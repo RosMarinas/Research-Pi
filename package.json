@@ -7,7 +7,7 @@
   "scripts": {
     "pi": "./run-pi.sh",
     "pi:trace": "./run-pi-traced.sh",
-    "check": "sh -n run-pi.sh run-pi-traced.sh install-user.sh && node --check .pi/lib/research-memory.mjs && node --check .pi/lib/research-compact.mjs",
+    "check": "sh -n run-pi.sh run-pi-traced.sh install-user.sh && node --check .pi/extensions/research-mode.ts && node --check .pi/lib/research-memory.mjs && node --check .pi/lib/research-compact.mjs",
     "test": "node --test tests/*.test.mjs"
   },
   "engines": {

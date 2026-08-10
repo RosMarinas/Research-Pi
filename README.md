@@ -1,6 +1,6 @@
 # Research Pi
 
-Research Pi 是一个面向 AI、通信等计算实验的个人 Pi harness。它使用锁定版本的 Pi Core 和 DeepSeek V4 Flash，并加入轻量的科研行为约束、实验记录、研究 checkpoint、非向量历史检索、结构化科研 compact 与按需 trace。
+Research Pi 是一个面向 AI、通信等计算实验的个人 Pi harness。它使用锁定版本的 Pi Core 和 DeepSeek V4 Flash，并加入科研优先的身份与工作约定、实验记录、研究 checkpoint、非向量历史检索、结构化科研 compact 与按需 trace。
 
 ## 快速开始
 
@@ -55,10 +55,12 @@ pi
 - `.pi/settings.json`：模型、thinking 和 retry 设置。
 - `.pi/agent/settings.json`：在其他科研项目中调用 `pi` 时仍生效的 retry 和 compact 默认值。
 - `.pi/agent/models.json`：DeepSeek 请求字段兼容配置。
-- `.pi/APPEND_SYSTEM.md`：追加到 Pi 默认提示后的科研行为约束。
+- `.pi/APPEND_SYSTEM.md`：追加到 Pi 默认提示后的稳定 Research Contract。
 - `.pi/extensions/`：Research Pi 提供的工具扩展。
 
 运行其他科研仓库时，该仓库自身的 `AGENTS.md` 等项目上下文仍会正常加载。
+
+最终 system prompt 由 Pi 原生的动态工具说明、Research Contract、目标项目上下文、白名单 skill 与当前工作目录共同构成。`research-mode` 扩展只把原生的 “coding assistant” 身份句稳定替换为 “computational research agent”；它不覆盖动态工具说明，也不在每轮加入时间、状态或随机内容。如果目标项目提供自定义 `SYSTEM.md`，该身份替换不会擅自改写它。
 
 ## Skill 白名单
 
@@ -76,6 +78,10 @@ pi --skill /path/to/skill
 白名单 skill 在当前机器不存在时会被跳过并给出提示，不影响 Pi 启动。
 
 ## 科研扩展
+
+### Research Mode
+
+Research Pi 默认处于探索与验证阶段：构造竞争假设，优先高信息增益且可逆的实验，将代码视为实验工具，并在证据支持路线或用户要求稳定交付后才进入收敛工程阶段。完成标准是研究判断得到推进，而不是代码发生修改。
 
 ### `record_experiment`
 
