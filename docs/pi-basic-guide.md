@@ -27,6 +27,14 @@ pi-traced
 
 科研 prompt、DeepSeek 配置、两个研究工具和 session 由 harness 提供；文件操作、Git checkpoint 和实验账本作用在启动 `pi` 时所在的研究仓库。
 
+Research Pi 默认关闭 Pi 的 skill 自动发现，只加载经过检查的研究白名单。某次任务需要额外 skill 时可显式添加：
+
+```sh
+pi --skill /path/to/skill
+```
+
+显式路径仍遵循 Pi 的原生 skill 加载与渐进披露机制。
+
 推荐先给会话命名，便于以后查找：
 
 ```text

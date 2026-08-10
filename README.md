@@ -59,6 +59,21 @@ pi
 
 运行其他科研仓库时，该仓库自身的 `AGENTS.md` 等项目上下文仍会正常加载。
 
+## Skill 白名单
+
+启动器使用 Pi 原生的 `--no-skills` 关闭全局和项目 skill 自动发现，再通过 `--skill` 只加载经过检查的默认白名单：
+
+- `~/.agents/skills/cognitive-knowledge-network`：研究概念、方法和证据导航；
+- `~/.codex/skills/remote-workspace`：远程环境、实验和 GPU 执行。
+
+其他 skills 不会因为存在于 `~/.agents/skills/`、`.agents/skills/` 或 `.pi/skills/` 而自动进入上下文。需要临时启用时，仍可使用 Pi 原生命令行参数：
+
+```sh
+pi --skill /path/to/skill
+```
+
+白名单 skill 在当前机器不存在时会被跳过并给出提示，不影响 Pi 启动。
+
 ## 科研扩展
 
 ### `record_experiment`

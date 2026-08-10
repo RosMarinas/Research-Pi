@@ -13,6 +13,8 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$script_path")" && pwd)
 env_file="$script_dir/.env"
 workspace=${PI_RESEARCH_WORKSPACE:-$PWD}
 core_bin=${PI_CORE_BIN:-"$script_dir/node_modules/.bin/pi"}
+cognitive_skill="${HOME:?HOME is not set}/.agents/skills/cognitive-knowledge-network"
+remote_workspace_skill="${HOME:?HOME is not set}/.codex/skills/remote-workspace"
 
 if [ "${1:-}" = "--workspace" ]; then
   if [ "$#" -lt 2 ]; then
@@ -21,6 +23,22 @@ if [ "${1:-}" = "--workspace" ]; then
   fi
   workspace=$2
   shift 2
+fi
+
+# Pi's settings.skills is additive and does not disable default discovery.
+# Use the official CLI isolation mechanism, then add only reviewed skills.
+set -- --no-skills "$@"
+
+if [ -f "$remote_workspace_skill/SKILL.md" ]; then
+  set -- --skill "$remote_workspace_skill" "$@"
+else
+  echo "Research skill unavailable, skipping: $remote_workspace_skill" >&2
+fi
+
+if [ -f "$cognitive_skill/SKILL.md" ]; then
+  set -- --skill "$cognitive_skill" "$@"
+else
+  echo "Research skill unavailable, skipping: $cognitive_skill" >&2
 fi
 
 if [ ! -d "$workspace" ]; then
