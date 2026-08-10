@@ -80,6 +80,7 @@ exec "$core_bin" \
   --session-dir "$script_dir/.pi/sessions" \
   --append-system-prompt "$script_dir/.pi/APPEND_SYSTEM.md" \
   --extension "$script_dir/.pi/extensions/project-boundary.ts" \
+  --extension "$script_dir/.pi/extensions/tool-activity.ts" \
   --extension "$script_dir/.pi/extensions/research-mode.ts" \
   --extension "$script_dir/.pi/extensions/record-experiment.ts" \
   --extension "$script_dir/.pi/extensions/research-checkpoint.ts" \
