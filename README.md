@@ -48,7 +48,7 @@ pi
 - Provider：`deepseek`
 - Model：`deepseek-v4-flash`
 - Endpoint：`https://api.deepseek.com`
-- Thinking level：`high`
+- Thinking level：`max`（通过官方 `reasoning_effort: "max"` 启用；384K 是最大输出上限，不是输入上下文或压缩阈值）
 
 主要配置位于：
 
@@ -94,6 +94,10 @@ pi --skill /path/to/skill
 - 默认只检索当前 Git 项目，排除当前 session 和废弃分支；
 - 实验记录、用户陈述、助手综合和 compact 摘要带有不同 reliability；
 - 常见 API key、token 和 password 形式在写入索引前会脱敏，但原始 session 本身仍应视为敏感数据。
+
+### Research Compaction
+
+DeepSeek V4 Flash 使用 Max reasoning，但不把 1M 容量等同于等质量注意力。Research Pi 在约 272K 总上下文时发起软 compact，384K 作为硬触发线；压缩后的原始 recent tail 按当前分支第 1/2/3 次 compact 取约 32K/40K/48K，之后固定在 48K。结构化研究状态和可检索历史负责承接更早证据。
 
 人类可使用 `/memory <query>` 查看前三条结果；该命令不把结果加入模型上下文。它不会自动在每轮注入旧会话。
 

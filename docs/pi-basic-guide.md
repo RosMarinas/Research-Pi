@@ -1,6 +1,6 @@
 # Research Pi 基本使用指南
 
-这份指南面向当前项目里的科研 Pi：Pi 0.84.1、DeepSeek V4 Flash、thinking `high`。安装用户级入口后，日常使用直接输入 `pi`。
+这份指南面向当前项目里的科研 Pi：Pi 0.84.1、DeepSeek V4 Flash、thinking `max`。安装用户级入口后，日常使用直接输入 `pi`。
 
 ## 1. 启动
 
@@ -233,6 +233,6 @@ Pi 现在提供四个低摩擦研究工具：
 - API key 只放在项目 `.env`，不要粘贴进 prompt、日志或实验文档；
 - Pi 会修改文件和运行命令，但没有内置安全隔离；
 - memory SQLite 是派生缓存，不进入 Git；它会脱敏常见凭证形式，但原始 session、实验账本和不常见秘密格式仍是敏感数据；
-- 当前 65,536 recent-tail 配置是初始值，256K/384K/512K 软 compact 阈值尚待真实长任务对照后决定；
+- Research Pi 在约 272K 总上下文时主动 compact，384K 作为硬触发线；压缩后原始 recent tail 按当前分支第 1/2/3 次 compact 取约 32K/40K/48K，之后固定在 48K；
 - 当前适合受监督科研探索，极限上下文、长期多分支召回和无人值守远程执行仍未完整验证；
 - 先让真实任务暴露摩擦，再加入 extension 或工作流，不预先安装全家桶。

@@ -5,7 +5,10 @@ import {
 	collectResearchEvidence,
 	normalizeResearchState,
 	parseResearchState,
+	RESEARCH_HARD_COMPACT_TOKENS,
+	RESEARCH_SOFT_COMPACT_TOKENS,
 	renderResearchSummary,
+	selectResearchCompactionPolicy,
 } from "../.pi/lib/research-compact.mjs";
 
 function experimentEntry(id, parentId, validityJudgment) {
@@ -110,4 +113,24 @@ test("structured compaction preserves prior hypotheses and downgrades unsupporte
 
 test("parses fenced JSON output", () => {
 	assert.deepEqual(parseResearchState("```json\n{\"researchQuestion\":\"q\"}\n```"), { researchQuestion: "q" });
+});
+
+test("research compaction uses bounded staged recent tails", () => {
+	const compact = (id) => ({
+		type: "compaction",
+		id,
+		details: { kind: "research-pi-compaction", version: 1 },
+	});
+	assert.deepEqual(selectResearchCompactionPolicy([]), {
+		version: 1,
+		ordinal: 1,
+		softTriggerTokens: RESEARCH_SOFT_COMPACT_TOKENS,
+		hardTriggerTokens: RESEARCH_HARD_COMPACT_TOKENS,
+		keepRecentTokens: 32 * 1024,
+	});
+	assert.equal(selectResearchCompactionPolicy([compact("c1")]).keepRecentTokens, 40 * 1024);
+	assert.equal(selectResearchCompactionPolicy([compact("c1"), compact("c2")]).keepRecentTokens, 48 * 1024);
+	assert.equal(selectResearchCompactionPolicy([compact("c1"), compact("c2"), compact("c3")]).keepRecentTokens, 48 * 1024);
+	assert.equal(RESEARCH_SOFT_COMPACT_TOKENS, 272 * 1024);
+	assert.equal(RESEARCH_HARD_COMPACT_TOKENS, 384 * 1024);
 });

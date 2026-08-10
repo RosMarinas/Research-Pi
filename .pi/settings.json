@@ -1,9 +1,9 @@
 {
   "defaultProvider": "deepseek",
   "defaultModel": "deepseek-v4-flash",
-  "defaultThinkingLevel": "high",
+  "defaultThinkingLevel": "max",
   "enabledModels": [
-    "deepseek/deepseek-v4-flash:high"
+    "deepseek/deepseek-v4-flash:max"
   ],
   "sessionDir": ".pi/sessions",
   "retry": {
@@ -17,6 +17,6 @@
   "compaction": {
     "enabled": true,
     "reserveTokens": 16384,
-    "keepRecentTokens": 65536
+    "keepRecentTokens": 32768
   }
 }

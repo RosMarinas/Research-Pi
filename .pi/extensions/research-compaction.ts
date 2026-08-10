@@ -1,15 +1,23 @@
 import { randomUUID } from "node:crypto";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent";
+import {
+	convertToLlm,
+	findCutPoint,
+	serializeConversation,
+	sessionEntryToContextMessages,
+} from "@earendil-works/pi-coding-agent";
 import {
 	buildResearchCompactionDetails,
 	buildResearchCompactionPrompt,
 	collectResearchEvidence,
 	normalizeResearchState,
 	parseResearchState,
+	RESEARCH_HARD_COMPACT_TOKENS,
 	renderResearchSummary,
 	RESEARCH_COMPACTION_KIND,
 	RESEARCH_COMPACTION_VERSION,
+	RESEARCH_SOFT_COMPACT_TOKENS,
+	selectResearchCompactionPolicy,
 } from "../lib/research-compact.mjs";
 
 function fileLists(fileOps: { read: Set<string>; written: Set<string>; edited: Set<string> }) {
@@ -20,14 +28,103 @@ function fileLists(fileOps: { read: Set<string>; written: Set<string>; edited: S
 	};
 }
 
+function prepareWithDynamicTail(event: SessionBeforeCompactEvent, keepRecentTokens: number) {
+	const { branchEntries, preparation } = event;
+	let previousCompactionIndex = -1;
+	for (let index = branchEntries.length - 1; index >= 0; index -= 1) {
+		if (branchEntries[index].type === "compaction") {
+			previousCompactionIndex = index;
+			break;
+		}
+	}
+
+	let boundaryStart = 0;
+	if (previousCompactionIndex >= 0) {
+		const previousCompaction = branchEntries[previousCompactionIndex];
+		if (previousCompaction.type === "compaction") {
+			const firstKeptIndex = branchEntries.findIndex((entry) => entry.id === previousCompaction.firstKeptEntryId);
+			boundaryStart = firstKeptIndex >= 0 ? firstKeptIndex : previousCompactionIndex + 1;
+		}
+	}
+
+	const cutPoint = findCutPoint(branchEntries, boundaryStart, branchEntries.length, keepRecentTokens);
+	const firstKeptEntry = branchEntries[cutPoint.firstKeptEntryIndex];
+	if (!firstKeptEntry?.id) return preparation;
+
+	const historyEnd = cutPoint.isSplitTurn ? cutPoint.turnStartIndex : cutPoint.firstKeptEntryIndex;
+	const messagesToSummarize = [];
+	for (let index = boundaryStart; index < historyEnd; index += 1) {
+		const entry = branchEntries[index];
+		if (entry.type === "compaction") continue;
+		const message = sessionEntryToContextMessages(entry)[0];
+		if (message) messagesToSummarize.push(message);
+	}
+
+	const turnPrefixMessages = [];
+	if (cutPoint.isSplitTurn) {
+		for (let index = cutPoint.turnStartIndex; index < cutPoint.firstKeptEntryIndex; index += 1) {
+			const entry = branchEntries[index];
+			if (entry.type === "compaction") continue;
+			const message = sessionEntryToContextMessages(entry)[0];
+			if (message) turnPrefixMessages.push(message);
+		}
+	}
+
+	if (!messagesToSummarize.length && !turnPrefixMessages.length) return preparation;
+	return {
+		...preparation,
+		firstKeptEntryId: firstKeptEntry.id,
+		messagesToSummarize,
+		turnPrefixMessages,
+		isSplitTurn: cutPoint.isSplitTurn,
+		settings: { ...preparation.settings, keepRecentTokens },
+	};
+}
+
 export default function (pi: ExtensionAPI) {
+	let compactionPending = false;
+
+	pi.on("session_start", () => {
+		compactionPending = false;
+	});
+
+	pi.on("session_compact", () => {
+		compactionPending = false;
+	});
+
+	pi.on("turn_end", (_event, ctx) => {
+		const usage = ctx.getContextUsage();
+		if (!usage || usage.tokens < RESEARCH_SOFT_COMPACT_TOKENS || compactionPending) return;
+
+		compactionPending = true;
+		const trigger = usage.tokens >= RESEARCH_HARD_COMPACT_TOKENS ? "hard" : "soft";
+		if (ctx.hasUI) {
+			ctx.ui.notify(
+				`Research ${trigger} compaction trigger: ${usage.tokens.toLocaleString()} context tokens.`,
+				trigger === "hard" ? "warning" : "info",
+			);
+		}
+		ctx.compact({
+			customInstructions: `Automatic research ${trigger} compaction at ${usage.tokens} context tokens.`,
+			onComplete: () => {
+				compactionPending = false;
+			},
+			onError: (error) => {
+				compactionPending = false;
+				if (ctx.hasUI) ctx.ui.notify(`Research compaction failed: ${error.message}`, "warning");
+			},
+		});
+	});
+
 	pi.on("session_before_compact", async (event, ctx) => {
 		if (!ctx.model) {
 			ctx.ui.notify("Research compaction could not resolve the active model; falling back to Pi compaction.", "warning");
 			return;
 		}
 
-		const { preparation, branchEntries, customInstructions, reason, signal } = event;
+		const { branchEntries, customInstructions, reason, signal } = event;
+		const policy = selectResearchCompactionPolicy(branchEntries);
+		const preparation = prepareWithDynamicTail(event, policy.keepRecentTokens);
 		const sessionId = ctx.sessionManager.getSessionId();
 		const evidence = collectResearchEvidence(branchEntries, sessionId, preparation.firstKeptEntryId);
 		const conversationText = serializeConversation(
@@ -44,7 +141,7 @@ export default function (pi: ExtensionAPI) {
 		});
 
 		ctx.ui.notify(
-			`Research compaction: ${preparation.tokensBefore.toLocaleString()} tokens, ${evidence.experiments.length} experiment record(s).`,
+			`Research compaction #${policy.ordinal}: ${preparation.tokensBefore.toLocaleString()} tokens, keeping ~${policy.keepRecentTokens.toLocaleString()} recent tokens, ${evidence.experiments.length} experiment record(s).`,
 			"info",
 		);
 
@@ -85,6 +182,7 @@ export default function (pi: ExtensionAPI) {
 				reason,
 				tokensBefore: preparation.tokensBefore,
 				fileOps: files,
+				policy,
 			});
 
 			if (normalized.warnings.length) {

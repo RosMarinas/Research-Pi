@@ -2,10 +2,32 @@ import { createHash } from "node:crypto";
 
 export const RESEARCH_COMPACTION_KIND = "research-pi-compaction";
 export const RESEARCH_COMPACTION_VERSION = 1;
+export const RESEARCH_COMPACTION_POLICY_VERSION = 1;
+export const RESEARCH_SOFT_COMPACT_TOKENS = 272 * 1024;
+export const RESEARCH_HARD_COMPACT_TOKENS = 384 * 1024;
+export const RESEARCH_RECENT_TAIL_SCHEDULE = Object.freeze([32 * 1024, 40 * 1024, 48 * 1024]);
 
 const MAX_HYPOTHESES = 24;
 const MAX_OBSERVATIONS = 32;
 const MAX_DECISIONS = 24;
+
+export function selectResearchCompactionPolicy(branchEntries) {
+	const previousResearchCompactions = branchEntries.filter(
+		(entry) =>
+			entry?.type === "compaction" &&
+			entry.details?.kind === RESEARCH_COMPACTION_KIND &&
+			entry.details?.version === RESEARCH_COMPACTION_VERSION,
+	).length;
+	const ordinal = previousResearchCompactions + 1;
+	const scheduleIndex = Math.min(ordinal - 1, RESEARCH_RECENT_TAIL_SCHEDULE.length - 1);
+	return {
+		version: RESEARCH_COMPACTION_POLICY_VERSION,
+		ordinal,
+		softTriggerTokens: RESEARCH_SOFT_COMPACT_TOKENS,
+		hardTriggerTokens: RESEARCH_HARD_COMPACT_TOKENS,
+		keepRecentTokens: RESEARCH_RECENT_TAIL_SCHEDULE[scheduleIndex],
+	};
+}
 
 function hash(value) {
 	return createHash("sha256").update(value).digest("hex");
@@ -432,6 +454,7 @@ export function buildResearchCompactionDetails({
 	reason,
 	tokensBefore,
 	fileOps,
+	policy,
 }) {
 	return {
 		kind: RESEARCH_COMPACTION_KIND,
@@ -440,6 +463,7 @@ export function buildResearchCompactionDetails({
 		sessionId,
 		reason,
 		tokensBefore,
+		compactionPolicy: policy,
 		researchState: state,
 		evidenceLedger: {
 			experiments: evidence.experiments,

@@ -73,13 +73,13 @@ export PI_CODING_AGENT_DIR="$script_dir/.pi/agent"
 cd "$workspace"
 
 if [ "$workspace" = "$script_dir" ]; then
-  exec "$core_bin" --provider deepseek --model deepseek-v4-flash --thinking high "$@"
+  exec "$core_bin" --provider deepseek --model deepseek-v4-flash --thinking max "$@"
 fi
 
 exec "$core_bin" \
   --provider deepseek \
   --model deepseek-v4-flash \
-  --thinking high \
+  --thinking max \
   --session-dir "$script_dir/.pi/sessions" \
   --append-system-prompt "$script_dir/.pi/APPEND_SYSTEM.md" \
   --extension "$script_dir/.pi/extensions/record-experiment.ts" \
