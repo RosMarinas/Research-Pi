@@ -1,0 +1,18 @@
+{
+  "name": "research-pi-harness",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Research-first Pi harness for AI and communications experiments",
+  "license": "UNLICENSED",
+  "scripts": {
+    "pi": "./run-pi.sh",
+    "pi:trace": "./run-pi-traced.sh",
+    "check": "sh -n run-pi.sh run-pi-traced.sh install-user.sh"
+  },
+  "engines": {
+    "node": ">=22.19"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.1"
+  }
+}

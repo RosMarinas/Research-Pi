@@ -1,0 +1,21 @@
+.DS_Store
+node_modules/
+*.log
+*.pem
+*.p12
+*.key
+.npmrc
+
+.env
+.env.*
+!.env.example
+
+.pi/sessions/
+.pi/research/*.jsonl
+.pi/agent/*
+!.pi/agent/models.json
+
+# Local design, research, and test notes
+/Codex科研场景反馈与改进.md
+/docs/research/
+/docs/testing/

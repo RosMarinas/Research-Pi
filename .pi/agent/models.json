@@ -1,0 +1,13 @@
+{
+  "providers": {
+    "deepseek": {
+      "modelOverrides": {
+        "deepseek-v4-flash": {
+          "compat": {
+            "maxTokensField": "max_tokens"
+          }
+        }
+      }
+    }
+  }
+}
