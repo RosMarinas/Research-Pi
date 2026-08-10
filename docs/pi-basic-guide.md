@@ -25,7 +25,7 @@ pi-raw
 pi-traced
 ```
 
-科研 prompt、DeepSeek 配置、四个研究工具和 session 由 harness 提供；文件操作、Git checkpoint 和实验账本作用在启动 `pi` 时所在的研究仓库。所有项目的 Research Pi session 集中保存在 harness 的 `.pi/sessions/`，每个 session header 仍记录其原始工作目录。
+科研 prompt、DeepSeek 配置、研究工具、Codex executor 和 session 由 harness 提供；文件操作、Git checkpoint、Codex 委派和实验账本作用在启动 `pi` 时所在的研究仓库。所有项目的 Research Pi session 集中保存在 harness 的 `.pi/sessions/`，每个 session header 仍记录其原始工作目录。
 
 Research Pi 默认关闭 Pi 的 skill 自动发现，只加载经过检查的研究白名单。某次任务需要额外 skill 时可显式添加：
 
@@ -96,12 +96,13 @@ Pi 会自行选择工具。若想明确控制，可以直接说：
 
 `!!command` 会运行命令但不把输出加入模型上下文。生成命令与 extension 都继承当前用户的系统权限；Pi 本身不是 sandbox。
 
-Pi 现在提供四个低摩擦研究工具：
+Pi 现在提供这些低摩擦研究工具：
 
 - `record_experiment`：当一个运行结果真正支持、削弱或无法区分研究假设时，Pi 可调用它追加一条 `.pi/research/experiments.jsonl`。普通搜索和调试不会自动记录。
 - `research_checkpoint`：在大步替换、回滚或废弃路线前，把当前 tracked Git 状态保存到 `refs/pi-research/checkpoints/...`。它不会切分支或清理工作树，也不会捕获 untracked 文件。
 - `research_memory_search`：在旧 session 和实验记录中进行本地全文检索；默认仅限当前 Git 项目，并排除当前 session 和废弃分支。
 - `research_memory_read`：根据搜索结果中的 session/entry ID 读取精确原文和小范围上下文。
+- `codex_delegate`：把工具密集或长程执行交给独立 Codex 上下文，或请求一个只读第二意见。Pi 仍负责研究规划与证据判断。
 
 可以直接提出：
 
@@ -120,6 +121,14 @@ Pi 现在提供四个低摩擦研究工具：
 ```
 
 人类也可使用 `/memory 梯度爆炸` 查看少量检索结果。`/memory` 不会把结果加入模型上下文；Research Pi 也不会自动在每一轮注入历史。
+
+需要 Codex 实际完成一项较长任务时，可以直接对 Pi 说：
+
+```text
+把数据加载重构和完整回归测试交给 Codex executor。目标是消除当前内存峰值，允许它修改、删除、提交、推送和运行远程实验。Codex 使用 gpt-5.6-sol/max；你负责给出成功标准，并在它返回后审查证据。
+```
+
+Pi 会获得一个 `codex-...` job ID。后台任务未结束时，应查询同一 job 的 status/result，或用 resume 继续该 Codex thread，而不是重复启动任务。默认 executor 拥有自动 `danger-full-access`，advisor 只读；两者默认都是 `gpt-5.6-sol/max`，也可以在具体委派时指定其他 Codex model。
 
 ## 4. 会话、分支和恢复
 
@@ -232,7 +241,8 @@ Pi 现在提供四个低摩擦研究工具：
 
 - API key 只放在项目 `.env`，不要粘贴进 prompt、日志或实验文档；
 - Pi 会修改文件和运行命令，但没有内置安全隔离；
+- Codex executor 同样不是低权限沙箱：它自动使用 `danger-full-access`，可以访问当前用户可用的文件、Git、SSH 与远程服务。Harness 会移除其 `DEEPSEEK_API_KEY`，但目标仓库和其他本机凭据仍应视为对 Codex 可见；
 - memory SQLite 是派生缓存，不进入 Git；它会脱敏常见凭证形式，但原始 session、实验账本和不常见秘密格式仍是敏感数据；
 - Research Pi 在约 272K 总上下文时主动 compact，384K 作为硬触发线；压缩后原始 recent tail 按当前分支第 1/2/3 次 compact 取约 32K/40K/48K，之后固定在 48K；
-- 当前适合受监督科研探索，极限上下文、长期多分支召回和无人值守远程执行仍未完整验证；
+- 当前适合科研探索；极限上下文、长期多分支召回和 Codex 无人值守远程执行仍需在真实任务中继续验证；
 - 先让真实任务暴露摩擦，再加入 extension 或工作流，不预先安装全家桶。

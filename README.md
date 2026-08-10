@@ -1,6 +1,6 @@
 # Research Pi
 
-Research Pi 是一个面向 AI、通信等计算实验的个人 Pi harness。它使用锁定版本的 Pi Core 和 DeepSeek V4 Flash，并加入科研优先的身份与工作约定、实验记录、研究 checkpoint、非向量历史检索、结构化科研 compact 与按需 trace。
+Research Pi 是一个面向 AI、通信等计算实验的个人 Pi harness。它使用锁定版本的 Pi Core 和 DeepSeek V4 Flash，并加入科研优先的身份与工作约定、实验记录、研究 checkpoint、非向量历史检索、结构化科研 compact、Codex 长程执行委派与按需 trace。
 
 ## 快速开始
 
@@ -113,6 +113,19 @@ DeepSeek V4 Flash 使用 Max reasoning，但不把 1M 容量等同于等质量�
 - 存在 compaction entry `details` 中的结构化 `researchState`、evidence ledger 和 provenance。
 
 强结论必须引用有效的 `record_experiment` entry；仅引用无效或 inconclusive 运行的 supported/weakened/rejected 状态会被降级。模型输出不能解析或校验时，自动回退到 Pi 原生 compact。使用 `/research-state` 可检查最近一次结构化状态。
+
+### Codex Executor
+
+`codex_delegate` 将本地 Codex CLI 作为上下文隔离的执行器或顾问，Pi 继续负责研究问题、假设、证据判断和下一步决策。
+
+- `advisor`：只读分析，默认 `gpt-5.6-sol`、reasoning `max`；
+- `executor`：完整执行任务，默认 `gpt-5.6-sol`、reasoning `max`、自动 `danger-full-access`；
+- 每次调用都可覆盖 Codex model 和 reasoning effort；
+- executor 可在委派范围内修改或删除文件、安装依赖、提交或推送、操作远程资源以及启动或取消昂贵实验；
+- 长任务默认后台运行，通过同一个工具的 `status`、`result`、`resume` 和 `cancel` action 管理；
+- 不默认建立 worktree，同一目标工作区同时只允许一个写入型 Codex job。
+
+Codex job、完整 JSONL event 和委派 prompt 保存在 harness 的 `.pi/codex/`，不会进入 Git。子进程不继承 `DEEPSEEK_API_KEY`，但 executor 仍拥有当前用户能够提供给 Codex 的本地、Git、SSH 和远程服务权限。
 
 ### Trace
 

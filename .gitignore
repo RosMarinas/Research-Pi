@@ -13,6 +13,7 @@ node_modules/
 .pi/sessions/
 .pi/research/*.jsonl
 .pi/memory/
+.pi/codex/
 .pi/agent/*
 !.pi/agent/models.json
 !.pi/agent/settings.json

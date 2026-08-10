@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Research Pi Codex delegation result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "goal_satisfied",
+    "summary",
+    "evidence",
+    "actions_taken",
+    "changed_files",
+    "checks",
+    "external_effects",
+    "uncertainties",
+    "recommended_next_step"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["completed", "inconclusive", "blocked"]
+    },
+    "goal_satisfied": {
+      "type": "boolean"
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 12000
+    },
+    "evidence": {
+      "type": "array",
+      "maxItems": 32,
+      "items": { "type": "string", "maxLength": 4000 }
+    },
+    "actions_taken": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "type": "string", "maxLength": 2000 }
+    },
+    "changed_files": {
+      "type": "array",
+      "maxItems": 256,
+      "items": { "type": "string", "maxLength": 1024 }
+    },
+    "checks": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["command", "result"],
+        "properties": {
+          "command": { "type": "string", "maxLength": 2000 },
+          "result": { "type": "string", "maxLength": 4000 }
+        }
+      }
+    },
+    "external_effects": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "target", "identifier", "detail"],
+        "properties": {
+          "kind": { "type": "string", "maxLength": 256 },
+          "target": { "type": "string", "maxLength": 2000 },
+          "identifier": { "type": "string", "maxLength": 1000 },
+          "detail": { "type": "string", "maxLength": 4000 }
+        }
+      }
+    },
+    "uncertainties": {
+      "type": "array",
+      "maxItems": 32,
+      "items": { "type": "string", "maxLength": 4000 }
+    },
+    "recommended_next_step": {
+      "type": "string",
+      "maxLength": 8000
+    }
+  }
+}

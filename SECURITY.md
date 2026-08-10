@@ -10,7 +10,10 @@ Never commit:
 - Pi sessions or traces, which contain prompts, reasoning, tool arguments and outputs;
 - `.pi/memory/`, which is a rebuildable local search index derived from sensitive sessions and experiment records;
 - `.pi/research/*.jsonl`, which may contain absolute paths, run IDs and project-sensitive observations;
+- `.pi/codex/`, which contains delegated prompts, Codex JSON events, local process metadata and structured results;
 - model checkpoints, datasets or experiment artifacts unless deliberately versioned elsewhere.
+
+`codex_delegate` executor jobs intentionally run the local Codex CLI with automatic `danger-full-access`. They inherit the current user's filesystem, Git, SSH and remote-service capabilities. The adapter removes `DEEPSEEK_API_KEY` from the child environment, but it is not a general secret sandbox: target repositories, Codex auth and other user credentials remain accessible to Codex when the operating system permits it.
 
 Before every release or first push, inspect:
 
