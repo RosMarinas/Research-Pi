@@ -10,6 +10,7 @@ import {
 	updateJobFile,
 	writeJsonAtomic,
 } from "./codex-jobs.mjs";
+import { codexPermissionConfigArguments } from "./project-boundary.mjs";
 
 function now() {
 	return new Date().toISOString();
@@ -146,16 +147,20 @@ async function main() {
 			request.model,
 			"-c",
 			`model_reasoning_effort=${JSON.stringify(request.reasoningEffort)}`,
+			...codexPermissionConfigArguments(
+				request.mode,
+				request.boundaryRoot ?? request.cwd,
+				request.runtimeTmp,
+				request.gitIdentity,
+			),
 			"-a",
 			"never",
-			"-s",
-			request.sandbox,
 			"-C",
 			request.cwd,
 		];
 		const execArgs = request.continuationThreadId
-			? ["exec", "resume", "--json", "--output-schema", request.schemaPath, request.continuationThreadId, "-"]
-			: ["exec", "--json", "--output-schema", request.schemaPath, "-"];
+			? ["exec", "--ignore-user-config", "resume", "--json", "--output-schema", request.schemaPath, request.continuationThreadId, "-"]
+			: ["exec", "--ignore-user-config", "--json", "--output-schema", request.schemaPath, "-"];
 		child = spawn(request.codexBin, [...globalArgs, ...execArgs], {
 			cwd: request.cwd,
 			detached: false,

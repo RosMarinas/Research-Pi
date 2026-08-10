@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import codexDelegateExtension from "../.pi/extensions/codex-delegate.ts";
+import codexDelegateExtension, { formatCodexStatus } from "../.pi/extensions/codex-delegate.ts";
 import {
 	DEFAULT_CODEX_MODEL,
 	DEFAULT_CODEX_REASONING_EFFORT,
@@ -14,6 +14,7 @@ import {
 	startCodexJob,
 	waitForCodexJob,
 } from "../.pi/lib/codex-jobs.mjs";
+import { CODEX_ADVISOR_PROFILE, CODEX_EXECUTOR_PROFILE } from "../.pi/lib/project-boundary.mjs";
 
 test("Pi registers one Codex delegation tool instead of a family of noisy tools", () => {
 	let registered;
@@ -21,10 +22,29 @@ test("Pi registers one Codex delegation tool instead of a family of noisy tools"
 		registerTool(tool) {
 			registered = tool;
 		},
+		on() {},
 	});
 	assert.equal(registered.name, "codex_delegate");
 	assert.equal(registered.executionMode, "sequential");
 	assert.match(registered.description, /gpt-5\.6-sol\/max/);
+});
+
+test("Codex delegation exposes bounded running and terminal footer states", () => {
+	const running = formatCodexStatus({
+		id: "codex-2026-08-11-12345678",
+		mode: "executor",
+		status: "running",
+		progress: "item.completed: command execution",
+	});
+	assert.equal(running, "⚙ Codex executor 12345678 · running · item.completed: command execution");
+
+	const completed = formatCodexStatus({
+		id: "codex-2026-08-11-abcdef12",
+		mode: "advisor",
+		status: "completed",
+		progress: "completed",
+	});
+	assert.equal(completed, "✓ Codex advisor abcdef12 · completed · completed");
 });
 
 function makeFakeCodex(root, delayMs = 0) {
@@ -41,12 +61,12 @@ process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => { prompt += chunk; });
 process.stdin.on("end", () => {
   setTimeout(() => {
-    const sandboxIndex = args.indexOf("-s");
     const modelIndex = args.indexOf("-m");
-    const sandbox = sandboxIndex >= 0 ? args[sandboxIndex + 1] : "unknown";
+    const configText = args.join(" ");
+    const sandbox = configText.includes("research_pi_executor") ? "${CODEX_EXECUTOR_PROFILE}" : configText.includes("research_pi_advisor") ? "${CODEX_ADVISOR_PROFILE}" : "unknown";
     const model = modelIndex >= 0 ? args[modelIndex + 1] : "unknown";
     const isResume = args.includes("resume");
-    if (sandbox === "danger-full-access") {
+    if (sandbox === "${CODEX_EXECUTOR_PROFILE}") {
       writeFileSync(join(process.cwd(), "codex-executed.txt"), "executor ran\\n", "utf8");
     }
     const result = {
@@ -55,7 +75,7 @@ process.stdin.on("end", () => {
       summary: isResume ? "resumed" : "finished",
       evidence: [model, sandbox, prompt.includes("Research Pi") ? "role-present" : "role-missing"],
       actions_taken: ["fake action"],
-      changed_files: sandbox === "danger-full-access" ? ["codex-executed.txt"] : [],
+      changed_files: sandbox === "${CODEX_EXECUTOR_PROFILE}" ? ["codex-executed.txt"] : [],
       checks: [{ command: "fake-check", result: "passed" }],
       external_effects: [],
       uncertainties: [],
@@ -74,7 +94,7 @@ process.stdin.on("end", () => {
 	return path;
 }
 
-test("delegation prompt encodes distinct advisor and full executor roles", () => {
+test("delegation prompt encodes distinct advisor and project-bounded executor roles", () => {
 	const advisor = buildDelegationPrompt({ mode: "advisor", task: "inspect", successCriteria: [], context: "" });
 	assert.match(advisor, /read-only advisor/);
 	assert.doesNotMatch(advisor, /committing or pushing Git changes/);
@@ -87,6 +107,7 @@ test("delegation prompt encodes distinct advisor and full executor roles", () =>
 	});
 	assert.match(executor, /deleting files/);
 	assert.match(executor, /expensive experiments/);
+	assert.match(executor, /hard authority boundary/);
 	assert.match(executor, /record the run id/);
 	assert.match(executor, /hypothesis H1/);
 });
@@ -123,7 +144,7 @@ test("advisor, executor, and explicit resume produce durable structured jobs", a
 		assert.equal(advisor.status, "completed");
 		assert.equal(advisor.model, DEFAULT_CODEX_MODEL);
 		assert.equal(advisor.reasoningEffort, DEFAULT_CODEX_REASONING_EFFORT);
-		assert.equal(advisor.sandbox, "read-only");
+		assert.equal(advisor.sandbox, CODEX_ADVISOR_PROFILE);
 		assert.equal(advisor.result.goal_satisfied, true);
 		assert.equal(advisor.threadId, "thread-fake-123");
 
@@ -138,7 +159,7 @@ test("advisor, executor, and explicit resume produce durable structured jobs", a
 		assert.equal(executor.status, "completed");
 		assert.equal(executor.model, DEFAULT_CODEX_MODEL);
 		assert.equal(executor.reasoningEffort, DEFAULT_CODEX_REASONING_EFFORT);
-		assert.equal(executor.sandbox, "danger-full-access");
+		assert.equal(executor.sandbox, CODEX_EXECUTOR_PROFILE);
 		assert.equal(readFileSync(join(workspace, "codex-executed.txt"), "utf8"), "executor ran\n");
 
 		const resumedStart = await resumeCodexJob(executor.id, {

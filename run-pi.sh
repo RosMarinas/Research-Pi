@@ -25,9 +25,10 @@ if [ "${1:-}" = "--workspace" ]; then
   shift 2
 fi
 
-# Pi's settings.skills is additive and does not disable default discovery.
-# Use the official CLI isolation mechanism, then add only reviewed skills.
-set -- --no-skills "$@"
+# Pi's settings resources are additive and do not disable default discovery.
+# Load only reviewed skills and executable extensions; user-supplied explicit
+# --skill/--extension arguments still work as an intentional one-run override.
+set -- --no-skills --no-extensions "$@"
 
 if [ -f "$remote_workspace_skill/SKILL.md" ]; then
   set -- --skill "$remote_workspace_skill" "$@"
@@ -72,16 +73,13 @@ export PI_CODING_AGENT_DIR="$script_dir/.pi/agent"
 
 cd "$workspace"
 
-if [ "$workspace" = "$script_dir" ]; then
-  exec "$core_bin" --provider deepseek --model deepseek-v4-flash --thinking max "$@"
-fi
-
 exec "$core_bin" \
   --provider deepseek \
   --model deepseek-v4-flash \
   --thinking max \
   --session-dir "$script_dir/.pi/sessions" \
   --append-system-prompt "$script_dir/.pi/APPEND_SYSTEM.md" \
+  --extension "$script_dir/.pi/extensions/project-boundary.ts" \
   --extension "$script_dir/.pi/extensions/research-mode.ts" \
   --extension "$script_dir/.pi/extensions/record-experiment.ts" \
   --extension "$script_dir/.pi/extensions/research-checkpoint.ts" \

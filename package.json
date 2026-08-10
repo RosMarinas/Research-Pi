@@ -8,13 +8,14 @@
   "scripts": {
     "pi": "./run-pi.sh",
     "pi:trace": "./run-pi-traced.sh",
-    "check": "sh -n run-pi.sh run-pi-traced.sh install-user.sh && node --check .pi/extensions/research-mode.ts && node --check .pi/extensions/research-side.ts && node --check .pi/extensions/deepseek-web-search.ts && node --check .pi/extensions/codex-delegate.ts && node --check .pi/lib/research-side.mjs && node --check .pi/lib/deepseek-web-search.mjs && node --check .pi/lib/research-memory.mjs && node --check .pi/lib/research-compact.mjs && node --check .pi/lib/codex-jobs.mjs && node --check .pi/lib/codex-job-worker.mjs",
+    "check": "sh -n run-pi.sh run-pi-traced.sh install-user.sh && node --check .pi/extensions/project-boundary.ts && node --check .pi/extensions/research-mode.ts && node --check .pi/extensions/research-side.ts && node --check .pi/extensions/deepseek-web-search.ts && node --check .pi/extensions/codex-delegate.ts && node --check .pi/lib/project-boundary.mjs && node --check .pi/lib/research-side.mjs && node --check .pi/lib/deepseek-web-search.mjs && node --check .pi/lib/research-memory.mjs && node --check .pi/lib/research-compact.mjs && node --check .pi/lib/codex-jobs.mjs && node --check .pi/lib/codex-job-worker.mjs",
     "test": "node --test tests/*.test.mjs"
   },
   "engines": {
     "node": ">=22.19"
   },
   "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.71",
     "@anthropic-ai/sdk": "0.91.1",
     "@earendil-works/pi-coding-agent": "0.84.1",
     "@earendil-works/pi-tui": "0.84.1",

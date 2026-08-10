@@ -1,6 +1,6 @@
 # Research Pi
 
-Research Pi 是一个面向 AI、通信等计算实验的个人 Pi harness。它使用锁定版本的 Pi Core 和 DeepSeek V4 Flash，并加入科研优先的身份与工作约定、持久化 side 对话、DeepSeek 原生网页检索、实验记录、研究 checkpoint、非向量历史检索、结构化科研 compact、Codex 长程执行委派与按需 trace。
+Research Pi 是一个面向 AI、通信等计算实验的个人 Pi harness。它使用锁定版本的 Pi Core 和 DeepSeek V4 Flash，并加入科研优先的身份与工作约定、项目级命令边界、持久化 side 对话、DeepSeek 原生网页检索、实验记录、研究 checkpoint、非向量历史检索、结构化科研 compact、Codex 长程执行委派与按需 trace。
 
 ## 快速开始
 
@@ -77,7 +77,15 @@ pi --skill /path/to/skill
 
 白名单 skill 在当前机器不存在时会被跳过并给出提示，不影响 Pi 启动。
 
+同理，启动器使用 `--no-extensions` 关闭目标项目和用户目录中的可执行 extension 自动发现，只显式加载本仓库审查过的 harness extensions。需要临时加载目标项目 extension 时必须由用户在启动命令中明确传入 `--extension /path/to/extension.ts`；这属于宿主代码执行授权，不受模型 shell 沙箱保护。
+
 ## 科研扩展
+
+### Project Boundary
+
+模型发起的 shell 使用 Pi 官方示例采用的 sandbox runtime，在 macOS 上落到 Seatbelt、Linux 上落到 bubblewrap/seccomp；Codex executor 使用 Codex permission profile。两者默认只能读取必要的系统运行路径，并可读写当前科研项目。项目内允许大步修改、删除和自由 Git commit；Git objects、index、refs 与 config 可写，`.git/hooks` 保持只读。Harness 只从用户级 Git 配置提取 `user.name` / `user.email` 注入提交环境，不暴露其余全局 Git 配置。公网和本地端口不做域名白名单限制，Unix socket、宿主凭据与其他目录不会自动继承。
+
+直接文件工具访问项目外路径或 `.env` 等受保护凭据时，交互界面会显示请求路径和解析后的真实路径，并只批准一次；非交互模式直接拒绝。shell 越界会失败，Pi 必须把准确操作交给用户。用户输入的 `!` / `!!` 是明确的人工直执行通道，不受模型 shell 边界约束。使用 `/boundary` 可查看当前状态。
 
 ### Research Mode
 
@@ -135,13 +143,14 @@ DeepSeek V4 Flash 使用 Max reasoning，但不把 1M 容量等同于等质量�
 `codex_delegate` 将本地 Codex CLI 作为上下文隔离的执行器或顾问，Pi 继续负责研究问题、假设、证据判断和下一步决策。
 
 - `advisor`：只读分析，默认 `gpt-5.6-sol`、reasoning `max`；
-- `executor`：完整执行任务，默认 `gpt-5.6-sol`、reasoning `max`、自动 `danger-full-access`；
+- `executor`：完整执行任务，默认 `gpt-5.6-sol`、reasoning `max`、自动使用 project-write permission profile；
 - 每次调用都可覆盖 Codex model 和 reasoning effort；
-- executor 可在委派范围内修改或删除文件、安装依赖、提交或推送、操作远程资源以及启动或取消昂贵实验；
+- executor 可在项目内修改或删除文件、安装项目依赖、自由提交，以及启动或取消昂贵实验；公网开放，但需要宿主凭据或项目外文件的 push、远程资源和远程实验会明确返回 blocker，由 Pi 交给用户批准或直接执行；
 - 长任务默认后台运行，通过同一个工具的 `status`、`result`、`resume` 和 `cancel` action 管理；
+- 后台任务会在 Pi 底部状态栏持续显示 job 后八位、模式、运行状态与最近进度；完成、失败或取消后保留终态，下一次委派时更新；
 - 不默认建立 worktree，同一目标工作区同时只允许一个写入型 Codex job。
 
-Codex job、完整 JSONL event 和委派 prompt 保存在 harness 的 `.pi/codex/`，不会进入 Git。子进程不继承 `DEEPSEEK_API_KEY`，但 executor 仍拥有当前用户能够提供给 Codex 的本地、Git、SSH 和远程服务权限。
+Codex job、完整 JSONL event 和委派 prompt 保存在 harness 的 `.pi/codex/`，不会进入 Git。子进程不继承 `DEEPSEEK_API_KEY`；Codex 工具子进程还使用 `core` 环境和默认 secret-name 过滤，不继承 SSH agent。Codex CLI 自身仍使用本机 Codex 登录完成模型调用，但该认证不会授予其工具访问用户目录。
 
 ### Trace
 

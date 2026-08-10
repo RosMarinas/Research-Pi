@@ -27,13 +27,21 @@ pi-traced
 
 科研 prompt、DeepSeek 配置、研究工具、Codex executor 和 session 由 harness 提供；文件操作、Git checkpoint、Codex 委派和实验账本作用在启动 `pi` 时所在的研究仓库。所有项目的 Research Pi session 集中保存在 harness 的 `.pi/sessions/`，每个 session header 仍记录其原始工作目录。
 
-Research Pi 默认关闭 Pi 的 skill 自动发现，只加载经过检查的研究白名单。某次任务需要额外 skill 时可显式添加：
+Research Pi 默认关闭 Pi 的 skill 和 executable extension 自动发现，只加载经过检查的研究白名单与 harness extensions。某次任务需要额外 skill 时可显式添加：
 
 ```sh
 pi --skill /path/to/skill
 ```
 
 显式路径仍遵循 Pi 的原生 skill 加载与渐进披露机制。
+
+目标项目自己的 extension 也必须由你显式授权加载：
+
+```sh
+pi --extension /path/to/project/.pi/extensions/example.ts
+```
+
+Extension 在 Pi 宿主进程内运行，不属于模型 shell，因此只加载你信任的代码。
 
 推荐先给会话命名，便于以后查找：
 
@@ -94,7 +102,9 @@ Pi 会自行选择工具。若想明确控制，可以直接说：
 !git status --short
 ```
 
-`!!command` 会运行命令但不把输出加入模型上下文。生成命令与 extension 都继承当前用户的系统权限；Pi 本身不是 sandbox。
+`!!command` 会运行命令但不把输出加入模型上下文。`!` / `!!` 是人工直执行通道，会以你的系统权限运行并在首次使用时警告；模型的 `bash` 则受当前项目边界约束。输入 `/boundary` 可查看生效根目录和权限。
+
+模型 shell 可读写当前项目（包括正常 Git commit 所需的 `.git` 数据），并可访问公网；它不能读取其他项目、宿主凭据或通过 Unix socket 继承 Docker/SSH-agent 权限。直接文件工具请求项目外路径时会显示真实路径并逐次询问；shell 越界不会自动提权，而是要求 Pi 给出准确的 `!command` 供你决定是否直接运行。
 
 Pi 现在提供这些低摩擦研究工具：
 
@@ -137,10 +147,10 @@ side 问答会以卡片保存在 session 中。`Ctrl+O` 展开完整内容，`/s
 需要 Codex 实际完成一项较长任务时，可以直接对 Pi 说：
 
 ```text
-把数据加载重构和完整回归测试交给 Codex executor。目标是消除当前内存峰值，允许它修改、删除、提交、推送和运行远程实验。Codex 使用 gpt-5.6-sol/max；你负责给出成功标准，并在它返回后审查证据。
+把数据加载重构和完整回归测试交给 Codex executor。目标是消除当前内存峰值，允许它在项目内修改、删除、提交和运行实验。Codex 使用 gpt-5.6-sol/max；你负责给出成功标准，并在它返回后审查证据。若远程运行需要项目外 SSH 凭据，让它返回准确命令给我批准或直接执行。
 ```
 
-Pi 会获得一个 `codex-...` job ID。后台任务未结束时，应查询同一 job 的 status/result，或用 resume 继续该 Codex thread，而不是重复启动任务。默认 executor 拥有自动 `danger-full-access`，advisor 只读；两者默认都是 `gpt-5.6-sol/max`，也可以在具体委派时指定其他 Codex model。
+Pi 会获得一个 `codex-...` job ID。底部状态栏会持续显示 job 后八位、advisor/executor 模式、`starting/running/completed/failed/cancelled` 状态和最近进度；即使后台工具调用已返回也会继续更新。后台任务未结束时，应查询同一 job 的 status/result，或用 resume 继续该 Codex thread，而不是重复启动任务。默认 executor 是 project-write + public-network，advisor 是 project-read + public-network；两者默认都是 `gpt-5.6-sol/max`，也可以在具体委派时指定其他 Codex model。
 
 ## 4. 会话、分支和恢复
 
@@ -255,8 +265,9 @@ Pi 会获得一个 `codex-...` job ID。后台任务未结束时，应查询同�
 
 - API key 只放在项目 `.env`，不要粘贴进 prompt、日志或实验文档；
 - DeepSeek Web Search 会额外产生模型和搜索相关 token 开销；简单检索也应保持有界；
-- Pi 会修改文件和运行命令，但没有内置安全隔离；
-- Codex executor 同样不是低权限沙箱：它自动使用 `danger-full-access`，可以访问当前用户可用的文件、Git、SSH 与远程服务。Harness 会移除其 `DEEPSEEK_API_KEY`，但目标仓库和其他本机凭据仍应视为对 Codex 可见；
+- Pi 的模型 shell 受 OS 级 sandbox runtime 约束，Codex executor 使用 project-only permission profile：项目可写、Git commit 可用、公网开放，项目外用户文件和 Unix sockets 默认不可用；Pi shell 的通用系统 temp 写入被关闭，仅保留 Apple Git 所需的窄 `xcrun_db` 系统缓存例外；Codex CLI 0.146 仍自带系统 temp 兼容路径，Harness 已将 `TMPDIR` 指向项目内并禁止主动越界，但这一处目前是纵深防御，不与 Pi shell 等强；
+- `.git/hooks` 是项目内唯一默认只读的 Git 子路径，防止实验任务植入后续持久执行；`.git/config`、objects、index 和 refs 可写；
+- `!` / `!!` 与人工批准的直接文件工具是越界通道。它们代表用户自己的权限决定，不应由模型通过变形命令或重复委派替代；
 - memory SQLite 是派生缓存，不进入 Git；它会脱敏常见凭证形式，但原始 session、实验账本和不常见秘密格式仍是敏感数据；
 - Research Pi 在约 272K 总上下文时主动 compact，384K 作为硬触发线；压缩后原始 recent tail 按当前分支第 1/2/3 次 compact 取约 32K/40K/48K，之后固定在 48K；
 - 当前适合科研探索；极限上下文、长期多分支召回和 Codex 无人值守远程执行仍需在真实任务中继续验证；

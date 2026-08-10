@@ -13,7 +13,13 @@ Never commit:
 - `.pi/codex/`, which contains delegated prompts, Codex JSON events, local process metadata and structured results;
 - model checkpoints, datasets or experiment artifacts unless deliberately versioned elsewhere.
 
-`codex_delegate` executor jobs intentionally run the local Codex CLI with automatic `danger-full-access`. They inherit the current user's filesystem, Git, SSH and remote-service capabilities. The adapter removes `DEEPSEEK_API_KEY` from the child environment, but it is not a general secret sandbox: target repositories, Codex auth and other user credentials remain accessible to Codex when the operating system permits it.
+Model-generated Pi shell commands use an OS sandbox runtime (Seatbelt on macOS, bubblewrap/seccomp on Linux); `codex_delegate` jobs use Codex permission profiles. The current project is writable, including Git objects, refs, index and config; `.git/hooks` remains read-only. Public network access is allowed without a domain allowlist, but other user directories, Unix sockets, SSH agent access and secret-named environment variables are unavailable to model tool subprocesses. Pi shell has no general system-temp write access; macOS retains only the narrow `xcrun_db` cache paths Apple Git requires. Direct Pi file tools require one human approval for each outside or protected path. Human-entered `!` / `!!` commands intentionally bypass the agent sandbox and run with the user's normal account permissions.
+
+Codex CLI 0.146 的 permission-profile 仍保留自身的系统临时目录兼容路径，即使 profile 请求拒绝系统 temp。Harness 会把 `TMPDIR` 重定向到项目内，并在委派约定中禁止主动使用项目外 temp；因此 Codex executor 对其他用户目录仍是 OS 级拒绝，但其系统 temp 边界目前属于纵深防御，不与 Pi shell 的硬边界等强。
+
+To keep normal commits usable without exposing `~/.gitconfig`, trusted harness startup reads only global `user.name` and `user.email` and injects those four author/committer environment fields. No credential helper, include, alias, signing-key or remote configuration is forwarded.
+
+This is a capability boundary, not a guarantee that project-local code is benign. A permitted command may still delete project files, create commits, consume compute, contact public services, or modify scripts that a human later runs. Review the project and delegation objective accordingly.
 
 Before every release or first push, inspect:
 
