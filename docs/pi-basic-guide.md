@@ -142,7 +142,7 @@ Pi 现在提供四个低摩擦研究工具：
 
 - 竞争假设 A/B 仍属于同一问题：使用 `/tree`，保留在同一会话树中；
 - 已经切换成新的研究问题或正式实验阶段：使用 `/fork` 或 `/new`；
-- 会话很长但仍在解决同一问题：使用 `/compact`。Research Pi 保留约 65,536 tokens 的 recent tail，并把竞争假设、有效性、evidence refs 与下一实验写入结构化 compact；完整 JSONL 历史仍保留。
+- 会话很长但仍在解决同一问题：可手动使用 `/compact`。Research Pi 也会在约 272K/384K 总上下文处自动触发，并按当前分支第 1/2/3 次 compact 保留约 32K/40K/48K recent tail；竞争假设、有效性、evidence refs 与下一实验写入结构化 compact，完整 JSONL 历史仍保留。
 - 新会话需要恢复旧证据：使用 memory search/read，不必先恢复整个旧 session。
 
 从终端恢复最近会话：

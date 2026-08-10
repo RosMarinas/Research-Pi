@@ -95,15 +95,13 @@ pi --skill /path/to/skill
 - 实验记录、用户陈述、助手综合和 compact 摘要带有不同 reliability；
 - 常见 API key、token 和 password 形式在写入索引前会脱敏，但原始 session 本身仍应视为敏感数据。
 
+人类可使用 `/memory <query>` 查看前三条结果；该命令不把结果加入模型上下文。它不会自动在每轮注入旧会话。
+
 ### Research Compaction
 
 DeepSeek V4 Flash 使用 Max reasoning，但不把 1M 容量等同于等质量注意力。Research Pi 在约 272K 总上下文时发起软 compact，384K 作为硬触发线；压缩后的原始 recent tail 按当前分支第 1/2/3 次 compact 取约 32K/40K/48K，之后固定在 48K。结构化研究状态和可检索历史负责承接更早证据。
 
-人类可使用 `/memory <query>` 查看前三条结果；该命令不把结果加入模型上下文。它不会自动在每轮注入旧会话。
-
-### Research Compact
-
-Research Pi 将未压缩的 recent tail 从 Pi 默认的 20K 提高到 65,536 tokens。`/compact` 或 Pi 自动 compact 时，扩展同时生成：
+`/compact` 或自动 compact 时，扩展同时生成：
 
 - 给模型继续工作的科研状态摘要；
 - 存在 compaction entry `details` 中的结构化 `researchState`、evidence ledger 和 provenance。
