@@ -1,11 +1,4 @@
 {
-  "defaultProvider": "deepseek",
-  "defaultModel": "deepseek-v4-flash",
-  "defaultThinkingLevel": "high",
-  "enabledModels": [
-    "deepseek/deepseek-v4-flash:high"
-  ],
-  "sessionDir": ".pi/sessions",
   "retry": {
     "enabled": true,
     "maxRetries": 2,

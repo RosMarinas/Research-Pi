@@ -25,7 +25,7 @@ pi-raw
 pi-traced
 ```
 
-科研 prompt、DeepSeek 配置、两个研究工具和 session 由 harness 提供；文件操作、Git checkpoint 和实验账本作用在启动 `pi` 时所在的研究仓库。
+科研 prompt、DeepSeek 配置、四个研究工具和 session 由 harness 提供；文件操作、Git checkpoint 和实验账本作用在启动 `pi` 时所在的研究仓库。所有项目的 Research Pi session 集中保存在 harness 的 `.pi/sessions/`，每个 session header 仍记录其原始工作目录。
 
 Research Pi 默认关闭 Pi 的 skill 自动发现，只加载经过检查的研究白名单。某次任务需要额外 skill 时可显式添加：
 
@@ -96,10 +96,12 @@ Pi 会自行选择工具。若想明确控制，可以直接说：
 
 `!!command` 会运行命令但不把输出加入模型上下文。生成命令与 extension 都继承当前用户的系统权限；Pi 本身不是 sandbox。
 
-Pi 现在还提供两个低摩擦研究工具：
+Pi 现在提供四个低摩擦研究工具：
 
 - `record_experiment`：当一个运行结果真正支持、削弱或无法区分研究假设时，Pi 可调用它追加一条 `.pi/research/experiments.jsonl`。普通搜索和调试不会自动记录。
 - `research_checkpoint`：在大步替换、回滚或废弃路线前，把当前 tracked Git 状态保存到 `refs/pi-research/checkpoints/...`。它不会切分支或清理工作树，也不会捕获 untracked 文件。
+- `research_memory_search`：在旧 session 和实验记录中进行本地全文检索；默认仅限当前 Git 项目，并排除当前 session 和废弃分支。
+- `research_memory_read`：根据搜索结果中的 session/entry ID 读取精确原文和小范围上下文。
 
 可以直接提出：
 
@@ -111,9 +113,17 @@ Pi 现在还提供两个低摩擦研究工具：
 下一步要整体替换当前实现；先用 research_checkpoint 保存这个研究决策点。不要自动提交当前分支。
 ```
 
+当任务依赖过去的实验或旧会话时可以直接说：
+
+```text
+先用 research_memory_search 查找之前关于梯度爆炸和 run-184 的实验；读取精确 entry 后再判断，不要把旧 assistant summary 当成实验事实。
+```
+
+人类也可使用 `/memory 梯度爆炸` 查看少量检索结果。`/memory` 不会把结果加入模型上下文；Research Pi 也不会自动在每一轮注入历史。
+
 ## 4. 会话、分支和恢复
 
-普通会话会自动保存到项目的 `.pi/sessions/`。
+普通会话会自动保存到 Research Pi harness 的 `.pi/sessions/`，而不是散落在每个科研仓库中。历史检索依据 session header 中的 cwd/Git 根目录区分项目。
 
 | 操作 | 用法 |
 |---|---|
@@ -125,12 +135,15 @@ Pi 现在还提供两个低摩擦研究工具：
 | 从较早的用户消息创建独立会话 | `/fork` |
 | 将当前分支复制为新会话 | `/clone` |
 | 压缩较早上下文 | `/compact` |
+| 检索历史会话但不注入模型 | `/memory 查询` |
+| 查看最近结构化科研状态 | `/research-state` |
 
 科研中推荐这样区分：
 
 - 竞争假设 A/B 仍属于同一问题：使用 `/tree`，保留在同一会话树中；
 - 已经切换成新的研究问题或正式实验阶段：使用 `/fork` 或 `/new`；
-- 会话很长但仍在解决同一问题：使用 `/compact`。压缩是有损的，但完整 JSONL 历史仍保留。
+- 会话很长但仍在解决同一问题：使用 `/compact`。Research Pi 保留约 65,536 tokens 的 recent tail，并把竞争假设、有效性、evidence refs 与下一实验写入结构化 compact；完整 JSONL 历史仍保留。
+- 新会话需要恢复旧证据：使用 memory search/read，不必先恢复整个旧 session。
 
 从终端恢复最近会话：
 
@@ -219,5 +232,7 @@ Pi 现在还提供两个低摩擦研究工具：
 
 - API key 只放在项目 `.env`，不要粘贴进 prompt、日志或实验文档；
 - Pi 会修改文件和运行命令，但没有内置安全隔离；
-- 当前适合受监督科研探索，真实 429/5xx、极限上下文、strict beta 和无人值守远程执行仍未完整验证；
+- memory SQLite 是派生缓存，不进入 Git；它会脱敏常见凭证形式，但原始 session、实验账本和不常见秘密格式仍是敏感数据；
+- 当前 65,536 recent-tail 配置是初始值，256K/384K/512K 软 compact 阈值尚待真实长任务对照后决定；
+- 当前适合受监督科研探索，极限上下文、长期多分支召回和无人值守远程执行仍未完整验证；
 - 先让真实任务暴露摩擦，再加入 extension 或工作流，不预先安装全家桶。

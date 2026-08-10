@@ -1,6 +1,6 @@
 # Research Pi
 
-Research Pi 是一个面向 AI、通信等计算实验的个人 Pi harness。它使用锁定版本的 Pi Core 和 DeepSeek V4 Flash，并加入轻量的科研行为约束、实验记录、研究 checkpoint 与按需 trace。
+Research Pi 是一个面向 AI、通信等计算实验的个人 Pi harness。它使用锁定版本的 Pi Core 和 DeepSeek V4 Flash，并加入轻量的科研行为约束、实验记录、研究 checkpoint、非向量历史检索、结构化科研 compact 与按需 trace。
 
 ## 快速开始
 
@@ -53,6 +53,7 @@ pi
 主要配置位于：
 
 - `.pi/settings.json`：模型、thinking 和 retry 设置。
+- `.pi/agent/settings.json`：在其他科研项目中调用 `pi` 时仍生效的 retry 和 compact 默认值。
 - `.pi/agent/models.json`：DeepSeek 请求字段兼容配置。
 - `.pi/APPEND_SYSTEM.md`：追加到 Pi 默认提示后的科研行为约束。
 - `.pi/extensions/`：Research Pi 提供的工具扩展。
@@ -84,6 +85,27 @@ pi --skill /path/to/skill
 
 在大步实验修改、回滚或废弃路线前，为当前已跟踪 Git 状态创建独立的研究 checkpoint，不切换分支，也不修改工作树。
 
+### Research Memory
+
+`research_memory_search` 和 `research_memory_read` 为模型提供按需历史检索。原始 session JSONL 和实验账本仍是事实源；本地 `.pi/memory/memory.sqlite` 只是可删除、可重建的派生索引。
+
+- 使用 SQLite FTS5，不使用 embeddings 或向量数据库；
+- 中文使用 trigram，短 run ID 使用受限子串回退；
+- 默认只检索当前 Git 项目，排除当前 session 和废弃分支；
+- 实验记录、用户陈述、助手综合和 compact 摘要带有不同 reliability；
+- 常见 API key、token 和 password 形式在写入索引前会脱敏，但原始 session 本身仍应视为敏感数据。
+
+人类可使用 `/memory <query>` 查看前三条结果；该命令不把结果加入模型上下文。它不会自动在每轮注入旧会话。
+
+### Research Compact
+
+Research Pi 将未压缩的 recent tail 从 Pi 默认的 20K 提高到 65,536 tokens。`/compact` 或 Pi 自动 compact 时，扩展同时生成：
+
+- 给模型继续工作的科研状态摘要；
+- 存在 compaction entry `details` 中的结构化 `researchState`、evidence ledger 和 provenance。
+
+强结论必须引用有效的 `record_experiment` entry；仅引用无效或 inconclusive 运行的 supported/weakened/rejected 状态会被降级。模型输出不能解析或校验时，自动回退到 Pi 原生 compact。使用 `/research-state` 可检查最近一次结构化状态。
+
 ### Trace
 
 `pi-traced` 将 trace 写入本 harness 的 `.pi/agent/traces/`。其中可能包含完整 prompt、工具参数和输出；该目录已被 Git 忽略。
@@ -104,4 +126,4 @@ pi --skill /path/to/skill
 
 ## 敏感信息
 
-`.env`、认证信息、session、trace 和本地实验记录均被排除在版本控制之外。仓库只跟踪不含真实密钥的 `.env.example`。提交前检查规则见 [`SECURITY.md`](SECURITY.md)。
+`.env`、认证信息、session、memory index、trace 和本地实验记录均被排除在版本控制之外。仓库只跟踪不含真实密钥的 `.env.example`，以及经过审查且不含凭证的模型/运行设置。提交前检查规则见 [`SECURITY.md`](SECURITY.md)。

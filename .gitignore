@@ -12,8 +12,10 @@ node_modules/
 
 .pi/sessions/
 .pi/research/*.jsonl
+.pi/memory/
 .pi/agent/*
 !.pi/agent/models.json
+!.pi/agent/settings.json
 
 # Local design, research, and test notes
 /Codex科研场景反馈与改进.md

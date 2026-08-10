@@ -6,8 +6,9 @@ Never commit:
 
 - `.env` or any real API key;
 - `.npmrc`, private keys or credential files;
-- `.pi/agent/*` except the reviewed `.pi/agent/models.json` compatibility configuration;
+- `.pi/agent/*` except the reviewed, credential-free `.pi/agent/models.json` and `.pi/agent/settings.json` configurations;
 - Pi sessions or traces, which contain prompts, reasoning, tool arguments and outputs;
+- `.pi/memory/`, which is a rebuildable local search index derived from sensitive sessions and experiment records;
 - `.pi/research/*.jsonl`, which may contain absolute paths, run IDs and project-sensitive observations;
 - model checkpoints, datasets or experiment artifacts unless deliberately versioned elsewhere.
 
