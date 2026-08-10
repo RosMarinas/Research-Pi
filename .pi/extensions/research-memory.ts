@@ -64,6 +64,7 @@ export default function (pi: ExtensionAPI) {
 					Type.Union([
 						Type.Literal("experiment"),
 						Type.Literal("checkpoint"),
+						Type.Literal("side"),
 						Type.Literal("user"),
 						Type.Literal("assistant"),
 						Type.Literal("compaction"),

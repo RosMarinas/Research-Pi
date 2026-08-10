@@ -87,5 +87,7 @@ exec "$core_bin" \
   --extension "$script_dir/.pi/extensions/research-checkpoint.ts" \
   --extension "$script_dir/.pi/extensions/research-memory.ts" \
   --extension "$script_dir/.pi/extensions/research-compaction.ts" \
+  --extension "$script_dir/.pi/extensions/research-side.ts" \
+  --extension "$script_dir/.pi/extensions/deepseek-web-search.ts" \
   --extension "$script_dir/.pi/extensions/codex-delegate.ts" \
   "$@"

@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 export const MEMORY_SCHEMA_VERSION = 1;
-export const MEMORY_EXTRACTOR_VERSION = "research-pi-memory-v1";
+export const MEMORY_EXTRACTOR_VERSION = "research-pi-memory-v2";
 
 const MAX_INDEXED_CHARS = 64_000;
 const DEFAULT_RESULT_LIMIT = 6;
@@ -73,6 +73,17 @@ function checkpointText(record) {
 		`Repository: ${scalar(record.repository, 1_000)}`,
 		`Ref: ${scalar(record.ref, 1_000)}`,
 		`Commit: ${scalar(record.commit, 160)}`,
+	]
+		.filter((line) => !line.endsWith(": "))
+		.join("\n");
+}
+
+function sideText(record) {
+	return [
+		`Side conversation ${scalar(record.id, 160)}`,
+		`Question: ${scalar(record.question, 4_000)}`,
+		`Answer: ${scalar(record.answer, 12_000)}`,
+		`Model: ${scalar(record.model?.provider, 160)}/${scalar(record.model?.id, 160)}`,
 	]
 		.filter((line) => !line.endsWith(": "))
 		.join("\n");
@@ -200,6 +211,18 @@ export function extractSessionUnits(path) {
 				entry,
 				kind: "checkpoint",
 				text: checkpointText(entry.data ?? {}),
+				active: active.has(entry.id),
+			});
+		} else if (entry.type === "custom" && entry.customType === "research-side") {
+			unit = makeUnit({
+				sourcePath,
+				sourceKind: "session",
+				sessionId,
+				projectCwd,
+				sessionName,
+				entry,
+				kind: "side",
+				text: sideText(entry.data ?? {}),
 				active: active.has(entry.id),
 			});
 		}
@@ -529,7 +552,15 @@ export function searchMemory(db, options) {
 
 	const queryLower = query.toLocaleLowerCase();
 	const tokenLowers = tokens.map((token) => token.toLocaleLowerCase());
-	const kindWeights = { experiment: 45, checkpoint: 28, user: 18, assistant: 8, compaction: 4, branch_summary: 2 };
+	const kindWeights = {
+		experiment: 45,
+		checkpoint: 28,
+		user: 18,
+		side: 8,
+		assistant: 8,
+		compaction: 4,
+		branch_summary: 2,
+	};
 	const scored = [...candidates.values()].map((row) => {
 		const lower = row.text.toLocaleLowerCase();
 		const coverage = tokenLowers.filter((token) => lower.includes(token)).length;

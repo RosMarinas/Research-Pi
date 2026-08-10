@@ -1,6 +1,6 @@
 # Research Pi
 
-Research Pi 是一个面向 AI、通信等计算实验的个人 Pi harness。它使用锁定版本的 Pi Core 和 DeepSeek V4 Flash，并加入科研优先的身份与工作约定、实验记录、研究 checkpoint、非向量历史检索、结构化科研 compact、Codex 长程执行委派与按需 trace。
+Research Pi 是一个面向 AI、通信等计算实验的个人 Pi harness。它使用锁定版本的 Pi Core 和 DeepSeek V4 Flash，并加入科研优先的身份与工作约定、持久化 side 对话、DeepSeek 原生网页检索、实验记录、研究 checkpoint、非向量历史检索、结构化科研 compact、Codex 长程执行委派与按需 trace。
 
 ## 快速开始
 
@@ -102,6 +102,22 @@ Research Pi 默认处于探索与验证阶段：构造竞争假设，优先高�
 - 常见 API key、token 和 password 形式在写入索引前会脱敏，但原始 session 本身仍应视为敏感数据。
 
 人类可使用 `/memory <query>` 查看前三条结果；该命令不把结果加入模型上下文。它不会自动在每轮注入旧会话。
+
+### Side 对话
+
+`/side <问题>` 使用当前可见上下文发起一次隔离调用，并把完整问答保存为 session custom entry。它不会自动进入后续主对话上下文，因此适合临时追问、替代解释和有价值但暂时不应污染主线的想法。
+
+- 卡片折叠时显示问题和答案预览，`Ctrl+O` 展开完整 Markdown；
+- `/side list` 列出当前会话分支的 side 对话；
+- `/side show <id>` 单独查看完整内容；
+- `/side use <id>` 显式把选中的问答提升到主上下文；
+- side 内容会进入 Research Memory，可靠性按 assistant synthesis 处理。
+
+### Web Search
+
+`web_search` 通过 DeepSeek Anthropic-compatible API 的原生 Web Search 做简单、直接、带结构化来源的当前信息检索，复用同一个 `DEEPSEEK_API_KEY`，无需额外搜索服务密钥。若 API 没有返回结构化来源，工具会明确标为未核验模型综合。
+
+Pi 可直接完成有界的小型调研；当用户指定，或任务确实需要大量搜索、交叉核验和中间材料整理时，再交给 Codex 隔离过程。
 
 ### Research Compaction
 

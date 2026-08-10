@@ -67,6 +67,19 @@ test("indexes Chinese text, short IDs, provenance, branch state, and redacts cre
 					nextStep: "测试真实会话",
 				},
 			},
+			{
+				type: "custom",
+				customType: "research-side",
+				id: "side-entry",
+				parentId: "exp-entry",
+				timestamp: "2026-01-01T00:00:05Z",
+				data: {
+					id: "side-1",
+					question: "另一条隔离思路是什么",
+					answer: "可以尝试 oracle 对照实验",
+					model: { provider: "deepseek", id: "deepseek-v4-flash" },
+				},
+			},
 		]);
 
 		const extracted = extractSessionUnits(sessionPath);
@@ -94,13 +107,18 @@ test("indexes Chinese text, short IDs, provenance, branch state, and redacts cre
 			const shortId = searchMemory(db, { ...base, query: "V4", limit: 6 });
 			assert.equal(shortId[0].entryId, "u1");
 
+			const side = searchMemory(db, { ...base, query: "oracle 对照", kinds: ["side"] });
+			assert.equal(side[0].entryId, "side-entry");
+			assert.equal(side[0].reliability, "assistant-synthesis");
+
 			assert.equal(searchMemory(db, { ...base, query: "zebra" }).length, 0);
 			const abandoned = searchMemory(db, { ...base, query: "zebra", includeAbandonedBranches: true });
 			assert.equal(abandoned[0].entryId, "abandoned");
 
 			const read = readMemory(db, { sessionId: "session-1", entryId: "exp-entry", radius: 1 });
-			assert.equal(read.entries.at(-1).kind, "experiment");
-			assert.match(read.entries.at(-1).text, /中文检索可用/);
+			const experimentEntry = read.entries.find((entry) => entry.entryId === "exp-entry");
+			assert.equal(experimentEntry.kind, "experiment");
+			assert.match(experimentEntry.text, /中文检索可用/);
 		} finally {
 			db.close();
 		}

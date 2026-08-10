@@ -102,6 +102,8 @@ Pi 现在提供这些低摩擦研究工具：
 - `research_checkpoint`：在大步替换、回滚或废弃路线前，把当前 tracked Git 状态保存到 `refs/pi-research/checkpoints/...`。它不会切分支或清理工作树，也不会捕获 untracked 文件。
 - `research_memory_search`：在旧 session 和实验记录中进行本地全文检索；默认仅限当前 Git 项目，并排除当前 session 和废弃分支。
 - `research_memory_read`：根据搜索结果中的 session/entry ID 读取精确原文和小范围上下文。
+- `/side <问题>`：用当前上下文做一次隔离追问并持久保存；默认不进入主上下文。
+- `web_search`：通过 DeepSeek 原生搜索做简单、直接、带来源的网页查找。
 - `codex_delegate`：把工具密集或长程执行交给独立 Codex 上下文，或请求一个只读第二意见。Pi 仍负责研究规划与证据判断。
 
 可以直接提出：
@@ -121,6 +123,16 @@ Pi 现在提供这些低摩擦研究工具：
 ```
 
 人类也可使用 `/memory 梯度爆炸` 查看少量检索结果。`/memory` 不会把结果加入模型上下文；Research Pi 也不会自动在每一轮注入历史。
+
+临时追问但不希望扩大主上下文时：
+
+```text
+/side 如果当前异常其实来自评价协议，而不是模型结构，会出现哪些可区分现象？
+```
+
+side 问答会以卡片保存在 session 中。`Ctrl+O` 展开完整内容，`/side show <id>` 单独查看，`/side use <id>` 才把它提升到主上下文。之后也能通过 Research Memory 找回，但它仍属于 assistant synthesis，不是实验事实。
+
+需要当天信息、一个官方页面或一份有界小调研时，可以让 Pi 调用 `web_search`。它复用 `.env` 中的 DeepSeek key。用户明确指定，或任务确实需要大量搜索、交叉核验和中间材料整理时，再交给 Codex 隔离过程。
 
 需要 Codex 实际完成一项较长任务时，可以直接对 Pi 说：
 
@@ -145,6 +157,8 @@ Pi 会获得一个 `codex-...` job ID。后台任务未结束时，应查询同�
 | 将当前分支复制为新会话 | `/clone` |
 | 压缩较早上下文 | `/compact` |
 | 检索历史会话但不注入模型 | `/memory 查询` |
+| 隔离追问并持久保存 | `/side 问题` |
+| 查看/提升 side 内容 | `/side show <id>`、`/side use <id>` |
 | 查看最近结构化科研状态 | `/research-state` |
 
 科研中推荐这样区分：
@@ -240,6 +254,7 @@ Pi 会获得一个 `codex-...` job ID。后台任务未结束时，应查询同�
 ## 8. 当前边界
 
 - API key 只放在项目 `.env`，不要粘贴进 prompt、日志或实验文档；
+- DeepSeek Web Search 会额外产生模型和搜索相关 token 开销；简单检索也应保持有界；
 - Pi 会修改文件和运行命令，但没有内置安全隔离；
 - Codex executor 同样不是低权限沙箱：它自动使用 `danger-full-access`，可以访问当前用户可用的文件、Git、SSH 与远程服务。Harness 会移除其 `DEEPSEEK_API_KEY`，但目标仓库和其他本机凭据仍应视为对 Codex 可见；
 - memory SQLite 是派生缓存，不进入 Git；它会脱敏常见凭证形式，但原始 session、实验账本和不常见秘密格式仍是敏感数据；
