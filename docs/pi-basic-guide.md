@@ -170,6 +170,8 @@ side 问答会以卡片保存在 session 中。`Ctrl+O` 展开完整内容，`/s
 
 Pi 会获得一个 `codex-...` job ID。底部状态栏会持续显示 job 后八位、advisor/executor 模式、`starting/running/completed/failed/cancelled` 状态和最近进度；即使后台工具调用已返回也会继续更新。后台任务未结束时，应查询同一 job 的 status/result，或用 resume 继续该 Codex thread，而不是重复启动任务。默认 executor 是 project-write + public-network，advisor 是 project-read + public-network；两者默认都是 `gpt-5.6-sol/max`，也可以在具体委派时指定其他 Codex model。
 
+Pi 在连续处理同一研究子任务时应使用稳定、简短的 `mission` 标签。带 mission 的新派遣默认 `reuse=auto`：运行中的同 mission/mode job 会直接重新挂接，已完成的会通过 App Server `thread/resume` 续接历史；不同 workspace、不同 mode 或不同 mission 不会自动复用。续接时 Harness 会比较 Git snapshot，工作区发生变化则显式要求 Codex 重新检查当前文件。使用 `/codex missions` 查看当前 workspace 的任务链；若要独立第二意见、开始另一研究路线或主动清除旧假设，使用新的 mission。
+
 ## 4. 会话、分支和恢复
 
 普通会话会自动保存到 Research Pi 的集中状态目录，而不是散落在每个科研仓库中。源码开发模式使用 harness 的 `.pi/sessions/`；稳定包使用 `~/.local/state/research-pi/sessions/`。历史检索依据 session header 中的 cwd/Git 根目录区分项目。

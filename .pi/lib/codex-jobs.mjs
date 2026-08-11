@@ -27,6 +27,7 @@ const JOB_ID_PATTERN = /^codex-[0-9TZ-]+-[a-f0-9]{8}$/;
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/;
 const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max", "ultra"]);
+const MISSION_MAX_LENGTH = 160;
 
 function now() {
 	return new Date().toISOString();
@@ -55,6 +56,64 @@ export function validateReasoningEffort(effort) {
 	return effort;
 }
 
+export function normalizeCodexMission(value, { required = false } = {}) {
+	const mission = String(value ?? "")
+		.normalize("NFKC")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!mission) {
+		if (required) throw new Error("A Codex mission is required for automatic context reuse");
+		return null;
+	}
+	if (mission.length > MISSION_MAX_LENGTH) throw new Error(`Codex mission must be at most ${MISSION_MAX_LENGTH} characters`);
+	if (/\p{Cc}/u.test(mission)) throw new Error("Codex mission must not contain control characters");
+	return mission;
+}
+
+function identityKey(prefix, value) {
+	return `${prefix}-${createHash("sha256").update(value).digest("hex").slice(0, 24)}`;
+}
+
+function missionKey(mission) {
+	return identityKey("mission", mission.toLocaleLowerCase("en-US"));
+}
+
+function runGit(cwd, args) {
+	return new Promise((resolveRun) => {
+		const child = spawn("git", args, { cwd, shell: false, stdio: ["ignore", "pipe", "ignore"] });
+		let stdout = "";
+		child.stdout.on("data", (chunk) => {
+			stdout += chunk.toString();
+		});
+		child.on("error", () => resolveRun({ code: 1, stdout: "" }));
+		child.on("close", (code) => resolveRun({ code: code ?? 1, stdout: stdout.trim() }));
+	});
+}
+
+async function resolveWorkspaceBoundary(inputCwd) {
+	const cwd = await realpath(resolve(inputCwd));
+	const workspaceRoot = await realpath(resolve(await resolveProjectRoot(cwd)));
+	return { cwd, workspaceRoot, workspaceKey: identityKey("workspace", workspaceRoot) };
+}
+
+export async function resolveCodexWorkspaceIdentity(inputCwd) {
+	const { cwd, workspaceRoot, workspaceKey } = await resolveWorkspaceBoundary(inputCwd);
+	let projectAnchor = workspaceRoot;
+	let commonDir = await runGit(workspaceRoot, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+	if (commonDir.code !== 0 || !commonDir.stdout) {
+		commonDir = await runGit(workspaceRoot, ["rev-parse", "--git-common-dir"]);
+	}
+	if (commonDir.code === 0 && commonDir.stdout) {
+		projectAnchor = await realpath(resolve(workspaceRoot, commonDir.stdout)).catch(() => resolve(workspaceRoot, commonDir.stdout));
+	}
+	return {
+		cwd,
+		workspaceRoot,
+		workspaceKey,
+		projectKey: identityKey("project", projectAnchor),
+	};
+}
+
 export function sanitizeCodexEnvironment(source = process.env) {
 	const env = { ...source };
 	delete env.DEEPSEEK_API_KEY;
@@ -62,7 +121,15 @@ export function sanitizeCodexEnvironment(source = process.env) {
 	return env;
 }
 
-export function buildDelegationPrompt({ mode, task, successCriteria = [], context = "", hostCapabilities = [] }) {
+export function buildDelegationPrompt({
+	mode,
+	task,
+	successCriteria = [],
+	context = "",
+	hostCapabilities = [],
+	mission,
+	continuationNotice,
+}) {
 	const role =
 		mode === "advisor"
 			? `You are the read-only advisor subordinate to Research Pi. Analyze the task deeply, inspect the current project as needed, challenge weak assumptions, and return a concrete proposal. Do not modify files or external state in advisor mode. Your OS-enforced permission profile can read the current project and minimal runtime files, with public network access, but cannot read other user directories.`
@@ -100,6 +167,14 @@ ${criteria}
 <context>
 ${boundedContext}
 </context>
+
+<mission>
+${mission ?? "This is an unlabelled standalone delegation. Do not assume it shares a mission with other Codex work."}
+</mission>
+
+<continuation_state>
+${continuationNotice ?? "This is a fresh Codex thread. Inspect the current workspace rather than assuming prior conversational state."}
+</continuation_state>
 
 Return a final JSON object matching the supplied schema. Separate observations from interpretation. A command succeeding is not by itself scientific evidence; report validity limitations so Research Pi can judge them.
 </research_pi_delegation>`;
@@ -192,23 +267,12 @@ async function updateWriterLock(lockPath, jobId, pid) {
 }
 
 export async function getGitSnapshot(cwd) {
-	const run = (args) =>
-		new Promise((resolveRun) => {
-			const child = spawn("git", args, { cwd, shell: false, stdio: ["ignore", "pipe", "ignore"] });
-			let stdout = "";
-			child.stdout.on("data", (chunk) => {
-				stdout += chunk.toString();
-			});
-			child.on("error", () => resolveRun({ code: 1, stdout: "" }));
-			child.on("close", (code) => resolveRun({ code: code ?? 1, stdout: stdout.trim() }));
-		});
-
-	const root = await run(["rev-parse", "--show-toplevel"]);
+	const root = await runGit(cwd, ["rev-parse", "--show-toplevel"]);
 	if (root.code !== 0) return {};
 	const [head, branch, statusResult] = await Promise.all([
-		run(["rev-parse", "--verify", "HEAD"]),
-		run(["branch", "--show-current"]),
-		run(["status", "--porcelain=v1", "--untracked-files=normal"]),
+		runGit(cwd, ["rev-parse", "--verify", "HEAD"]),
+		runGit(cwd, ["branch", "--show-current"]),
+		runGit(cwd, ["status", "--porcelain=v1", "--untracked-files=normal"]),
 	]);
 	return {
 		root: root.stdout,
@@ -217,6 +281,34 @@ export async function getGitSnapshot(cwd) {
 		dirty: statusResult.code === 0 ? statusResult.stdout.length > 0 : undefined,
 		status: statusResult.code === 0 ? statusResult.stdout.slice(0, 20000) : undefined,
 	};
+}
+
+function gitSnapshotFingerprint(snapshot) {
+	if (!snapshot || Object.keys(snapshot).length === 0) return null;
+	return createHash("sha256")
+		.update(JSON.stringify({
+			commit: snapshot.commit ?? null,
+			branch: snapshot.branch ?? null,
+			dirty: snapshot.dirty ?? null,
+			status: snapshot.status ?? null,
+		}))
+		.digest("hex")
+		.slice(0, 16);
+}
+
+export function buildCodexContinuationNotice(previousJob, currentGit) {
+	const previousGit = previousJob.gitAfter ?? previousJob.gitBefore ?? {};
+	const previousFingerprint = gitSnapshotFingerprint(previousGit);
+	const currentFingerprint = gitSnapshotFingerprint(currentGit);
+	const describe = (snapshot, fingerprint) =>
+		`branch=${snapshot?.branch || "unknown"}, commit=${snapshot?.commit?.slice(0, 12) || "unknown"}, dirty=${snapshot?.dirty ?? "unknown"}, state=${fingerprint || "unavailable"}`;
+	if (!previousFingerprint || !currentFingerprint) {
+		return `This continues Codex thread ${previousJob.threadId} from job ${previousJob.id}, but Git freshness could not be fully verified. Re-inspect every file and external run state relevant to the follow-up before acting.`;
+	}
+	if (previousFingerprint === currentFingerprint) {
+		return `This continues Codex thread ${previousJob.threadId} from job ${previousJob.id}. The Git snapshot matches the previous terminal snapshot (${describe(currentGit, currentFingerprint)}). Re-check runtime and untracked external state when it matters.`;
+	}
+	return `This continues Codex thread ${previousJob.threadId} from job ${previousJob.id}, but the workspace changed after that job. Previous: ${describe(previousGit, previousFingerprint)}. Current: ${describe(currentGit, currentFingerprint)}. Treat prior file observations as stale and re-inspect the current workspace before editing, running, or interpreting evidence.`;
 }
 
 function createJobId() {
@@ -234,14 +326,16 @@ export async function startCodexJob(options) {
 	const mode = options.mode === "advisor" ? "advisor" : "executor";
 	const model = validateModel(options.model ?? DEFAULT_CODEX_MODEL);
 	const reasoningEffort = validateReasoningEffort(options.reasoningEffort ?? DEFAULT_CODEX_REASONING_EFFORT);
-	const cwd = await realpath(resolve(options.cwd));
+	const identity = await resolveCodexWorkspaceIdentity(options.cwd);
+	const { cwd, workspaceRoot, workspaceKey, projectKey } = identity;
+	const mission = normalizeCodexMission(options.mission);
 	await access(cwd);
 	const jobRoot = resolve(options.jobRoot ?? DEFAULT_CODEX_JOB_ROOT);
 	const schemaPath = resolve(options.schemaPath ?? DEFAULT_CODEX_SCHEMA_PATH);
 	await access(schemaPath);
 	const workerPath = resolve(options.workerPath ?? CODEX_JOB_WORKER_PATH);
 	await access(workerPath);
-	const boundaryRoot = await resolveProjectRoot(cwd);
+	const boundaryRoot = workspaceRoot;
 	const hostCapabilityContext = options.hostCapabilityContext ?? (options.leaderSessionId
 		? await resolveCapabilityContext(boundaryRoot, options.leaderSessionId)
 		: null);
@@ -266,9 +360,11 @@ export async function startCodexJob(options) {
 			successCriteria: options.successCriteria,
 			context: options.context,
 			hostCapabilities,
+			mission,
+			continuationNotice: options.continuationNotice,
 		});
 		const request = {
-			version: 2,
+			version: 3,
 			jobId,
 			mode,
 			model,
@@ -276,6 +372,11 @@ export async function startCodexJob(options) {
 			sandbox,
 			cwd,
 			boundaryRoot,
+			workspaceRoot,
+			workspaceKey,
+			projectKey,
+			mission,
+			missionKey: mission ? missionKey(mission) : null,
 			prompt,
 			continuationThreadId: options.continuationThreadId,
 			timeoutMinutes: options.timeoutMinutes ?? null,
@@ -288,7 +389,7 @@ export async function startCodexJob(options) {
 			hostCapabilityContext,
 		};
 		const job = {
-			version: 2,
+			version: 3,
 			id: jobId,
 			transport: "app-server",
 			leaderSessionId: options.leaderSessionId ?? null,
@@ -299,6 +400,11 @@ export async function startCodexJob(options) {
 			reasoningEffort,
 			sandbox,
 			cwd,
+			workspaceRoot,
+			workspaceKey,
+			projectKey,
+			mission,
+			missionKey: mission ? missionKey(mission) : null,
 			writerRoot,
 			createdAt,
 			startedAt: null,
@@ -346,9 +452,31 @@ export async function startCodexJob(options) {
 	}
 }
 
+async function jobWorkspaceKey(job) {
+	const actual = await resolveWorkspaceBoundary(job.cwd);
+	if (job.workspaceKey && job.workspaceKey !== actual.workspaceKey) {
+		throw new Error(`Codex job ${job.id} has inconsistent workspace metadata`);
+	}
+	if (job.workspaceRoot) {
+		const storedRoot = await realpath(resolve(job.workspaceRoot)).catch(() => resolve(job.workspaceRoot));
+		if (storedRoot !== actual.workspaceRoot) throw new Error(`Codex job ${job.id} has inconsistent workspace root`);
+	}
+	return actual.workspaceKey;
+}
+
+export async function assertCodexJobWorkspace(job, expectedCwd) {
+	if (!expectedCwd) return job;
+	const expected = await resolveWorkspaceBoundary(expectedCwd);
+	const actualKey = await jobWorkspaceKey(job);
+	if (actualKey !== expected.workspaceKey) {
+		throw new Error(`Codex job ${job.id} belongs to another workspace; switch to that workspace before managing or resuming it`);
+	}
+	return job;
+}
+
 export async function listCodexJobs(options = {}) {
 	const jobRoot = resolve(options.jobRoot ?? DEFAULT_CODEX_JOB_ROOT);
-	const filterCwd = options.cwd ? await realpath(resolve(options.cwd)).catch(() => resolve(options.cwd)) : null;
+	const filterIdentity = options.cwd ? await resolveCodexWorkspaceIdentity(options.cwd) : null;
 	let entries;
 	try {
 		entries = await readdir(jobRoot, { withFileTypes: true });
@@ -362,7 +490,9 @@ export async function listCodexJobs(options = {}) {
 		try {
 			const job = await readCodexJob(entry.name, { jobRoot });
 			if (options.leaderSessionId && job.leaderSessionId !== options.leaderSessionId) continue;
-			if (filterCwd && resolve(job.cwd) !== filterCwd) continue;
+			if (filterIdentity && (await jobWorkspaceKey(job)) !== filterIdentity.workspaceKey) continue;
+			if (options.missionKey && job.missionKey !== options.missionKey) continue;
+			if (options.mode && job.mode !== options.mode) continue;
 			jobs.push(job);
 		} catch {
 			// One damaged job must not prevent the remaining session jobs from reattaching.
@@ -371,15 +501,48 @@ export async function listCodexJobs(options = {}) {
 	return jobs.sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
 }
 
+export async function findReusableCodexJob(options) {
+	const mission = normalizeCodexMission(options.mission, { required: true });
+	const jobs = await listCodexJobs({
+		jobRoot: options.jobRoot,
+		cwd: options.cwd,
+		missionKey: missionKey(mission),
+		mode: options.mode,
+	});
+	return jobs.reverse().find((job) => !isTerminalStatus(job.status) || Boolean(job.threadId)) ?? null;
+}
+
+export async function listCodexMissions(options) {
+	const jobs = await listCodexJobs({ jobRoot: options.jobRoot, cwd: options.cwd });
+	const groups = new Map();
+	for (const job of jobs) {
+		const key = `${job.missionKey ?? `unassigned:${job.id}`}:${job.mode}`;
+		const current = groups.get(key);
+		groups.set(key, {
+			mission: job.mission ?? null,
+			missionKey: job.missionKey ?? null,
+			mode: job.mode,
+			jobCount: (current?.jobCount ?? 0) + 1,
+			latestJobId: job.id,
+			threadId: job.threadId ?? current?.threadId ?? null,
+			status: job.status,
+			createdAt: job.createdAt,
+			finishedAt: job.finishedAt ?? null,
+			reusable: Boolean(job.threadId ?? current?.threadId),
+		});
+	}
+	return [...groups.values()].sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+}
+
 async function queueCodexCommand(jobId, command, options = {}) {
 	validateJobId(jobId);
 	const jobRoot = resolve(options.jobRoot ?? DEFAULT_CODEX_JOB_ROOT);
-	const job = await readCodexJob(jobId, { jobRoot });
+	const job = await readCodexJob(jobId, { jobRoot, expectedCwd: options.expectedCwd });
 	if (isTerminalStatus(job.status)) throw new Error(`Codex job ${jobId} is already ${job.status}`);
 	const commandId = createCommandId();
 	const payload = { version: 1, id: commandId, jobId, createdAt: now(), status: "pending", ...command };
 	await writeJsonAtomic(join(jobRoot, jobId, "commands", `${commandId}.json`), payload);
-	return { command: payload, job: await readCodexJob(jobId, { jobRoot, reconcile: false }) };
+	return { command: payload, job: await readCodexJob(jobId, { jobRoot, expectedCwd: options.expectedCwd, reconcile: false }) };
 }
 
 export async function respondToCodexJob(jobId, options = {}) {
@@ -409,6 +572,7 @@ export async function readCodexJob(jobId, options = {}) {
 	const jobRoot = resolve(options.jobRoot ?? DEFAULT_CODEX_JOB_ROOT);
 	const jobDir = join(jobRoot, jobId);
 	let job = await readJson(join(jobDir, "job.json"));
+	await assertCodexJobWorkspace(job, options.expectedCwd);
 	if (options.reconcile !== false && !isTerminalStatus(job.status)) {
 		const createdAge = Date.now() - Date.parse(job.createdAt);
 		if (job.workerPid && !processIsAlive(job.workerPid)) {
@@ -443,10 +607,10 @@ export async function waitForCodexJob(jobId, options = {}) {
 	let lastProgress;
 	while (true) {
 		if (options.signal?.aborted) {
-			await cancelCodexJob(jobId, { jobRoot: options.jobRoot });
-			return await readCodexJob(jobId, { jobRoot: options.jobRoot });
+			await cancelCodexJob(jobId, { jobRoot: options.jobRoot, expectedCwd: options.expectedCwd });
+			return await readCodexJob(jobId, { jobRoot: options.jobRoot, expectedCwd: options.expectedCwd });
 		}
-		const job = await readCodexJob(jobId, { jobRoot: options.jobRoot });
+		const job = await readCodexJob(jobId, { jobRoot: options.jobRoot, expectedCwd: options.expectedCwd });
 		if (job.progress !== lastProgress) {
 			lastProgress = job.progress;
 			options.onUpdate?.(job);
@@ -460,7 +624,7 @@ export async function cancelCodexJob(jobId, options = {}) {
 	validateJobId(jobId);
 	const jobRoot = resolve(options.jobRoot ?? DEFAULT_CODEX_JOB_ROOT);
 	const jobDir = join(jobRoot, jobId);
-	let job = await readCodexJob(jobId, { jobRoot });
+	let job = await readCodexJob(jobId, { jobRoot, expectedCwd: options.expectedCwd });
 	if (isTerminalStatus(job.status)) return job;
 	job = await updateJobFile(jobDir, (current) => ({
 		...current,
@@ -477,7 +641,7 @@ export async function cancelCodexJob(jobId, options = {}) {
 	}
 	for (let attempt = 0; attempt < 30; attempt++) {
 		await delay(100);
-		job = await readCodexJob(jobId, { jobRoot });
+		job = await readCodexJob(jobId, { jobRoot, expectedCwd: options.expectedCwd });
 		if (isTerminalStatus(job.status)) return job;
 	}
 	if (processIsAlive(job.workerPid)) {
@@ -500,8 +664,13 @@ export async function cancelCodexJob(jobId, options = {}) {
 }
 
 export async function resumeCodexJob(jobId, options) {
-	const previous = await readCodexJob(jobId, { jobRoot: options.jobRoot });
+	const previous = await readCodexJob(jobId, { jobRoot: options.jobRoot, expectedCwd: options.expectedCwd });
 	if (!previous.threadId) throw new Error(`Codex job ${jobId} has no resumable thread id`);
+	const requestedMission = normalizeCodexMission(options.mission);
+	if (requestedMission && previous.missionKey && missionKey(requestedMission) !== previous.missionKey) {
+		throw new Error(`Codex job ${jobId} belongs to mission "${previous.mission}"; start a new thread for "${requestedMission}"`);
+	}
+	const currentGit = await getGitSnapshot(previous.cwd);
 	return await startCodexJob({
 		...options,
 		cwd: previous.cwd,
@@ -511,6 +680,8 @@ export async function resumeCodexJob(jobId, options) {
 		task: options.followUp,
 		continuationThreadId: previous.threadId,
 		continuationOf: previous.id,
+		mission: requestedMission ?? previous.mission ?? null,
+		continuationNotice: buildCodexContinuationNotice(previous, currentGit),
 		leaderSessionId: options.leaderSessionId ?? previous.leaderSessionId,
 		background: options.background ?? previous.autoNotify,
 	});
@@ -536,6 +707,11 @@ export function publicJobView(job) {
 		reasoningEffort: job.reasoningEffort,
 		sandbox: job.sandbox,
 		cwd: job.cwd,
+		workspaceRoot: job.workspaceRoot ?? job.writerRoot ?? job.cwd,
+		workspaceKey: job.workspaceKey ?? null,
+		projectKey: job.projectKey ?? null,
+		mission: job.mission ?? null,
+		missionKey: job.missionKey ?? null,
 		createdAt: job.createdAt,
 		startedAt: job.startedAt,
 		finishedAt: job.finishedAt,

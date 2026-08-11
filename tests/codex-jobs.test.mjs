@@ -8,8 +8,12 @@ import {
 	DEFAULT_CODEX_MODEL,
 	DEFAULT_CODEX_REASONING_EFFORT,
 	buildDelegationPrompt,
+	buildCodexContinuationNotice,
 	cancelCodexJob,
+	findReusableCodexJob,
 	listCodexJobs,
+	listCodexMissions,
+	readCodexJob,
 	respondToCodexJob,
 	resumeCodexJob,
 	sanitizeCodexEnvironment,
@@ -26,15 +30,21 @@ import {
 
 test("Pi registers one Codex delegation tool instead of a family of noisy tools", () => {
 	let registered;
+	let command;
 	codexDelegateExtension({
 		registerTool(tool) {
 			registered = tool;
+		},
+		registerCommand(name, definition) {
+			command = { name, definition };
 		},
 		on() {},
 	});
 	assert.equal(registered.name, "codex_delegate");
 	assert.equal(registered.executionMode, "sequential");
 	assert.match(registered.description, /gpt-5\.6-sol\/max/);
+	assert.equal(command.name, "codex");
+	assert.match(command.definition.description, /mission threads/);
 });
 
 test("Codex delegation exposes bounded running and terminal footer states", () => {
@@ -181,6 +191,28 @@ test("delegation prompt encodes distinct advisor and project-bounded executor ro
 	assert.match(executor, /hypothesis H1/);
 });
 
+test("continuation notice detects stale Git state without copying filenames", () => {
+	const previous = {
+		id: "codex-2026-08-11-00000000",
+		threadId: "thread-1",
+		gitAfter: {
+			branch: "main",
+			commit: "a".repeat(40),
+			dirty: true,
+			status: " M secret-looking-filename.txt",
+		},
+	};
+	const notice = buildCodexContinuationNotice(previous, {
+		branch: "experiment",
+		commit: "b".repeat(40),
+		dirty: false,
+		status: "",
+	});
+	assert.match(notice, /workspace changed/);
+	assert.match(notice, /Treat prior file observations as stale/);
+	assert.doesNotMatch(notice, /secret-looking-filename/);
+});
+
 test("Codex environment removes the DeepSeek credential without dropping execution access", () => {
 	const env = sanitizeCodexEnvironment({
 		PATH: "/bin",
@@ -249,6 +281,92 @@ test("advisor, executor, and explicit resume produce durable structured jobs", a
 		assert.equal(resumed.status, "completed");
 		assert.equal(resumed.continuationOf, executor.id);
 		assert.equal(resumed.result.summary, "resumed");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("mission routing reuses only the same mode and workspace", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-mission-"));
+	try {
+		const workspace = join(root, "workspace");
+		const otherWorkspace = join(root, "other-workspace");
+		const jobRoot = join(root, "codex", "jobs");
+		mkdirSync(workspace, { recursive: true });
+		mkdirSync(otherWorkspace, { recursive: true });
+		const codexBin = makeFakeCodex(root);
+		const firstStart = await startCodexJob({
+			cwd: workspace,
+			jobRoot,
+			codexBin,
+			mode: "executor",
+			mission: "R2a qualification",
+			task: "implement the first probe",
+		});
+		const first = await waitForCodexJob(firstStart.id, { jobRoot });
+		assert.equal(first.mission, "R2a qualification");
+		assert.match(first.projectKey, /^project-/);
+		assert.match(first.workspaceKey, /^workspace-/);
+
+		const reusable = await findReusableCodexJob({
+			cwd: workspace,
+			jobRoot,
+			mode: "executor",
+			mission: "  R2a   qualification  ",
+		});
+		assert.equal(reusable.id, first.id);
+		assert.equal(
+			await findReusableCodexJob({ cwd: workspace, jobRoot, mode: "advisor", mission: "R2a qualification" }),
+			null,
+		);
+		assert.equal(
+			await findReusableCodexJob({ cwd: otherWorkspace, jobRoot, mode: "executor", mission: "R2a qualification" }),
+			null,
+		);
+
+		const resumedStart = await resumeCodexJob(first.id, {
+			cwd: workspace,
+			expectedCwd: workspace,
+			jobRoot,
+			codexBin,
+			followUp: "debug the same qualification mission",
+		});
+		const resumed = await waitForCodexJob(resumedStart.id, { jobRoot, expectedCwd: workspace });
+		assert.equal(resumed.continuationOf, first.id);
+		assert.equal(resumed.mission, "R2a qualification");
+		assert.equal(resumed.threadId, first.threadId);
+		const persistedRequest = readFileSync(join(jobRoot, resumed.id, "request.json"), "utf8");
+		assert.match(persistedRequest, /continues Codex thread/);
+
+		const missions = await listCodexMissions({ cwd: workspace, jobRoot });
+		assert.equal(missions.length, 1);
+		assert.equal(missions[0].mission, "R2a qualification");
+		assert.equal(missions[0].jobCount, 2);
+		assert.equal(missions[0].latestJobId, resumed.id);
+
+		await assert.rejects(
+			readCodexJob(first.id, { jobRoot, expectedCwd: otherWorkspace }),
+			/belongs to another workspace/,
+		);
+		await assert.rejects(
+			resumeCodexJob(first.id, {
+				jobRoot,
+				codexBin,
+				expectedCwd: otherWorkspace,
+				followUp: "wrong workspace",
+			}),
+			/belongs to another workspace/,
+		);
+		await assert.rejects(
+			resumeCodexJob(first.id, {
+				jobRoot,
+				codexBin,
+				expectedCwd: workspace,
+				mission: "different mission",
+				followUp: "silently reclassify",
+			}),
+			/belongs to mission/,
+		);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
