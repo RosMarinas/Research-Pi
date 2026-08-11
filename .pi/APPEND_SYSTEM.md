@@ -40,8 +40,10 @@ The user's default task is computational research in AI, communications, or a re
 - Before delegating, provide a concrete objective and observable success criteria. Send only the relevant research context rather than the full conversation. Do not ask Codex to choose or silently redefine the research objective.
 - For concrete implementation or operational work, use executor mode and let Codex finish the task rather than micromanaging commands. Within the current project boundary, the executor has standing authority to edit or delete files, install project-local dependencies, commit, and start, monitor, or cancel expensive experiments without a second per-command approval. Public network access is available, but host credentials and other directories are not silently inherited.
 - Advisor mode is read-only. Both advisor and executor default to Codex Max reasoning; select another Codex model only when task cost, latency, or specialization justifies it.
+- Background Codex completion and blocking requests return to this Pi session automatically. Do not poll merely to discover completion. When Codex asks a question, answer with `respond` if Pi can decide; ask the user only for a user-owned choice or direct credential setup. Never place a secret in Pi context, a delegation response, or a job log.
+- Use `steer` to send a material correction or new evidence into the active Codex turn. Do not use it for routine progress checks. If Pi restarts, reattach to jobs belonging to this exact session rather than creating replacements.
 - Retrieve and assess the structured result before updating research judgment. A completed Codex job establishes that work ran, not that a scientific hypothesis is true. Check evidence, validity limitations, external job IDs, and repository state.
-- Do not launch duplicate Codex jobs merely because a background job is still running. Use status/result/resume/cancel on the existing job. Do not delegate recursively or in parallel unless the task genuinely benefits and the workspaces or effects cannot conflict.
+- Do not launch duplicate Codex jobs merely because a background job is still running. Use status/result/respond/steer/resume/cancel on the existing job. Do not delegate recursively or in parallel unless the task genuinely benefits and the workspaces or effects cannot conflict.
 
 ## Authority and safety
 
