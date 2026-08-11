@@ -2,6 +2,8 @@
 
 This repository contains executable agent configuration. Treat its local runtime data as sensitive.
 
+The source checkout is a fast-iteration development harness. Stable npm installs keep immutable package files separate from user configuration (`~/.config/research-pi` by default) and runtime state (`~/.local/state/research-pi` by default). Neither directory belongs in this repository or in a release tarball.
+
 Never commit:
 
 - `.env` or any real API key;
@@ -20,6 +22,10 @@ User-approved host capabilities are the narrow escalation path shared by Pi and 
 Codex CLI 0.146 的 permission-profile 仍保留自身的系统临时目录兼容路径，即使 profile 请求拒绝系统 temp。Harness 会把 `TMPDIR` 重定向到项目内，并在委派约定中禁止主动使用项目外 temp；因此 Codex executor 对其他用户目录仍是 OS 级拒绝，但其系统 temp 边界目前属于纵深防御，不与 Pi shell 的硬边界等强。
 
 To keep normal commits usable without exposing `~/.gitconfig`, trusted harness startup reads only global `user.name` and `user.email` and injects those four author/committer environment fields. No credential helper, include, alias, signing-key or remote configuration is forwarded.
+
+System runtime access is a separate read-only zone, compiled into both the Pi sandbox and Codex permission profiles. On macOS the trusted launcher resolves the active Developer directory with `xcode-select -p`, canonicalizes it, grants that directory read access, and injects `DEVELOPER_DIR`. Optional additional runtime roots require `RESEARCH_PI_RUNTIME_ROOTS`; roots under the user's home additionally require the explicit high-risk opt-in `RESEARCH_PI_ALLOW_HOME_RUNTIME_ROOTS=1`, because read/execute permission also makes their contents model-readable.
+
+Every Codex job performs a model-free sandbox preflight before App Server startup. A Git repository must support `git --version` and `git status` under the exact advisor/executor profile; an available `python3` is also probed. Failure stops the job before model execution. `pi doctor` and `/boundary doctor` expose the same checks for installation and incident diagnosis.
 
 This is a capability boundary, not a guarantee that project-local code is benign. A permitted command may still delete project files, create commits, consume compute, contact public services, or modify scripts that a human later runs. Review the project and delegation objective accordingly.
 

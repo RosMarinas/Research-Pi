@@ -26,11 +26,14 @@ import {
 	prepareBoundaryRuntime,
 	readGitIdentity,
 	resolveBoundaryPath,
+	runCodexSandboxPreflight,
 	sanitizeBoundaryEnvironment,
 } from "../lib/project-boundary.mjs";
+import { resolveSystemRuntimePolicy } from "../lib/security-policy.mjs";
 
 type BoundaryRuntime = Awaited<ReturnType<typeof prepareBoundaryRuntime>>;
 type CapabilityContext = Awaited<ReturnType<typeof resolveCapabilityContext>>;
+type SystemRuntimePolicy = Awaited<ReturnType<typeof resolveSystemRuntimePolicy>>;
 
 function parseCommandWords(input: string): string[] {
 	const words: string[] = [];
@@ -122,6 +125,7 @@ function terminateProcess(child: ReturnType<typeof spawn>) {
 function createProjectBashOperations(
 	runtime: BoundaryRuntime,
 	gitIdentity: Awaited<ReturnType<typeof readGitIdentity>>,
+	systemRuntime: SystemRuntimePolicy,
 ): BashOperations {
 	return {
 		async exec(command, cwd, { onData, signal, timeout, env }) {
@@ -138,11 +142,13 @@ function createProjectBashOperations(
 				commandText: command,
 			});
 			const childEnv = sanitizeBoundaryEnvironment({ ...env, ...wrapped.env });
+			Object.assign(childEnv, systemRuntime.environment);
 			childEnv.TMPDIR = runtime.runtimeTmp;
 			childEnv.TMP = runtime.runtimeTmp;
 			childEnv.TEMP = runtime.runtimeTmp;
 			childEnv.GIT_CONFIG_GLOBAL = "/dev/null";
 			childEnv.GIT_CONFIG_NOSYSTEM = "1";
+			childEnv.GIT_OPTIONAL_LOCKS = "0";
 			const gitConfigCount = Number.parseInt(childEnv.GIT_CONFIG_COUNT ?? "0", 10) || 0;
 			childEnv.GIT_CONFIG_COUNT = String(gitConfigCount + 1);
 			childEnv[`GIT_CONFIG_KEY_${gitConfigCount}`] = "core.excludesFile";
@@ -214,6 +220,7 @@ function createProjectBashOperations(
 export default function projectBoundaryExtension(pi: ExtensionAPI) {
 	let runtime: BoundaryRuntime | undefined;
 	let capabilityContext: CapabilityContext | undefined;
+	let systemRuntime: SystemRuntimePolicy | undefined;
 	let gitIdentity: Awaited<ReturnType<typeof readGitIdentity>>;
 	let initializationError: string | undefined;
 	let userOverrideNoticeShown = false;
@@ -330,7 +337,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 				};
 			}
 			const sandboxed = createBashTool(ctx.cwd, {
-				operations: createProjectBashOperations(runtime, gitIdentity),
+				operations: createProjectBashOperations(runtime, gitIdentity, systemRuntime ?? await resolveSystemRuntimePolicy()),
 				exposeSessionEnvironment: false,
 			});
 			return await sandboxed.execute(id, params, signal, onUpdate);
@@ -395,10 +402,11 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		try {
 			runtime = await prepareBoundaryRuntime(ctx.cwd);
+			systemRuntime = await resolveSystemRuntimePolicy();
 			capabilityContext = await resolveCapabilityContext(runtime.root, ctx.sessionManager.getSessionId());
 			gitIdentity = await readGitIdentity(runtime.root);
 			await SandboxManager.initialize(
-				buildSandboxRuntimeConfig(runtime.root),
+				buildSandboxRuntimeConfig(runtime.root, process.env, systemRuntime),
 				async () => true,
 				process.platform === "darwin",
 			);
@@ -406,6 +414,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			await refreshBoundaryStatus(ctx);
 		} catch (error) {
 			runtime = undefined;
+			systemRuntime = undefined;
 			initializationError = error instanceof Error ? error.message : String(error);
 			ctx.ui.setStatus("boundary", ctx.ui.theme.fg("error", "🔒 boundary failed closed"));
 			ctx.ui.notify(`Research Pi project boundary failed to initialize: ${initializationError}`, "error");
@@ -416,6 +425,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 		await SandboxManager.reset().catch(() => undefined);
 		runtime = undefined;
 		capabilityContext = undefined;
+		systemRuntime = undefined;
 	});
 
 	pi.registerCommand("boundary", {
@@ -423,6 +433,60 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const words = parseCommandWords(args ?? "");
 			const action = words.shift();
+			if (action === "doctor") {
+				if (!runtime || !systemRuntime) {
+					ctx.ui.notify(`Boundary unavailable: ${initializationError ?? "not initialized"}`, "error");
+					return;
+				}
+				ctx.ui.setWorkingMessage("Validating Pi and Codex permission boundaries...");
+				try {
+					let piOutput = "";
+					const piProbe = await createProjectBashOperations(runtime, gitIdentity, systemRuntime).exec(
+						"set -e\ngit --version >/dev/null\ngit status --porcelain=v1 --untracked-files=no >/dev/null\nif command -v python3 >/dev/null 2>&1; then python3 --version >/dev/null; fi\nprintf 'research-pi-shell-preflight=ok\\n'",
+						runtime.root,
+						{
+							onData: (chunk) => {
+								piOutput = `${piOutput}${chunk.toString()}`.slice(-8000);
+							},
+							timeout: 20,
+							env: process.env,
+						},
+					);
+					if (piProbe.exitCode !== 0) throw new Error(`Pi shell preflight exited ${piProbe.exitCode}: ${piOutput}`);
+					const [advisorProbe, executorProbe] = await Promise.all([
+						runCodexSandboxPreflight({
+							codexBin: process.env.PI_CODEX_BIN ?? "codex",
+							mode: "advisor",
+							cwd: runtime.root,
+							gitIdentity,
+							runtimePolicy: systemRuntime,
+						}),
+						runCodexSandboxPreflight({
+							codexBin: process.env.PI_CODEX_BIN ?? "codex",
+							mode: "executor",
+							cwd: runtime.root,
+							runtimeTmp: runtime.runtimeTmp,
+							gitIdentity,
+							runtimePolicy: systemRuntime,
+						}),
+					]);
+					ctx.ui.notify(
+						[
+							"Research Pi boundary doctor passed.",
+							"Pi shell: project/Git/runtime OK.",
+							`Codex advisor: ${advisorProbe.stdout || "project/Git/runtime OK"}.`,
+							`Codex executor: ${executorProbe.stdout || "project/Git/runtime OK"}.`,
+							...systemRuntime.diagnostics,
+						].join("\n"),
+						"info",
+					);
+				} catch (error) {
+					ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+				} finally {
+					ctx.ui.setWorkingMessage();
+				}
+				return;
+			}
 			if (action === "grants") {
 				const grants = await listCapabilityGrants(requireCapabilityContext());
 				ctx.ui.notify(grants.length ? grants.map(capabilityGrantSummary).join("\n") : "No active host capabilities.", "info");
@@ -476,6 +540,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			if (action === "help") {
 				ctx.ui.notify([
 					"/boundary — show policy and active grant count",
+					"/boundary doctor — validate Pi/Codex Git and runtime permissions without a model call",
 					"/boundary grants — list session grants",
 					"/boundary grant-read <external-path>",
 					"/boundary grant-ssh <alias|user@host[:port]>",
@@ -493,6 +558,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 						"Research Pi project boundary is active.",
 						`Project root: ${runtime.root}`,
 						"Agent shell: project read/write; .git commit/config/refs writable; .git/hooks read-only.",
+						`System runtime: ${(systemRuntime?.readRoots ?? []).join(", ") || "platform minimal runtime"} (read-only).`,
 						"Network: web clients use an open approval proxy; raw SSH requires an explicit ssh-target capability.",
 						`Host grants: ${capabilityContext ? (await listCapabilityGrants(capabilityContext)).length : 0} active for this Pi session.`,
 						"Outside path: direct reads can be approved once/session; credentials remain opaque; arbitrary shell stays project-only.",

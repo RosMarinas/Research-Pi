@@ -1,6 +1,6 @@
 # Research Pi 基本使用指南
 
-这份指南面向当前项目里的科研 Pi：Pi 0.84.1、DeepSeek V4 Flash、thinking `max`。安装用户级入口后，日常使用直接输入 `pi`。
+这份指南面向 Research Pi：Pi 0.84.1、DeepSeek V4 Flash、thinking `max`。源码 checkout 用于快速开发；稳定版本作为 npm CLI 全局安装。两种形态的日常入口都是 `pi`。
 
 ## 1. 启动
 
@@ -11,7 +11,7 @@ pi
 
 第一次交互式启动若出现 project trust 提示，确认信任本项目的 `.pi` 配置。进入界面后直接输入自然语言任务并按 Enter。
 
-尚未运行 `install-user.sh` 时，也可以从 harness 目录显式启动：
+源码开发时，可以从 harness 目录显式启动：
 
 ```bash
 cd /path/to/research-pi-harness
@@ -25,7 +25,9 @@ pi-raw
 pi-traced
 ```
 
-科研 prompt、DeepSeek 配置、研究工具、Codex executor 和 session 由 harness 提供；文件操作、Git checkpoint、Codex 委派和实验账本作用在启动 `pi` 时所在的研究仓库。所有项目的 Research Pi session 集中保存在 harness 的 `.pi/sessions/`，每个 session header 仍记录其原始工作目录。
+科研 prompt、DeepSeek 配置、研究工具、Codex executor 和 session 由 harness 提供；文件操作、Git checkpoint、Codex 委派和实验账本作用在启动 `pi` 时所在的研究仓库。所有项目的 Research Pi session 集中保存在当前运行形态的状态目录，每个 session header 仍记录其原始工作目录。
+
+稳定包首次安装后运行 `pi setup`，随后在 `~/.config/research-pi/credentials.env` 填入 DeepSeek key。稳定包的 session、memory、Codex job、grant 和 trace 默认集中在 `~/.local/state/research-pi/`；源码开发入口仍使用 checkout 的 `.env` 与 `.pi/`，保证修改后可立即试用。`pi paths` 可确认当前运行的是哪一种形态。
 
 Research Pi 默认关闭 Pi 的 skill 和 executable extension 自动发现，只加载经过检查的研究白名单与 harness extensions。某次任务需要额外 skill 时可显式添加：
 
@@ -104,6 +106,8 @@ Pi 会自行选择工具。若想明确控制，可以直接说：
 
 `!!command` 会运行命令但不把输出加入模型上下文。`!` / `!!` 是人工直执行通道，会以你的系统权限运行并在首次使用时警告；模型的 `bash` 则受当前项目边界约束。输入 `/boundary` 可查看生效根目录和权限。
 
+安装、升级或权限异常后先运行 `pi doctor`；交互会话内可运行 `/boundary doctor`。它们不调用模型，会验证项目、Git、Python 与 Codex sandbox 的真实权限。每个 Codex job 也会在模型启动前自动执行 preflight。
+
 模型 shell 可读写当前项目（包括正常 Git commit 所需的 `.git` 数据），并可访问公网；它不能读取其他项目、宿主凭据或通过 Unix socket 继承 Docker/SSH-agent 权限。直接文件工具请求项目外路径时会显示真实路径并逐次询问；shell 越界不会自动提权，而是要求 Pi 给出准确的 `!command` 供你决定是否直接运行。
 
 所有模型工具调用都会在底部状态栏显示工具名、经过截断和凭据遮蔽的目标摘要以及已运行时间；成功或失败终态保留 5 秒。多个工具并行时显示数量和最近启动的工具。Codex 后台 job 使用独立的持久状态，不受这个 5 秒终态影响。
@@ -144,7 +148,7 @@ Pi 现在提供这些低摩擦研究工具：
 
 side 问答会以卡片保存在 session 中。`Ctrl+O` 展开完整内容，`/side show <id>` 单独查看，`/side use <id>` 才把它提升到主上下文。之后也能通过 Research Memory 找回，但它仍属于 assistant synthesis，不是实验事实。
 
-需要当天信息、一个官方页面或一份有界小调研时，可以让 Pi 调用 `web_search`。它复用 `.env` 中的 DeepSeek key。用户明确指定，或任务确实需要大量搜索、交叉核验和中间材料整理时，再交给 Codex 隔离过程。
+需要当天信息、一个官方页面或一份有界小调研时，可以让 Pi 调用 `web_search`。它复用 Research Pi 配置中的 DeepSeek key。用户明确指定，或任务确实需要大量搜索、交叉核验和中间材料整理时，再交给 Codex 隔离过程。
 
 需要 Codex 实际完成一项较长任务时，可以直接对 Pi 说：
 
@@ -156,7 +160,7 @@ Pi 会获得一个 `codex-...` job ID。底部状态栏会持续显示 job 后�
 
 ## 4. 会话、分支和恢复
 
-普通会话会自动保存到 Research Pi harness 的 `.pi/sessions/`，而不是散落在每个科研仓库中。历史检索依据 session header 中的 cwd/Git 根目录区分项目。
+普通会话会自动保存到 Research Pi 的集中状态目录，而不是散落在每个科研仓库中。源码开发模式使用 harness 的 `.pi/sessions/`；稳定包使用 `~/.local/state/research-pi/sessions/`。历史检索依据 session header 中的 cwd/Git 根目录区分项目。
 
 | 操作 | 用法 |
 |---|---|
@@ -238,7 +242,7 @@ Pi 会获得一个 `codex-...` job ID。底部状态栏会持续显示 job 后�
 ./run-pi-traced.sh
 ```
 
-真实仓库同样支持 `--workspace`。trace 写入 harness 的 `.pi/agent/traces/`，输入 `/trace` 可生成并打开 HTML。trace 保存完整 prompt、工具参数和输出，不要在包含未脱敏秘密的任务中随意启用或分享。
+真实仓库同样支持 `--workspace`。源码开发模式的 trace 写入 harness 的 `.pi/agent/traces/`，稳定包写入用户状态目录的 `agent/traces/`；输入 `/trace` 可生成并打开 HTML。trace 保存完整 prompt、工具参数和输出，不要在包含未脱敏秘密的任务中随意启用或分享。
 
 ## 7. 三个可直接使用的示例
 

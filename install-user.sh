@@ -4,6 +4,23 @@ set -eu
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 user_bin_dir=${XDG_BIN_HOME:-"${HOME:?HOME is not set}/.local/bin"}
 
+if [ "${1:-}" = "--remove-dev-links" ]; then
+  for name in pi pi-traced pi-raw; do
+    destination="$user_bin_dir/$name"
+    if [ -L "$destination" ]; then
+      target=$(readlink "$destination")
+      case "$target" in
+        "$script_dir"/*)
+          rm -f "$destination"
+          echo "Removed development link $destination"
+          ;;
+        *) echo "Keeping unrelated link $destination -> $target" ;;
+      esac
+    fi
+  done
+  exit 0
+fi
+
 if [ ! -x "$script_dir/node_modules/.bin/pi" ]; then
   echo "Pinned Pi core is missing. Run 'npm install --ignore-scripts' in $script_dir first." >&2
   exit 2
@@ -21,6 +38,12 @@ install_link() {
     return
   fi
 
+  if [ "$name" = "pi-raw" ] && [ -L "$destination" ] && [ "$(readlink "$destination")" = "$script_dir/node_modules/.bin/pi" ]; then
+    ln -sfn "$target" "$destination"
+    echo "Updated legacy development link $destination -> $target"
+    return
+  fi
+
   if [ -e "$destination" ] || [ -L "$destination" ]; then
     echo "Refusing to overwrite existing $destination" >&2
     exit 2
@@ -32,7 +55,7 @@ install_link() {
 
 install_link pi "$script_dir/run-pi.sh"
 install_link pi-traced "$script_dir/run-pi-traced.sh"
-install_link pi-raw "$script_dir/node_modules/.bin/pi"
+install_link pi-raw "$script_dir/bin/pi-raw.mjs"
 
 case ":$PATH:" in
   *":$user_bin_dir:"*) ;;

@@ -12,7 +12,8 @@ import {
 	updateJobFile,
 	writeJsonAtomic,
 } from "./codex-jobs.mjs";
-import { codexPermissionConfigArguments } from "./project-boundary.mjs";
+import { codexPermissionConfigArguments, runCodexSandboxPreflight } from "./project-boundary.mjs";
+import { resolveSystemRuntimePolicy } from "./security-policy.mjs";
 
 function now() {
 	return new Date().toISOString();
@@ -550,8 +551,32 @@ async function main() {
 			lastActivityAt: now(),
 		}));
 
+		const systemRuntime = await resolveSystemRuntimePolicy();
+		const permissionArgs = codexPermissionConfigArguments(
+			request.mode,
+			request.boundaryRoot ?? request.cwd,
+			request.runtimeTmp,
+			request.gitIdentity,
+			systemRuntime,
+		);
+		if (!request.skipSandboxPreflight) {
+			await writeJobUpdate((current) => ({
+				...current,
+				progress: "validating Codex project, Git, and system-runtime permissions",
+				lastActivityAt: now(),
+			}));
+			await runCodexSandboxPreflight({
+				codexBin: request.codexBin,
+				mode: request.mode,
+				cwd: request.boundaryRoot ?? request.cwd,
+				runtimeTmp: request.runtimeTmp,
+				gitIdentity: request.gitIdentity,
+				runtimePolicy: systemRuntime,
+				environment: process.env,
+			});
+		}
 		const appServerArgs = [
-			...codexPermissionConfigArguments(request.mode, request.boundaryRoot ?? request.cwd, request.runtimeTmp, request.gitIdentity),
+			...permissionArgs,
 			"app-server",
 			"--stdio",
 		];

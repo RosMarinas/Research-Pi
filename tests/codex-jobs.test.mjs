@@ -65,6 +65,10 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 
 const args = process.argv.slice(2);
+if (args.includes("sandbox")) {
+  process.stdout.write("research-pi-codex-preflight=ok\\n");
+  process.exit(0);
+}
 const configText = args.join(" ");
 const sandbox = configText.includes("research_pi_executor") ? "${CODEX_EXECUTOR_PROFILE}" : configText.includes("research_pi_advisor") ? "${CODEX_ADVISOR_PROFILE}" : "unknown";
 let model = "unknown";

@@ -127,3 +127,28 @@ test("Codex executor profile keeps project and Git writable with public network"
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("shared system runtime policy is read-only in both Pi and Codex sandboxes", () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-policy-"));
+	try {
+		mkdirSync(join(root, ".git"));
+		const runtimePolicy = {
+			platform: "darwin",
+			readRoots: ["/Library/Developer/CommandLineTools"],
+			environment: { DEVELOPER_DIR: "/Library/Developer/CommandLineTools" },
+		};
+		const profile = permissionProfileDefinition({ access: "write", workspaceRoot: root, runtimePolicy });
+		assert.ok(profile.includes('"/Library/Developer/CommandLineTools" = "read"'));
+		assert.ok(!profile.includes('"/Library/Developer/CommandLineTools" = "write"'));
+
+		const args = codexPermissionConfigArguments("executor", root, join(root, ".git", "research-pi", "tmp"), null, runtimePolicy);
+		assert.ok(args.some((arg) => arg.includes("DEVELOPER_DIR")));
+		assert.ok(args.some((arg) => arg.includes("GIT_CONFIG_GLOBAL")));
+
+		const config = buildSandboxRuntimeConfig(root, {}, runtimePolicy);
+		assert.ok(config.filesystem.allowRead.includes("/Library/Developer/CommandLineTools"));
+		assert.ok(!config.filesystem.allowWrite.includes("/Library/Developer/CommandLineTools"));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});

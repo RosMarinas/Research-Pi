@@ -4,11 +4,13 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { openMemoryIndex, readMemory, searchMemory, syncMemoryIndex } from "../lib/research-memory.mjs";
+import { researchPiStateRoot } from "../lib/runtime-paths.mjs";
 
 const harnessRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const memoryDir = join(harnessRoot, ".pi", "memory");
+const stateRoot = researchPiStateRoot(harnessRoot);
+const memoryDir = join(stateRoot, "memory");
 const databasePath = join(memoryDir, "memory.sqlite");
-const sessionDir = join(harnessRoot, ".pi", "sessions");
+const sessionDir = join(stateRoot, "sessions");
 
 function withIndex<T>(cwd: string, operation: (db: ReturnType<typeof openMemoryIndex>, sync: unknown) => T): T {
 	mkdirSync(memoryDir, { recursive: true });

@@ -13,5 +13,7 @@
     "keepRecentTokens": 32768
   },
   "lastChangelogVersion": "0.84.1",
-  "theme": "dark"
+  "theme": "dark",
+  "defaultProvider": "deepseek",
+  "defaultModel": "deepseek-v4-flash"
 }
