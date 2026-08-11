@@ -122,6 +122,8 @@ Pi 会自行选择工具。若想明确控制，可以直接说：
 
 `trust-*` 按项目持久保存，`grant-*` 只在当前 Pi session 生效。持久规则保存在用户状态目录而不是仓库中；源码开发模式下位于 Git 忽略的 `.pi/capabilities/`。`host-command` 会在授权界面显示 cwd、完整 argv 和建议前缀，并以宿主用户权限运行，所以只信任你认可的项目入口；不透明 `ssh-target` 的凭据内容不会进入模型。
 
+WSL2 分支例外：`trust-ssh` 仍可持久使用；`grant-command` 和 `grant-script` 自动收窄为 one-shot，`trust-command` 被禁用。它们不能访问 `/mnt` 或启动 Windows/PowerShell executable。完整安装与实机检查见 [Windows / WSL2 指南](windows-wsl-guide.md)。
+
 所有模型工具调用都会在底部状态栏显示工具名、经过截断和凭据遮蔽的目标摘要以及已运行时间；成功或失败终态保留 5 秒。多个工具并行时显示数量和最近启动的工具。Codex 后台 job 使用独立的持久状态，不受这个 5 秒终态影响。
 
 Pi 现在提供这些低摩擦研究工具：
@@ -286,7 +288,7 @@ Pi 会获得一个 `codex-...` job ID。底部状态栏会持续显示 job 后�
 - Pi 的模型 shell 受 OS 级 sandbox runtime 约束，Codex executor 使用 project-only permission profile：项目可写、Git commit 可用、公网开放，项目外用户文件和 Unix sockets 默认不可用；Pi shell 的通用系统 temp 写入被关闭，仅保留 Apple Git 所需的窄 `xcrun_db` 系统缓存例外；Codex CLI 0.146 仍自带系统 temp 兼容路径，Harness 已将 `TMPDIR` 指向项目内并禁止主动越界，但这一处目前是纵深防御，不与 Pi shell 等强；
 - `.git/hooks` 是项目内唯一默认只读的 Git 子路径，防止实验任务植入后续持久执行；`.git/config`、objects、index 和 refs 可写；
 - 项目内任意 `uv`、Python 和 shell 命令由 sandbox 约束效果，而不是由命令字符串白名单约束；需要宿主 SSH/config/agent 的入口通过一次/session/project 三档 host capability 授权；
-- 项目持久 `trust-ssh` 绑定精确 target，`trust-command` 绑定界面显示的 argv 前缀；代码字符串默认绑定完整 argv。它们可被 Pi 与 Codex executor 自动复用，也可用 `/boundary revoke` 撤销；
+- 项目持久 `trust-ssh` 绑定精确 target，非 WSL 环境的 `trust-command` 绑定界面显示的 argv 前缀；代码字符串默认绑定完整 argv。它们可被 Pi 与 Codex executor 自动复用，也可用 `/boundary revoke` 撤销；WSL 下 host command/project script 仅 one-shot；
 - `!` / `!!` 与人工批准的直接文件工具仍是最终越界通道，但 broker 能表达的操作应由 agent 申请授权后继续执行，不应常态化退回用户手动运行；
 - memory SQLite 是派生缓存，不进入 Git；它会脱敏常见凭证形式，但原始 session、实验账本和不常见秘密格式仍是敏感数据；
 - Research Pi 在约 272K 总上下文时主动 compact，384K 作为硬触发线；压缩后原始 recent tail 按当前分支第 1/2/3 次 compact 取约 32K/40K/48K，之后固定在 48K；

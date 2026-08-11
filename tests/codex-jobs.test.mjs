@@ -179,6 +179,13 @@ test("delegation prompt encodes distinct advisor and project-bounded executor ro
 	assert.match(executor, /credential contents never enter/);
 	assert.match(executor, /record the run id/);
 	assert.match(executor, /hypothesis H1/);
+	const wslExecutor = buildDelegationPrompt({
+		mode: "executor",
+		task: "run remote work",
+		wslVersion: "2",
+	});
+	assert.match(wslExecutor, /project trust only for an opaque SSH target/);
+	assert.match(wslExecutor, /host argv requires one-shot approval/);
 });
 
 test("Codex environment removes the DeepSeek credential without dropping execution access", () => {
@@ -377,6 +384,7 @@ test("Codex uses the same opaque session host-capability ledger", async () => {
 		writeFileSync(outside, "host capability reached\n");
 		const hostCapabilityContext = await resolveCapabilityContext(workspace, "pi-session-host", {
 			stateRoot: join(root, "capabilities"),
+			wslVersion: undefined,
 		});
 		const request = await prepareCapabilityRequest(hostCapabilityContext, { kind: "external-read", path: outside });
 		await createCapabilityGrant(hostCapabilityContext, request, "session");
@@ -412,6 +420,7 @@ test("Codex executor reuses a project-trusted host-command prefix", async () => 
 		writeFileSync(commandScript, "process.stdout.write(`host-command:${process.argv[2]}`);\n", { mode: 0o600 });
 		const hostCapabilityContext = await resolveCapabilityContext(workspace, "pi-session-host-command", {
 			stateRoot: join(root, "capabilities"),
+			wslVersion: undefined,
 		});
 		const request = await prepareCapabilityRequest(hostCapabilityContext, {
 			kind: "host-command",

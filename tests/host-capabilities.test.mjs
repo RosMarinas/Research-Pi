@@ -4,6 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+	assertWslHostCommand,
 	createCapabilityGrant,
 	executeGrantedCapability,
 	hostBridgeEnvironment,
@@ -23,10 +24,14 @@ function fixture(prefix) {
 	return { root, project, outside, stateRoot: join(root, "capability-state") };
 }
 
+function nativeOptions(paths) {
+	return { stateRoot: paths.stateRoot, wslVersion: undefined };
+}
+
 test("one-shot external reads are exact, bounded, and consumed", async () => {
 	const paths = fixture("research-pi-cap-read-");
 	try {
-		const context = await resolveCapabilityContext(paths.project, "session-read", { stateRoot: paths.stateRoot });
+		const context = await resolveCapabilityContext(paths.project, "session-read", nativeOptions(paths));
 		const readable = join(paths.outside, "notes.txt");
 		const sibling = join(paths.outside, "other.txt");
 		writeFileSync(readable, "synthetic external note\n");
@@ -55,7 +60,7 @@ test("credential files cannot become model-readable capabilities", async () => {
 
 	const paths = fixture("research-pi-cap-secret-");
 	try {
-		const context = await resolveCapabilityContext(paths.project, "session-secret", { stateRoot: paths.stateRoot });
+		const context = await resolveCapabilityContext(paths.project, "session-secret", nativeOptions(paths));
 		const key = join(paths.outside, "private.key");
 		const disguisedKey = join(paths.outside, "notes.txt");
 		writeFileSync(key, "synthetic-private-key");
@@ -76,7 +81,7 @@ test("credential files cannot become model-readable capabilities", async () => {
 test("SSH grants use opaque host credentials and exact targets", async () => {
 	const paths = fixture("research-pi-cap-ssh-");
 	try {
-		const context = await resolveCapabilityContext(paths.project, "session-ssh", { stateRoot: paths.stateRoot });
+		const context = await resolveCapabilityContext(paths.project, "session-ssh", nativeOptions(paths));
 		const fakeSsh = join(paths.root, "fake-ssh.mjs");
 		writeFileSync(
 			fakeSsh,
@@ -125,8 +130,8 @@ process.stdout.write(JSON.stringify({
 test("project-trusted SSH targets are reused automatically across Pi sessions", async () => {
 	const paths = fixture("research-pi-cap-ssh-project-");
 	try {
-		const firstContext = await resolveCapabilityContext(paths.project, "session-first", { stateRoot: paths.stateRoot });
-		const secondContext = await resolveCapabilityContext(paths.project, "session-second", { stateRoot: paths.stateRoot });
+		const firstContext = await resolveCapabilityContext(paths.project, "session-first", nativeOptions(paths));
+		const secondContext = await resolveCapabilityContext(paths.project, "session-second", nativeOptions(paths));
 		const fakeSsh = join(paths.root, "fake-project-ssh.mjs");
 		writeFileSync(fakeSsh, "#!/usr/bin/env node\nprocess.stdout.write(process.argv.slice(-2).join(' '));\n", { mode: 0o700 });
 		chmodSync(fakeSsh, 0o700);
@@ -151,8 +156,8 @@ test("project-trusted SSH targets are reused automatically across Pi sessions", 
 test("project host-command prefixes support uv-style runners and non-executable scripts", async () => {
 	const paths = fixture("research-pi-cap-command-");
 	try {
-		const firstContext = await resolveCapabilityContext(paths.project, "session-command-first", { stateRoot: paths.stateRoot });
-		const secondContext = await resolveCapabilityContext(paths.project, "session-command-second", { stateRoot: paths.stateRoot });
+		const firstContext = await resolveCapabilityContext(paths.project, "session-command-first", nativeOptions(paths));
+		const secondContext = await resolveCapabilityContext(paths.project, "session-command-second", nativeOptions(paths));
 		const fakeBin = join(paths.root, "bin");
 		mkdirSync(fakeBin);
 		const fakeUv = join(fakeBin, "uv");
@@ -211,7 +216,7 @@ test("project host-command prefixes support uv-style runners and non-executable 
 test("code-string commands can be approved without granting a broader shell prefix", async () => {
 	const paths = fixture("research-pi-cap-code-string-");
 	try {
-		const context = await resolveCapabilityContext(paths.project, "session-code-string", { stateRoot: paths.stateRoot });
+		const context = await resolveCapabilityContext(paths.project, "session-code-string", nativeOptions(paths));
 		const argv = ["sh", "-c", "printf approved"];
 		const request = await prepareCapabilityRequest(context, { kind: "host-command", cwd: paths.project, argv });
 		assert.deepEqual(request.suggestedPrefix, argv);
@@ -239,10 +244,85 @@ test("code-string commands can be approved without granting a broader shell pref
 	}
 });
 
+test("WSL keeps persistent SSH trust but makes host execution one-shot", async () => {
+	const paths = fixture("research-pi-cap-wsl-");
+	try {
+		const nativeContext = await resolveCapabilityContext(paths.project, "session-native", {
+			stateRoot: paths.stateRoot,
+			wslVersion: undefined,
+		});
+		const staleRequest = await prepareCapabilityRequest(nativeContext, {
+			kind: "host-command",
+			cwd: paths.project,
+			argv: ["uv", "run", "remote_run.py", "status"],
+		});
+		await createCapabilityGrant(nativeContext, staleRequest, "project");
+
+		const context = await resolveCapabilityContext(paths.project, "session-wsl", {
+			stateRoot: paths.stateRoot,
+			wslVersion: "2",
+		});
+		const sshRequest = await prepareCapabilityRequest(context, { kind: "ssh-target", target: "lab.example" });
+		const sshGrant = await createCapabilityGrant(context, sshRequest, "project");
+		assert.equal(sshGrant.scope, "project");
+
+		const commandScript = join(paths.project, "wsl-command.mjs");
+		writeFileSync(
+			commandScript,
+			"process.stdout.write(JSON.stringify({ path: process.env.PATH, interop: process.env.WSL_INTEROP ?? null, wslenv: process.env.WSLENV ?? null }));\n",
+			{ mode: 0o600 },
+		);
+		const commandInput = { kind: "host-command", cwd: paths.project, argv: [process.execPath, commandScript] };
+		const commandRequest = await prepareCapabilityRequest(context, commandInput);
+		await assert.rejects(createCapabilityGrant(context, commandRequest, "session"), /one-shot approval/);
+		await assert.rejects(createCapabilityGrant(context, commandRequest, "project"), /one-shot approval/);
+		await createCapabilityGrant(context, commandRequest, "once");
+		const projectScript = join(paths.project, "sync.sh");
+		writeFileSync(projectScript, "#!/bin/sh\nprintf sync\n", { mode: 0o700 });
+		chmodSync(projectScript, 0o700);
+		const scriptRequest = await prepareCapabilityRequest(context, {
+			kind: "project-script",
+			path: projectScript,
+			args: [],
+		});
+		await assert.rejects(createCapabilityGrant(context, scriptRequest, "session"), /one-shot approval/);
+
+		const grants = await listCapabilityGrants(context);
+		assert.equal(grants.some((grant) => grant.kind === "ssh-target" && grant.scope === "project"), true);
+		assert.equal(grants.some((grant) => grant.kind === "host-command" && grant.scope === "project"), false);
+		const result = await executeGrantedCapability(context, commandInput, {
+			env: {
+				PATH: `/usr/bin:/mnt/c/Windows/System32`,
+				HOME: paths.root,
+				WSL_INTEROP: "/run/WSL/123_interop",
+				WSLENV: "PATH/l",
+			},
+		});
+		const observed = JSON.parse(result.stdout);
+		assert.equal(observed.path, "/usr/bin");
+		assert.equal(observed.interop, null);
+		assert.equal(observed.wslenv, null);
+		await assert.rejects(executeGrantedCapability(context, commandInput), /Missing approved host-command capability/);
+	} finally {
+		rmSync(paths.root, { recursive: true, force: true });
+	}
+});
+
+test("WSL host-command rejects Windows interop and obvious host-mount code", () => {
+	assert.throws(() => assertWslHostCommand(["cmd.exe", "/c", "dir"], "2"), /Windows or PowerShell/);
+	assert.throws(() => assertWslHostCommand(["pwsh", "-Command", "Get-ChildItem"], "2"), /Windows or PowerShell/);
+	assert.throws(() => assertWslHostCommand(["sh", "-c", "rm -rf /mnt/c/output"], "2"), /cannot address \/mnt/);
+	assert.throws(
+		() => assertWslHostCommand(["uv", "run", "remote_run.py", "cat", "/mnt/remote-dataset"], "2"),
+		/cannot address \/mnt/,
+	);
+	assert.doesNotThrow(() => assertWslHostCommand(["uv", "run", "remote_run.py", "cat", "/data/remote-dataset"], "2"));
+});
+
 test("project-script grants pin both file hash and argv", async () => {
 	const paths = fixture("research-pi-cap-script-");
 	try {
-		const context = await resolveCapabilityContext(paths.project, "session-script", { stateRoot: paths.stateRoot });
+		const context = await resolveCapabilityContext(paths.project, "session-script", nativeOptions(paths));
 		const script = join(paths.project, "sync.sh");
 		writeFileSync(script, "#!/bin/sh\nprintf 'sync:%s' \"$1\"\n", { mode: 0o700 });
 		chmodSync(script, 0o700);

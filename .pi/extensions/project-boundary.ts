@@ -250,7 +250,7 @@ function createProjectBashOperations(
 					if (crossedBoundary) {
 						onData(
 							Buffer.from(
-								"\n[Research Pi boundary] This command needs host authority. Do not hand the command back to the user by default: retry it through host_capability command with an exact argv, or use an already trusted SSH target/command prefix.\n",
+								"\n[Research Pi boundary] This command needs host authority. Do not hand the command back to the user by default: retry it through host_capability with an exact argv, or use an already trusted SSH target.\n",
 							),
 						);
 					}
@@ -290,13 +290,17 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 
 	const requestInteractiveGrant = async (request: any, ctx: any, operation?: any) => {
 		if (!ctx.hasUI) return undefined;
+		const wslOneShot = capabilityContext?.wslVersion !== undefined &&
+			(request.kind === "host-command" || request.kind === "project-script");
 		const projectTrustLabel = request.kind === "ssh-target"
 			? "Trust this SSH target for the project"
-			: request.kind === "host-command"
+			: request.kind === "host-command" && !wslOneShot
 				? "Trust the suggested command prefix for the project"
 				: undefined;
-		const choices = ["Approve once", "Approve this Pi session (24h)", projectTrustLabel, "Deny"].filter(Boolean) as string[];
-		const footer = request.kind === "host-command"
+		const choices = ["Approve once", wslOneShot ? undefined : "Approve this Pi session (24h)", projectTrustLabel, "Deny"].filter(Boolean) as string[];
+		const footer = wslOneShot
+			? "WSL host execution can reach Windows-mounted disks. This grant is one-shot; /mnt and Windows executables remain prohibited."
+			: request.kind === "host-command"
 			? "Host commands have your user authority. Project trust is stored outside the repository and can be revoked."
 			: "SSH credentials remain opaque to the model.";
 		const choice = await ctx.ui.select(
@@ -321,6 +325,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			"Use a host capability when a justified project operation needs SSH credentials or host-user authority.",
 			"read accesses an approved external file; ssh uses an approved exact target with opaque credentials; command runs an argv inside the project cwd with host authority; script is the legacy strict exact-script mode.",
 			"Project-trusted SSH targets and command prefixes run without repeated approval. Never use this tool to inspect private keys, tokens, or credential stores.",
+			"Under WSL2, SSH target trust may persist, but host commands and project scripts require one-shot approval and cannot invoke Windows interop.",
 		].join(" "),
 		promptSnippet: "Use project-trusted SSH or host-command capabilities instead of handing executable commands back to the user",
 		promptGuidelines: [
@@ -328,6 +333,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			"When a justified command needs host SSH access or another host-user capability, call host_capability command with an exact argv. If a project trust rule already matches, execution is automatic.",
 			"Direct SSH uses opaque credentials. Host-command has broader user authority and must match an approved exact command or project prefix; never request, read, print, copy, or transmit private keys or tokens.",
 			"A missing capability is a user authorization boundary. Do not route around it with bash, symlinks, proxy commands, copied credentials, or another agent.",
+			"Under WSL2, never access /mnt or launch Windows/PowerShell executables through host-command; those operations remain direct human authority.",
 		],
 		parameters: Type.Object({
 			action: Type.Union([Type.Literal("list"), Type.Literal("read"), Type.Literal("ssh"), Type.Literal("command"), Type.Literal("script")]),
@@ -385,7 +391,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			"Agent-initiated shell commands may read minimal system runtime paths and may read/write the current project, including Git metadata; they cannot access other user directories or write system temp paths.",
 			"Public network access is available without a domain allowlist. Arbitrary project-local uv, Python, shell, Node, Git, and test commands are allowed; command syntax is not a policy boundary.",
 			"Unix sockets and host credential files remain outside the project sandbox. If a justified operation needs them, use host_capability command or a project-trusted SSH target instead of asking the user to copy a terminal command.",
-			"Under WSL2, Windows host mounts and Windows executable interop remain outside the ordinary agent boundary. Do not invoke powershell.exe, cmd.exe, wsl.exe, or paths below /mnt through sandboxed bash; request an explicit host capability when the operation is truly necessary.",
+			"Under WSL2, Windows host mounts and Windows executable interop remain outside the agent boundary. Do not invoke powershell.exe, cmd.exe, wsl.exe, or paths below /mnt; Windows-native operations remain a direct human action, while Linux host commands for SSH-backed work require one-shot approval.",
 			"Do not attempt an indirect boundary bypass. Request the exact brokered target or argv and continue after approval; use ! only if the broker cannot express the operation.",
 		],
 		async execute(id, params, signal, onUpdate, ctx) {
@@ -592,6 +598,13 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 					ctx.ui.notify("Host grants require interactive confirmation.", "error");
 					return;
 				}
+				if (action === "trust-command" && capabilityContext?.wslVersion !== undefined) {
+					ctx.ui.notify(
+						"WSL does not persist host-command trust because an out-of-sandbox project process could reach Windows disks. Use /boundary grant-command for one-shot approval, or trust an opaque SSH target.",
+						"error",
+					);
+					return;
+				}
 				const input = action === "grant-read"
 					? { kind: "external-read", path: words[0] }
 					: action === "grant-ssh" || action === "trust-ssh"
@@ -606,15 +619,25 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 					// model requests still receive the conservative recommended prefix.
 					request.suggestedPrefix = [...request.argv];
 				}
+				const wslOneShot = capabilityContext?.wslVersion !== undefined &&
+					(request.kind === "host-command" || request.kind === "project-script");
 				const approved = await ctx.ui.confirm(
-					projectScope ? "Trust this host capability for the project?" : "Approve host capability for this Pi session?",
+					wslOneShot
+						? "Approve this one WSL host execution?"
+						: projectScope
+							? "Trust this host capability for the project?"
+							: "Approve host capability for this Pi session?",
 					describeCapabilityRequest(request),
 				);
 				if (!approved) {
 					ctx.ui.notify("Host capability not approved.", "info");
 					return;
 				}
-				const grant = await createCapabilityGrant(requireCapabilityContext(), request, projectScope ? "project" : "session");
+				const grant = await createCapabilityGrant(
+					requireCapabilityContext(),
+					request,
+					wslOneShot ? "once" : projectScope ? "project" : "session",
+				);
 				ctx.ui.notify(`Approved ${capabilityGrantSummary(grant)}`, "warning");
 				await refreshBoundaryStatus(ctx);
 				return;
@@ -627,9 +650,9 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 					"/boundary grant-read <external-path>",
 					"/boundary grant-ssh <alias|user@host[:port]> — current session",
 					"/boundary trust-ssh <alias|user@host[:port]> — persistent for this project",
-					"/boundary grant-command <executable> [exact argv...] — current session",
-					"/boundary trust-command <executable> [argv-prefix...] — persistent for this project",
-					"/boundary grant-script <project-script> [exact args...]",
+					`/boundary grant-command <executable> [exact argv...] — ${capabilityContext?.wslVersion !== undefined ? "one-shot on WSL" : "current session"}`,
+					`/boundary trust-command <executable> [argv-prefix...] — ${capabilityContext?.wslVersion !== undefined ? "disabled on WSL" : "persistent for this project"}`,
+					`/boundary grant-script <project-script> [exact args...] — ${capabilityContext?.wslVersion !== undefined ? "one-shot on WSL" : "current session"}`,
 					"/boundary revoke <grant-id|all>",
 				].join("\n"), "info");
 				return;
@@ -644,12 +667,14 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 						`Project root: ${runtime.root}`,
 						"Agent shell: project read/write; .git commit/config/refs writable; .git/hooks read-only.",
 						`System runtime: ${(systemRuntime?.readRoots ?? []).join(", ") || "platform minimal runtime"} (read-only).`,
-						"Network: public web is open; project-trusted SSH targets and command prefixes run without repeated approval.",
+						wslIsolation
+							? "Network: public web is open; project-trusted SSH targets run without repeated approval; host commands are one-shot."
+							: "Network: public web is open; project-trusted SSH targets and command prefixes run without repeated approval.",
 						wslIsolation
 							? `WSL${wslIsolation.version}: /mnt denied; seccomp required; cmd.exe host-interop probe blocked (exit ${wslIsolation.probeExitCode}).`
 							: undefined,
 						`Host grants: ${capabilityContext ? (await listCapabilityGrants(capabilityContext)).length : 0} active across project/session scopes.`,
-						"Commands: arbitrary uv/Python/shell syntax is allowed inside the project sandbox; approved host commands may use user authority.",
+						"Commands: arbitrary uv/Python/shell syntax is allowed inside the project sandbox; WSL host commands require one-shot user approval.",
 						"Outside path and /mnt access still require explicit approval; credential contents remain protected.",
 						"Use /boundary help for grant and revoke commands.",
 					].filter(Boolean)

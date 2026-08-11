@@ -69,7 +69,7 @@ pi
 
 Windows 上的最小、安全迁移路线是 WSL2，而不是让现有 Bash harness 直接改由 PowerShell 解释。请使用 `windows-research-pi` 分支，并把科研项目和 Research Pi 都放在 WSL 自身的 `/home/...` 文件系统中；`/mnt/c`、`/mnt/d` 等 Windows host mounts 不可作为 agent workspace。
 
-该分支在启动时要求 WSL2、bubblewrap、socat、ripgrep 和可用的 seccomp helper，并执行一次无副作用的 Windows host-interop 探针。缺少 seccomp、项目位于 `/mnt` 或 `cmd.exe` 能从沙箱中成功启动时，边界会 fail closed。安装步骤和边界说明见 [`docs/windows-wsl-guide.md`](docs/windows-wsl-guide.md)。
+该分支在启动时要求 WSL2、bubblewrap、socat、ripgrep、`fd`/`fdfind` 和可用的 seccomp helper，并执行一次无副作用的 Windows host-interop 探针。缺少 seccomp、项目位于 `/mnt` 或 `cmd.exe` 能从沙箱中成功启动时，边界会 fail closed。项目认可的 SSH target 可以持久自动使用；通用 host command/project script 在 WSL 下只能一次性批准，且不能访问 `/mnt` 或调用 Windows/PowerShell executable。安装步骤和边界说明见 [`docs/windows-wsl-guide.md`](docs/windows-wsl-guide.md)。
 
 ## 命令入口
 
@@ -165,6 +165,8 @@ pi doctor --workspace /path/to/research-project
 
 `host-command` 是显式离开 sandbox 的宿主执行：它继承用户账号可用的运行时环境与 SSH agent，因此比不透明 `ssh-target` 更强。界面会同时显示完整 argv、cwd 和建议持久前缀，只有用户授权后才能执行。shell sandbox 越界时，Pi 应优先通过该 broker 申请一次或项目规则并继续当前任务；只有 broker 无法表达操作时才退回人工 `!` / `!!` 通道。
 
+Windows/WSL2 分支采用更严格的例外：`trust-ssh` 仍可按项目持久保存，但 `host-command` 与 `project-script` 只接受 one-shot grant，旧版本留下的 session/project command grant 也不会被复用。Broker 会从 PATH 移除 Windows mount、清除 WSL interop 环境，并拒绝明显的 `/mnt`、`.exe`、PowerShell/cmd/wsl/explorer 入口；真正的 Windows 原生操作仍由用户在 PowerShell 直接执行。
+
 ### Tool Activity
 
 所有模型工具调用都会在 Pi 底部状态栏显示工具名、安全截断后的目标摘要、运行时间和成功/失败终态；并行调用显示当前数量与最近启动的工具。普通工具终态保留 5 秒，`codex_delegate` 的后台 job 另有持久状态，不会因委派工具返回而消失。
@@ -227,7 +229,7 @@ DeepSeek V4 Flash 使用 Max reasoning，但不把 1M 容量等同于等质量�
 - `advisor`：只读分析，默认 `gpt-5.6-sol`、reasoning `max`；
 - `executor`：完整执行任务，默认 `gpt-5.6-sol`、reasoning `max`、自动使用 project-write permission profile；
 - 每次调用都可覆盖 Codex model 和 reasoning effort；
-- executor 可在项目内修改或删除文件、安装项目依赖、自由提交，以及启动或取消昂贵实验；经过用户授权后，它还可通过 `research_pi_host` 使用精确外部只读、SSH target 和固定脚本，不需要复制凭据或重开 delegation；
+- executor 可在项目内修改或删除文件、安装项目依赖、自由提交，以及启动或取消昂贵实验；经过用户授权后，它还可通过 `research_pi_host` 使用精确外部只读、SSH target、host command 和严格固定脚本，不需要复制凭据或重开 delegation；WSL 下只有 SSH target 可持久信任，其他宿主执行为 one-shot；
 - Codex 通过本地 stdio App Server 运行，保存稳定的 thread/turn ID；长任务默认后台运行，通过同一个工具的 `status`、`result`、`respond`、`steer`、`resume` 和 `cancel` action 管理；
 - `respond` 回答 Codex 在运行中提出的显式问题；`steer` 将修正或新证据注入仍在运行的 turn，不需要终止并重开任务；
 - 后台任务会在 Pi 底部状态栏持续显示 job 后八位、模式、运行状态与最近进度；完成、失败、取消或需要输入时，会把一条限长结构化事件送回最初的 Pi session 并自动触发 Leader 继续处理；

@@ -23,6 +23,7 @@
     ".pi/schemas/",
     ".pi/vendor/",
     "docs/pi-basic-guide.md",
+    "docs/windows-wsl-guide.md",
     ".env.example",
     "README.md",
     "SECURITY.md"
