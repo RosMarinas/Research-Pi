@@ -131,6 +131,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     } else if (prompt.includes("HOST_READ_PATH=")) {
       const path = prompt.match(/HOST_READ_PATH=([^\\n<]+)/)?.[1]?.trim();
       send({ id: "server-host-read-1", method: "item/tool/call", params: { threadId: "thread-fake-123", turnId: activeTurn, callId: "host-call-1", tool: "research_pi_host", arguments: { action: "read", path } } });
+    } else if (prompt.includes("HOST_COMMAND_PATH=")) {
+      const path = prompt.match(/HOST_COMMAND_PATH=([^\\n<]+)/)?.[1]?.trim();
+      send({ id: "server-host-command-1", method: "item/tool/call", params: { threadId: "thread-fake-123", turnId: activeTurn, callId: "host-command-1", tool: "research_pi_host", arguments: { action: "command", argv: [process.execPath, path, "from-codex"], cwd: process.cwd() } } });
     } else {
       completionTimer = setTimeout(() => complete(prompt), ${delayMs});
     }
@@ -138,6 +141,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     const answer = message.result?.contentItems?.[0]?.text ?? "missing answer";
     complete("Research Pi", answer);
   } else if (message.id === "server-host-read-1") {
+    const answer = message.result?.contentItems?.[0]?.text ?? message.error?.message ?? "missing host response";
+    complete("Research Pi", answer);
+  } else if (message.id === "server-host-command-1") {
     const answer = message.result?.contentItems?.[0]?.text ?? message.error?.message ?? "missing host response";
     complete("Research Pi", answer);
   } else if (message.method === "turn/steer") {
@@ -379,6 +385,41 @@ test("Codex uses the same opaque session host-capability ledger", async () => {
 		const persistedRequest = readFileSync(join(jobRoot, started.id, "request.json"), "utf8");
 		assert.match(persistedRequest, /hostCapabilityContext/);
 		assert.doesNotMatch(persistedRequest, /SSH_AUTH_SOCK|PRIVATE KEY|API_KEY/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("Codex executor reuses a project-trusted host-command prefix", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-host-command-"));
+	try {
+		const workspace = join(root, "workspace");
+		const jobRoot = join(root, "codex", "jobs");
+		mkdirSync(join(workspace, ".git"), { recursive: true });
+		const commandScript = join(workspace, "host-command.mjs");
+		writeFileSync(commandScript, "process.stdout.write(`host-command:${process.argv[2]}`);\n", { mode: 0o600 });
+		const hostCapabilityContext = await resolveCapabilityContext(workspace, "pi-session-host-command", {
+			stateRoot: join(root, "capabilities"),
+		});
+		const request = await prepareCapabilityRequest(hostCapabilityContext, {
+			kind: "host-command",
+			cwd: workspace,
+			argv: [process.execPath, commandScript, "seed"],
+		});
+		await createCapabilityGrant(hostCapabilityContext, request, "project");
+		const codexBin = makeFakeCodex(root);
+		const started = await startCodexJob({
+			cwd: workspace,
+			jobRoot,
+			codexBin,
+			mode: "executor",
+			task: `Execute the trusted project command. HOST_COMMAND_PATH=${commandScript}`,
+			leaderSessionId: "pi-session-host-command",
+			hostCapabilityContext,
+		});
+		const completed = await waitForCodexJob(started.id, { jobRoot });
+		assert.equal(completed.status, "completed");
+		assert.match(completed.result.evidence.join("\n"), /host-command:from-codex/);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

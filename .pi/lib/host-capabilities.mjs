@@ -1,8 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, statSync } from "node:fs";
 import { access, mkdir, open, readFile, readdir, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import {
 	isProtectedProjectMutation,
@@ -12,7 +11,7 @@ import {
 	secretEnvironmentNames,
 } from "./project-boundary.mjs";
 
-const LEDGER_VERSION = 1;
+const LEDGER_VERSION = 2;
 const SESSION_GRANT_MS = 24 * 60 * 60 * 1000;
 const MAX_READ_BYTES = 128 * 1024;
 const MAX_PROCESS_OUTPUT_BYTES = 128 * 1024;
@@ -28,16 +27,18 @@ function delay(ms) {
 }
 
 function normalizeScope(scope) {
-	if (scope !== "once" && scope !== "session") throw new Error(`Unsupported capability scope: ${scope}`);
+	if (scope !== "once" && scope !== "session" && scope !== "project") {
+		throw new Error(`Unsupported capability scope: ${scope}`);
+	}
 	return scope;
 }
 
 function normalizeArgs(args) {
 	if (!Array.isArray(args)) return [];
-	if (args.length > 64) throw new Error("A project-script capability accepts at most 64 arguments");
+	if (args.length > 128) throw new Error("A host command accepts at most 128 arguments");
 	return args.map((value) => {
 		const text = String(value);
-		if (text.includes("\0") || text.length > 4096) throw new Error("Invalid project-script argument");
+		if (text.includes("\0") || text.length > 4096) throw new Error("Invalid host-command argument");
 		return text;
 	});
 }
@@ -46,20 +47,43 @@ function sameArray(left, right) {
 	return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
+function startsWithArray(values, prefix) {
+	return prefix.length > 0 && prefix.length <= values.length && prefix.every((value, index) => values[index] === value);
+}
+
+function recommendedCommandPrefix(argv) {
+	const executable = basename(argv[0]).toLowerCase();
+	if (executable === "uv" && argv[1] === "run" && argv[2]) {
+		const runner = basename(argv[2]).toLowerCase();
+		if (["python", "python3"].includes(runner) && argv[3] === "-m" && argv[4]) return argv.slice(0, 5);
+		if (["python", "python3"].includes(runner) && argv[3] && !argv[3].startsWith("-")) return argv.slice(0, 4);
+		if (["python", "python3"].includes(runner) && argv[3] === "-c") return [...argv];
+		return argv.slice(0, 3);
+	}
+	if (["python", "python3"].includes(executable)) {
+		if (argv[1] === "-c") return [...argv];
+		if (argv[1] === "-m" && argv[2]) return argv.slice(0, 3);
+		if (argv[1] && !argv[1].startsWith("-")) return argv.slice(0, 2);
+	}
+	if (["node", "bash", "sh", "zsh"].includes(executable)) {
+		if (["-c", "-lc", "-e", "--eval"].includes(argv[1])) return [...argv];
+		if (argv[1] && !argv[1].startsWith("-")) return argv.slice(0, 2);
+	}
+	return argv.slice(0, 1);
+}
+
+function displayArgv(argv) {
+	return argv.map((value) => (/^[A-Za-z0-9_./:@%+=,-]+$/.test(value) ? value : JSON.stringify(value))).join(" ");
+}
+
 function stateRootForProject(projectRoot, explicitStateRoot) {
 	if (explicitStateRoot) return resolve(explicitStateRoot);
 	if (process.env.PI_RESEARCH_CAPABILITY_DIR) return resolve(process.env.PI_RESEARCH_CAPABILITY_DIR);
 	if (process.env.PI_CODING_AGENT_DIR) return resolve(dirname(process.env.PI_CODING_AGENT_DIR), "capabilities");
-	const gitDirectory = join(projectRoot, ".git");
-	let standaloneGitDirectory = false;
-	try {
-		standaloneGitDirectory = existsSync(gitDirectory) && statSync(gitDirectory).isDirectory();
-	} catch {
-		standaloneGitDirectory = false;
+	if (process.platform === "win32") {
+		return resolve(process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "Research-Pi", "state", "capabilities");
 	}
-	return standaloneGitDirectory
-		? join(gitDirectory, "research-pi", "capabilities")
-		: join(projectRoot, ".pi", "research-pi-runtime", "capabilities");
+	return resolve(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "research-pi", "capabilities");
 }
 
 export async function resolveCapabilityContext(cwd, sessionId, options = {}) {
@@ -71,7 +95,9 @@ export async function resolveCapabilityContext(cwd, sessionId, options = {}) {
 		version: LEDGER_VERSION,
 		projectRoot,
 		sessionId,
-		ledgerPath: join(stateRoot, projectHash, `${sessionId}.json`),
+		ledgerPath: join(stateRoot, projectHash, "sessions", `${sessionId}.json`),
+		legacyLedgerPath: join(stateRoot, projectHash, `${sessionId}.json`),
+		projectLedgerPath: join(stateRoot, projectHash, "project.json"),
 	};
 }
 
@@ -82,27 +108,49 @@ async function writeJsonAtomic(path, value) {
 	await rename(temporary, path);
 }
 
-function emptyLedger(context) {
+function emptyLedger(context, ledgerKind) {
 	return {
 		version: LEDGER_VERSION,
+		ledgerKind,
 		projectRoot: context.projectRoot,
-		sessionId: context.sessionId,
+		...(ledgerKind === "session" ? { sessionId: context.sessionId } : {}),
 		updatedAt: now(),
 		grants: [],
 	};
 }
 
-async function readLedger(context) {
+function ledgerPath(context, ledgerKind) {
+	return ledgerKind === "project" ? context.projectLedgerPath : context.ledgerPath;
+}
+
+async function readLedger(context, ledgerKind = "session") {
+	const path = ledgerPath(context, ledgerKind);
 	let ledger;
 	try {
-		ledger = JSON.parse(await readFile(context.ledgerPath, "utf8"));
+		ledger = JSON.parse(await readFile(path, "utf8"));
 	} catch (error) {
-		if (error?.code === "ENOENT") return emptyLedger(context);
-		throw error;
+		if (error?.code === "ENOENT" && ledgerKind === "session" && context.legacyLedgerPath) {
+			try {
+				ledger = JSON.parse(await readFile(context.legacyLedgerPath, "utf8"));
+			} catch (legacyError) {
+				if (legacyError?.code === "ENOENT") return emptyLedger(context, ledgerKind);
+				throw legacyError;
+			}
+		} else if (error?.code === "ENOENT") {
+			return emptyLedger(context, ledgerKind);
+		} else {
+			throw error;
+		}
 	}
-	if (ledger.version !== LEDGER_VERSION || ledger.projectRoot !== context.projectRoot || ledger.sessionId !== context.sessionId) {
+	const legacySessionLedger = ledgerKind === "session" && ledger.version === 1;
+	const identityMatches =
+		ledger.projectRoot === context.projectRoot &&
+		(ledgerKind === "project" || ledger.sessionId === context.sessionId);
+	if ((!legacySessionLedger && ledger.version !== LEDGER_VERSION) || !identityMatches) {
 		throw new Error("Capability ledger identity mismatch");
 	}
+	ledger.version = LEDGER_VERSION;
+	ledger.ledgerKind = ledgerKind;
 	const currentTime = Date.now();
 	ledger.grants = Array.isArray(ledger.grants)
 		? ledger.grants.filter((grant) => !grant.expiresAt || Date.parse(grant.expiresAt) > currentTime)
@@ -110,9 +158,10 @@ async function readLedger(context) {
 	return ledger;
 }
 
-async function withLedgerLock(context, action) {
-	await mkdir(dirname(context.ledgerPath), { recursive: true, mode: 0o700 });
-	const lockPath = `${context.ledgerPath}.lock`;
+async function withLedgerLock(context, ledgerKind, action) {
+	const path = ledgerPath(context, ledgerKind);
+	await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+	const lockPath = `${path}.lock`;
 	let handle;
 	for (let attempt = 0; attempt < 80; attempt += 1) {
 		try {
@@ -132,7 +181,7 @@ async function withLedgerLock(context, action) {
 	}
 	if (!handle) throw new Error("Timed out waiting for the capability ledger lock");
 	try {
-		return await action(await readLedger(context));
+		return await action(await readLedger(context, ledgerKind), path);
 	} finally {
 		await handle.close().catch(() => undefined);
 		await unlink(lockPath).catch(() => undefined);
@@ -209,7 +258,9 @@ async function fileContainsPrivateKey(path) {
 }
 
 export async function prepareCapabilityRequest(context, input) {
-	if (!context?.projectRoot || !context?.sessionId || !context?.ledgerPath) throw new Error("Capability context is unavailable");
+	if (!context?.projectRoot || !context?.sessionId || !context?.ledgerPath || !context?.projectLedgerPath) {
+		throw new Error("Capability context is unavailable");
+	}
 	const kind = input?.kind;
 	if (kind === "external-read") {
 		const info = await resolveBoundaryPath(context.projectRoot, input.path);
@@ -231,6 +282,24 @@ export async function prepareCapabilityRequest(context, input) {
 	if (kind === "ssh-target") {
 		const target = normalizeSshTarget(input.target, input.port);
 		return { kind, target: target.canonical, destination: target.destination, port: target.port };
+	}
+	if (kind === "host-command") {
+		const argv = normalizeArgs(input.argv);
+		if (argv.length === 0 || !argv[0].trim() || argv[0].startsWith("-")) {
+			throw new Error("A host-command capability requires an executable argv[0]");
+		}
+		const workingDirectory = await resolveBoundaryPath(context.projectRoot, input.cwd ?? context.projectRoot);
+		if (!workingDirectory.inside) throw new Error("A host-command working directory must stay inside the current project");
+		const workingDirectoryStat = await stat(workingDirectory.resolvedPath);
+		if (!workingDirectoryStat.isDirectory()) throw new Error("A host-command working directory must be a directory");
+		return {
+			kind,
+			target: displayArgv(argv),
+			cwd: workingDirectory.resolvedPath,
+			argv,
+			match: "exact",
+			suggestedPrefix: recommendedCommandPrefix(argv),
+		};
 	}
 	if (kind === "project-script") {
 		const info = await resolveBoundaryPath(context.projectRoot, input.path);
@@ -261,6 +330,13 @@ function grantMatches(grant, request) {
 		return grant.directory ? isWithinRoot(grant.target, request.target) : grant.target === request.target;
 	}
 	if (grant.kind === "ssh-target") return grant.target === request.target;
+	if (grant.kind === "host-command") {
+		return grant.cwd === request.cwd && (
+			grant.match === "prefix"
+				? startsWithArray(request.argv ?? [], grant.argv ?? [])
+				: sameArray(grant.argv ?? [], request.argv ?? [])
+		);
+	}
 	if (grant.kind === "project-script") {
 		return grant.target === request.target && grant.sha256 === request.sha256 && sameArray(grant.args ?? [], request.args ?? []);
 	}
@@ -268,6 +344,9 @@ function grantMatches(grant, request) {
 }
 
 export function capabilityGrantSummary(grant) {
+	if (grant.kind === "host-command") {
+		return `${grant.id} · host-command ${grant.match ?? "exact"} · ${displayArgv(grant.argv ?? [])} · ${grant.scope}`;
+	}
 	if (grant.kind === "project-script") {
 		return `${grant.id} · project-script · ${grant.target} ${(grant.args ?? []).join(" ")} · ${grant.scope}`.trim();
 	}
@@ -275,7 +354,11 @@ export function capabilityGrantSummary(grant) {
 }
 
 export async function listCapabilityGrants(context) {
-	return (await readLedger(context)).grants;
+	const [projectLedger, sessionLedger] = await Promise.all([
+		readLedger(context, "project"),
+		readLedger(context, "session"),
+	]);
+	return [...projectLedger.grants, ...sessionLedger.grants];
 }
 
 export async function findCapabilityGrant(context, request) {
@@ -284,53 +367,69 @@ export async function findCapabilityGrant(context, request) {
 
 export async function createCapabilityGrant(context, request, scope = "session") {
 	const normalizedScope = normalizeScope(scope);
-	return await withLedgerLock(context, async (ledger) => {
-		const existing = ledger.grants.find((grant) => grantMatches(grant, request) && grant.scope === normalizedScope);
+	const ledgerKind = normalizedScope === "project" ? "project" : "session";
+	const persistedRequest = { ...request };
+	delete persistedRequest.approvalPreview;
+	if (persistedRequest.kind === "host-command") {
+		persistedRequest.argv = normalizedScope === "project"
+			? [...(persistedRequest.suggestedPrefix ?? persistedRequest.argv)]
+			: [...persistedRequest.argv];
+		persistedRequest.target = displayArgv(persistedRequest.argv);
+		persistedRequest.match = normalizedScope === "project" ? "prefix" : "exact";
+	}
+	delete persistedRequest.suggestedPrefix;
+	return await withLedgerLock(context, ledgerKind, async (ledger, path) => {
+		const existing = ledger.grants.find((grant) => grantMatches(grant, persistedRequest) && grant.scope === normalizedScope);
 		if (existing) return existing;
 		const createdAt = now();
-		const { approvalPreview: _approvalPreview, ...persistedRequest } = request;
 		const grant = {
 			version: LEDGER_VERSION,
 			id: `grant-${randomUUID().slice(0, 8)}`,
 			...persistedRequest,
 			scope: normalizedScope,
 			createdAt,
-			expiresAt: new Date(Date.now() + SESSION_GRANT_MS).toISOString(),
+			...(normalizedScope === "project" ? {} : { expiresAt: new Date(Date.now() + SESSION_GRANT_MS).toISOString() }),
 		};
 		ledger.grants.push(grant);
 		ledger.updatedAt = createdAt;
-		await writeJsonAtomic(context.ledgerPath, ledger);
+		await writeJsonAtomic(path, ledger);
 		return grant;
 	});
 }
 
 export async function revokeCapabilityGrant(context, selector) {
-	return await withLedgerLock(context, async (ledger) => {
-		const before = ledger.grants.length;
-		ledger.grants = selector === "all"
-			? []
-			: ledger.grants.filter((grant) => grant.id !== selector && !grant.id.startsWith(selector));
-		const removed = before - ledger.grants.length;
-		if (removed > 0) {
-			ledger.updatedAt = now();
-			await writeJsonAtomic(context.ledgerPath, ledger);
-		}
-		return removed;
-	});
+	let removed = 0;
+	for (const ledgerKind of ["session", "project"]) {
+		removed += await withLedgerLock(context, ledgerKind, async (ledger, path) => {
+			const before = ledger.grants.length;
+			ledger.grants = selector === "all"
+				? []
+				: ledger.grants.filter((grant) => grant.id !== selector && !grant.id.startsWith(selector));
+			const count = before - ledger.grants.length;
+			if (count > 0) {
+				ledger.updatedAt = now();
+				await writeJsonAtomic(path, ledger);
+			}
+			return count;
+		});
+	}
+	return removed;
 }
 
 async function consumeCapabilityGrant(context, request) {
-	return await withLedgerLock(context, async (ledger) => {
+	const sessionGrant = await withLedgerLock(context, "session", async (ledger, path) => {
 		const index = ledger.grants.findIndex((grant) => grantMatches(grant, request));
 		if (index < 0) return undefined;
 		const grant = ledger.grants[index];
 		if (grant.scope === "once") {
 			ledger.grants.splice(index, 1);
 			ledger.updatedAt = now();
-			await writeJsonAtomic(context.ledgerPath, ledger);
+			await writeJsonAtomic(path, ledger);
 		}
 		return grant;
 	});
+	if (sessionGrant) return sessionGrant;
+	return (await readLedger(context, "project")).grants.find((grant) => grantMatches(grant, request));
 }
 
 export async function authorizeCapabilityRequest(context, input) {
@@ -339,11 +438,15 @@ export async function authorizeCapabilityRequest(context, input) {
 }
 
 export function hostBridgeEnvironment(source = process.env) {
-	const allowed = new Set(["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM", "SSH_AUTH_SOCK"]);
+	const allowed = new Set([
+		"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM", "SSH_AUTH_SOCK",
+		"VIRTUAL_ENV", "PYTHONPATH", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE",
+	]);
+	const allowedPrefixes = ["LC_", "UV_", "PIP_", "CONDA_", "XDG_"];
 	const env = {};
 	for (const [name, value] of Object.entries(source)) {
 		if (value === undefined) continue;
-		if (allowed.has(name) || name.startsWith("LC_")) env[name] = value;
+		if (allowed.has(name) || allowedPrefixes.some((prefix) => name.startsWith(prefix))) env[name] = value;
 	}
 	for (const name of secretEnvironmentNames(env)) {
 		if (name !== "SSH_AUTH_SOCK") delete env[name];
@@ -439,8 +542,10 @@ export async function executeGrantedCapability(context, input, options = {}) {
 		const hint = request.kind === "external-read"
 			? `/boundary grant-read ${JSON.stringify(input.path)}`
 			: request.kind === "ssh-target"
-				? `/boundary grant-ssh ${request.target}`
-				: `/boundary grant-script ${JSON.stringify(input.path)} ${(request.args ?? []).map((arg) => JSON.stringify(arg)).join(" ")}`.trim();
+				? `/boundary trust-ssh ${request.target}`
+				: request.kind === "host-command"
+					? `/boundary trust-command ${(request.suggestedPrefix ?? request.argv).map((arg) => JSON.stringify(arg)).join(" ")}`
+					: `/boundary grant-script ${JSON.stringify(input.path)} ${(request.args ?? []).map((arg) => JSON.stringify(arg)).join(" ")}`.trim();
 		throw new Error(`Missing approved ${request.kind} capability. Ask the user to run: ${hint}`);
 	}
 	let result;
@@ -459,6 +564,14 @@ export async function executeGrantedCapability(context, input, options = {}) {
 		];
 		result = await runBoundedProcess(options.sshBin ?? process.env.PI_RESEARCH_SSH_BIN ?? "ssh", args, {
 			cwd: context.projectRoot,
+			timeoutSeconds: input.timeoutSeconds,
+			signal: options.signal,
+			onData: options.onData,
+			env: options.env,
+		});
+	} else if (request.kind === "host-command") {
+		result = await runBoundedProcess(request.argv[0], request.argv.slice(1), {
+			cwd: request.cwd,
 			timeoutSeconds: input.timeoutSeconds,
 			signal: options.signal,
 			onData: options.onData,
