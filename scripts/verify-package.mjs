@@ -34,6 +34,7 @@ for (const required of [
 	"docs/configuration.md",
 	".pi/extensions/project-boundary.ts",
 	".pi/lib/project-boundary.mjs",
+	"docs/windows-wsl-guide.md",
 ]) {
 	assert.ok(files.includes(required), `npm package is missing ${required}`);
 }

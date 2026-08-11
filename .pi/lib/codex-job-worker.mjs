@@ -688,7 +688,9 @@ async function main() {
 			{
 				name: "research_pi_host",
 				description:
-					"Use Research Pi host capabilities for justified SSH or host-user operations. Project-trusted SSH targets and command prefixes run automatically; otherwise ask Research Pi for approval through consult_research_pi. Normal uv/Python/shell commands stay in the project sandbox. Advisor mode may use read only.",
+					request.hostCapabilityContext?.wslVersion !== undefined
+						? "Use Research Pi host capabilities for justified SSH or host-user operations. Project-trusted SSH targets run automatically; WSL host commands/project scripts require one-shot approval and cannot invoke Windows interop. Ask Research Pi through consult_research_pi when approval is missing. Normal uv/Python/shell commands stay in the project sandbox. Advisor mode may use read only."
+						: "Use Research Pi host capabilities for justified SSH or host-user operations. Project-trusted SSH targets and command prefixes run automatically; otherwise ask Research Pi for approval through consult_research_pi. Normal uv/Python/shell commands stay in the project sandbox. Advisor mode may use read only.",
 				inputSchema: {
 					type: "object",
 					additionalProperties: false,

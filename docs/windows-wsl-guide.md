@@ -14,6 +14,8 @@ Research Pi 在 Windows 上的推荐入口是 WSL2。Agent、项目文件、Node
 - 必须启用 bubblewrap 和 seccomp；缺少 Unix socket restriction 时 fail closed；
 - 启动后在沙箱内运行一次无副作用的 `cmd.exe /d /c exit 0` 探针；如果 Windows host interop 成功，整个 agent shell 被禁用；
 - direct file tools 请求 `/mnt` 等项目外路径时仍需要一次明确人工批准，非交互模式拒绝；
+- 项目认可的精确 SSH target 可持久信任；通用 host command 与 project script 只能 one-shot 批准，旧 session/project command grant 不会生效；
+- host-command 的 PATH 会移除 Windows mount，且拒绝明显的 `/mnt`、Windows `.exe`、PowerShell/cmd/wsl/explorer 入口；
 - 用户输入的 `!` / `!!` 是人工直执行通道，不受 agent sandbox 保护。
 
 阻断 Unix socket 很重要：WSL 可以通过 interop 把 Windows `.exe` 交给宿主执行。仅仅隐藏 `/mnt/c` 不足以替代 seccomp；Research Pi 同时要求文件边界、socket 边界和启动探针。
@@ -48,7 +50,7 @@ wsl --list --verbose
 
 ```sh
 sudo apt update
-sudo apt install -y git zsh ripgrep bubblewrap socat
+sudo apt install -y git zsh ripgrep fd-find bubblewrap socat
 ```
 
 安装 Linux 版 Node.js `>=22.19`，随后确认所有命令来自 WSL，而不是 `/mnt/c`：
@@ -58,10 +60,12 @@ node --version
 npm --version
 git --version
 zsh --version
-command -v node npm git zsh rg bwrap socat
+command -v node npm git zsh rg fdfind bwrap socat
 ```
 
 关键工具建议安装在 `/usr/bin`、`/usr/local/bin` 或其他 Linux 路径。不要依赖 Windows Node、Windows Git 或位于 `/mnt/c` 的 executable。
+
+Pi 0.84.1 会把 Ubuntu 的 `fdfind` 识别为 `fd`，因此不需要下载 GitHub release，也不需要创建不受包管理器维护的手工副本。这同时避免 GitHub API 限流导致的 `fd not found ... 403` 启动提示。
 
 ## 3. 克隆 Research Pi
 
@@ -121,6 +125,14 @@ Windows 可以通过 `\\wsl$\Ubuntu\home\...` 浏览 WSL 文件，但不要把 W
 
 ## 6. 检查边界
 
+先在普通 WSL shell 中运行无模型 doctor：
+
+```sh
+pi doctor --workspace "$PWD"
+```
+
+除 Git、Python 和 Codex preflight 外，应出现 `WSL2 boundary: research-pi-wsl-preflight=ok`。该检查会验证 bubblewrap/seccomp 依赖，并确认 sandbox 内既不能读取 `/mnt/c`，也不能运行 `cmd.exe`。
+
 成功启动后，状态栏应显示类似：
 
 ```text
@@ -142,6 +154,23 @@ Windows 可以通过 `\\wsl$\Ubuntu\home\...` 浏览 WSL 文件，但不要把 W
 
 如果状态是 `boundary failed closed`，不要通过关闭 sandbox 解决。根据错误补齐 `bwrap`、`socat`、`rg`，升级到 WSL2，或把项目移出 `/mnt`。
 
+## SSH 与远程实验授权
+
+科研服务器使用 Linux SSH broker，不需要开放 WSL host interop。可在 Pi 中一次性建立当前项目的精确 target 信任：
+
+```text
+/boundary trust-ssh 931server
+/boundary grants
+```
+
+此后 Pi 和 Codex executor 可自动向该 target 运行不同远程命令，SSH config、key 和 agent 内容仍不会进入模型。若项目的 `remote_run.py` 必须在 sandbox 外使用本地 SSH，则每次由工具弹窗选择 `Approve once`，或先执行：
+
+```text
+/boundary grant-command uv run remote_run.py <本次精确参数>
+```
+
+在 WSL2 中这条 grant 只可消费一次；`/boundary trust-command` 被拒绝。优先让 agent 使用 `ssh-target`，因为它只暴露远程命令能力，不会让任意项目代码获得整个 WSL 用户权限。
+
 ## Windows 原生操作
 
 需要 Windows Registry、Windows service、MSVC GUI 或其他宿主能力时，由 Pi 给出精确命令，再由用户在 PowerShell 人工执行。不要从 agent shell 内调用：
@@ -155,7 +184,7 @@ explorer.exe
 /mnt/c/.../*.exe
 ```
 
-未来如需自动化这些能力，应增加独立的结构化 Windows tool 和单次人工授权；不应给 Linux shell 打开通用 WSL interop。
+未来如需自动化这些能力，应增加独立的结构化 Windows tool 和单次人工授权；不应给 Linux shell 或通用 host-command 打开 WSL interop。
 
 ## 本地验证
 

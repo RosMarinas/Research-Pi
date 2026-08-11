@@ -25,6 +25,7 @@
     "docs/pi-basic-guide.md",
     "docs/configuration.md",
     "docs/research-runtime-test-guide.md",
+    "docs/windows-wsl-guide.md",
     ".env.example",
     "README.md",
     "SECURITY.md"

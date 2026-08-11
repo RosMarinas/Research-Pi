@@ -27,6 +27,8 @@ Host-command is intentionally broader than opaque SSH: the process receives oper
 
 This broker does not make a remote account itself safe: after trusting an SSH target, remote commands have the authority of that account. It also does not make a trusted command intrinsically safe: changed project code behind a trusted prefix executes with host authority. Project trust is a user assertion about that project and entrypoint, not a content hash.
 
+On WSL2, the policy is stricter because a process outside bubblewrap can reach Windows-mounted disks. Only exact opaque SSH targets may receive persistent project trust. Host-command and project-script grants are one-shot, legacy broader grants are ignored, Windows mount entries are removed from PATH, and obvious `/mnt`, Windows `.exe`, PowerShell, cmd, wsl and explorer entrypoints are rejected. This lexical rejection is defense in depth rather than a shell-code proof; the one-shot human review remains the authority boundary. Windows-native work must be run directly by the user in PowerShell.
+
 Codex CLI 0.146 的 permission-profile 仍保留自身的系统临时目录兼容路径，即使 profile 请求拒绝系统 temp。Harness 会把 `TMPDIR` 重定向到项目内，并在委派约定中禁止主动使用项目外 temp；因此 Codex executor 对其他用户目录仍是 OS 级拒绝，但其系统 temp 边界目前属于纵深防御，不与 Pi shell 的硬边界等强。
 
 To keep normal commits usable without exposing `~/.gitconfig`, trusted harness startup reads only global `user.name` and `user.email` and injects those four author/committer environment fields. No credential helper, include, alias, signing-key or remote configuration is forwarded.

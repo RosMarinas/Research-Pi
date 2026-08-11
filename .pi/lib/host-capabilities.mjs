@@ -3,11 +3,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { access, mkdir, open, readFile, readdir, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
+import { getWslVersion } from "@anthropic-ai/sandbox-runtime";
 import {
 	isProtectedProjectMutation,
 	isWithinRoot,
 	resolveBoundaryPath,
 	resolveProjectRoot,
+	sanitizeWslInteropEnvironment,
 	secretEnvironmentNames,
 } from "./project-boundary.mjs";
 
@@ -86,6 +88,53 @@ function stateRootForProject(projectRoot, explicitStateRoot) {
 	return resolve(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "research-pi", "capabilities");
 }
 
+function resolveWslVersion(options = {}) {
+	return Object.prototype.hasOwnProperty.call(options, "wslVersion") ? options.wslVersion : getWslVersion();
+}
+
+function isWslHostExecutable(value) {
+	const executable = basename(String(value ?? "").replaceAll("\\", "/")).toLowerCase();
+	return executable.endsWith(".exe") || ["powershell", "pwsh", "wsl", "explorer"].includes(executable);
+}
+
+function obviousWslHostPathReference(value) {
+	const normalized = String(value ?? "").replaceAll("\\", "/").toLowerCase();
+	return (
+		normalized === "/mnt" ||
+		normalized.startsWith("/mnt/") ||
+		normalized.includes(" /mnt/") ||
+		normalized.includes("'/mnt/") ||
+		normalized.includes('"/mnt/') ||
+		normalized.includes("/run/wsl/") ||
+		normalized.includes("/run/desktop/mnt/host/") ||
+		normalized.includes("//wsl$/")
+	);
+}
+
+function obviousWslInteropReference(value) {
+	const normalized = String(value ?? "").replaceAll("\\", "/").toLowerCase();
+	return obviousWslHostPathReference(normalized) ||
+		/(?:^|[\s'"/])(?:cmd|powershell|pwsh|wsl|explorer)(?:\.exe)?(?:$|[\s'"/])/.test(normalized);
+}
+
+export function assertWslHostCommand(argv, wslVersion = getWslVersion()) {
+	if (wslVersion === undefined) return;
+	if (isWslHostExecutable(argv[0])) {
+		throw new Error("WSL host-command cannot launch Windows or PowerShell executables; run Windows-native operations manually in PowerShell");
+	}
+	const executable = basename(argv[0]).toLowerCase();
+	const codeArgument = ["sh", "bash", "zsh"].includes(executable) && ["-c", "-lc"].includes(argv[1])
+		? argv[2]
+		: ["python", "python3"].includes(executable) && argv[1] === "-c"
+			? argv[2]
+			: executable === "node" && ["-e", "--eval"].includes(argv[1])
+				? argv[2]
+				: undefined;
+	if (argv.some(obviousWslHostPathReference) || (codeArgument && obviousWslInteropReference(codeArgument))) {
+		throw new Error("WSL host-command cannot address /mnt or Windows host interop; run that exact Windows-native operation manually");
+	}
+}
+
 export async function resolveCapabilityContext(cwd, sessionId, options = {}) {
 	if (!SESSION_ID_PATTERN.test(String(sessionId ?? ""))) throw new Error("Invalid Pi session id for capability ledger");
 	const projectRoot = await resolveProjectRoot(cwd);
@@ -95,6 +144,7 @@ export async function resolveCapabilityContext(cwd, sessionId, options = {}) {
 		version: LEDGER_VERSION,
 		projectRoot,
 		sessionId,
+		wslVersion: resolveWslVersion(options),
 		ledgerPath: join(stateRoot, projectHash, "sessions", `${sessionId}.json`),
 		legacyLedgerPath: join(stateRoot, projectHash, `${sessionId}.json`),
 		projectLedgerPath: join(stateRoot, projectHash, "project.json"),
@@ -288,6 +338,7 @@ export async function prepareCapabilityRequest(context, input) {
 		if (argv.length === 0 || !argv[0].trim() || argv[0].startsWith("-")) {
 			throw new Error("A host-command capability requires an executable argv[0]");
 		}
+		assertWslHostCommand(argv, context.wslVersion);
 		const workingDirectory = await resolveBoundaryPath(context.projectRoot, input.cwd ?? context.projectRoot);
 		if (!workingDirectory.inside) throw new Error("A host-command working directory must stay inside the current project");
 		const workingDirectoryStat = await stat(workingDirectory.resolvedPath);
@@ -343,6 +394,12 @@ function grantMatches(grant, request) {
 	return false;
 }
 
+function grantAllowedForContext(context, grant) {
+	if (context.wslVersion === undefined) return true;
+	if (grant.kind !== "host-command" && grant.kind !== "project-script") return true;
+	return grant.scope === "once";
+}
+
 export function capabilityGrantSummary(grant) {
 	if (grant.kind === "host-command") {
 		return `${grant.id} · host-command ${grant.match ?? "exact"} · ${displayArgv(grant.argv ?? [])} · ${grant.scope}`;
@@ -358,7 +415,7 @@ export async function listCapabilityGrants(context) {
 		readLedger(context, "project"),
 		readLedger(context, "session"),
 	]);
-	return [...projectLedger.grants, ...sessionLedger.grants];
+	return [...projectLedger.grants, ...sessionLedger.grants].filter((grant) => grantAllowedForContext(context, grant));
 }
 
 export async function findCapabilityGrant(context, request) {
@@ -367,6 +424,13 @@ export async function findCapabilityGrant(context, request) {
 
 export async function createCapabilityGrant(context, request, scope = "session") {
 	const normalizedScope = normalizeScope(scope);
+	if (
+		context.wslVersion !== undefined &&
+		(request.kind === "host-command" || request.kind === "project-script") &&
+		normalizedScope !== "once"
+	) {
+		throw new Error("WSL host commands and project scripts require one-shot approval; persistent trust is limited to opaque SSH targets");
+	}
 	const ledgerKind = normalizedScope === "project" ? "project" : "session";
 	const persistedRequest = { ...request };
 	delete persistedRequest.approvalPreview;
@@ -418,7 +482,7 @@ export async function revokeCapabilityGrant(context, selector) {
 
 async function consumeCapabilityGrant(context, request) {
 	const sessionGrant = await withLedgerLock(context, "session", async (ledger, path) => {
-		const index = ledger.grants.findIndex((grant) => grantMatches(grant, request));
+		const index = ledger.grants.findIndex((grant) => grantAllowedForContext(context, grant) && grantMatches(grant, request));
 		if (index < 0) return undefined;
 		const grant = ledger.grants[index];
 		if (grant.scope === "once") {
@@ -429,7 +493,9 @@ async function consumeCapabilityGrant(context, request) {
 		return grant;
 	});
 	if (sessionGrant) return sessionGrant;
-	return (await readLedger(context, "project")).grants.find((grant) => grantMatches(grant, request));
+	return (await readLedger(context, "project")).grants.find(
+		(grant) => grantAllowedForContext(context, grant) && grantMatches(grant, request),
+	);
 }
 
 export async function authorizeCapabilityRequest(context, input) {
@@ -437,7 +503,7 @@ export async function authorizeCapabilityRequest(context, input) {
 	return { request, grant: await consumeCapabilityGrant(context, request) };
 }
 
-export function hostBridgeEnvironment(source = process.env) {
+export function hostBridgeEnvironment(source = process.env, options = {}) {
 	const allowed = new Set([
 		"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM", "SSH_AUTH_SOCK",
 		"VIRTUAL_ENV", "PYTHONPATH", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE",
@@ -451,7 +517,7 @@ export function hostBridgeEnvironment(source = process.env) {
 	for (const name of secretEnvironmentNames(env)) {
 		if (name !== "SSH_AUTH_SOCK") delete env[name];
 	}
-	return env;
+	return sanitizeWslInteropEnvironment(env, resolveWslVersion(options));
 }
 
 function terminateProcess(child) {
@@ -472,7 +538,7 @@ async function runBoundedProcess(executable, args, options = {}) {
 			detached: true,
 			shell: false,
 			stdio: ["ignore", "pipe", "pipe"],
-			env: hostBridgeEnvironment(options.env),
+			env: hostBridgeEnvironment(options.env, { wslVersion: options.wslVersion }),
 		});
 		let stdout = Buffer.alloc(0);
 		let stderr = Buffer.alloc(0);
@@ -544,7 +610,7 @@ export async function executeGrantedCapability(context, input, options = {}) {
 			: request.kind === "ssh-target"
 				? `/boundary trust-ssh ${request.target}`
 				: request.kind === "host-command"
-					? `/boundary trust-command ${(request.suggestedPrefix ?? request.argv).map((arg) => JSON.stringify(arg)).join(" ")}`
+					? `/boundary ${context.wslVersion !== undefined ? "grant-command" : "trust-command"} ${(request.suggestedPrefix ?? request.argv).map((arg) => JSON.stringify(arg)).join(" ")}`
 					: `/boundary grant-script ${JSON.stringify(input.path)} ${(request.args ?? []).map((arg) => JSON.stringify(arg)).join(" ")}`.trim();
 		throw new Error(`Missing approved ${request.kind} capability. Ask the user to run: ${hint}`);
 	}
@@ -568,6 +634,7 @@ export async function executeGrantedCapability(context, input, options = {}) {
 			signal: options.signal,
 			onData: options.onData,
 			env: options.env,
+			wslVersion: context.wslVersion,
 		});
 	} else if (request.kind === "host-command") {
 		result = await runBoundedProcess(request.argv[0], request.argv.slice(1), {
@@ -576,6 +643,7 @@ export async function executeGrantedCapability(context, input, options = {}) {
 			signal: options.signal,
 			onData: options.onData,
 			env: options.env,
+			wslVersion: context.wslVersion,
 		});
 	} else {
 		if ((await sha256File(request.target)) !== grant.sha256) throw new Error("Approved project script changed; grant revoked by hash mismatch");
@@ -585,6 +653,7 @@ export async function executeGrantedCapability(context, input, options = {}) {
 			signal: options.signal,
 			onData: options.onData,
 			env: options.env,
+			wslVersion: context.wslVersion,
 		});
 	}
 	return { grantId: grant.id, kind: request.kind, target: request.target, ...result };
