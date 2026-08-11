@@ -89,9 +89,30 @@ pi --skill /path/to/skill
 
 ### Project Boundary
 
-模型发起的 shell 使用 Pi 官方示例采用的 sandbox runtime，在 macOS 上落到 Seatbelt、Linux 上落到 bubblewrap/seccomp；Codex executor 使用 Codex permission profile。两者默认只能读取必要的系统运行路径，并可读写当前科研项目。项目内允许大步修改、删除和自由 Git commit；Git objects、index、refs 与 config 可写，`.git/hooks` 保持只读。Harness 只从用户级 Git 配置提取 `user.name` / `user.email` 注入提交环境，不暴露其余全局 Git 配置。公网和本地端口不做域名白名单限制，Unix socket、宿主凭据与其他目录不会自动继承。
+模型发起的 shell 使用 Pi 官方示例采用的 sandbox runtime，在 macOS 上落到 Seatbelt、Linux 上落到 bubblewrap/seccomp；Codex executor 使用 Codex permission profile。两者默认只能读取必要的系统运行路径，并可读写当前科研项目。项目内允许大步修改、删除和自由 Git commit；Git objects、index、refs 与 config 可写，`.git/hooks` 保持只读。Harness 只从用户级 Git 配置提取 `user.name` / `user.email` 注入提交环境，不暴露其余全局 Git 配置。普通 Web 客户端通过开放审批代理访问公网；OpenSSH 这类原始 TCP 客户端必须使用下面的显式 host capability。Unix socket、宿主凭据与其他目录不会自动继承。
 
-直接文件工具访问项目外路径或 `.env` 等受保护凭据时，交互界面会显示请求路径和解析后的真实路径，并只批准一次；非交互模式直接拒绝。shell 越界会失败，Pi 必须把准确操作交给用户。用户输入的 `!` / `!!` 是明确的人工直执行通道，不受模型 shell 边界约束。使用 `/boundary` 可查看当前状态。
+### Host capability
+
+当科研任务确实需要读取项目外资料、连接实验服务器或运行会调用 SSH/rsync 的项目脚本时，使用 `host_capability`。授权由用户在 TUI 中选择一次或当前 Pi session（24 小时），Pi 与该 session 启动的 Codex job 共用同一个本地账本：
+
+- `external-read` 只允许一个精确文件，或显式批准目录下的读取；私钥、`.env`、云凭据与 keychain 等不能授权给模型读取；
+- `ssh-target` 只允许一个精确 `[user@]host[:port]`，系统 SSH 可以不透明地使用 `~/.ssh/config`、私钥或 `SSH_AUTH_SOCK`，但凭据内容不会进入模型、prompt、job 或日志；
+- `project-script` 只允许项目内一个精确 SHA-256 和精确 argv。脚本或参数变化后必须重新批准，适合 `./sync.sh --once` 这类已有工作流；
+- Codex advisor 只能使用外部只读授权；executor 才能使用 SSH 和项目脚本。
+
+可以让模型直接调用 `host_capability` 并在弹窗中批准，也可以由用户预先执行：
+
+```text
+/boundary grant-read "~/.ssh/config"
+/boundary grant-ssh 931server
+/boundary grant-script ./sync.sh --once
+/boundary grants
+/boundary revoke <grant-id|all>
+```
+
+`/boundary` 显示当前边界和 grant 数量。授权账本位于本地 `.pi/capabilities/`，不会进入 Git；它只保存目标、scope、到期时间、脚本哈希与 argv，不保存密钥。任意通用 bash 仍处于 project-only 边界，`!` / `!!` 继续作为最后的人工系统权限通道。
+
+直接文件工具访问普通项目外路径时，交互界面会显示请求路径和解析后的真实路径，并可批准一次或本 session；已知凭据材料不能进入模型。shell 越界仍会失败，Pi 应优先请求精确 host capability，无法表达时才把准确 `!` 命令交给用户。用户输入的 `!` / `!!` 是明确的人工直执行通道，不受模型 shell 边界约束。
 
 ### Tool Activity
 
@@ -155,14 +176,14 @@ DeepSeek V4 Flash 使用 Max reasoning，但不把 1M 容量等同于等质量�
 - `advisor`：只读分析，默认 `gpt-5.6-sol`、reasoning `max`；
 - `executor`：完整执行任务，默认 `gpt-5.6-sol`、reasoning `max`、自动使用 project-write permission profile；
 - 每次调用都可覆盖 Codex model 和 reasoning effort；
-- executor 可在项目内修改或删除文件、安装项目依赖、自由提交，以及启动或取消昂贵实验；公网开放，但需要宿主凭据或项目外文件的 push、远程资源和远程实验会明确返回 blocker，由 Pi 交给用户批准或直接执行；
+- executor 可在项目内修改或删除文件、安装项目依赖、自由提交，以及启动或取消昂贵实验；经过用户授权后，它还可通过 `research_pi_host` 使用精确外部只读、SSH target 和固定脚本，不需要复制凭据或重开 delegation；
 - Codex 通过本地 stdio App Server 运行，保存稳定的 thread/turn ID；长任务默认后台运行，通过同一个工具的 `status`、`result`、`respond`、`steer`、`resume` 和 `cancel` action 管理；
 - `respond` 回答 Codex 在运行中提出的显式问题；`steer` 将修正或新证据注入仍在运行的 turn，不需要终止并重开任务；
 - 后台任务会在 Pi 底部状态栏持续显示 job 后八位、模式、运行状态与最近进度；完成、失败、取消或需要输入时，会把一条限长结构化事件送回最初的 Pi session 并自动触发 Leader 继续处理；
 - Pi 重启或恢复会话后会按 session ID 重新挂接仍在运行或尚未消费的 job。若输入框中已有草稿，事件排到下一轮，避免抢占用户正在写的内容；
 - 不默认建立 worktree，同一目标工作区同时只允许一个写入型 Codex job。
 
-Codex job、请求账本、精简 JSONL 审计事件和委派 prompt 保存在 harness 的 `.pi/codex/`，不会进入 Git。默认不落盘 token delta、reasoning 生命周期或模型正文；`job.json` 仅在可见进度或语义状态变化时更新，并在 `workerIo` 中记录实际写入计数。审计事件和 stderr 每个 job 分别限制为 2 MiB。只有显式设置 `PI_CODEX_TRACE=1` 才记录上限 32 MiB 的原始 App Server event，用完应立即关闭。已经处理的普通响应只保留长度和 SHA-256，不长期保留正文；但响应首先会进入 Pi 模型上下文，因此绝不能通过该通道传递 API key 等秘密。子进程不继承 `DEEPSEEK_API_KEY`；Codex 工具子进程还使用 `core` 环境和默认 secret-name 过滤，不继承 SSH agent。Codex CLI 自身仍使用本机 Codex 登录完成模型调用，但该认证不会授予其工具访问用户目录。
+Codex job、请求账本、精简 JSONL 审计事件和委派 prompt 保存在 harness 的 `.pi/codex/`，不会进入 Git。默认不落盘 token delta、reasoning 生命周期或模型正文；`job.json` 仅在可见进度或语义状态变化时更新，并在 `workerIo` 中记录实际写入计数。审计事件和 stderr 每个 job 分别限制为 2 MiB。只有显式设置 `PI_CODEX_TRACE=1` 才记录上限 32 MiB 的原始 App Server event，用完应立即关闭。已经处理的普通响应只保留长度和 SHA-256，不长期保留正文；但响应首先会进入 Pi 模型上下文，因此绝不能通过该通道传递 API key 等秘密。普通 Codex 工具子进程不继承 DeepSeek key，也不能直接访问 SSH agent；只有 `research_pi_host` broker 在匹配用户 grant 后才把 `SSH_AUTH_SOCK` 不透明地交给系统 SSH 进程。Codex CLI 自身仍使用本机 Codex 登录完成模型调用，但该认证不会授予其工具访问用户目录。
 
 ### Trace
 
