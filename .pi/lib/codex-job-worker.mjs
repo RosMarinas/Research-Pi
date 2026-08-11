@@ -72,8 +72,59 @@ function describeNotification(message) {
 	if (item.type === "mcpToolCall") return `${method}: MCP ${item.server ?? ""}/${item.tool ?? ""}`;
 	if (item.type === "webSearch") return `${method}: web search`;
 	if (item.type === "dynamicToolCall") return `${method}: ${item.tool ?? "dynamic tool"}`;
-	if (item.type === "agentMessage") return "Codex produced a candidate final result";
-	return item.type ? `${method}: ${item.type}` : method;
+	// Reasoning, user-message echoes, and partial/final prose are not operational
+	// progress. Persisting them would turn normal generation into job-state churn.
+	return null;
+}
+
+const DEFAULT_AUDIT_METHODS = new Set([
+	"thread/started",
+	"turn/started",
+	"turn/completed",
+	"error",
+	"item/started",
+	"item/completed",
+]);
+
+function compactAuditEvent(message) {
+	const method = message?.method;
+	if (method && message.id !== undefined) {
+		return {
+			timestamp: now(),
+			direction: "server_request",
+			id: message.id,
+			method,
+			threadId: message.params?.threadId,
+			turnId: message.params?.turnId,
+		};
+	}
+	if (message?.id !== undefined && !method) {
+		return {
+			timestamp: now(),
+			direction: "rpc_response",
+			id: message.id,
+			ok: !message.error,
+			...(message.error ? { error: truncate(message.error?.message ?? JSON.stringify(message.error), 1000) } : {}),
+		};
+	}
+	if (!DEFAULT_AUDIT_METHODS.has(method)) return null;
+	const params = message.params ?? {};
+	const item = params.item ?? {};
+	const summary = describeNotification(message);
+	if ((method === "item/started" || method === "item/completed") && !summary) {
+		// The structured result is persisted separately. Default audit mode keeps
+		// tool lifecycle, not model prose or reasoning lifecycle noise.
+		return null;
+	}
+	return {
+		timestamp: now(),
+		method,
+		threadId: params.threadId ?? params.thread?.id,
+		turnId: params.turnId ?? params.turn?.id,
+		...(item.id ? { itemId: item.id } : {}),
+		...(item.type ? { itemType: item.type } : {}),
+		summary: summary ?? method,
+	};
 }
 
 function requestId(jobId, rpcId, method) {
@@ -101,6 +152,13 @@ async function main() {
 	const outputSchema = await readJson(request.schemaPath);
 	const eventsStream = createWriteStream(join(jobDir, "events.jsonl"), { flags: "a", mode: 0o600 });
 	const stderrStream = createWriteStream(join(jobDir, "stderr.log"), { flags: "a", mode: 0o600 });
+	const rawEventTrace = process.env.PI_CODEX_TRACE === "1";
+	const maxEventLogBytes = rawEventTrace ? 32 * 1024 * 1024 : 2 * 1024 * 1024;
+	const maxStderrLogBytes = 2 * 1024 * 1024;
+	let eventLogBytes = 0;
+	let stderrLogBytes = 0;
+	let eventLogCapped = false;
+	let stderrLogCapped = false;
 	let child;
 	let stdoutBuffer = "";
 	let stderrTail = "";
@@ -112,6 +170,9 @@ async function main() {
 	let timedOut = false;
 	let timeout;
 	let commandTimer;
+	let notificationUpdateTimer;
+	let pendingNotificationUpdate = null;
+	let lastNotificationProgress = null;
 	let rpcSequence = 1;
 	let updateQueue = Promise.resolve();
 	let resolveTurn;
@@ -119,6 +180,14 @@ async function main() {
 	const pendingRpc = new Map();
 	const pendingHumanResponses = new Map();
 	const handledCommands = new Set();
+	const workerIo = {
+		appServerMessagesSeen: 0,
+		deltaNotificationsSeen: 0,
+		auditRecordsWritten: 0,
+		progressUpdatesPersisted: 0,
+		// startCodexJob created job.json once before this worker started.
+		jobStateWrites: 1,
+	};
 	const turnDone = new Promise((resolve, reject) => {
 		resolveTurn = resolve;
 		rejectTurn = reject;
@@ -127,13 +196,79 @@ async function main() {
 	// Keep the deferred rejection observed until the normal control flow awaits it.
 	void turnDone.catch(() => undefined);
 
+	const writeJobUpdate = async (update) => {
+		const nextWriteCount = workerIo.jobStateWrites + 1;
+		const result = await updateJobFile(jobDir, async (current) => {
+			const next = typeof update === "function" ? await update(current) : { ...current, ...update };
+			return { ...next, workerIo: { ...workerIo, jobStateWrites: nextWriteCount } };
+		});
+		workerIo.jobStateWrites = nextWriteCount;
+		return result;
+	};
+
 	const enqueueJobUpdate = (update) => {
 		updateQueue = updateQueue
-			.then(() => updateJobFile(jobDir, (current) => ({ ...current, ...update, lastActivityAt: now() })))
+			.then(() => writeJobUpdate((current) => ({ ...current, ...update, lastActivityAt: now() })))
 			.catch(async (error) => {
 				await appendFile(join(jobDir, "worker-errors.log"), `${now()} ${error?.stack ?? error}\n`, { mode: 0o600 });
 			});
 		return updateQueue;
+	};
+
+	const writeBounded = (stream, value, kind) => {
+		const bytes = Buffer.byteLength(value);
+		const limit = kind === "event" ? maxEventLogBytes : maxStderrLogBytes;
+		const used = kind === "event" ? eventLogBytes : stderrLogBytes;
+		if (used >= limit) {
+			if (kind === "event") eventLogCapped = true;
+			else stderrLogCapped = true;
+			return false;
+		}
+		const remaining = limit - used;
+		if (kind === "event" && bytes > remaining) {
+			// Never leave a truncated JSON record at the end of events.jsonl.
+			eventLogCapped = true;
+			return false;
+		}
+		const chunk = bytes <= remaining ? value : Buffer.from(value).subarray(0, remaining);
+		stream.write(chunk);
+		if (kind === "event") {
+			eventLogBytes += Math.min(bytes, remaining);
+			eventLogCapped ||= bytes > remaining;
+		} else {
+			stderrLogBytes += Math.min(bytes, remaining);
+			stderrLogCapped ||= bytes > remaining;
+		}
+		return true;
+	};
+
+	const writeAuditEvent = (message) => {
+		const record = rawEventTrace ? message : compactAuditEvent(message);
+		if (!record) return;
+		if (writeBounded(eventsStream, `${JSON.stringify(record)}\n`, "event")) workerIo.auditRecordsWritten += 1;
+	};
+
+	const cancelNotificationUpdate = () => {
+		if (notificationUpdateTimer) clearTimeout(notificationUpdateTimer);
+		notificationUpdateTimer = undefined;
+		pendingNotificationUpdate = null;
+	};
+
+	const flushNotificationUpdate = () => {
+		if (notificationUpdateTimer) clearTimeout(notificationUpdateTimer);
+		notificationUpdateTimer = undefined;
+		const update = pendingNotificationUpdate;
+		pendingNotificationUpdate = null;
+		if (!update) return updateQueue;
+		workerIo.progressUpdatesPersisted += 1;
+		return enqueueJobUpdate(update);
+	};
+
+	const queueNotificationUpdate = (update) => {
+		pendingNotificationUpdate = { ...(pendingNotificationUpdate ?? {}), ...update };
+		if (!notificationUpdateTimer) {
+			notificationUpdateTimer = setTimeout(() => void flushNotificationUpdate(), 400);
+		}
 	};
 
 	const send = (message) => {
@@ -171,6 +306,7 @@ async function main() {
 	};
 
 	const waitForHumanResponse = async (record) => {
+		cancelNotificationUpdate();
 		await writeJsonAtomic(join(jobDir, "requests", `${record.id}.json`), record);
 		await enqueueJobUpdate({
 			status: "input_required",
@@ -250,7 +386,9 @@ async function main() {
 	};
 
 	const handleMessage = (message) => {
-		eventsStream.write(`${JSON.stringify(message)}\n`);
+		workerIo.appServerMessagesSeen += 1;
+		if (message?.method === "item/agentMessage/delta") workerIo.deltaNotificationsSeen += 1;
+		writeAuditEvent(message);
 		if (message?.method && message.id !== undefined) {
 			void handleServerRequest(message);
 			return;
@@ -266,6 +404,8 @@ async function main() {
 		}
 		const method = message?.method;
 		const params = message?.params ?? {};
+		const previousThreadId = threadId;
+		const previousTurnId = activeTurnId;
 		if (method === "thread/started") threadId = params.thread?.id ?? threadId;
 		if (method === "turn/started") activeTurnId = params.turn?.id ?? params.turnId ?? activeTurnId;
 		if (method === "item/completed" && params.item?.type === "agentMessage" && typeof params.item.text === "string") {
@@ -273,11 +413,15 @@ async function main() {
 		}
 		if (method === "error") lastError = truncate(params.error?.message ?? params.message ?? JSON.stringify(params), 4000);
 		const progress = describeNotification(message);
-		if (progress || threadId || activeTurnId) enqueueJobUpdate({
-			threadId,
-			activeTurnId,
-			...(progress ? { progress } : {}),
-		});
+		const identityChanged = threadId !== previousThreadId || activeTurnId !== previousTurnId;
+		const progressChanged = progress && progress !== lastNotificationProgress;
+		if (progressChanged) lastNotificationProgress = progress;
+		if (identityChanged || progressChanged) {
+			queueNotificationUpdate({
+				...(identityChanged ? { threadId, activeTurnId } : {}),
+				...(progressChanged ? { progress } : {}),
+			});
+		}
 		if (method === "turn/completed" && (!activeTurnId || params.turn?.id === activeTurnId)) {
 			resolveTurn(params.turn ?? { status: "completed" });
 		}
@@ -354,7 +498,7 @@ async function main() {
 	});
 
 	try {
-		await updateJobFile(jobDir, (current) => ({
+		await writeJobUpdate((current) => ({
 			...current,
 			status: "running",
 			workerPid: process.pid,
@@ -377,11 +521,11 @@ async function main() {
 			stdio: ["pipe", "pipe", "pipe"],
 			env: { ...sanitizeCodexEnvironment(process.env), CODEX_SQLITE_HOME: codexStateHome },
 		});
-		await updateJobFile(jobDir, (current) => ({ ...current, codexPid: child.pid ?? null, lastActivityAt: now() }));
+		await writeJobUpdate((current) => ({ ...current, codexPid: child.pid ?? null, lastActivityAt: now() }));
 		child.stderr.on("data", (chunk) => {
 			stderrTail = truncate(`${stderrTail}${chunk.toString()}`, 12000);
+			writeBounded(stderrStream, chunk, "stderr");
 		});
-		child.stderr.pipe(stderrStream, { end: false });
 		child.stdout.on("data", (chunk) => {
 			stdoutBuffer += chunk.toString();
 			const lines = stdoutBuffer.split("\n");
@@ -391,7 +535,7 @@ async function main() {
 				try {
 					handleMessage(JSON.parse(line));
 				} catch {
-					eventsStream.write(`${JSON.stringify({ malformed: truncate(line, 4000) })}\n`);
+					writeBounded(eventsStream, `${JSON.stringify({ timestamp: now(), malformed: truncate(line, 4000) })}\n`, "event");
 				}
 			}
 		});
@@ -417,7 +561,10 @@ async function main() {
 
 		await rpcRequest("initialize", {
 			clientInfo: { name: "research_pi", title: "Research Pi Harness", version: "0.1.0" },
-			capabilities: { experimentalApi: true },
+			capabilities: {
+				experimentalApi: true,
+				optOutNotificationMethods: ["item/agentMessage/delta"],
+			},
 		}, 30_000);
 		send({ method: "initialized", params: {} });
 
@@ -486,6 +633,7 @@ async function main() {
 		const turn = await turnDone;
 		if (timeout) clearTimeout(timeout);
 		if (commandTimer) clearInterval(commandTimer);
+		cancelNotificationUpdate();
 		await updateQueue;
 		const turnFailed = turn?.status === "failed";
 		if (turnFailed) lastError = truncate(turn.error?.message ?? (lastError || "Codex turn failed"), 4000);
@@ -494,7 +642,7 @@ async function main() {
 		await writeJsonAtomic(resultPath, result);
 		const status = cancellationRequested ? "cancelled" : !turnFailed && !timedOut ? "completed" : "failed";
 		const gitAfter = await getGitSnapshot(request.cwd);
-		await updateJobFile(jobDir, (current) => ({
+		await writeJobUpdate((current) => ({
 			...current,
 			status,
 			finishedAt: now(),
@@ -506,13 +654,16 @@ async function main() {
 			gitAfter,
 			resultPath,
 			error: status === "failed" ? lastError || "Codex turn failed" : null,
+			logCapped: { events: eventLogCapped, stderr: stderrLogCapped },
 			lastActivityAt: now(),
 		}));
 	} catch (error) {
+		cancelNotificationUpdate();
+		await updateQueue;
 		lastError = truncate(error?.stack ?? String(error), 12000);
 		const resultPath = join(jobDir, "result.json");
 		await writeJsonAtomic(resultPath, parseStructuredResult(lastAgentText, lastError)).catch(() => undefined);
-		await updateJobFile(jobDir, (current) => ({
+		await writeJobUpdate((current) => ({
 			...current,
 			status: cancellationRequested ? "cancelled" : "failed",
 			finishedAt: now(),
@@ -521,11 +672,13 @@ async function main() {
 			progress: cancellationRequested ? "cancelled" : "worker failed",
 			resultPath,
 			error: lastError,
+			logCapped: { events: eventLogCapped, stderr: stderrLogCapped },
 			lastActivityAt: now(),
 		})).catch(() => undefined);
 	} finally {
 		if (timeout) clearTimeout(timeout);
 		if (commandTimer) clearInterval(commandTimer);
+		cancelNotificationUpdate();
 		for (const pending of pendingRpc.values()) {
 			clearTimeout(pending.timer);
 			pending.reject(new Error("Codex app-server worker stopped"));
@@ -536,7 +689,9 @@ async function main() {
 		terminateChild("SIGKILL");
 		eventsStream.end();
 		stderrStream.end();
-		if (!lastError && stderrTail) {
+		// stderr.log already contains the stream. Preserve a second tail only when
+		// the bounded log dropped later diagnostics after reaching its cap.
+		if (stderrLogCapped && stderrTail) {
 			await appendFile(join(jobDir, "stderr-tail.log"), stderrTail, { mode: 0o600 }).catch(() => undefined);
 		}
 		await releaseWriterLock(request.lockPath, request.jobId).catch(() => undefined);

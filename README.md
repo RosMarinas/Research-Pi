@@ -156,7 +156,7 @@ DeepSeek V4 Flash 使用 Max reasoning，但不把 1M 容量等同于等质量�
 - Pi 重启或恢复会话后会按 session ID 重新挂接仍在运行或尚未消费的 job。若输入框中已有草稿，事件排到下一轮，避免抢占用户正在写的内容；
 - 不默认建立 worktree，同一目标工作区同时只允许一个写入型 Codex job。
 
-Codex job、请求账本、完整 JSONL event 和委派 prompt 保存在 harness 的 `.pi/codex/`，不会进入 Git。已经处理的普通响应只保留长度和 SHA-256，不长期保留正文；但响应首先会进入 Pi 模型上下文，因此绝不能通过该通道传递 API key 等秘密。子进程不继承 `DEEPSEEK_API_KEY`；Codex 工具子进程还使用 `core` 环境和默认 secret-name 过滤，不继承 SSH agent。Codex CLI 自身仍使用本机 Codex 登录完成模型调用，但该认证不会授予其工具访问用户目录。
+Codex job、请求账本、精简 JSONL 审计事件和委派 prompt 保存在 harness 的 `.pi/codex/`，不会进入 Git。默认不落盘 token delta、reasoning 生命周期或模型正文；`job.json` 仅在可见进度或语义状态变化时更新，并在 `workerIo` 中记录实际写入计数。审计事件和 stderr 每个 job 分别限制为 2 MiB。只有显式设置 `PI_CODEX_TRACE=1` 才记录上限 32 MiB 的原始 App Server event，用完应立即关闭。已经处理的普通响应只保留长度和 SHA-256，不长期保留正文；但响应首先会进入 Pi 模型上下文，因此绝不能通过该通道传递 API key 等秘密。子进程不继承 `DEEPSEEK_API_KEY`；Codex 工具子进程还使用 `core` 环境和默认 secret-name 过滤，不继承 SSH agent。Codex CLI 自身仍使用本机 Codex 登录完成模型调用，但该认证不会授予其工具访问用户目录。
 
 ### Trace
 

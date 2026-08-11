@@ -66,6 +66,8 @@ let model = "unknown";
 let isResume = false;
 let activeTurn = null;
 let completionTimer;
+let deltaNotificationsOptedOut = false;
+process.stderr.write("fake app-server warning\\n");
 
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
 const complete = (prompt, leaderResponse = "") => {
@@ -76,7 +78,7 @@ const complete = (prompt, leaderResponse = "") => {
     status: "completed",
     goal_satisfied: true,
     summary: isResume ? "resumed" : "finished",
-    evidence: [model, sandbox, prompt.includes("Research Pi") ? "role-present" : "role-missing", leaderResponse].filter(Boolean),
+    evidence: [model, sandbox, prompt.includes("Research Pi") ? "role-present" : "role-missing", deltaNotificationsOptedOut ? "delta-opt-out" : "delta-not-opted-out", leaderResponse].filter(Boolean),
     actions_taken: ["fake action"],
     changed_files: sandbox === "${CODEX_EXECUTOR_PROFILE}" ? ["codex-executed.txt"] : [],
     checks: [{ command: "fake-check", result: "passed" }],
@@ -91,6 +93,7 @@ const complete = (prompt, leaderResponse = "") => {
 createInterface({ input: process.stdin }).on("line", (line) => {
   const message = JSON.parse(line);
   if (message.method === "initialize") {
+    deltaNotificationsOptedOut = message.params.capabilities?.optOutNotificationMethods?.includes("item/agentMessage/delta") ?? false;
     send({ id: message.id, result: { userAgent: "fake", platformFamily: "unix", platformOs: "test", codexHome: process.cwd() } });
   } else if (message.method === "thread/start") {
     model = message.params.model;
@@ -106,6 +109,11 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     const prompt = message.params.input[0].text;
     send({ id: message.id, result: { turn: { id: activeTurn, status: "inProgress", items: [], error: null } } });
     send({ method: "turn/started", params: { threadId: "thread-fake-123", turn: { id: activeTurn, status: "inProgress", items: [], error: null } } });
+    if (prompt.includes("delta storm")) {
+      for (let index = 0; index < 1000; index += 1) {
+        send({ method: "item/agentMessage/delta", params: { threadId: "thread-fake-123", turnId: activeTurn, itemId: "message-1", delta: "x" } });
+      }
+    }
     if (prompt.includes("ask the leader live")) {
       send({ id: "server-question-1", method: "item/tool/call", params: { threadId: "thread-fake-123", turnId: activeTurn, callId: "call-1", tool: "consult_research_pi", arguments: { audience: "leader", question: "Choose H1 or H2", why_blocking: "The experiment differs", options: ["H1", "H2"] } } });
     } else {
@@ -274,6 +282,39 @@ test("app-server delegation supports live leader requests and durable session re
 		const persistedCommand = readFileSync(join(jobRoot, started.id, "commands", commandName), "utf8");
 		assert.doesNotMatch(persistedCommand, /Use H2/);
 		assert.match(persistedCommand, /responseSha256/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("token delta storms do not amplify job-state or default audit-log writes", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-io-"));
+	try {
+		const workspace = join(root, "workspace");
+		const jobRoot = join(root, "codex", "jobs");
+		mkdirSync(workspace, { recursive: true });
+		const codexBin = makeFakeCodex(root);
+		const started = await startCodexJob({
+			cwd: workspace,
+			jobRoot,
+			codexBin,
+			mode: "advisor",
+			task: "run a delta storm protocol smoke",
+		});
+		const completed = await waitForCodexJob(started.id, { jobRoot });
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		assert.equal(completed.status, "completed");
+		assert.match(completed.result.evidence.join("\n"), /delta-opt-out/);
+		assert.equal(completed.workerIo.deltaNotificationsSeen, 1000);
+		assert.ok(completed.workerIo.jobStateWrites <= 7, JSON.stringify(completed.workerIo));
+		assert.ok(completed.workerIo.progressUpdatesPersisted <= 1, JSON.stringify(completed.workerIo));
+
+		const jobDir = join(jobRoot, started.id);
+		const events = readFileSync(join(jobDir, "events.jsonl"), "utf8");
+		assert.doesNotMatch(events, /item\/agentMessage\/delta/);
+		assert.ok(events.trim().split("\n").length < 20, events);
+		assert.ok(readdirSync(jobDir).includes("stderr.log"));
+		assert.ok(!readdirSync(jobDir).includes("stderr-tail.log"));
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
