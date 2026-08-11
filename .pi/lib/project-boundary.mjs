@@ -5,6 +5,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { getWslVersion } from "@anthropic-ai/sandbox-runtime";
+import { normalizeSystemRuntimePolicy } from "./security-policy.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -232,11 +233,15 @@ function gitRules(workspaceRoot, access) {
 	].join(", ");
 }
 
-function filesystemBaseRules(workspaceRoot, access) {
+function filesystemBaseRules(workspaceRoot, access, runtimePolicy) {
+	const runtimeRules = normalizeSystemRuntimePolicy(runtimePolicy).readRoots.map(
+		(path) => `${JSON.stringify(path)} = "read"`,
+	);
 	return [
 		"glob_scan_max_depth = 4",
 		'":root" = "deny"',
 		'":minimal" = "read"',
+		...runtimeRules,
 		temporaryDenyRules(),
 		gitRules(workspaceRoot, access),
 	]
@@ -244,14 +249,14 @@ function filesystemBaseRules(workspaceRoot, access) {
 		.join(", ");
 }
 
-export function permissionProfileDefinition({ access = "write", workspaceRoot } = {}) {
+export function permissionProfileDefinition({ access = "write", workspaceRoot, runtimePolicy } = {}) {
 	if (access !== "read" && access !== "write") throw new Error(`Unsupported project access: ${access}`);
 	return [
 		"{",
 		`description = "Research Pi project ${access} access boundary",`,
 		workspaceRoot ? `workspace_roots = { ${JSON.stringify(workspaceRoot)} = true },` : undefined,
 		"filesystem = {",
-		`${filesystemBaseRules(workspaceRoot, access)},`,
+		`${filesystemBaseRules(workspaceRoot, access, runtimePolicy)},`,
 		`":workspace_roots" = { ${workspaceRules(access)} }`,
 		"},",
 		'network = { enabled = true, allow_local_binding = true, domains = { "*" = "allow" } }',
@@ -261,26 +266,125 @@ export function permissionProfileDefinition({ access = "write", workspaceRoot } 
 		.join(" ");
 }
 
-export function codexPermissionConfigArguments(mode, workspaceRoot, runtimeTmp, gitIdentity) {
+export function codexPermissionConfigArguments(mode, workspaceRoot, runtimeTmp, gitIdentity, runtimePolicy) {
 	const advisor = mode === "advisor";
 	const profile = advisor ? CODEX_ADVISOR_PROFILE : CODEX_EXECUTOR_PROFILE;
 	const access = advisor ? "read" : "write";
+	const normalizedRuntime = normalizeSystemRuntimePolicy(runtimePolicy);
+	const shellEnvironment = {
+		...normalizedRuntime.environment,
+		GIT_CONFIG_GLOBAL: "/dev/null",
+		GIT_CONFIG_NOSYSTEM: "1",
+		GIT_OPTIONAL_LOCKS: "0",
+		...(runtimeTmp
+			? {
+					TMPDIR: runtimeTmp,
+					TMP: runtimeTmp,
+					TEMP: runtimeTmp,
+					...(gitIdentity
+						? {
+								GIT_AUTHOR_NAME: gitIdentity.name,
+								GIT_AUTHOR_EMAIL: gitIdentity.email,
+								GIT_COMMITTER_NAME: gitIdentity.name,
+								GIT_COMMITTER_EMAIL: gitIdentity.email,
+							}
+						: {}),
+				}
+			: {}),
+	};
+	const shellEnvironmentToml = Object.entries(shellEnvironment)
+		.map(([name, value]) => `${name}=${JSON.stringify(value)}`)
+		.join(", ");
 	return [
 		"-c",
 		`default_permissions=${JSON.stringify(profile)}`,
 		"-c",
-		`permissions.${profile}=${permissionProfileDefinition({ access, workspaceRoot })}`,
+		`permissions.${profile}=${permissionProfileDefinition({ access, workspaceRoot, runtimePolicy: normalizedRuntime })}`,
 		"-c",
 		'shell_environment_policy.inherit="core"',
 		"-c",
 		"shell_environment_policy.ignore_default_excludes=false",
-		...(runtimeTmp
+		...(shellEnvironmentToml
 			? [
 					"-c",
-					`shell_environment_policy.set={ TMPDIR=${JSON.stringify(runtimeTmp)}, TMP=${JSON.stringify(runtimeTmp)}, TEMP=${JSON.stringify(runtimeTmp)}, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1"${gitIdentity ? `, GIT_AUTHOR_NAME=${JSON.stringify(gitIdentity.name)}, GIT_AUTHOR_EMAIL=${JSON.stringify(gitIdentity.email)}, GIT_COMMITTER_NAME=${JSON.stringify(gitIdentity.name)}, GIT_COMMITTER_EMAIL=${JSON.stringify(gitIdentity.email)}` : ""} }`,
+					`shell_environment_policy.set={ ${shellEnvironmentToml} }`,
 				]
 			: []),
 	];
+}
+
+export async function runCodexSandboxPreflight(options) {
+	const mode = options.mode === "advisor" ? "advisor" : "executor";
+	const profile = mode === "advisor" ? CODEX_ADVISOR_PROFILE : CODEX_EXECUTOR_PROFILE;
+	const cwd = resolve(options.cwd);
+	const runtimePolicy = normalizeSystemRuntimePolicy(options.runtimePolicy);
+	const permissionArgs = codexPermissionConfigArguments(
+		mode,
+		cwd,
+		options.runtimeTmp,
+		options.gitIdentity,
+		runtimePolicy,
+	);
+	const commands = ["git --version >/dev/null"];
+	if (existsSync(join(cwd, ".git"))) {
+		commands.push("git status --porcelain=v1 --untracked-files=no >/dev/null");
+	}
+	if (existsSync(join(cwd, ".env"))) {
+		commands.push('if dd if=.env of=/dev/null bs=1 count=1 2>/dev/null; then echo "project .env became readable" >&2; exit 91; fi');
+	}
+	if (mode === "executor" && options.runtimeTmp) {
+		commands.push(
+			'probe="$TMPDIR/codex-permission-preflight-$$"',
+			'trap \'rm -rf "$probe"\' EXIT',
+			'mkdir -p "$probe"',
+			'git init -q "$probe"',
+			'printf "permission probe\\n" > "$probe/probe.txt"',
+			'git -C "$probe" add probe.txt',
+			'git -C "$probe" -c user.name="Research Pi Doctor" -c user.email="doctor@research-pi.invalid" commit -q -m "permission probe"',
+		);
+	}
+	commands.push('if command -v python3 >/dev/null 2>&1; then python3 --version >/dev/null; fi');
+	commands.push('printf "research-pi-codex-preflight=ok\\n"');
+	const environment = {
+		...sanitizeBoundaryEnvironment(options.environment ?? process.env),
+		...runtimePolicy.environment,
+		GIT_CONFIG_GLOBAL: "/dev/null",
+		GIT_CONFIG_NOSYSTEM: "1",
+		GIT_OPTIONAL_LOCKS: "0",
+	};
+	try {
+		const { stdout, stderr } = await execFileAsync(
+			options.codexBin ?? "codex",
+			[
+				...permissionArgs,
+				"sandbox",
+				"-P",
+				profile,
+				"-C",
+				cwd,
+				"/bin/sh",
+				"-c",
+				commands.join("\n"),
+			],
+			{
+				cwd,
+				env: environment,
+				timeout: options.timeoutMs ?? 20_000,
+				maxBuffer: 64 * 1024,
+			},
+		);
+		return {
+			ok: true,
+			mode,
+			profile,
+			stdout: stdout.trim(),
+			stderr: stderr.trim(),
+			runtimePolicy,
+		};
+	} catch (error) {
+		const detail = [error?.message, error?.stdout, error?.stderr].filter(Boolean).join("\n").slice(-12_000);
+		throw new Error(`Codex ${mode} sandbox preflight failed before model execution:\n${detail}`, { cause: error });
+	}
 }
 
 function canonicalTemporaryPaths() {
@@ -323,7 +427,8 @@ function discoverSensitiveProjectPaths(root, maxDepth = 4) {
 	return [...found];
 }
 
-export function buildSandboxRuntimeConfig(root, environment = process.env) {
+export function buildSandboxRuntimeConfig(root, environment = process.env, runtimePolicy) {
+	const normalizedRuntime = normalizeSystemRuntimePolicy(runtimePolicy);
 	const userParent = dirname(homedir());
 	const deniedRegions = new Set([userParent, ...canonicalTemporaryPaths()]);
 	if (process.platform === "darwin") deniedRegions.add("/Volumes");
@@ -357,7 +462,7 @@ export function buildSandboxRuntimeConfig(root, environment = process.env) {
 		},
 		filesystem: {
 			denyRead: [...deniedRegions, ...sensitive],
-			allowRead: [root, ...macOSXcrunCachePaths()],
+			allowRead: [root, ...normalizedRuntime.readRoots, ...macOSXcrunCachePaths()],
 			allowWrite: [root, ...macOSXcrunCachePaths()],
 			denyWrite: [...externalDefaultWrites, ...sensitive],
 			allowGitConfig: true,

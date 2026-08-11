@@ -4,6 +4,7 @@ import { access, mkdir, open, readFile, readdir, realpath, rename, unlink, write
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { capabilityGrantSummary, listCapabilityGrants, resolveCapabilityContext } from "./host-capabilities.mjs";
+import { researchPiStateRoot } from "./runtime-paths.mjs";
 import {
 	CODEX_ADVISOR_PROFILE,
 	CODEX_EXECUTOR_PROFILE,
@@ -15,7 +16,8 @@ import {
 
 const LIB_DIR = dirname(fileURLToPath(import.meta.url));
 export const HARNESS_ROOT = resolve(LIB_DIR, "../..");
-export const DEFAULT_CODEX_JOB_ROOT = join(HARNESS_ROOT, ".pi", "codex", "jobs");
+export const RESEARCH_PI_STATE_ROOT = researchPiStateRoot(HARNESS_ROOT);
+export const DEFAULT_CODEX_JOB_ROOT = join(RESEARCH_PI_STATE_ROOT, "codex", "jobs");
 export const DEFAULT_CODEX_SCHEMA_PATH = join(HARNESS_ROOT, ".pi", "schemas", "codex-delegate-result.json");
 export const CODEX_JOB_WORKER_PATH = join(LIB_DIR, "codex-job-worker.mjs");
 export const DEFAULT_CODEX_MODEL = "gpt-5.6-sol";
@@ -283,6 +285,7 @@ export async function startCodexJob(options) {
 			lockPath,
 			runtimeTmp: boundaryRuntime?.runtimeTmp,
 			gitIdentity,
+			skipSandboxPreflight: options.skipSandboxPreflight === true,
 			hostCapabilityContext,
 		};
 		const job = {

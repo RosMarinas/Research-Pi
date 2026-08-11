@@ -2,7 +2,38 @@
 
 Research Pi 是一个面向 AI、通信等计算实验的个人 Pi harness。它使用锁定版本的 Pi Core 和 DeepSeek V4 Flash，并加入科研优先的身份与工作约定、项目级命令边界、持久化 side 对话、DeepSeek 原生网页检索、实验记录、研究 checkpoint、非向量历史检索、结构化科研 compact、Codex 长程执行委派与按需 trace。
 
-## 快速开始
+## 开发仓库与稳定安装
+
+本仓库本身是 Research Pi 的快速开发 checkout：修改 extension、policy 或 prompt 后，`./run-pi.sh` 会立即使用新代码，适合持续迭代。`./install-user.sh` 创建的 `~/.local/bin/pi` 只是指向该 checkout 的开发软链接，不属于稳定发布。
+
+稳定版本按 npm CLI 打包，程序代码、用户配置和运行状态彼此分离：
+
+```text
+npm 全局目录                  Research Pi 程序与锁定依赖
+~/.config/research-pi/        credentials.env 等用户配置
+~/.local/state/research-pi/   sessions、memory、Codex jobs、grants、trace
+<research-project>/.pi/       该项目自己的实验记录与 checkpoint
+```
+
+发布稳定 tag/package 后，安装方式为：
+
+```sh
+./install-user.sh --remove-dev-links  # 若此前安装过 checkout 开发软链接
+npm install -g @rosmarinas/research-pi
+pi setup
+pi paths
+```
+
+也可从明确的 Git tag 安装而不依赖 npm registry：
+
+```sh
+npm install -g 'git+ssh://git@github.com/RosMarinas/Research-Pi.git#v0.2.0'
+pi setup
+```
+
+`pi setup` 只创建权限为 `0600` 的用户配置模板，不生成或提交密钥。填入 `~/.config/research-pi/credentials.env` 后即可在任意项目运行 `pi`。使用 `pi paths` 可检查当前程序、配置和状态目录；使用 `pi doctor` 可在不调用模型的情况下验证宿主 Git/Python 与 Codex sandbox。
+
+## 从源码快速开发
 
 要求 Node.js `>=22.19`。
 
@@ -19,7 +50,7 @@ cp .env.example .env
 DEEPSEEK_API_KEY=你的_API_key
 ```
 
-安装当前用户的命令入口：
+可选：安装指向当前 checkout 的开发命令入口：
 
 ```sh
 ./install-user.sh
@@ -46,7 +77,7 @@ Windows 上的最小、安全迁移路线是 WSL2，而不是让现有 Bash harn
 - `pi-traced`：额外记录模型、工具与时延 trace；trace 可能包含敏感内容，仅按需使用。
 - `pi-raw`：直接运行锁定的 Pi Core，用于与 harness 行为进行对照。
 
-安装器默认在 `${XDG_BIN_HOME:-$HOME/.local/bin}` 创建符号链接，不覆盖已经存在的同名文件。
+开发安装器默认在 `${XDG_BIN_HOME:-$HOME/.local/bin}` 创建符号链接，不覆盖已经存在的同名文件。移动或删除 checkout 会使该开发入口失效；稳定使用应安装打包版本。
 
 ## 默认配置
 
@@ -56,13 +87,15 @@ Windows 上的最小、安全迁移路线是 WSL2，而不是让现有 Bash harn
 - Endpoint：`https://api.deepseek.com`
 - Thinking level：`max`（通过官方 `reasoning_effort: "max"` 启用；384K 是最大输出上限，不是输入上下文或压缩阈值）
 
-主要配置位于：
+源码开发模式的 Harness 配置位于：
 
 - `.pi/settings.json`：模型、thinking 和 retry 设置。
 - `.pi/agent/settings.json`：在其他科研项目中调用 `pi` 时仍生效的 retry 和 compact 默认值。
 - `.pi/agent/models.json`：DeepSeek 请求字段兼容配置。
 - `.pi/APPEND_SYSTEM.md`：追加到 Pi 默认提示后的稳定 Research Contract。
 - `.pi/extensions/`：Research Pi 提供的工具扩展。
+
+打包模式会在启动时把经过审查的 `models.json` 和 `settings.json` 部署到用户状态目录；API key、session、memory、trace、Codex job 和 capability ledger 不写入 npm 安装目录。
 
 运行其他科研仓库时，该仓库自身的 `AGENTS.md` 等项目上下文仍会正常加载。
 
@@ -91,6 +124,18 @@ pi --skill /path/to/skill
 
 模型发起的 shell 使用 Pi 官方示例采用的 sandbox runtime，在 macOS 上落到 Seatbelt、Linux 上落到 bubblewrap/seccomp；Codex executor 使用 Codex permission profile。两者默认只能读取必要的系统运行路径，并可读写当前科研项目。项目内允许大步修改、删除和自由 Git commit；Git objects、index、refs 与 config 可写，`.git/hooks` 保持只读。Harness 只从用户级 Git 配置提取 `user.name` / `user.email` 注入提交环境，不暴露其余全局 Git 配置。普通 Web 客户端通过开放审批代理访问公网；OpenSSH 这类原始 TCP 客户端必须使用下面的显式 host capability。Unix socket、宿主凭据与其他目录不会自动继承。
 
+macOS 启动时由可信宿主侧解析活动的 `xcode-select -p`，将该 Developer 目录只读加入 Pi/Codex 的共享系统运行时策略，并显式设置 `DEVELOPER_DIR`。因此 `/usr/bin/git`、系统 Python 和编译工具不需要读取整个用户目录。每个 Codex job 在模型执行前先运行无模型 sandbox preflight；Git 或系统运行时不可用时立即失败，不消耗模型调用。可随时执行：
+
+```text
+/boundary doctor
+```
+
+或在终端执行：
+
+```sh
+pi doctor --workspace /path/to/research-project
+```
+
 ### Host capability
 
 当科研任务确实需要读取项目外资料、连接实验服务器或运行会调用 SSH/rsync 的项目脚本时，使用 `host_capability`。授权由用户在 TUI 中选择一次或当前 Pi session（24 小时），Pi 与该 session 启动的 Codex job 共用同一个本地账本：
@@ -110,7 +155,7 @@ pi --skill /path/to/skill
 /boundary revoke <grant-id|all>
 ```
 
-`/boundary` 显示当前边界和 grant 数量。授权账本位于本地 `.pi/capabilities/`，不会进入 Git；它只保存目标、scope、到期时间、脚本哈希与 argv，不保存密钥。任意通用 bash 仍处于 project-only 边界，`!` / `!!` 继续作为最后的人工系统权限通道。
+`/boundary` 显示当前边界和 grant 数量。授权账本位于当前状态目录的 `capabilities/`（源码模式即 `.pi/capabilities/`），不会进入 Git；它只保存目标、scope、到期时间、脚本哈希与 argv，不保存密钥。任意通用 bash 仍处于 project-only 边界，`!` / `!!` 继续作为最后的人工系统权限通道。
 
 直接文件工具访问普通项目外路径时，交互界面会显示请求路径和解析后的真实路径，并可批准一次或本 session；已知凭据材料不能进入模型。shell 越界仍会失败，Pi 应优先请求精确 host capability，无法表达时才把准确 `!` 命令交给用户。用户输入的 `!` / `!!` 是明确的人工直执行通道，不受模型 shell 边界约束。
 
@@ -132,7 +177,7 @@ Research Pi 默认处于探索与验证阶段：构造竞争假设，优先高�
 
 ### Research Memory
 
-`research_memory_search` 和 `research_memory_read` 为模型提供按需历史检索。原始 session JSONL 和实验账本仍是事实源；本地 `.pi/memory/memory.sqlite` 只是可删除、可重建的派生索引。
+`research_memory_search` 和 `research_memory_read` 为模型提供按需历史检索。原始 session JSONL 和实验账本仍是事实源；状态目录中的 `memory/memory.sqlite` 只是可删除、可重建的派生索引。
 
 - 使用 SQLite FTS5，不使用 embeddings 或向量数据库；
 - 中文使用 trigram，短 run ID 使用受限子串回退；
@@ -183,11 +228,11 @@ DeepSeek V4 Flash 使用 Max reasoning，但不把 1M 容量等同于等质量�
 - Pi 重启或恢复会话后会按 session ID 重新挂接仍在运行或尚未消费的 job。若输入框中已有草稿，事件排到下一轮，避免抢占用户正在写的内容；
 - 不默认建立 worktree，同一目标工作区同时只允许一个写入型 Codex job。
 
-Codex job、请求账本、精简 JSONL 审计事件和委派 prompt 保存在 harness 的 `.pi/codex/`，不会进入 Git。默认不落盘 token delta、reasoning 生命周期或模型正文；`job.json` 仅在可见进度或语义状态变化时更新，并在 `workerIo` 中记录实际写入计数。审计事件和 stderr 每个 job 分别限制为 2 MiB。只有显式设置 `PI_CODEX_TRACE=1` 才记录上限 32 MiB 的原始 App Server event，用完应立即关闭。已经处理的普通响应只保留长度和 SHA-256，不长期保留正文；但响应首先会进入 Pi 模型上下文，因此绝不能通过该通道传递 API key 等秘密。普通 Codex 工具子进程不继承 DeepSeek key，也不能直接访问 SSH agent；只有 `research_pi_host` broker 在匹配用户 grant 后才把 `SSH_AUTH_SOCK` 不透明地交给系统 SSH 进程。Codex CLI 自身仍使用本机 Codex 登录完成模型调用，但该认证不会授予其工具访问用户目录。
+Codex job、请求账本、精简 JSONL 审计事件和委派 prompt 保存在状态目录的 `codex/`（源码模式即 `.pi/codex/`），不会进入 Git。默认不落盘 token delta、reasoning 生命周期或模型正文；`job.json` 仅在可见进度或语义状态变化时更新，并在 `workerIo` 中记录实际写入计数。审计事件和 stderr 每个 job 分别限制为 2 MiB。只有显式设置 `PI_CODEX_TRACE=1` 才记录上限 32 MiB 的原始 App Server event，用完应立即关闭。已经处理的普通响应只保留长度和 SHA-256，不长期保留正文；但响应首先会进入 Pi 模型上下文，因此绝不能通过该通道传递 API key 等秘密。普通 Codex 工具子进程不继承 DeepSeek key，也不能直接访问 SSH agent；只有 `research_pi_host` broker 在匹配用户 grant 后才把 `SSH_AUTH_SOCK` 不透明地交给系统 SSH 进程。Codex CLI 自身仍使用本机 Codex 登录完成模型调用，但该认证不会授予其工具访问用户目录。
 
 ### Trace
 
-`pi-traced` 将 trace 写入本 harness 的 `.pi/agent/traces/`。其中可能包含完整 prompt、工具参数和输出；该目录已被 Git 忽略。
+`pi-traced` 将 trace 写入状态目录的 `agent/traces/`（源码模式即 `.pi/agent/traces/`）。其中可能包含完整 prompt、工具参数和输出；源码状态目录已被 Git 忽略，稳定包状态目录位于 checkout 之外。
 
 ## 不安装全局入口
 
