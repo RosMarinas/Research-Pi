@@ -9,6 +9,7 @@ import {
 	prepareBoundaryRuntime,
 	readGitIdentity,
 	resolveProjectRoot,
+	sanitizeWslInteropEnvironment,
 } from "./project-boundary.mjs";
 
 const LIB_DIR = dirname(fileURLToPath(import.meta.url));
@@ -51,8 +52,8 @@ export function validateReasoningEffort(effort) {
 	return effort;
 }
 
-export function sanitizeCodexEnvironment(source = process.env) {
-	const env = { ...source };
+export function sanitizeCodexEnvironment(source = process.env, wslVersion) {
+	const env = sanitizeWslInteropEnvironment(source, wslVersion);
 	delete env.DEEPSEEK_API_KEY;
 	delete env.PI_DEEPSEEK_API_KEY;
 	return env;

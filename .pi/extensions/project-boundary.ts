@@ -1,13 +1,14 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
+import { getWslVersion, SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import type { ExtensionAPI, BashOperations } from "@earendil-works/pi-coding-agent";
 import { createBashTool } from "@earendil-works/pi-coding-agent";
 import {
 	boundaryWarning,
 	buildSandboxRuntimeConfig,
 	directToolPath,
+	assertWslSandboxDependencies,
 	isProtectedProjectMutation,
 	likelySandboxDenial,
 	prepareBoundaryRuntime,
@@ -17,6 +18,33 @@ import {
 } from "../lib/project-boundary.mjs";
 
 type BoundaryRuntime = Awaited<ReturnType<typeof prepareBoundaryRuntime>>;
+
+async function verifyWslHostInteropBlocked(
+	runtime: BoundaryRuntime,
+	gitIdentity: Awaited<ReturnType<typeof readGitIdentity>>,
+) {
+	const wslVersion = getWslVersion();
+	if (wslVersion === undefined) return undefined;
+
+	const dependencies = await SandboxManager.checkDependenciesAsync();
+	assertWslSandboxDependencies(dependencies, wslVersion);
+
+	let output = "";
+	const probe = await createProjectBashOperations(runtime, gitIdentity).exec("cmd.exe /d /c exit 0", runtime.root, {
+		onData(chunk) {
+			output = `${output}${chunk.toString()}`.slice(-8192);
+		},
+		timeout: 10,
+		env: process.env,
+	});
+	if (probe.exitCode === 0) {
+		throw new Error(
+			"WSL host interop escaped the Research Pi sandbox: cmd.exe executed successfully. " +
+				"Disable WSL interop or restore seccomp and /mnt isolation before using agent shell tools.",
+		);
+	}
+	return { version: wslVersion, probeExitCode: probe.exitCode, output };
+}
 
 function terminateProcess(child: ReturnType<typeof spawn>) {
 	if (!child.pid) return;
@@ -124,6 +152,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 	let gitIdentity: Awaited<ReturnType<typeof readGitIdentity>>;
 	let initializationError: string | undefined;
 	let userOverrideNoticeShown = false;
+	let wslIsolation: Awaited<ReturnType<typeof verifyWslHostInteropBlocked>>;
 	const baseBash = createBashTool(process.cwd());
 
 	pi.registerTool({
@@ -133,6 +162,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Agent-initiated shell commands may read minimal system runtime paths and may read/write the current project, including Git metadata; they cannot access other user directories or write system temp paths.",
 			"Public network access is available without a domain allowlist. Unix sockets and host credential files remain outside the project boundary.",
+			"When running under WSL2, Windows host mounts and Windows executable interop are outside the agent boundary. Do not invoke powershell.exe, cmd.exe, wsl.exe, or paths below /mnt; hand an exact command to the user instead.",
 			"If an operation needs a path outside the project, do not attempt an indirect bypass. State the exact path and operation, then ask the user for one explicit approval or ask them to run the exact command with !.",
 		],
 		async execute(id, params, signal, onUpdate, ctx) {
@@ -193,10 +223,21 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 				async () => true,
 				process.platform === "darwin",
 			);
+			wslIsolation = await verifyWslHostInteropBlocked(runtime, gitIdentity);
 			initializationError = undefined;
-			ctx.ui.setStatus("boundary", ctx.ui.theme.fg("accent", "🔒 project-only · net open · git write"));
+			ctx.ui.setStatus(
+				"boundary",
+				ctx.ui.theme.fg(
+					"accent",
+					wslIsolation
+						? `🔒 wsl${wslIsolation.version} · project-only · host bridge blocked`
+						: "🔒 project-only · net open · git write",
+				),
+			);
 		} catch (error) {
+			await SandboxManager.reset().catch(() => undefined);
 			runtime = undefined;
+			wslIsolation = undefined;
 			initializationError = error instanceof Error ? error.message : String(error);
 			ctx.ui.setStatus("boundary", ctx.ui.theme.fg("error", "🔒 boundary failed closed"));
 			ctx.ui.notify(`Research Pi project boundary failed to initialize: ${initializationError}`, "error");
@@ -206,6 +247,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		await SandboxManager.reset().catch(() => undefined);
 		runtime = undefined;
+		wslIsolation = undefined;
 	});
 
 	pi.registerCommand("boundary", {
@@ -217,8 +259,11 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 						`Project root: ${runtime.root}`,
 						"Agent shell: project read/write; .git commit/config/refs writable; .git/hooks read-only.",
 						"Network: public destinations and local binding enabled; Unix sockets not inherited.",
+						wslIsolation
+							? `WSL${wslIsolation.version}: /mnt denied; seccomp required; cmd.exe host-interop probe blocked (exit ${wslIsolation.probeExitCode}).`
+							: undefined,
 						"Outside path: direct file tools ask once; shell fails and must be handed to the user as an exact ! command.",
-					]
+					].filter(Boolean)
 				: [`Boundary unavailable (failed closed): ${initializationError ?? "not initialized"}`];
 			ctx.ui.notify(lines.join("\n"), runtime ? "info" : "error");
 		},

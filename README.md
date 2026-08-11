@@ -34,6 +34,12 @@ pi
 
 更完整的命令说明见 [`docs/pi-basic-guide.md`](docs/pi-basic-guide.md)。
 
+### Windows / WSL2
+
+Windows 上的最小、安全迁移路线是 WSL2，而不是让现有 Bash harness 直接改由 PowerShell 解释。请使用 `windows-research-pi` 分支，并把科研项目和 Research Pi 都放在 WSL 自身的 `/home/...` 文件系统中；`/mnt/c`、`/mnt/d` 等 Windows host mounts 不可作为 agent workspace。
+
+该分支在启动时要求 WSL2、bubblewrap、socat、ripgrep 和可用的 seccomp helper，并执行一次无副作用的 Windows host-interop 探针。缺少 seccomp、项目位于 `/mnt` 或 `cmd.exe` 能从沙箱中成功启动时，边界会 fail closed。安装步骤和边界说明见 [`docs/windows-wsl-guide.md`](docs/windows-wsl-guide.md)。
+
 ## 命令入口
 
 - `pi`：加载 Research Pi harness。

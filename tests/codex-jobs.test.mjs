@@ -123,6 +123,18 @@ test("Codex environment removes the DeepSeek credential without dropping executi
 	assert.equal(env.PATH, "/bin");
 	assert.equal(env.HOME, "/tmp/example-home");
 	assert.equal(env.SSH_AUTH_SOCK, "/tmp/ssh.sock");
+
+	const wsl = sanitizeCodexEnvironment(
+		{
+			PATH: "/usr/bin:/mnt/c/Windows/System32",
+			WSL_INTEROP: "/run/WSL/123_interop",
+			DEEPSEEK_API_KEY: "secret",
+		},
+		"2",
+	);
+	assert.equal(wsl.PATH, "/usr/bin");
+	assert.equal(wsl.WSL_INTEROP, undefined);
+	assert.equal(wsl.DEEPSEEK_API_KEY, undefined);
 });
 
 test("advisor, executor, and explicit resume produce durable structured jobs", async () => {
