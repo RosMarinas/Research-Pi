@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import projectBoundaryExtension from "../.pi/extensions/project-boundary.ts";
 import {
 	CODEX_EXECUTOR_PROFILE,
 	boundaryWarning,
@@ -15,6 +16,22 @@ import {
 	resolveProjectRoot,
 	sanitizeBoundaryEnvironment,
 } from "../.pi/lib/project-boundary.mjs";
+
+test("project boundary exposes one opaque host-capability tool", () => {
+	const tools = [];
+	const commands = [];
+	projectBoundaryExtension({
+		registerTool(tool) {
+			tools.push(tool.name);
+		},
+		registerCommand(name) {
+			commands.push(name);
+		},
+		on() {},
+	});
+	assert.deepEqual(tools.sort(), ["bash", "host_capability"]);
+	assert.deepEqual(commands, ["boundary"]);
+});
 
 test("path resolution accepts project paths and detects traversal plus symlink escapes", async () => {
 	const parent = mkdtempSync(join(tmpdir(), "research-pi-boundary-path-"));

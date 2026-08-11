@@ -309,7 +309,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		description: [
 			"Delegate bounded operational work to a context-isolated local Codex executor, or obtain a read-only Codex second opinion.",
 			`Both modes default to ${DEFAULT_CODEX_MODEL}/${DEFAULT_CODEX_REASONING_EFFORT}.`,
-			"Executor jobs run automatically inside the current project boundary. They may edit/delete files, freely commit, use public network, and run expensive experiments, but cannot inherit host credentials or access other directories.",
+			"Executor jobs run automatically inside the current project boundary. They may edit/delete files, freely commit, use public network, and run expensive experiments. Exact user-approved external-read, SSH-target, or fixed-script capabilities are available through an opaque host broker; raw credentials never enter Codex.",
 			"Pi remains responsible for framing the research question, judging evidence, and choosing the next research action.",
 			"Use action=status/result/cancel/resume/respond/steer with the returned job id; do not start duplicate jobs merely because a background job is still running.",
 			"Background completion and blocking requests are delivered into the originating Pi session automatically. respond answers an explicit request; steer corrects an active turn without restarting it.",
@@ -319,7 +319,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			"Use codex_delegate when a bounded execution task would require many tools or produce enough intermediate output to pollute the research context; delegation is for context isolation, not automatic parallelism.",
 			"Before starting Codex, state the objective and success criteria. Send only relevant research context; do not copy the full conversation or ask Codex to decide the research objective.",
 			"Use mode=executor when Codex should actually complete the work. It has standing authority for destructive, long-running, and expensive steps inside the current project and should not be micromanaged command by command.",
-			"If Codex reports that an outside-project path or host credential is required, review the exact request and hand it to the user. Do not disguise the same operation as a new delegation.",
+			"If Codex needs an unapproved outside path, SSH target, or host script, review the exact request and ask the user for the returned /boundary grant. After approval, respond so Codex can retry the same turn. Do not disguise the operation as a new delegation.",
 			"Use mode=advisor only for a genuinely useful independent proposal or critique. Advisor is read-only but still uses max reasoning by default.",
 			"After retrieving a result, inspect its evidence and validity limitations. Codex completion does not by itself establish a scientific conclusion.",
 			"When a Codex request arrives, answer it promptly with action=respond if Pi can decide. Ask the user only for user-owned choices or direct credential setup. Never place secrets in a response.",

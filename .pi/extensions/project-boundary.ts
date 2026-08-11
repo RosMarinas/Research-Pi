@@ -4,6 +4,19 @@ import { existsSync } from "node:fs";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import type { ExtensionAPI, BashOperations } from "@earendil-works/pi-coding-agent";
 import { createBashTool } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+import {
+	authorizeCapabilityRequest,
+	capabilityGrantSummary,
+	createCapabilityGrant,
+	executeGrantedCapability,
+	findCapabilityGrant,
+	isForbiddenCredentialRead,
+	listCapabilityGrants,
+	prepareCapabilityRequest,
+	resolveCapabilityContext,
+	revokeCapabilityGrant,
+} from "../lib/host-capabilities.mjs";
 import {
 	boundaryWarning,
 	buildSandboxRuntimeConfig,
@@ -17,6 +30,85 @@ import {
 } from "../lib/project-boundary.mjs";
 
 type BoundaryRuntime = Awaited<ReturnType<typeof prepareBoundaryRuntime>>;
+type CapabilityContext = Awaited<ReturnType<typeof resolveCapabilityContext>>;
+
+function parseCommandWords(input: string): string[] {
+	const words: string[] = [];
+	let current = "";
+	let quote: "'" | '"' | undefined;
+	let escaped = false;
+	for (const character of String(input ?? "").trim()) {
+		if (escaped) {
+			current += character;
+			escaped = false;
+			continue;
+		}
+		if (character === "\\" && quote !== "'") {
+			escaped = true;
+			continue;
+		}
+		if (quote) {
+			if (character === quote) quote = undefined;
+			else current += character;
+			continue;
+		}
+		if (character === "'" || character === '"') {
+			quote = character;
+			continue;
+		}
+		if (/\s/.test(character)) {
+			if (current) words.push(current);
+			current = "";
+			continue;
+		}
+		current += character;
+	}
+	if (escaped || quote) throw new Error("Unterminated quote or escape in /boundary command");
+	if (current) words.push(current);
+	return words;
+}
+
+function capabilityInput(params: any) {
+	if (params.action === "read") return { kind: "external-read", path: params.path };
+	if (params.action === "ssh") {
+		return {
+			kind: "ssh-target",
+			target: params.target,
+			port: params.port,
+			remoteCommand: params.remoteCommand,
+			timeoutSeconds: params.timeoutSeconds,
+		};
+	}
+	if (params.action === "script") {
+		return {
+			kind: "project-script",
+			path: params.path,
+			args: params.args ?? [],
+			timeoutSeconds: params.timeoutSeconds,
+		};
+	}
+	throw new Error(`Unsupported host capability action: ${params.action}`);
+}
+
+function describeCapabilityRequest(request: any, operation?: any): string {
+	if (request.kind === "external-read") {
+		return `Read ${request.directory ? "directory" : "file"}: ${request.target}`;
+	}
+	if (request.kind === "ssh-target") {
+		return [
+			`Use local SSH credentials for: ${request.target}`,
+			operation?.remoteCommand ? `Current remote command:\n${operation.remoteCommand}` : "This pre-grant authorizes commands to this target.",
+			"A session grant permits subsequent remote commands to this same target for up to 24 hours.",
+		].join("\n");
+	}
+	return [
+		`Run project script outside the sandbox:`,
+		request.target,
+		`Args: ${(request.args ?? []).join(" ") || "(none)"}`,
+		`SHA-256: ${request.sha256}`,
+		`Preview (first 20 lines):\n${request.approvalPreview || "[empty]"}`,
+	].join("\n");
+}
 
 function terminateProcess(child: ReturnType<typeof spawn>) {
 	if (!child.pid) return;
@@ -121,10 +213,100 @@ function createProjectBashOperations(
 
 export default function projectBoundaryExtension(pi: ExtensionAPI) {
 	let runtime: BoundaryRuntime | undefined;
+	let capabilityContext: CapabilityContext | undefined;
 	let gitIdentity: Awaited<ReturnType<typeof readGitIdentity>>;
 	let initializationError: string | undefined;
 	let userOverrideNoticeShown = false;
 	const baseBash = createBashTool(process.cwd());
+
+	const refreshBoundaryStatus = async (ctx: any) => {
+		if (!ctx.hasUI) return;
+		const count = capabilityContext ? (await listCapabilityGrants(capabilityContext)).length : 0;
+		const label = runtime ? `🔒 project-only · grants ${count} · web proxy · git write` : "🔒 boundary failed closed";
+		ctx.ui.setStatus("boundary", ctx.ui.theme.fg(runtime ? "accent" : "error", label));
+	};
+
+	const requireCapabilityContext = () => {
+		if (!capabilityContext) throw new Error("Host capability ledger is not initialized");
+		return capabilityContext;
+	};
+
+	const requestInteractiveGrant = async (request: any, ctx: any, operation?: any) => {
+		if (!ctx.hasUI) return undefined;
+		const choice = await ctx.ui.select(
+			`⚠️ Research Pi requests a host capability\n\n${describeCapabilityRequest(request, operation)}\n\nCredentials remain opaque to the model.`,
+			["Approve once", "Approve this Pi session (24h)", "Deny"],
+		);
+		if (choice !== "Approve once" && choice !== "Approve this Pi session (24h)") return undefined;
+		const grant = await createCapabilityGrant(
+			requireCapabilityContext(),
+			request,
+			choice === "Approve once" ? "once" : "session",
+		);
+		ctx.ui.notify(`Approved ${capabilityGrantSummary(grant)}`, "warning");
+		await refreshBoundaryStatus(ctx);
+		return grant;
+	};
+
+	pi.registerTool({
+		name: "host_capability",
+		label: "Host Capability",
+		description: [
+			"Use an explicitly user-approved host capability without exposing host credentials to the model.",
+			"read accesses one approved external file/directory; ssh runs a command on one approved SSH target; script runs one approved project script with an exact SHA-256 and exact argv.",
+			"If no matching grant exists, interactive Pi asks the user once. Never use this tool to inspect private keys, tokens, or credential stores.",
+		].join(" "),
+		promptSnippet: "Use explicitly approved external-read, SSH, or fixed project-script host capabilities",
+		promptGuidelines: [
+			"Use host_capability only when ordinary project tools cannot perform an already justified operation. State the exact external path, SSH target, or project script and arguments.",
+			"SSH and project-script capabilities may use host credentials opaquely; never request, read, print, copy, or transmit private keys or tokens.",
+			"A missing capability is a user authorization boundary. Do not route around it with bash, symlinks, proxy commands, copied credentials, or another agent.",
+		],
+		parameters: Type.Object({
+			action: Type.Union([Type.Literal("list"), Type.Literal("read"), Type.Literal("ssh"), Type.Literal("script")]),
+			path: Type.Optional(Type.String({ description: "External path for read, or in-project executable path for script" })),
+			target: Type.Optional(Type.String({ description: "Exact SSH alias or [user@]host[:port]" })),
+			port: Type.Optional(Type.Integer({ minimum: 1, maximum: 65535 })),
+			remoteCommand: Type.Optional(Type.String({ description: "Exact remote shell command for ssh" })),
+			args: Type.Optional(Type.Array(Type.String(), { maxItems: 64, description: "Exact argv for an approved project script" })),
+			timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 86400 })),
+		}),
+		executionMode: "sequential",
+		async execute(_id, params, signal, onUpdate, ctx) {
+			try {
+				const context = requireCapabilityContext();
+				if (params.action === "list") {
+					const grants = await listCapabilityGrants(context);
+					return { content: [{ type: "text", text: grants.length ? grants.map(capabilityGrantSummary).join("\n") : "No active host capabilities." }] };
+				}
+				const input = capabilityInput(params);
+				const request = await prepareCapabilityRequest(context, input);
+				if (!(await findCapabilityGrant(context, request))) {
+					const grant = await requestInteractiveGrant(request, ctx, input);
+					if (!grant) throw new Error("Host capability was not approved by the user");
+				}
+				let outputTail = "";
+				const result = await executeGrantedCapability(context, input, {
+					signal,
+					env: process.env,
+					onData: (chunk: Buffer) => {
+						outputTail = `${outputTail}${chunk.toString()}`.slice(-12000);
+						onUpdate?.({ content: [{ type: "text", text: outputTail }] });
+					},
+				});
+				const text = [
+					`Capability ${result.grantId} executed (${result.kind}: ${result.target}).`,
+					`Exit: ${result.exitCode}${result.timedOut ? " · timed out" : ""}${result.outputTruncated ? " · output truncated" : ""}`,
+					result.stdout ? `stdout:\n${result.stdout}` : undefined,
+					result.stderr ? `stderr:\n${result.stderr}` : undefined,
+				].filter(Boolean).join("\n");
+				await refreshBoundaryStatus(ctx);
+				return { content: [{ type: "text", text }], isError: result.exitCode !== 0 };
+			} catch (error) {
+				return { content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }], isError: true };
+			}
+		},
+	});
 
 	pi.registerTool({
 		...baseBash,
@@ -163,6 +345,32 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			(event.toolName === "write" || event.toolName === "edit") &&
 			isProtectedProjectMutation(info.root, info.resolvedPath);
 		if (info.inside && !info.sensitive && !protectedMutation) return undefined;
+		const readLike = event.toolName === "read" || event.toolName === "grep" || event.toolName === "find" || event.toolName === "ls";
+		if (!info.inside && readLike) {
+			if (isForbiddenCredentialRead(info.lexicalPath) || isForbiddenCredentialRead(info.resolvedPath)) {
+				return {
+					block: true,
+					reason: "Credential material cannot be made model-readable. Use an opaque SSH/project-script capability or an exact user-run ! command.",
+					terminate: false,
+				};
+			}
+			try {
+				const request = await prepareCapabilityRequest(requireCapabilityContext(), { kind: "external-read", path: requestedPath });
+				if (event.toolName === "grep" && request.directory) {
+					return { block: true, reason: "Recursive grep cannot use an external directory grant; approve and read exact files instead.", terminate: false };
+				}
+				let grant = await findCapabilityGrant(requireCapabilityContext(), request);
+				if (!grant) grant = await requestInteractiveGrant(request, ctx);
+				if (!grant) return { block: true, reason: "External read was not approved by the user.", terminate: false };
+				const authorized = await authorizeCapabilityRequest(requireCapabilityContext(), { kind: "external-read", path: requestedPath });
+				if (!authorized.grant) return { block: true, reason: "External-read grant disappeared before use.", terminate: false };
+				ctx.ui.notify(`Using ${authorized.grant.id} for ${info.resolvedPath}`, "warning");
+				await refreshBoundaryStatus(ctx);
+				return undefined;
+			} catch (error) {
+				return { block: true, reason: error instanceof Error ? error.message : String(error), terminate: false };
+			}
+		}
 
 		const warning = boundaryWarning(
 			info,
@@ -187,6 +395,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		try {
 			runtime = await prepareBoundaryRuntime(ctx.cwd);
+			capabilityContext = await resolveCapabilityContext(runtime.root, ctx.sessionManager.getSessionId());
 			gitIdentity = await readGitIdentity(runtime.root);
 			await SandboxManager.initialize(
 				buildSandboxRuntimeConfig(runtime.root),
@@ -194,7 +403,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 				process.platform === "darwin",
 			);
 			initializationError = undefined;
-			ctx.ui.setStatus("boundary", ctx.ui.theme.fg("accent", "🔒 project-only · net open · git write"));
+			await refreshBoundaryStatus(ctx);
 		} catch (error) {
 			runtime = undefined;
 			initializationError = error instanceof Error ? error.message : String(error);
@@ -206,18 +415,88 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		await SandboxManager.reset().catch(() => undefined);
 		runtime = undefined;
+		capabilityContext = undefined;
 	});
 
 	pi.registerCommand("boundary", {
 		description: "Show the active Research Pi project security boundary",
-		handler: async (_args, ctx) => {
+		handler: async (args, ctx) => {
+			const words = parseCommandWords(args ?? "");
+			const action = words.shift();
+			if (action === "grants") {
+				const grants = await listCapabilityGrants(requireCapabilityContext());
+				ctx.ui.notify(grants.length ? grants.map(capabilityGrantSummary).join("\n") : "No active host capabilities.", "info");
+				return;
+			}
+			if (action === "revoke") {
+				const selector = words[0];
+				if (!selector) {
+					ctx.ui.notify("Usage: /boundary revoke <grant-id|all>", "warning");
+					return;
+				}
+				const removed = await revokeCapabilityGrant(requireCapabilityContext(), selector);
+				ctx.ui.notify(`Revoked ${removed} host capability grant(s).`, removed ? "warning" : "info");
+				await refreshBoundaryStatus(ctx);
+				return;
+			}
+			if (action === "grant-read" || action === "grant-ssh" || action === "grant-script") {
+				const validArguments =
+					(action === "grant-read" && words.length === 1) ||
+					(action === "grant-ssh" && words.length === 1) ||
+					(action === "grant-script" && words.length >= 1);
+				if (!validArguments) {
+					const usage = action === "grant-read"
+						? "/boundary grant-read <external-path>"
+						: action === "grant-ssh"
+							? "/boundary grant-ssh <alias|user@host[:port]>"
+							: "/boundary grant-script <project-script> [exact args...]";
+					ctx.ui.notify(`Usage: ${usage}`, "warning");
+					return;
+				}
+				if (!ctx.hasUI) {
+					ctx.ui.notify("Host grants require interactive confirmation.", "error");
+					return;
+				}
+				const input = action === "grant-read"
+					? { kind: "external-read", path: words[0] }
+					: action === "grant-ssh"
+						? { kind: "ssh-target", target: words[0] }
+						: { kind: "project-script", path: words[0], args: words.slice(1) };
+				const request = await prepareCapabilityRequest(requireCapabilityContext(), input);
+				const approved = await ctx.ui.confirm("Approve host capability for this Pi session?", describeCapabilityRequest(request));
+				if (!approved) {
+					ctx.ui.notify("Host capability not approved.", "info");
+					return;
+				}
+				const grant = await createCapabilityGrant(requireCapabilityContext(), request, "session");
+				ctx.ui.notify(`Approved ${capabilityGrantSummary(grant)}`, "warning");
+				await refreshBoundaryStatus(ctx);
+				return;
+			}
+			if (action === "help") {
+				ctx.ui.notify([
+					"/boundary — show policy and active grant count",
+					"/boundary grants — list session grants",
+					"/boundary grant-read <external-path>",
+					"/boundary grant-ssh <alias|user@host[:port]>",
+					"/boundary grant-script <project-script> [exact args...]",
+					"/boundary revoke <grant-id|all>",
+				].join("\n"), "info");
+				return;
+			}
+			if (action) {
+				ctx.ui.notify(`Unknown /boundary action: ${action}. Use /boundary help.`, "warning");
+				return;
+			}
 			const lines = runtime
 				? [
 						"Research Pi project boundary is active.",
 						`Project root: ${runtime.root}`,
 						"Agent shell: project read/write; .git commit/config/refs writable; .git/hooks read-only.",
-						"Network: public destinations and local binding enabled; Unix sockets not inherited.",
-						"Outside path: direct file tools ask once; shell fails and must be handed to the user as an exact ! command.",
+						"Network: web clients use an open approval proxy; raw SSH requires an explicit ssh-target capability.",
+						`Host grants: ${capabilityContext ? (await listCapabilityGrants(capabilityContext)).length : 0} active for this Pi session.`,
+						"Outside path: direct reads can be approved once/session; credentials remain opaque; arbitrary shell stays project-only.",
+						"Use /boundary help for grant and revoke commands.",
 					]
 				: [`Boundary unavailable (failed closed): ${initializationError ?? "not initialized"}`];
 			ctx.ui.notify(lines.join("\n"), runtime ? "info" : "error");

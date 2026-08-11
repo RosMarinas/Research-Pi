@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import { appendFile, mkdir, readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { executeGrantedCapability } from "./host-capabilities.mjs";
 import {
 	getGitSnapshot,
 	readJson,
@@ -180,6 +181,7 @@ async function main() {
 	const pendingRpc = new Map();
 	const pendingHumanResponses = new Map();
 	const handledCommands = new Set();
+	const hostCapabilityAbort = new AbortController();
 	const workerIo = {
 		appServerMessagesSeen: 0,
 		deltaNotificationsSeen: 0,
@@ -321,6 +323,46 @@ async function main() {
 		const params = message.params ?? {};
 		const id = requestId(request.jobId, message.id, method);
 		try {
+			if (method === "item/tool/call" && params.tool === "research_pi_host") {
+				if (!request.hostCapabilityContext) throw new Error("This Codex job has no Pi session capability ledger");
+				const args = params.arguments ?? {};
+				if (request.mode === "advisor" && args.action !== "read") {
+					throw new Error("Advisor mode may use only external-read host capabilities");
+				}
+				const input = args.action === "read"
+					? { kind: "external-read", path: args.path }
+					: args.action === "ssh"
+						? {
+							kind: "ssh-target",
+							target: args.target,
+							port: args.port,
+							remoteCommand: args.remoteCommand,
+							timeoutSeconds: args.timeoutSeconds,
+						}
+						: {
+							kind: "project-script",
+							path: args.path,
+							args: args.args ?? [],
+							timeoutSeconds: args.timeoutSeconds,
+						};
+				await enqueueJobUpdate({ progress: `host capability ${args.action ?? "unknown"} running` });
+				const result = await executeGrantedCapability(request.hostCapabilityContext, input, {
+					signal: hostCapabilityAbort.signal,
+					env: process.env,
+				});
+				await enqueueJobUpdate({ progress: `host capability ${args.action} finished with exit ${result.exitCode}` });
+				const content = truncate([
+					`Grant ${result.grantId} executed (${result.kind}: ${result.target}).`,
+					`Exit: ${result.exitCode}${result.timedOut ? " · timed out" : ""}${result.outputTruncated ? " · output truncated" : ""}`,
+					result.stdout ? `stdout:\n${result.stdout}` : undefined,
+					result.stderr ? `stderr:\n${result.stderr}` : undefined,
+				].filter(Boolean).join("\n"), 64000);
+				send({
+					id: message.id,
+					result: { success: result.exitCode === 0, contentItems: [{ type: "inputText", text: content }] },
+				});
+				return;
+			}
 			if (method === "item/tool/call" && params.tool === "consult_research_pi") {
 				const args = params.arguments ?? {};
 				const record = {
@@ -488,6 +530,7 @@ async function main() {
 
 	process.on("SIGTERM", () => {
 		cancellationRequested = true;
+		hostCapabilityAbort.abort();
 		enqueueJobUpdate({ status: "cancelling", progress: "interrupting Codex turn" });
 		if (threadId && activeTurnId) {
 			void rpcRequest("turn/interrupt", { threadId, turnId: activeTurnId }, 5000).catch(() => terminateChild("SIGTERM"));
@@ -514,12 +557,16 @@ async function main() {
 		];
 		const codexStateHome = join(dirname(dirname(jobDir)), "state");
 		await mkdir(codexStateHome, { recursive: true, mode: 0o700 });
+		const codexChildEnvironment = sanitizeCodexEnvironment(process.env);
+		// The worker retains the opaque SSH agent handle for research_pi_host;
+		// the sandboxed Codex process itself must not even inherit its path.
+		delete codexChildEnvironment.SSH_AUTH_SOCK;
 		child = spawn(request.codexBin, appServerArgs, {
 			cwd: request.cwd,
 			detached: false,
 			shell: false,
 			stdio: ["pipe", "pipe", "pipe"],
-			env: { ...sanitizeCodexEnvironment(process.env), CODEX_SQLITE_HOME: codexStateHome },
+			env: { ...codexChildEnvironment, CODEX_SQLITE_HOME: codexStateHome },
 		});
 		await writeJobUpdate((current) => ({ ...current, codexPid: child.pid ?? null, lastActivityAt: now() }));
 		child.stderr.on("data", (chunk) => {
@@ -569,6 +616,25 @@ async function main() {
 		send({ method: "initialized", params: {} });
 
 		const dynamicTools = [
+			{
+				name: "research_pi_host",
+				description:
+					"Use only an exact Research Pi host capability already approved by the user. Credentials are brokered opaquely. If the tool reports a missing grant, call consult_research_pi with audience=user and the exact /boundary command; never bypass it. Advisor mode may use read only.",
+				inputSchema: {
+					type: "object",
+					additionalProperties: false,
+					required: ["action"],
+					properties: {
+						action: { type: "string", enum: ["read", "ssh", "script"] },
+						path: { type: "string", maxLength: 4096 },
+						target: { type: "string", maxLength: 255 },
+						port: { type: "integer", minimum: 1, maximum: 65535 },
+						remoteCommand: { type: "string", maxLength: 32768 },
+						args: { type: "array", maxItems: 64, items: { type: "string", maxLength: 4096 } },
+						timeoutSeconds: { type: "integer", minimum: 1, maximum: 86400 },
+					},
+				},
+			},
 			{
 				name: "consult_research_pi",
 				description:
@@ -676,6 +742,7 @@ async function main() {
 			lastActivityAt: now(),
 		})).catch(() => undefined);
 	} finally {
+		hostCapabilityAbort.abort();
 		if (timeout) clearTimeout(timeout);
 		if (commandTimer) clearInterval(commandTimer);
 		cancelNotificationUpdate();

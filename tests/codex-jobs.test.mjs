@@ -18,6 +18,11 @@ import {
 	waitForCodexJob,
 } from "../.pi/lib/codex-jobs.mjs";
 import { CODEX_ADVISOR_PROFILE, CODEX_EXECUTOR_PROFILE } from "../.pi/lib/project-boundary.mjs";
+import {
+	createCapabilityGrant,
+	prepareCapabilityRequest,
+	resolveCapabilityContext,
+} from "../.pi/lib/host-capabilities.mjs";
 
 test("Pi registers one Codex delegation tool instead of a family of noisy tools", () => {
 	let registered;
@@ -67,6 +72,7 @@ let isResume = false;
 let activeTurn = null;
 let completionTimer;
 let deltaNotificationsOptedOut = false;
+let hostToolPresent = false;
 process.stderr.write("fake app-server warning\\n");
 
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
@@ -78,7 +84,7 @@ const complete = (prompt, leaderResponse = "") => {
     status: "completed",
     goal_satisfied: true,
     summary: isResume ? "resumed" : "finished",
-    evidence: [model, sandbox, prompt.includes("Research Pi") ? "role-present" : "role-missing", deltaNotificationsOptedOut ? "delta-opt-out" : "delta-not-opted-out", leaderResponse].filter(Boolean),
+    evidence: [model, sandbox, prompt.includes("Research Pi") ? "role-present" : "role-missing", deltaNotificationsOptedOut ? "delta-opt-out" : "delta-not-opted-out", hostToolPresent ? "host-tool-present" : "host-tool-missing", process.env.SSH_AUTH_SOCK ? "child-ssh-agent-present" : "child-ssh-agent-absent", leaderResponse].filter(Boolean),
     actions_taken: ["fake action"],
     changed_files: sandbox === "${CODEX_EXECUTOR_PROFILE}" ? ["codex-executed.txt"] : [],
     checks: [{ command: "fake-check", result: "passed" }],
@@ -97,10 +103,12 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     send({ id: message.id, result: { userAgent: "fake", platformFamily: "unix", platformOs: "test", codexHome: process.cwd() } });
   } else if (message.method === "thread/start") {
     model = message.params.model;
+    hostToolPresent = message.params.dynamicTools?.some((tool) => tool.name === "research_pi_host") ?? false;
     send({ id: message.id, result: { thread: { id: "thread-fake-123", turns: [] } } });
     send({ method: "thread/started", params: { thread: { id: "thread-fake-123", turns: [] } } });
   } else if (message.method === "thread/resume") {
     model = message.params.model;
+    hostToolPresent = message.params.dynamicTools?.some((tool) => tool.name === "research_pi_host") ?? false;
     isResume = true;
     send({ id: message.id, result: { thread: { id: message.params.threadId, turns: [] } } });
     send({ method: "thread/started", params: { thread: { id: message.params.threadId, turns: [] } } });
@@ -116,11 +124,17 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     }
     if (prompt.includes("ask the leader live")) {
       send({ id: "server-question-1", method: "item/tool/call", params: { threadId: "thread-fake-123", turnId: activeTurn, callId: "call-1", tool: "consult_research_pi", arguments: { audience: "leader", question: "Choose H1 or H2", why_blocking: "The experiment differs", options: ["H1", "H2"] } } });
+    } else if (prompt.includes("HOST_READ_PATH=")) {
+      const path = prompt.match(/HOST_READ_PATH=([^\\n<]+)/)?.[1]?.trim();
+      send({ id: "server-host-read-1", method: "item/tool/call", params: { threadId: "thread-fake-123", turnId: activeTurn, callId: "host-call-1", tool: "research_pi_host", arguments: { action: "read", path } } });
     } else {
       completionTimer = setTimeout(() => complete(prompt), ${delayMs});
     }
   } else if (message.id === "server-question-1") {
     const answer = message.result?.contentItems?.[0]?.text ?? "missing answer";
+    complete("Research Pi", answer);
+  } else if (message.id === "server-host-read-1") {
+    const answer = message.result?.contentItems?.[0]?.text ?? message.error?.message ?? "missing host response";
     complete("Research Pi", answer);
   } else if (message.method === "turn/steer") {
     send({ id: message.id, result: { turnId: activeTurn } });
@@ -151,6 +165,8 @@ test("delegation prompt encodes distinct advisor and project-bounded executor ro
 	assert.match(executor, /deleting files/);
 	assert.match(executor, /expensive experiments/);
 	assert.match(executor, /hard authority boundary/);
+	assert.match(executor, /research_pi_host/);
+	assert.match(executor, /credential contents never enter/);
 	assert.match(executor, /record the run id/);
 	assert.match(executor, /hypothesis H1/);
 });
@@ -176,13 +192,21 @@ test("advisor, executor, and explicit resume produce durable structured jobs", a
 		mkdirSync(workspace, { recursive: true });
 		const codexBin = makeFakeCodex(root);
 
-		const advisorStart = await startCodexJob({
-			cwd: workspace,
-			jobRoot,
-			codexBin,
-			mode: "advisor",
-			task: "inspect only",
-		});
+		const previousAgentSocket = process.env.SSH_AUTH_SOCK;
+		process.env.SSH_AUTH_SOCK = "/private/synthetic-agent.sock";
+		let advisorStart;
+		try {
+			advisorStart = await startCodexJob({
+				cwd: workspace,
+				jobRoot,
+				codexBin,
+				mode: "advisor",
+				task: "inspect only",
+			});
+		} finally {
+			if (previousAgentSocket === undefined) delete process.env.SSH_AUTH_SOCK;
+			else process.env.SSH_AUTH_SOCK = previousAgentSocket;
+		}
 		const advisor = await waitForCodexJob(advisorStart.id, { jobRoot });
 		assert.equal(advisor.status, "completed");
 		assert.equal(advisor.model, DEFAULT_CODEX_MODEL);
@@ -190,6 +214,7 @@ test("advisor, executor, and explicit resume produce durable structured jobs", a
 		assert.equal(advisor.sandbox, CODEX_ADVISOR_PROFILE);
 		assert.equal(advisor.result.goal_satisfied, true);
 		assert.equal(advisor.threadId, "thread-fake-123");
+		assert.match(advisor.result.evidence.join("\n"), /child-ssh-agent-absent/);
 
 		const executorStart = await startCodexJob({
 			cwd: workspace,
@@ -315,6 +340,41 @@ test("token delta storms do not amplify job-state or default audit-log writes", 
 		assert.ok(events.trim().split("\n").length < 20, events);
 		assert.ok(readdirSync(jobDir).includes("stderr.log"));
 		assert.ok(!readdirSync(jobDir).includes("stderr-tail.log"));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("Codex uses the same opaque session host-capability ledger", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-host-"));
+	try {
+		const workspace = join(root, "workspace");
+		const outside = join(root, "outside-note.txt");
+		const jobRoot = join(root, "codex", "jobs");
+		mkdirSync(join(workspace, ".git"), { recursive: true });
+		writeFileSync(outside, "host capability reached\n");
+		const hostCapabilityContext = await resolveCapabilityContext(workspace, "pi-session-host", {
+			stateRoot: join(root, "capabilities"),
+		});
+		const request = await prepareCapabilityRequest(hostCapabilityContext, { kind: "external-read", path: outside });
+		await createCapabilityGrant(hostCapabilityContext, request, "session");
+		const codexBin = makeFakeCodex(root);
+		const started = await startCodexJob({
+			cwd: workspace,
+			jobRoot,
+			codexBin,
+			mode: "advisor",
+			task: `Use the approved host read. HOST_READ_PATH=${outside}`,
+			leaderSessionId: "pi-session-host",
+			hostCapabilityContext,
+		});
+		const completed = await waitForCodexJob(started.id, { jobRoot });
+		assert.equal(completed.status, "completed");
+		assert.match(completed.result.evidence.join("\n"), /host-tool-present/);
+		assert.match(completed.result.evidence.join("\n"), /host capability reached/);
+		const persistedRequest = readFileSync(join(jobRoot, started.id, "request.json"), "utf8");
+		assert.match(persistedRequest, /hostCapabilityContext/);
+		assert.doesNotMatch(persistedRequest, /SSH_AUTH_SOCK|PRIVATE KEY|API_KEY/);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
