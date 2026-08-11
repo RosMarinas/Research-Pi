@@ -4,6 +4,7 @@ import { mkdir, realpath, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
+import { getWslVersion } from "@anthropic-ai/sandbox-runtime";
 import { normalizeSystemRuntimePolicy } from "./security-policy.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -28,6 +29,57 @@ export function stripAtPrefix(path) {
 export function isWithinRoot(root, candidate) {
 	const rel = relative(root, candidate);
 	return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
+}
+
+export function isWslHostMount(candidate) {
+	const normalized = resolve(candidate);
+	return normalized === "/mnt" || normalized.startsWith("/mnt/");
+}
+
+export function assertWslWorkspaceBoundary(root, wslVersion = getWslVersion()) {
+	if (wslVersion === undefined) return;
+	if (wslVersion === "1") {
+		throw new Error("Research Pi requires WSL2; WSL1 cannot provide the required bubblewrap/seccomp boundary");
+	}
+	if (isWslHostMount(root)) {
+		throw new Error(
+			`Research Pi refuses WSL workspaces under /mnt because they reside on the Windows host: ${root}. ` +
+				"Clone or move the project into the WSL filesystem (for example ~/research/project).",
+		);
+	}
+}
+
+export function assertWslSandboxDependencies(dependencies, wslVersion = getWslVersion()) {
+	if (wslVersion === undefined) return;
+	const securityWarning = dependencies.warnings.find((warning) =>
+		/(?:seccomp.*not available|unix socket access not restricted)/i.test(warning),
+	);
+	if (securityWarning) {
+		throw new Error(
+			`Research Pi refuses degraded WSL isolation: ${securityWarning}. ` +
+				"The seccomp layer is required to block WSL host-interop sockets.",
+		);
+	}
+}
+
+export function sanitizeWslInteropEnvironment(source = process.env, wslVersion = getWslVersion()) {
+	const env = { ...source };
+	if (wslVersion === undefined) return env;
+	delete env.WSL_INTEROP;
+	delete env.WSLENV;
+	if (typeof env.PATH === "string") {
+		env.PATH = env.PATH
+			.split(":")
+			.filter(
+				(entry) =>
+					entry.length > 0 &&
+					!isWslHostMount(entry) &&
+					entry !== "/run/desktop/mnt/host" &&
+					!entry.startsWith("/run/desktop/mnt/host/"),
+			)
+			.join(":");
+	}
+	return env;
 }
 
 async function resolveThroughExistingAncestor(path) {
@@ -101,12 +153,14 @@ export function secretEnvironmentNames(source = process.env) {
 			name === "DEEPSEEK_API_KEY" ||
 			name === "PI_DEEPSEEK_API_KEY" ||
 			name === "SSH_AUTH_SOCK" ||
+			name === "WSL_INTEROP" ||
+			name === "WSLENV" ||
 			name === "PI_SESSION_FILE",
 	);
 }
 
-export function sanitizeBoundaryEnvironment(source = process.env) {
-	const env = { ...source };
+export function sanitizeBoundaryEnvironment(source = process.env, wslVersion = getWslVersion()) {
+	const env = sanitizeWslInteropEnvironment(source, wslVersion);
 	for (const name of secretEnvironmentNames(env)) delete env[name];
 	return env;
 }
@@ -383,6 +437,8 @@ export function buildSandboxRuntimeConfig(root, environment = process.env, runti
 	if (process.platform === "linux") {
 		deniedRegions.add("/mnt");
 		deniedRegions.add("/media");
+		deniedRegions.add("/run/WSL");
+		deniedRegions.add("/run/desktop/mnt/host");
 	}
 	const sensitive = [
 		join(root, ".env"),
@@ -403,6 +459,7 @@ export function buildSandboxRuntimeConfig(root, environment = process.env, runti
 			allowedDomains: [],
 			deniedDomains: [],
 			strictAllowlist: false,
+			allowAllUnixSockets: false,
 			allowLocalBinding: true,
 		},
 		filesystem: {
@@ -415,6 +472,7 @@ export function buildSandboxRuntimeConfig(root, environment = process.env, runti
 		credentials: {
 			envVars: secretEnvironmentNames(environment).map((name) => ({ mode: "deny", name })),
 		},
+		enableWeakerNestedSandbox: false,
 	};
 }
 
@@ -445,6 +503,7 @@ export async function resolveProjectRoot(root) {
 
 export async function prepareBoundaryRuntime(root) {
 	const canonicalRoot = await resolveProjectRoot(root);
+	assertWslWorkspaceBoundary(canonicalRoot);
 	let runtimeTmp;
 	try {
 		const gitDir = join(canonicalRoot, ".git");
