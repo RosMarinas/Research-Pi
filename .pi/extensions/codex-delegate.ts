@@ -1,10 +1,12 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
 	DEFAULT_CODEX_MODEL,
 	DEFAULT_CODEX_REASONING_EFFORT,
 	cancelCodexJob,
+	findReusableCodexJob,
 	listCodexJobs,
+	listCodexMissions,
 	publicJobView,
 	readCodexJob,
 	respondToCodexJob,
@@ -23,6 +25,7 @@ const ActionSchema = Type.Union(
 		Type.Literal("resume"),
 		Type.Literal("respond"),
 		Type.Literal("steer"),
+		Type.Literal("missions"),
 	],
 	{ description: "Start or manage one Codex delegation job" },
 );
@@ -43,6 +46,10 @@ const EffortSchema = Type.Union(
 	{ description: `Codex reasoning effort; default ${DEFAULT_CODEX_REASONING_EFFORT}` },
 );
 
+const ReuseSchema = Type.Union([Type.Literal("auto"), Type.Literal("never")], {
+	description: "auto resumes the latest thread with the same explicit mission and mode; never always starts a fresh thread",
+});
+
 const ParamsSchema = Type.Object({
 	action: ActionSchema,
 	mode: Type.Optional(ModeSchema),
@@ -62,6 +69,14 @@ const ParamsSchema = Type.Object({
 			description: "Only the research context needed for this task; do not copy the full Pi transcript",
 		}),
 	),
+	mission: Type.Optional(
+		Type.String({
+			description: "Stable research subtask label used for deterministic thread reuse within this workspace",
+			minLength: 1,
+			maxLength: 160,
+		}),
+	),
+	reuse: Type.Optional(ReuseSchema),
 	model: Type.Optional(
 		Type.String({
 			description: `Codex model override; default ${DEFAULT_CODEX_MODEL}`,
@@ -124,6 +139,17 @@ function formatJob(job: ReturnType<typeof publicJobView>): string {
 	return `Codex job ${job.id} is ${job.status}: ${job.progress}. Use action=result later to retrieve its structured result.`;
 }
 
+function formatMissions(missions: Awaited<ReturnType<typeof listCodexMissions>>): string {
+	if (missions.length === 0) return "No Codex missions exist in the current workspace.";
+	return [
+		"Codex missions in the current workspace:",
+		...missions.map((mission) => {
+			const label = mission.mission ?? "(unlabelled standalone jobs)";
+			return `- ${label} · ${mission.mode} · ${mission.status} · ${mission.latestJobId} · ${mission.jobCount} job${mission.jobCount === 1 ? "" : "s"}${mission.reusable ? " · resumable" : ""}`;
+		}),
+	].join("\n");
+}
+
 type CodexJobView = ReturnType<typeof publicJobView>;
 
 const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled"]);
@@ -140,7 +166,8 @@ function boundedProgress(progress: string | null | undefined): string {
 export function formatCodexStatus(job: CodexJobView, activeCount = 1): string {
 	const icon = job.status === "completed" ? "✓" : job.status === "failed" || job.status === "cancelled" ? "✗" : job.status === "input_required" ? "?" : "⚙";
 	const count = activeCount > 1 && !TERMINAL_JOB_STATUSES.has(job.status) ? `${activeCount} running · ` : "";
-	return `${icon} Codex ${count}${job.mode} ${shortJobId(job.id)} · ${job.status} · ${boundedProgress(job.progress)}`;
+	const mission = job.mission ? ` · ${boundedProgress(job.mission).slice(0, 36)}` : "";
+	return `${icon} Codex ${count}${job.mode} ${shortJobId(job.id)}${mission} · ${job.status} · ${boundedProgress(job.progress)}`;
 }
 
 export default function codexDelegateExtension(pi: ExtensionAPI) {
@@ -198,6 +225,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		return [
 			`Codex delegation ${job.id} ${job.status}. Pi must inspect this result and decide the next research action; completion alone is not scientific evidence.`,
 			`Mode/model: ${job.mode} · ${job.model} · ${job.reasoningEffort}`,
+			job.mission ? `Mission: ${job.mission}` : undefined,
 			result.summary ? `Summary: ${String(result.summary).slice(0, 5000)}` : undefined,
 			boundedList(result.evidence).length ? `Evidence:\n- ${boundedList(result.evidence).join("\n- ")}` : undefined,
 			boundedList(result.uncertainties).length ? `Uncertainties:\n- ${boundedList(result.uncertainties).join("\n- ")}` : undefined,
@@ -244,7 +272,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		const poll = async () => {
 			if (shuttingDown) return;
 			try {
-				const current = publicJobView(await readCodexJob(initial.id));
+				const current = publicJobView(await readCodexJob(initial.id, { expectedCwd: ctx.cwd }));
 				rememberJob(current, ctx);
 				deliverJobEvent(current, ctx);
 				if (TERMINAL_JOB_STATUSES.has(current.status)) {
@@ -303,6 +331,22 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		if (ctx.hasUI) ctx.ui.setStatus("codex_delegate", undefined);
 	});
 
+	pi.registerCommand("codex", {
+		description: "Inspect Codex mission threads in this workspace (/codex missions)",
+		handler: async (args: string, ctx: ExtensionCommandContext) => {
+			const action = args.trim() || "missions";
+			if (action !== "missions" && action !== "list") {
+				ctx.ui.notify("Usage: /codex missions", "warning");
+				return;
+			}
+			try {
+				ctx.ui.notify(formatMissions(await listCodexMissions({ cwd: ctx.cwd })), "info");
+			} catch (error) {
+				ctx.ui.notify(`Could not list Codex missions: ${error instanceof Error ? error.message : String(error)}`, "error");
+			}
+		},
+	});
+
 	pi.registerTool({
 		name: "codex_delegate",
 		label: "Codex Delegate",
@@ -311,13 +355,15 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			`Both modes default to ${DEFAULT_CODEX_MODEL}/${DEFAULT_CODEX_REASONING_EFFORT}.`,
 			"Executor jobs run automatically inside the current project boundary. They may edit/delete files, freely commit, use public network, and run expensive experiments. Exact user-approved external-read, SSH-target, or fixed-script capabilities are available through an opaque host broker; raw credentials never enter Codex.",
 			"Pi remains responsible for framing the research question, judging evidence, and choosing the next research action.",
-			"Use action=status/result/cancel/resume/respond/steer with the returned job id; do not start duplicate jobs merely because a background job is still running.",
+			"Give related work a stable mission label and use reuse=auto to continue its exact Codex thread; use action=missions to inspect workspace-local mission threads.",
+			"Use action=status/result/cancel/resume/respond/steer with the returned job id; jobs from another workspace cannot be managed or resumed.",
 			"Background completion and blocking requests are delivered into the originating Pi session automatically. respond answers an explicit request; steer corrects an active turn without restarting it.",
 		].join(" "),
 		promptSnippet: "Delegate long operational work or a bounded second opinion to local Codex",
 		promptGuidelines: [
 			"Use codex_delegate when a bounded execution task would require many tools or produce enough intermediate output to pollute the research context; delegation is for context isolation, not automatic parallelism.",
 			"Before starting Codex, state the objective and success criteria. Send only relevant research context; do not copy the full conversation or ask Codex to decide the research objective.",
+			"Use a stable mission label for consecutive work on one research subtask and reuse=auto. Start a fresh mission for an independent critique, a different research route, a different workspace, or substantially stale assumptions.",
 			"Use mode=executor when Codex should actually complete the work. It has standing authority for destructive, long-running, and expensive steps inside the current project and should not be micromanaged command by command.",
 			"If Codex needs an unapproved outside path, SSH target, or host script, review the exact request and ask the user for the returned /boundary grant. After approval, respond so Codex can retry the same turn. Do not disguise the operation as a new delegation.",
 			"Use mode=advisor only for a genuinely useful independent proposal or critique. Advisor is read-only but still uses max reasoning by default.",
@@ -330,7 +376,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const requestedMode = params.mode;
 			const startMode = requestedMode ?? "executor";
-			const effectiveBackground = params.background ?? (startMode === "executor");
+			let effectiveBackground = params.background ?? (startMode === "executor");
 			let job;
 			let commandReceipt: string | undefined;
 			if (ctx.hasUI && (params.action === "start" || params.action === "resume")) {
@@ -340,20 +386,39 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 
 			try {
 				switch (params.action) {
-					case "start":
-						job = await startCodexJob({
+					case "start": {
+						const task = requireText(params.task, "task");
+						const reuse = params.reuse ?? (params.mission ? "auto" : "never");
+						const common = {
 							cwd: ctx.cwd,
 							mode: startMode,
-							task: requireText(params.task, "task"),
 							successCriteria: params.successCriteria ?? [],
 							context: params.context ?? "",
+							mission: params.mission,
 							model: params.model,
 							reasoningEffort: params.reasoningEffort,
 							timeoutMinutes: params.timeoutMinutes ?? null,
 							leaderSessionId: ctx.sessionManager.getSessionId(),
 							background: effectiveBackground,
-						});
+						};
+						const reusable = reuse === "auto"
+							? await findReusableCodexJob({ cwd: ctx.cwd, mission: params.mission, mode: startMode })
+							: null;
+						if (reusable && !TERMINAL_JOB_STATUSES.has(reusable.status)) {
+							job = reusable;
+							commandReceipt = `Codex mission "${reusable.mission}" already has active job ${reusable.id}; attached to it instead of starting a duplicate.`;
+						} else if (reusable?.threadId) {
+							job = await resumeCodexJob(reusable.id, {
+								...common,
+								expectedCwd: ctx.cwd,
+								followUp: task,
+							});
+							commandReceipt = `Resumed Codex mission "${reusable.mission}" from job ${reusable.id} as ${job.id}.`;
+						} else {
+							job = await startCodexJob({ ...common, task });
+						}
 						break;
+					}
 					case "resume":
 						job = await resumeCodexJob(requireText(params.jobId, "jobId"), {
 							followUp: requireText(params.followUp, "followUp"),
@@ -362,16 +427,20 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 							reasoningEffort: params.reasoningEffort,
 							successCriteria: params.successCriteria ?? [],
 							context: params.context ?? "",
+							mission: params.mission,
 							timeoutMinutes: params.timeoutMinutes ?? null,
 							leaderSessionId: ctx.sessionManager.getSessionId(),
-							background: effectiveBackground,
+							background: params.background,
+							expectedCwd: ctx.cwd,
 						});
+						effectiveBackground = params.background ?? job.autoNotify ?? (job.mode === "executor");
 						break;
 					case "respond": {
 						const queued = await respondToCodexJob(requireText(params.jobId, "jobId"), {
 							requestId: requireText(params.requestId, "requestId"),
 							response: params.response,
 							answers: params.answers,
+							expectedCwd: ctx.cwd,
 						});
 						job = queued.job;
 						commandReceipt = `Response queued for Codex request ${params.requestId} in job ${job.id}.`;
@@ -380,6 +449,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 					case "steer": {
 						const queued = await steerCodexJob(requireText(params.jobId, "jobId"), {
 							message: requireText(params.message, "message"),
+							expectedCwd: ctx.cwd,
 						});
 						job = queued.job;
 						commandReceipt = `Steering message queued for active Codex job ${job.id}.`;
@@ -387,11 +457,18 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 					}
 					case "status":
 					case "result":
-						job = await readCodexJob(requireText(params.jobId, "jobId"));
+						job = await readCodexJob(requireText(params.jobId, "jobId"), { expectedCwd: ctx.cwd });
 						break;
 					case "cancel":
-						job = await cancelCodexJob(requireText(params.jobId, "jobId"));
+						job = await cancelCodexJob(requireText(params.jobId, "jobId"), { expectedCwd: ctx.cwd });
 						break;
+					case "missions": {
+						const missions = await listCodexMissions({ cwd: ctx.cwd });
+						return {
+							content: [{ type: "text", text: formatMissions(missions) }],
+							details: { missions },
+						};
+					}
 					default:
 						throw new Error(`Unsupported Codex action: ${params.action}`);
 				}
@@ -401,6 +478,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 				if ((params.action === "start" || params.action === "resume") && !effectiveBackground) {
 					job = await waitForCodexJob(job.id, {
 						signal,
+						expectedCwd: ctx.cwd,
 						onUpdate: (current) => {
 							const currentView = publicJobView(current);
 							rememberJob(currentView, ctx);
@@ -418,7 +496,12 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 				}
 
 				return {
-					content: [{ type: "text", text: commandReceipt ?? formatJob(view) }],
+					content: [{
+						type: "text",
+						text: commandReceipt && TERMINAL_JOB_STATUSES.has(view.status)
+							? `${commandReceipt}\n${formatJob(view)}`
+							: commandReceipt ?? formatJob(view),
+					}],
 					details: view,
 				};
 			} catch (error) {
