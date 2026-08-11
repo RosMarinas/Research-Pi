@@ -156,11 +156,13 @@ DeepSeek V4 Flash 使用 Max reasoning，但不把 1M 容量等同于等质量�
 - `executor`：完整执行任务，默认 `gpt-5.6-sol`、reasoning `max`、自动使用 project-write permission profile；
 - 每次调用都可覆盖 Codex model 和 reasoning effort；
 - executor 可在项目内修改或删除文件、安装项目依赖、自由提交，以及启动或取消昂贵实验；公网开放，但需要宿主凭据或项目外文件的 push、远程资源和远程实验会明确返回 blocker，由 Pi 交给用户批准或直接执行；
-- 长任务默认后台运行，通过同一个工具的 `status`、`result`、`resume` 和 `cancel` action 管理；
-- 后台任务会在 Pi 底部状态栏持续显示 job 后八位、模式、运行状态与最近进度；完成、失败或取消后保留终态，下一次委派时更新；
+- Codex 通过本地 stdio App Server 运行，保存稳定的 thread/turn ID；长任务默认后台运行，通过同一个工具的 `status`、`result`、`respond`、`steer`、`resume` 和 `cancel` action 管理；
+- `respond` 回答 Codex 在运行中提出的显式问题；`steer` 将修正或新证据注入仍在运行的 turn，不需要终止并重开任务；
+- 后台任务会在 Pi 底部状态栏持续显示 job 后八位、模式、运行状态与最近进度；完成、失败、取消或需要输入时，会把一条限长结构化事件送回最初的 Pi session 并自动触发 Leader 继续处理；
+- Pi 重启或恢复会话后会按 session ID 重新挂接仍在运行或尚未消费的 job。若输入框中已有草稿，事件排到下一轮，避免抢占用户正在写的内容；
 - 不默认建立 worktree，同一目标工作区同时只允许一个写入型 Codex job。
 
-Codex job、完整 JSONL event 和委派 prompt 保存在 harness 的 `.pi/codex/`，不会进入 Git。子进程不继承 `DEEPSEEK_API_KEY`；Codex 工具子进程还使用 `core` 环境和默认 secret-name 过滤，不继承 SSH agent。Codex CLI 自身仍使用本机 Codex 登录完成模型调用，但该认证不会授予其工具访问用户目录。
+Codex job、请求账本、完整 JSONL event 和委派 prompt 保存在 harness 的 `.pi/codex/`，不会进入 Git。已经处理的普通响应只保留长度和 SHA-256，不长期保留正文；但响应首先会进入 Pi 模型上下文，因此绝不能通过该通道传递 API key 等秘密。子进程不继承 `DEEPSEEK_API_KEY`；Codex 工具子进程还使用 `core` 环境和默认 secret-name 过滤，不继承 SSH agent。Codex CLI 自身仍使用本机 Codex 登录完成模型调用，但该认证不会授予其工具访问用户目录。
 
 ### Trace
 

@@ -4,10 +4,13 @@ import {
 	DEFAULT_CODEX_MODEL,
 	DEFAULT_CODEX_REASONING_EFFORT,
 	cancelCodexJob,
+	listCodexJobs,
 	publicJobView,
 	readCodexJob,
+	respondToCodexJob,
 	resumeCodexJob,
 	startCodexJob,
+	steerCodexJob,
 	waitForCodexJob,
 } from "../lib/codex-jobs.mjs";
 
@@ -18,6 +21,8 @@ const ActionSchema = Type.Union(
 		Type.Literal("result"),
 		Type.Literal("cancel"),
 		Type.Literal("resume"),
+		Type.Literal("respond"),
+		Type.Literal("steer"),
 	],
 	{ description: "Start or manage one Codex delegation job" },
 );
@@ -85,6 +90,20 @@ const ParamsSchema = Type.Object({
 			minLength: 1,
 		}),
 	),
+	requestId: Type.Optional(
+		Type.String({ description: "Pending request id for action=respond", minLength: 1 }),
+	),
+	response: Type.Optional(
+		Type.String({ description: "Plain-text answer for action=respond; never put credentials or secrets here", minLength: 1 }),
+	),
+	answers: Type.Optional(
+		Type.Record(Type.String(), Type.Array(Type.String()), {
+			description: "Optional request_user_input answers keyed by question id",
+		}),
+	),
+	message: Type.Optional(
+		Type.String({ description: "Instruction to inject into the active Codex turn for action=steer", minLength: 1 }),
+	),
 });
 
 function requireText(value: string | undefined, label: string): string {
@@ -98,6 +117,9 @@ function formatJob(job: ReturnType<typeof publicJobView>): string {
 	}
 	if (job.status === "failed" || job.status === "cancelled") {
 		return `Codex job ${job.id} ${job.status}: ${job.error ?? job.progress}`;
+	}
+	if (job.status === "input_required" && job.pendingRequest) {
+		return `Codex job ${job.id} needs input (${job.pendingRequest.id}): ${job.pendingRequest.question}`;
 	}
 	return `Codex job ${job.id} is ${job.status}: ${job.progress}. Use action=result later to retrieve its structured result.`;
 }
@@ -116,14 +138,16 @@ function boundedProgress(progress: string | null | undefined): string {
 }
 
 export function formatCodexStatus(job: CodexJobView, activeCount = 1): string {
-	const icon = job.status === "completed" ? "✓" : job.status === "failed" || job.status === "cancelled" ? "✗" : "⚙";
+	const icon = job.status === "completed" ? "✓" : job.status === "failed" || job.status === "cancelled" ? "✗" : job.status === "input_required" ? "?" : "⚙";
 	const count = activeCount > 1 && !TERMINAL_JOB_STATUSES.has(job.status) ? `${activeCount} running · ` : "";
 	return `${icon} Codex ${count}${job.mode} ${shortJobId(job.id)} · ${job.status} · ${boundedProgress(job.progress)}`;
 }
 
 export default function codexDelegateExtension(pi: ExtensionAPI) {
+	const EVENT_KIND = "codex-delegation-event";
 	const activeJobs = new Map<string, CodexJobView>();
 	const monitorTimers = new Map<string, NodeJS.Timeout>();
+	const deliveredEvents = new Set<string>();
 	let latestTerminal: CodexJobView | undefined;
 	let shuttingDown = false;
 
@@ -145,8 +169,76 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		refreshFooter(ctx);
 	};
 
+	const eventId = (job: CodexJobView): string | undefined => {
+		if (job.status === "input_required" && job.pendingRequest?.id) return `${job.id}:request:${job.pendingRequest.id}`;
+		if (TERMINAL_JOB_STATUSES.has(job.status)) return `${job.id}:terminal:${job.status}`;
+		return undefined;
+	};
+
+	const boundedList = (values: unknown, limit = 8): string[] =>
+		Array.isArray(values) ? values.slice(0, limit).map((value) => boundedProgress(String(value))) : [];
+
+	const eventContent = (job: CodexJobView): string => {
+		if (job.status === "input_required" && job.pendingRequest) {
+			const pending = job.pendingRequest;
+			return [
+				`Codex delegation ${job.id} is waiting for ${pending.audience === "user" ? "the user" : "Research Pi"}.`,
+				`Request id: ${pending.id}`,
+				`Question: ${pending.question}`,
+				pending.whyBlocking ? `Why it blocks progress: ${pending.whyBlocking}` : undefined,
+				pending.options?.length ? `Options: ${pending.options.join(" | ")}` : undefined,
+				pending.secret
+					? "This request is marked secret. Do not ask for or transmit the secret through Pi, model context, codex_delegate, or job files. Ask the user to configure it directly, then continue without echoing it."
+					: `Answer with codex_delegate action=respond, jobId=${job.id}, requestId=${pending.id}. Use action=steer only for unsolicited corrections to the active turn.`,
+			]
+				.filter(Boolean)
+				.join("\n");
+		}
+		const result = job.result ?? {};
+		return [
+			`Codex delegation ${job.id} ${job.status}. Pi must inspect this result and decide the next research action; completion alone is not scientific evidence.`,
+			`Mode/model: ${job.mode} · ${job.model} · ${job.reasoningEffort}`,
+			result.summary ? `Summary: ${String(result.summary).slice(0, 5000)}` : undefined,
+			boundedList(result.evidence).length ? `Evidence:\n- ${boundedList(result.evidence).join("\n- ")}` : undefined,
+			boundedList(result.uncertainties).length ? `Uncertainties:\n- ${boundedList(result.uncertainties).join("\n- ")}` : undefined,
+			result.recommended_next_step ? `Recommended next step: ${String(result.recommended_next_step).slice(0, 3000)}` : undefined,
+			job.error ? `Error: ${String(job.error).slice(0, 3000)}` : undefined,
+			`Use codex_delegate action=result with jobId=${job.id} if the full structured result is needed.`,
+		]
+			.filter(Boolean)
+			.join("\n");
+	};
+
+	const deliverJobEvent = (job: CodexJobView, ctx: ExtensionContext) => {
+		const id = eventId(job);
+		if (!id || deliveredEvents.has(id)) return;
+		const editorHasDraft = ctx.hasUI && Boolean(ctx.ui.getEditorText?.().trim());
+		try {
+			pi.sendMessage(
+				{
+					customType: EVENT_KIND,
+					content: eventContent(job),
+					display: true,
+					details: { eventId: id, jobId: job.id, status: job.status, requestId: job.pendingRequest?.id ?? null },
+				},
+				{
+					deliverAs: editorHasDraft ? "nextTurn" : "followUp",
+					triggerTurn: !editorHasDraft,
+				},
+			);
+		} catch (error) {
+			if (ctx.hasUI) ctx.ui.notify(`Could not deliver Codex event: ${error instanceof Error ? error.message : String(error)}`, "warning");
+			return;
+		}
+		deliveredEvents.add(id);
+		if (editorHasDraft && ctx.hasUI) {
+			ctx.ui.notify(`Codex ${shortJobId(job.id)} ${job.status}; the event is queued behind your editor draft.`, "info");
+		}
+	};
+
 	const monitorJob = (initial: CodexJobView, ctx: ExtensionContext) => {
 		rememberJob(initial, ctx);
+		deliverJobEvent(initial, ctx);
 		if (TERMINAL_JOB_STATUSES.has(initial.status) || monitorTimers.has(initial.id)) return;
 
 		const poll = async () => {
@@ -154,6 +246,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			try {
 				const current = publicJobView(await readCodexJob(initial.id));
 				rememberJob(current, ctx);
+				deliverJobEvent(current, ctx);
 				if (TERMINAL_JOB_STATUSES.has(current.status)) {
 					monitorTimers.delete(current.id);
 					return;
@@ -179,8 +272,26 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		monitorTimers.set(initial.id, timer);
 	};
 
-	pi.on("session_start", () => {
+	pi.on("session_start", async (_event, ctx) => {
 		shuttingDown = false;
+		deliveredEvents.clear();
+		for (const entry of ctx.sessionManager.getBranch()) {
+			if (entry.type === "custom_message" && entry.customType === EVENT_KIND && entry.details?.eventId) {
+				deliveredEvents.add(String(entry.details.eventId));
+			}
+		}
+		try {
+			const jobs = await listCodexJobs({
+				leaderSessionId: ctx.sessionManager.getSessionId(),
+				cwd: ctx.cwd,
+			});
+			for (const job of jobs) {
+				if (TERMINAL_JOB_STATUSES.has(job.status) && job.autoNotify === false) continue;
+				monitorJob(publicJobView(job), ctx);
+			}
+		} catch (error) {
+			if (ctx.hasUI) ctx.ui.notify(`Could not reattach Codex jobs: ${error instanceof Error ? error.message : String(error)}`, "warning");
+		}
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
@@ -200,7 +311,8 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			`Both modes default to ${DEFAULT_CODEX_MODEL}/${DEFAULT_CODEX_REASONING_EFFORT}.`,
 			"Executor jobs run automatically inside the current project boundary. They may edit/delete files, freely commit, use public network, and run expensive experiments, but cannot inherit host credentials or access other directories.",
 			"Pi remains responsible for framing the research question, judging evidence, and choosing the next research action.",
-			"Use action=status/result/cancel/resume with the returned job id; do not start duplicate jobs merely because a background job is still running.",
+			"Use action=status/result/cancel/resume/respond/steer with the returned job id; do not start duplicate jobs merely because a background job is still running.",
+			"Background completion and blocking requests are delivered into the originating Pi session automatically. respond answers an explicit request; steer corrects an active turn without restarting it.",
 		].join(" "),
 		promptSnippet: "Delegate long operational work or a bounded second opinion to local Codex",
 		promptGuidelines: [
@@ -210,6 +322,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			"If Codex reports that an outside-project path or host credential is required, review the exact request and hand it to the user. Do not disguise the same operation as a new delegation.",
 			"Use mode=advisor only for a genuinely useful independent proposal or critique. Advisor is read-only but still uses max reasoning by default.",
 			"After retrieving a result, inspect its evidence and validity limitations. Codex completion does not by itself establish a scientific conclusion.",
+			"When a Codex request arrives, answer it promptly with action=respond if Pi can decide. Ask the user only for user-owned choices or direct credential setup. Never place secrets in a response.",
 		],
 		parameters: ParamsSchema,
 		executionMode: "sequential",
@@ -217,7 +330,9 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const requestedMode = params.mode;
 			const startMode = requestedMode ?? "executor";
+			const effectiveBackground = params.background ?? (startMode === "executor");
 			let job;
+			let commandReceipt: string | undefined;
 			if (ctx.hasUI && (params.action === "start" || params.action === "resume")) {
 				ctx.ui.setWorkingMessage(params.action === "start" ? "Starting Codex delegation..." : "Resuming Codex delegation...");
 				ctx.ui.setStatus("codex_delegate", `⚙ Codex ${startMode} · ${params.action === "start" ? "starting" : "resuming"}`);
@@ -235,6 +350,8 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 							model: params.model,
 							reasoningEffort: params.reasoningEffort,
 							timeoutMinutes: params.timeoutMinutes ?? null,
+							leaderSessionId: ctx.sessionManager.getSessionId(),
+							background: effectiveBackground,
 						});
 						break;
 					case "resume":
@@ -246,8 +363,28 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 							successCriteria: params.successCriteria ?? [],
 							context: params.context ?? "",
 							timeoutMinutes: params.timeoutMinutes ?? null,
+							leaderSessionId: ctx.sessionManager.getSessionId(),
+							background: effectiveBackground,
 						});
 						break;
+					case "respond": {
+						const queued = await respondToCodexJob(requireText(params.jobId, "jobId"), {
+							requestId: requireText(params.requestId, "requestId"),
+							response: params.response,
+							answers: params.answers,
+						});
+						job = queued.job;
+						commandReceipt = `Response queued for Codex request ${params.requestId} in job ${job.id}.`;
+						break;
+					}
+					case "steer": {
+						const queued = await steerCodexJob(requireText(params.jobId, "jobId"), {
+							message: requireText(params.message, "message"),
+						});
+						job = queued.job;
+						commandReceipt = `Steering message queued for active Codex job ${job.id}.`;
+						break;
+					}
 					case "status":
 					case "result":
 						job = await readCodexJob(requireText(params.jobId, "jobId"));
@@ -261,8 +398,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 
 				let view = publicJobView(job);
 				rememberJob(view, ctx);
-				const background = params.background ?? job.mode === "executor";
-				if ((params.action === "start" || params.action === "resume") && !background) {
+				if ((params.action === "start" || params.action === "resume") && !effectiveBackground) {
 					job = await waitForCodexJob(job.id, {
 						signal,
 						onUpdate: (current) => {
@@ -282,7 +418,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 				}
 
 				return {
-					content: [{ type: "text", text: formatJob(view) }],
+					content: [{ type: "text", text: commandReceipt ?? formatJob(view) }],
 					details: view,
 				};
 			} catch (error) {

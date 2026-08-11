@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,9 +9,12 @@ import {
 	DEFAULT_CODEX_REASONING_EFFORT,
 	buildDelegationPrompt,
 	cancelCodexJob,
+	listCodexJobs,
+	respondToCodexJob,
 	resumeCodexJob,
 	sanitizeCodexEnvironment,
 	startCodexJob,
+	steerCodexJob,
 	waitForCodexJob,
 } from "../.pi/lib/codex-jobs.mjs";
 import { CODEX_ADVISOR_PROFILE, CODEX_EXECUTOR_PROFILE } from "../.pi/lib/project-boundary.mjs";
@@ -54,38 +57,70 @@ function makeFakeCodex(root, delayMs = 0) {
 		`#!/usr/bin/env node
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
 
 const args = process.argv.slice(2);
-let prompt = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => { prompt += chunk; });
-process.stdin.on("end", () => {
-  setTimeout(() => {
-    const modelIndex = args.indexOf("-m");
-    const configText = args.join(" ");
-    const sandbox = configText.includes("research_pi_executor") ? "${CODEX_EXECUTOR_PROFILE}" : configText.includes("research_pi_advisor") ? "${CODEX_ADVISOR_PROFILE}" : "unknown";
-    const model = modelIndex >= 0 ? args[modelIndex + 1] : "unknown";
-    const isResume = args.includes("resume");
-    if (sandbox === "${CODEX_EXECUTOR_PROFILE}") {
-      writeFileSync(join(process.cwd(), "codex-executed.txt"), "executor ran\\n", "utf8");
+const configText = args.join(" ");
+const sandbox = configText.includes("research_pi_executor") ? "${CODEX_EXECUTOR_PROFILE}" : configText.includes("research_pi_advisor") ? "${CODEX_ADVISOR_PROFILE}" : "unknown";
+let model = "unknown";
+let isResume = false;
+let activeTurn = null;
+let completionTimer;
+
+const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+const complete = (prompt, leaderResponse = "") => {
+  if (sandbox === "${CODEX_EXECUTOR_PROFILE}") {
+    writeFileSync(join(process.cwd(), "codex-executed.txt"), "executor ran\\n", "utf8");
+  }
+  const result = {
+    status: "completed",
+    goal_satisfied: true,
+    summary: isResume ? "resumed" : "finished",
+    evidence: [model, sandbox, prompt.includes("Research Pi") ? "role-present" : "role-missing", leaderResponse].filter(Boolean),
+    actions_taken: ["fake action"],
+    changed_files: sandbox === "${CODEX_EXECUTOR_PROFILE}" ? ["codex-executed.txt"] : [],
+    checks: [{ command: "fake-check", result: "passed" }],
+    external_effects: [],
+    uncertainties: [],
+    recommended_next_step: "inspect result"
+  };
+  send({ method: "item/completed", params: { threadId: "thread-fake-123", turnId: activeTurn, item: { id: "message-1", type: "agentMessage", phase: "final_answer", text: JSON.stringify(result) } } });
+  send({ method: "turn/completed", params: { threadId: "thread-fake-123", turn: { id: activeTurn, status: "completed", items: [], error: null } } });
+};
+
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ id: message.id, result: { userAgent: "fake", platformFamily: "unix", platformOs: "test", codexHome: process.cwd() } });
+  } else if (message.method === "thread/start") {
+    model = message.params.model;
+    send({ id: message.id, result: { thread: { id: "thread-fake-123", turns: [] } } });
+    send({ method: "thread/started", params: { thread: { id: "thread-fake-123", turns: [] } } });
+  } else if (message.method === "thread/resume") {
+    model = message.params.model;
+    isResume = true;
+    send({ id: message.id, result: { thread: { id: message.params.threadId, turns: [] } } });
+    send({ method: "thread/started", params: { thread: { id: message.params.threadId, turns: [] } } });
+  } else if (message.method === "turn/start") {
+    activeTurn = "turn-fake-456";
+    const prompt = message.params.input[0].text;
+    send({ id: message.id, result: { turn: { id: activeTurn, status: "inProgress", items: [], error: null } } });
+    send({ method: "turn/started", params: { threadId: "thread-fake-123", turn: { id: activeTurn, status: "inProgress", items: [], error: null } } });
+    if (prompt.includes("ask the leader live")) {
+      send({ id: "server-question-1", method: "item/tool/call", params: { threadId: "thread-fake-123", turnId: activeTurn, callId: "call-1", tool: "consult_research_pi", arguments: { audience: "leader", question: "Choose H1 or H2", why_blocking: "The experiment differs", options: ["H1", "H2"] } } });
+    } else {
+      completionTimer = setTimeout(() => complete(prompt), ${delayMs});
     }
-    const result = {
-      status: "completed",
-      goal_satisfied: true,
-      summary: isResume ? "resumed" : "finished",
-      evidence: [model, sandbox, prompt.includes("Research Pi") ? "role-present" : "role-missing"],
-      actions_taken: ["fake action"],
-      changed_files: sandbox === "${CODEX_EXECUTOR_PROFILE}" ? ["codex-executed.txt"] : [],
-      checks: [{ command: "fake-check", result: "passed" }],
-      external_effects: [],
-      uncertainties: [],
-      recommended_next_step: "inspect result"
-    };
-    console.log(JSON.stringify({ type: "thread.started", thread_id: "thread-fake-123" }));
-    console.log(JSON.stringify({ type: "turn.started" }));
-    console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: JSON.stringify(result) } }));
-    console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 20 } }));
-  }, ${delayMs});
+  } else if (message.id === "server-question-1") {
+    const answer = message.result?.contentItems?.[0]?.text ?? "missing answer";
+    complete("Research Pi", answer);
+  } else if (message.method === "turn/steer") {
+    send({ id: message.id, result: { turnId: activeTurn } });
+  } else if (message.method === "turn/interrupt") {
+    clearTimeout(completionTimer);
+    send({ id: message.id, result: {} });
+    send({ method: "turn/completed", params: { threadId: "thread-fake-123", turn: { id: activeTurn, status: "interrupted", items: [], error: null } } });
+  }
 });
 `,
 		{ encoding: "utf8", mode: 0o700 },
@@ -183,6 +218,74 @@ test("advisor, executor, and explicit resume produce durable structured jobs", a
 		assert.equal(resumed.status, "completed");
 		assert.equal(resumed.continuationOf, executor.id);
 		assert.equal(resumed.result.summary, "resumed");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("app-server delegation supports live leader requests and durable session reattachment", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-live-"));
+	try {
+		const workspace = join(root, "workspace");
+		const jobRoot = join(root, "codex", "jobs");
+		mkdirSync(workspace, { recursive: true });
+		const codexBin = makeFakeCodex(root);
+		const started = await startCodexJob({
+			cwd: workspace,
+			jobRoot,
+			codexBin,
+			mode: "advisor",
+			task: "ask the leader live",
+			leaderSessionId: "pi-session-live",
+		});
+		assert.equal(started.leaderSessionId, "pi-session-live");
+		assert.equal((await listCodexJobs({ jobRoot })).length, 1);
+
+		let waiting;
+		let observed;
+		for (let attempt = 0; attempt < 200; attempt++) {
+			const [job] = await listCodexJobs({ jobRoot, leaderSessionId: "pi-session-live", cwd: workspace });
+			if (job) observed = job;
+			if (job?.status === "input_required") {
+				waiting = job;
+				break;
+			}
+			await new Promise((resolve) => setTimeout(resolve, 25));
+		}
+		assert.equal(waiting?.pendingRequest?.question, "Choose H1 or H2", JSON.stringify(observed));
+		assert.equal(waiting?.activeTurnId, "turn-fake-456");
+
+		const steering = await steerCodexJob(started.id, {
+			jobRoot,
+			message: "Treat this as a protocol smoke, not a research conclusion.",
+		});
+		for (let attempt = 0; attempt < 100; attempt++) {
+			const command = JSON.parse(
+				readFileSync(join(jobRoot, started.id, "commands", `${steering.command.id}.json`), "utf8"),
+			);
+			if (command.status === "applied") break;
+			if (command.status === "failed") assert.fail(command.error);
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		assert.equal(
+			JSON.parse(readFileSync(join(jobRoot, started.id, "commands", `${steering.command.id}.json`), "utf8")).status,
+			"applied",
+		);
+		await respondToCodexJob(started.id, {
+			jobRoot,
+			requestId: waiting.pendingRequest.id,
+			response: "Use H2 because it distinguishes the hypotheses.",
+		});
+		const completed = await waitForCodexJob(started.id, { jobRoot });
+		assert.equal(completed.status, "completed");
+		assert.match(completed.result.evidence.join("\n"), /Use H2/);
+
+		const commandName = readdirSync(join(jobRoot, started.id, "commands")).find((name) =>
+			readFileSync(join(jobRoot, started.id, "commands", name), "utf8").includes('"type": "respond"'),
+		);
+		const persistedCommand = readFileSync(join(jobRoot, started.id, "commands", commandName), "utf8");
+		assert.doesNotMatch(persistedCommand, /Use H2/);
+		assert.match(persistedCommand, /responseSha256/);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
