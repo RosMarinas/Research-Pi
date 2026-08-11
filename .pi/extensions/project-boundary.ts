@@ -91,6 +91,14 @@ function capabilityInput(params: any) {
 			timeoutSeconds: params.timeoutSeconds,
 		};
 	}
+	if (params.action === "command") {
+		return {
+			kind: "host-command",
+			argv: params.argv ?? [],
+			cwd: params.cwd,
+			timeoutSeconds: params.timeoutSeconds,
+		};
+	}
 	throw new Error(`Unsupported host capability action: ${params.action}`);
 }
 
@@ -102,7 +110,16 @@ function describeCapabilityRequest(request: any, operation?: any): string {
 		return [
 			`Use local SSH credentials for: ${request.target}`,
 			operation?.remoteCommand ? `Current remote command:\n${operation.remoteCommand}` : "This pre-grant authorizes commands to this target.",
-			"A session grant permits subsequent remote commands to this same target for up to 24 hours.",
+			"A project trust grant permits future commands to this target without repeated approval.",
+		].join("\n");
+	}
+	if (request.kind === "host-command") {
+		return [
+			"Run a project command with host-user authority:",
+			`cwd: ${request.cwd}`,
+			`argv: ${request.argv.map((arg: string) => JSON.stringify(arg)).join(" ")}`,
+			`Suggested persistent prefix: ${request.suggestedPrefix.map((arg: string) => JSON.stringify(arg)).join(" ")}`,
+			"This command runs outside the project sandbox and can use your host account. Review the argv before approving.",
 		].join("\n");
 	}
 	return [
@@ -233,7 +250,7 @@ function createProjectBashOperations(
 					if (crossedBoundary) {
 						onData(
 							Buffer.from(
-								"\n[Research Pi boundary] Agent shell crossed the project boundary. Do not bypass it indirectly. Ask the user to approve one explicit file-tool access or to run the exact command with !.\n",
+								"\n[Research Pi boundary] This command needs host authority. Do not hand the command back to the user by default: retry it through host_capability command with an exact argv, or use an already trusted SSH target/command prefix.\n",
 							),
 						);
 					}
@@ -273,15 +290,24 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 
 	const requestInteractiveGrant = async (request: any, ctx: any, operation?: any) => {
 		if (!ctx.hasUI) return undefined;
+		const projectTrustLabel = request.kind === "ssh-target"
+			? "Trust this SSH target for the project"
+			: request.kind === "host-command"
+				? "Trust the suggested command prefix for the project"
+				: undefined;
+		const choices = ["Approve once", "Approve this Pi session (24h)", projectTrustLabel, "Deny"].filter(Boolean) as string[];
+		const footer = request.kind === "host-command"
+			? "Host commands have your user authority. Project trust is stored outside the repository and can be revoked."
+			: "SSH credentials remain opaque to the model.";
 		const choice = await ctx.ui.select(
-			`⚠️ Research Pi requests a host capability\n\n${describeCapabilityRequest(request, operation)}\n\nCredentials remain opaque to the model.`,
-			["Approve once", "Approve this Pi session (24h)", "Deny"],
+			`⚠️ Research Pi requests a host capability\n\n${describeCapabilityRequest(request, operation)}\n\n${footer}`,
+			choices,
 		);
-		if (choice !== "Approve once" && choice !== "Approve this Pi session (24h)") return undefined;
+		if (choice !== "Approve once" && choice !== "Approve this Pi session (24h)" && choice !== projectTrustLabel) return undefined;
 		const grant = await createCapabilityGrant(
 			requireCapabilityContext(),
 			request,
-			choice === "Approve once" ? "once" : "session",
+			choice === "Approve once" ? "once" : choice === "Approve this Pi session (24h)" ? "session" : "project",
 		);
 		ctx.ui.notify(`Approved ${capabilityGrantSummary(grant)}`, "warning");
 		await refreshBoundaryStatus(ctx);
@@ -292,23 +318,26 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 		name: "host_capability",
 		label: "Host Capability",
 		description: [
-			"Use an explicitly user-approved host capability without exposing host credentials to the model.",
-			"read accesses one approved external file/directory; ssh runs a command on one approved SSH target; script runs one approved project script with an exact SHA-256 and exact argv.",
-			"If no matching grant exists, interactive Pi asks the user once. Never use this tool to inspect private keys, tokens, or credential stores.",
+			"Use a host capability when a justified project operation needs SSH credentials or host-user authority.",
+			"read accesses an approved external file; ssh uses an approved exact target with opaque credentials; command runs an argv inside the project cwd with host authority; script is the legacy strict exact-script mode.",
+			"Project-trusted SSH targets and command prefixes run without repeated approval. Never use this tool to inspect private keys, tokens, or credential stores.",
 		].join(" "),
-		promptSnippet: "Use explicitly approved external-read, SSH, or fixed project-script host capabilities",
+		promptSnippet: "Use project-trusted SSH or host-command capabilities instead of handing executable commands back to the user",
 		promptGuidelines: [
-			"Use host_capability only when ordinary project tools cannot perform an already justified operation. State the exact external path, SSH target, or project script and arguments.",
-			"SSH and project-script capabilities may use host credentials opaquely; never request, read, print, copy, or transmit private keys or tokens.",
+			"Run arbitrary uv, Python, shell, Node, Git, and test commands normally inside the project sandbox. Command syntax such as sh -c or python -c is not itself a reason to refuse.",
+			"When a justified command needs host SSH access or another host-user capability, call host_capability command with an exact argv. If a project trust rule already matches, execution is automatic.",
+			"Direct SSH uses opaque credentials. Host-command has broader user authority and must match an approved exact command or project prefix; never request, read, print, copy, or transmit private keys or tokens.",
 			"A missing capability is a user authorization boundary. Do not route around it with bash, symlinks, proxy commands, copied credentials, or another agent.",
 		],
 		parameters: Type.Object({
-			action: Type.Union([Type.Literal("list"), Type.Literal("read"), Type.Literal("ssh"), Type.Literal("script")]),
+			action: Type.Union([Type.Literal("list"), Type.Literal("read"), Type.Literal("ssh"), Type.Literal("command"), Type.Literal("script")]),
 			path: Type.Optional(Type.String({ description: "External path for read, or in-project executable path for script" })),
 			target: Type.Optional(Type.String({ description: "Exact SSH alias or [user@]host[:port]" })),
 			port: Type.Optional(Type.Integer({ minimum: 1, maximum: 65535 })),
 			remoteCommand: Type.Optional(Type.String({ description: "Exact remote shell command for ssh" })),
-			args: Type.Optional(Type.Array(Type.String(), { maxItems: 64, description: "Exact argv for an approved project script" })),
+			argv: Type.Optional(Type.Array(Type.String(), { maxItems: 128, description: "Exact host command argv, for example [\"uv\",\"run\",\"remote_run.py\",\"bash\",\"experiment.sh\"]" })),
+			cwd: Type.Optional(Type.String({ description: "Working directory inside the current project; defaults to the project root" })),
+			args: Type.Optional(Type.Array(Type.String(), { maxItems: 64, description: "Legacy exact argv for project-script" })),
 			timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 86400 })),
 		}),
 		executionMode: "sequential",
@@ -354,9 +383,10 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 		promptSnippet: "Execute shell commands inside the current project boundary; public network is available",
 		promptGuidelines: [
 			"Agent-initiated shell commands may read minimal system runtime paths and may read/write the current project, including Git metadata; they cannot access other user directories or write system temp paths.",
-			"Public network access is available without a domain allowlist. Unix sockets and host credential files remain outside the project boundary.",
-			"When running under WSL2, Windows host mounts and Windows executable interop are outside the agent boundary. Do not invoke powershell.exe, cmd.exe, wsl.exe, or paths below /mnt; hand an exact command to the user instead.",
-			"If an operation needs a path outside the project, do not attempt an indirect bypass. State the exact path and operation, then ask the user for one explicit approval or ask them to run the exact command with !.",
+			"Public network access is available without a domain allowlist. Arbitrary project-local uv, Python, shell, Node, Git, and test commands are allowed; command syntax is not a policy boundary.",
+			"Unix sockets and host credential files remain outside the project sandbox. If a justified operation needs them, use host_capability command or a project-trusted SSH target instead of asking the user to copy a terminal command.",
+			"Under WSL2, Windows host mounts and Windows executable interop remain outside the ordinary agent boundary. Do not invoke powershell.exe, cmd.exe, wsl.exe, or paths below /mnt through sandboxed bash; request an explicit host capability when the operation is truly necessary.",
+			"Do not attempt an indirect boundary bypass. Request the exact brokered target or argv and continue after approval; use ! only if the broker cannot express the operation.",
 		],
 		async execute(id, params, signal, onUpdate, ctx) {
 			if (!runtime) {
@@ -391,7 +421,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			if (isForbiddenCredentialRead(info.lexicalPath) || isForbiddenCredentialRead(info.resolvedPath)) {
 				return {
 					block: true,
-					reason: "Credential material cannot be made model-readable. Use an opaque SSH/project-script capability or an exact user-run ! command.",
+					reason: "Credential material cannot be made model-readable. Use an opaque SSH capability or an approved host command without reading the credential contents.",
 					terminate: false,
 				};
 			}
@@ -541,17 +571,20 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 				await refreshBoundaryStatus(ctx);
 				return;
 			}
-			if (action === "grant-read" || action === "grant-ssh" || action === "grant-script") {
+			if (["grant-read", "grant-ssh", "trust-ssh", "grant-script", "grant-command", "trust-command"].includes(action ?? "")) {
 				const validArguments =
 					(action === "grant-read" && words.length === 1) ||
-					(action === "grant-ssh" && words.length === 1) ||
-					(action === "grant-script" && words.length >= 1);
+					((action === "grant-ssh" || action === "trust-ssh") && words.length === 1) ||
+					(action === "grant-script" && words.length >= 1) ||
+					((action === "grant-command" || action === "trust-command") && words.length >= 1);
 				if (!validArguments) {
 					const usage = action === "grant-read"
 						? "/boundary grant-read <external-path>"
-						: action === "grant-ssh"
-							? "/boundary grant-ssh <alias|user@host[:port]>"
-							: "/boundary grant-script <project-script> [exact args...]";
+						: action === "grant-ssh" || action === "trust-ssh"
+							? `/boundary ${action} <alias|user@host[:port]>`
+							: action === "grant-command" || action === "trust-command"
+								? `/boundary ${action} <executable> [argv-prefix...]`
+								: "/boundary grant-script <project-script> [exact args...]";
 					ctx.ui.notify(`Usage: ${usage}`, "warning");
 					return;
 				}
@@ -561,16 +594,27 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 				}
 				const input = action === "grant-read"
 					? { kind: "external-read", path: words[0] }
-					: action === "grant-ssh"
+					: action === "grant-ssh" || action === "trust-ssh"
 						? { kind: "ssh-target", target: words[0] }
-						: { kind: "project-script", path: words[0], args: words.slice(1) };
+						: action === "grant-command" || action === "trust-command"
+							? { kind: "host-command", argv: words, cwd: ctx.cwd }
+							: { kind: "project-script", path: words[0], args: words.slice(1) };
 				const request = await prepareCapabilityRequest(requireCapabilityContext(), input);
-				const approved = await ctx.ui.confirm("Approve host capability for this Pi session?", describeCapabilityRequest(request));
+				const projectScope = action === "trust-ssh" || action === "trust-command";
+				if (action === "trust-command" && request.kind === "host-command") {
+					// An explicit user command defines the persistent prefix verbatim. Automatic
+					// model requests still receive the conservative recommended prefix.
+					request.suggestedPrefix = [...request.argv];
+				}
+				const approved = await ctx.ui.confirm(
+					projectScope ? "Trust this host capability for the project?" : "Approve host capability for this Pi session?",
+					describeCapabilityRequest(request),
+				);
 				if (!approved) {
 					ctx.ui.notify("Host capability not approved.", "info");
 					return;
 				}
-				const grant = await createCapabilityGrant(requireCapabilityContext(), request, "session");
+				const grant = await createCapabilityGrant(requireCapabilityContext(), request, projectScope ? "project" : "session");
 				ctx.ui.notify(`Approved ${capabilityGrantSummary(grant)}`, "warning");
 				await refreshBoundaryStatus(ctx);
 				return;
@@ -579,9 +623,12 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 				ctx.ui.notify([
 					"/boundary — show policy and active grant count",
 					"/boundary doctor — validate Pi/Codex Git and runtime permissions without a model call",
-					"/boundary grants — list session grants",
+					"/boundary grants — list active project and session grants",
 					"/boundary grant-read <external-path>",
-					"/boundary grant-ssh <alias|user@host[:port]>",
+					"/boundary grant-ssh <alias|user@host[:port]> — current session",
+					"/boundary trust-ssh <alias|user@host[:port]> — persistent for this project",
+					"/boundary grant-command <executable> [exact argv...] — current session",
+					"/boundary trust-command <executable> [argv-prefix...] — persistent for this project",
 					"/boundary grant-script <project-script> [exact args...]",
 					"/boundary revoke <grant-id|all>",
 				].join("\n"), "info");
@@ -597,12 +644,13 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 						`Project root: ${runtime.root}`,
 						"Agent shell: project read/write; .git commit/config/refs writable; .git/hooks read-only.",
 						`System runtime: ${(systemRuntime?.readRoots ?? []).join(", ") || "platform minimal runtime"} (read-only).`,
-						"Network: public web access and local binding enabled; raw SSH requires an explicit ssh-target capability; Unix sockets are not inherited by the agent shell.",
+						"Network: public web is open; project-trusted SSH targets and command prefixes run without repeated approval.",
 						wslIsolation
 							? `WSL${wslIsolation.version}: /mnt denied; seccomp required; cmd.exe host-interop probe blocked (exit ${wslIsolation.probeExitCode}).`
 							: undefined,
-						`Host grants: ${capabilityContext ? (await listCapabilityGrants(capabilityContext)).length : 0} active for this Pi session.`,
-						"Outside path: direct reads can be approved once/session; credentials remain opaque; arbitrary shell stays project-only.",
+						`Host grants: ${capabilityContext ? (await listCapabilityGrants(capabilityContext)).length : 0} active across project/session scopes.`,
+						"Commands: arbitrary uv/Python/shell syntax is allowed inside the project sandbox; approved host commands may use user authority.",
+						"Outside path and /mnt access still require explicit approval; credential contents remain protected.",
 						"Use /boundary help for grant and revoke commands.",
 					].filter(Boolean)
 				: [`Boundary unavailable (failed closed): ${initializationError ?? "not initialized"}`];

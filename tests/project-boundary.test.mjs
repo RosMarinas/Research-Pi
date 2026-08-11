@@ -26,14 +26,18 @@ test("project boundary exposes one opaque host-capability tool", () => {
 	const commands = [];
 	projectBoundaryExtension({
 		registerTool(tool) {
-			tools.push(tool.name);
+			tools.push(tool);
 		},
 		registerCommand(name) {
 			commands.push(name);
 		},
 		on() {},
 	});
-	assert.deepEqual(tools.sort(), ["bash", "host_capability"]);
+	assert.deepEqual(tools.map((tool) => tool.name).sort(), ["bash", "host_capability"]);
+	const hostTool = tools.find((tool) => tool.name === "host_capability");
+	assert.match(hostTool.description, /command runs an argv/);
+	assert.match(JSON.stringify(hostTool.parameters), /host command argv/);
+	assert.match(JSON.stringify(hostTool.parameters), /"command"/);
 	assert.deepEqual(commands, ["boundary"]);
 });
 

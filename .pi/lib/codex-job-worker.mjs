@@ -340,7 +340,14 @@ async function main() {
 							remoteCommand: args.remoteCommand,
 							timeoutSeconds: args.timeoutSeconds,
 						}
-						: {
+						: args.action === "command"
+							? {
+								kind: "host-command",
+								argv: args.argv ?? [],
+								cwd: args.cwd,
+								timeoutSeconds: args.timeoutSeconds,
+							}
+							: {
 							kind: "project-script",
 							path: args.path,
 							args: args.args ?? [],
@@ -644,17 +651,19 @@ async function main() {
 			{
 				name: "research_pi_host",
 				description:
-					"Use only an exact Research Pi host capability already approved by the user. Credentials are brokered opaquely. If the tool reports a missing grant, call consult_research_pi with audience=user and the exact /boundary command; never bypass it. Advisor mode may use read only.",
+					"Use Research Pi host capabilities for justified SSH or host-user operations. Project-trusted SSH targets and command prefixes run automatically; otherwise ask Research Pi for approval through consult_research_pi. Normal uv/Python/shell commands stay in the project sandbox. Advisor mode may use read only.",
 				inputSchema: {
 					type: "object",
 					additionalProperties: false,
 					required: ["action"],
 					properties: {
-						action: { type: "string", enum: ["read", "ssh", "script"] },
+						action: { type: "string", enum: ["read", "ssh", "command", "script"] },
 						path: { type: "string", maxLength: 4096 },
 						target: { type: "string", maxLength: 255 },
 						port: { type: "integer", minimum: 1, maximum: 65535 },
 						remoteCommand: { type: "string", maxLength: 32768 },
+						argv: { type: "array", maxItems: 128, items: { type: "string", maxLength: 4096 } },
+						cwd: { type: "string", maxLength: 4096 },
 						args: { type: "array", maxItems: 64, items: { type: "string", maxLength: 4096 } },
 						timeoutSeconds: { type: "integer", minimum: 1, maximum: 86400 },
 					},

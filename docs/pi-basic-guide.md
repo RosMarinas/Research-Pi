@@ -108,7 +108,19 @@ Pi 会自行选择工具。若想明确控制，可以直接说：
 
 安装、升级或权限异常后先运行 `pi doctor`；交互会话内可运行 `/boundary doctor`。它们不调用模型，会验证项目、Git、Python 与 Codex sandbox 的真实权限。每个 Codex job 也会在模型启动前自动执行 preflight。
 
-模型 shell 可读写当前项目（包括正常 Git commit 所需的 `.git` 数据），并可访问公网；它不能读取其他项目、宿主凭据或通过 Unix socket 继承 Docker/SSH-agent 权限。直接文件工具请求项目外路径时会显示真实路径并逐次询问；shell 越界不会自动提权，而是要求 Pi 给出准确的 `!command` 供你决定是否直接运行。
+模型 shell 可读写当前项目（包括正常 Git commit 所需的 `.git` 数据），并可访问公网。项目内的 `uv`、Python、shell、Node、Git 和测试命令可直接运行，`sh -c` 或 `python3 -c` 不会仅因语法形式被拒绝。其他项目、宿主凭据和 Unix socket 仍在 sandbox 外；需要 SSH 或宿主权限时，Pi 会通过 `host_capability` 请求一次/session 授权，或复用当前项目已信任的 SSH target/command prefix，而不是默认让你复制命令到终端。
+
+常用预授权示例：
+
+```text
+/boundary trust-ssh 931server
+/boundary trust-command uv run remote_run.py
+/boundary trust-command python3 remote_run.py
+/boundary trust-command ./sync.sh
+/boundary grants
+```
+
+`trust-*` 按项目持久保存，`grant-*` 只在当前 Pi session 生效。持久规则保存在用户状态目录而不是仓库中；源码开发模式下位于 Git 忽略的 `.pi/capabilities/`。`host-command` 会在授权界面显示 cwd、完整 argv 和建议前缀，并以宿主用户权限运行，所以只信任你认可的项目入口；不透明 `ssh-target` 的凭据内容不会进入模型。
 
 所有模型工具调用都会在底部状态栏显示工具名、经过截断和凭据遮蔽的目标摘要以及已运行时间；成功或失败终态保留 5 秒。多个工具并行时显示数量和最近启动的工具。Codex 后台 job 使用独立的持久状态，不受这个 5 秒终态影响。
 
@@ -273,7 +285,9 @@ Pi 会获得一个 `codex-...` job ID。底部状态栏会持续显示 job 后�
 - DeepSeek Web Search 会额外产生模型和搜索相关 token 开销；简单检索也应保持有界；
 - Pi 的模型 shell 受 OS 级 sandbox runtime 约束，Codex executor 使用 project-only permission profile：项目可写、Git commit 可用、公网开放，项目外用户文件和 Unix sockets 默认不可用；Pi shell 的通用系统 temp 写入被关闭，仅保留 Apple Git 所需的窄 `xcrun_db` 系统缓存例外；Codex CLI 0.146 仍自带系统 temp 兼容路径，Harness 已将 `TMPDIR` 指向项目内并禁止主动越界，但这一处目前是纵深防御，不与 Pi shell 等强；
 - `.git/hooks` 是项目内唯一默认只读的 Git 子路径，防止实验任务植入后续持久执行；`.git/config`、objects、index 和 refs 可写；
-- `!` / `!!` 与人工批准的直接文件工具是越界通道。它们代表用户自己的权限决定，不应由模型通过变形命令或重复委派替代；
+- 项目内任意 `uv`、Python 和 shell 命令由 sandbox 约束效果，而不是由命令字符串白名单约束；需要宿主 SSH/config/agent 的入口通过一次/session/project 三档 host capability 授权；
+- 项目持久 `trust-ssh` 绑定精确 target，`trust-command` 绑定界面显示的 argv 前缀；代码字符串默认绑定完整 argv。它们可被 Pi 与 Codex executor 自动复用，也可用 `/boundary revoke` 撤销；
+- `!` / `!!` 与人工批准的直接文件工具仍是最终越界通道，但 broker 能表达的操作应由 agent 申请授权后继续执行，不应常态化退回用户手动运行；
 - memory SQLite 是派生缓存，不进入 Git；它会脱敏常见凭证形式，但原始 session、实验账本和不常见秘密格式仍是敏感数据；
 - Research Pi 在约 272K 总上下文时主动 compact，384K 作为硬触发线；压缩后原始 recent tail 按当前分支第 1/2/3 次 compact 取约 32K/40K/48K，之后固定在 48K；
 - 当前适合科研探索；极限上下文、长期多分支召回和 Codex 无人值守远程执行仍需在真实任务中继续验证；

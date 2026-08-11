@@ -138,26 +138,32 @@ pi doctor --workspace /path/to/research-project
 
 ### Host capability
 
-当科研任务确实需要读取项目外资料、连接实验服务器或运行会调用 SSH/rsync 的项目脚本时，使用 `host_capability`。授权由用户在 TUI 中选择一次或当前 Pi session（24 小时），Pi 与该 session 启动的 Codex job 共用同一个本地账本：
+普通 `uv`、Python、shell、Node、Git 和测试命令在项目 sandbox 内直接运行，不按命令名称或 `-c` 字符串做白名单判断。当科研任务确实需要读取项目外资料、连接实验服务器，或让项目命令使用宿主 SSH/config/agent 等权限时，使用 `host_capability`。授权有三种作用域：一次、当前 Pi session（24 小时）和当前项目持久信任；Pi 与 Codex job 共用同一组规则：
 
 - `external-read` 只允许一个精确文件，或显式批准目录下的读取；私钥、`.env`、云凭据与 keychain 等不能授权给模型读取；
 - `ssh-target` 只允许一个精确 `[user@]host[:port]`，系统 SSH 可以不透明地使用 `~/.ssh/config`、私钥或 `SSH_AUTH_SOCK`，但凭据内容不会进入模型、prompt、job 或日志；
-- `project-script` 只允许项目内一个精确 SHA-256 和精确 argv。脚本或参数变化后必须重新批准，适合 `./sync.sh --once` 这类已有工作流；
-- Codex advisor 只能使用外部只读授权；executor 才能使用 SSH 和项目脚本。
+- `host-command` 以 `shell:false` 执行明确 argv，工作目录必须位于当前项目。一次/session 授权匹配完整 argv；项目信任匹配界面显示的结构化前缀，例如 `uv run remote_run.py`、`python3 remote_run.py` 或 `./sync.sh`，因此实验参数可以变化而无需反复批准；
+- `sh -c`、`bash -c`、`python3 -c`、`node -e` 等代码字符串默认只建议把完整 argv 作为持久规则，不会退化成信任整个解释器；
+- `project-script` 保留为兼容用的最严格模式：绑定项目内文件的精确 SHA-256 与精确 argv；
+- Codex advisor 只能使用外部只读授权；executor 可复用项目认可的 SSH target 和 command prefix。
 
 可以让模型直接调用 `host_capability` 并在弹窗中批准，也可以由用户预先执行：
 
 ```text
 /boundary grant-read "~/.ssh/config"
-/boundary grant-ssh 931server
+/boundary trust-ssh 931server
+/boundary trust-command uv run remote_run.py
+/boundary trust-command python3 remote_run.py
+/boundary trust-command ./sync.sh
+/boundary grant-command python3 -c "print('one exact host-side probe')"
 /boundary grant-script ./sync.sh --once
 /boundary grants
 /boundary revoke <grant-id|all>
 ```
 
-`/boundary` 显示当前边界和 grant 数量。授权账本位于当前状态目录的 `capabilities/`（源码模式即 `.pi/capabilities/`），不会进入 Git；它只保存目标、scope、到期时间、脚本哈希与 argv，不保存密钥。任意通用 bash 仍处于 project-only 边界，`!` / `!!` 继续作为最后的人工系统权限通道。
+`/boundary` 显示当前边界和 grant 数量。`grant-*` 是当前 session 规则，`trust-*` 是按项目根目录隔离的持久规则；两者都可随时 revoke。授权账本位于当前状态目录的 `capabilities/`（源码开发模式即 Git 忽略的 `.pi/capabilities/`），不会打包或进入 Git；它只保存项目哈希、目标、scope、到期时间、argv 前缀及兼容脚本哈希，不保存密钥。
 
-直接文件工具访问普通项目外路径时，交互界面会显示请求路径和解析后的真实路径，并可批准一次或本 session；已知凭据材料不能进入模型。shell 越界仍会失败，Pi 应优先请求精确 host capability，无法表达时才把准确 `!` 命令交给用户。用户输入的 `!` / `!!` 是明确的人工直执行通道，不受模型 shell 边界约束。
+`host-command` 是显式离开 sandbox 的宿主执行：它继承用户账号可用的运行时环境与 SSH agent，因此比不透明 `ssh-target` 更强。界面会同时显示完整 argv、cwd 和建议持久前缀，只有用户授权后才能执行。shell sandbox 越界时，Pi 应优先通过该 broker 申请一次或项目规则并继续当前任务；只有 broker 无法表达操作时才退回人工 `!` / `!!` 通道。
 
 ### Tool Activity
 

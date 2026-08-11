@@ -122,6 +122,123 @@ process.stdout.write(JSON.stringify({
 	}
 });
 
+test("project-trusted SSH targets are reused automatically across Pi sessions", async () => {
+	const paths = fixture("research-pi-cap-ssh-project-");
+	try {
+		const firstContext = await resolveCapabilityContext(paths.project, "session-first", { stateRoot: paths.stateRoot });
+		const secondContext = await resolveCapabilityContext(paths.project, "session-second", { stateRoot: paths.stateRoot });
+		const fakeSsh = join(paths.root, "fake-project-ssh.mjs");
+		writeFileSync(fakeSsh, "#!/usr/bin/env node\nprocess.stdout.write(process.argv.slice(-2).join(' '));\n", { mode: 0o700 });
+		chmodSync(fakeSsh, 0o700);
+
+		const request = await prepareCapabilityRequest(firstContext, { kind: "ssh-target", target: "lab.example" });
+		const grant = await createCapabilityGrant(firstContext, request, "project");
+		assert.equal(grant.scope, "project");
+		assert.equal(readFileSync(firstContext.projectLedgerPath, "utf8").includes("session-first"), false);
+
+		const result = await executeGrantedCapability(
+			secondContext,
+			{ kind: "ssh-target", target: "lab.example", remoteCommand: "hostname" },
+			{ sshBin: fakeSsh, env: { PATH: process.env.PATH, HOME: paths.root } },
+		);
+		assert.equal(result.exitCode, 0);
+		assert.match(result.stdout, /lab\.example hostname/);
+	} finally {
+		rmSync(paths.root, { recursive: true, force: true });
+	}
+});
+
+test("project host-command prefixes support uv-style runners and non-executable scripts", async () => {
+	const paths = fixture("research-pi-cap-command-");
+	try {
+		const firstContext = await resolveCapabilityContext(paths.project, "session-command-first", { stateRoot: paths.stateRoot });
+		const secondContext = await resolveCapabilityContext(paths.project, "session-command-second", { stateRoot: paths.stateRoot });
+		const fakeBin = join(paths.root, "bin");
+		mkdirSync(fakeBin);
+		const fakeUv = join(fakeBin, "uv");
+		writeFileSync(
+			fakeUv,
+			"#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ argv: process.argv.slice(2), secret: process.env.DEEPSEEK_API_KEY ?? null, uvCache: process.env.UV_CACHE_DIR ?? null }));\n",
+			{ mode: 0o700 },
+		);
+		chmodSync(fakeUv, 0o700);
+		writeFileSync(join(paths.project, "remote_run.py"), "print('not executed directly')\n", { mode: 0o600 });
+
+		const request = await prepareCapabilityRequest(firstContext, {
+			kind: "host-command",
+			cwd: paths.project,
+			argv: ["uv", "run", "remote_run.py", "bash", "experiment-a.sh"],
+		});
+		assert.deepEqual(request.suggestedPrefix, ["uv", "run", "remote_run.py"]);
+		const grant = await createCapabilityGrant(firstContext, request, "project");
+		assert.equal(grant.match, "prefix");
+		assert.deepEqual(grant.argv, ["uv", "run", "remote_run.py"]);
+
+		const result = await executeGrantedCapability(
+			secondContext,
+			{
+				kind: "host-command",
+				cwd: paths.project,
+				argv: ["uv", "run", "remote_run.py", "bash", "experiment-b.sh"],
+			},
+			{
+				env: {
+					PATH: `${fakeBin}:${process.env.PATH}`,
+					HOME: paths.root,
+					UV_CACHE_DIR: join(paths.root, "uv-cache"),
+					DEEPSEEK_API_KEY: "must-not-leak",
+				},
+			},
+		);
+		const observed = JSON.parse(result.stdout);
+		assert.deepEqual(observed.argv, ["run", "remote_run.py", "bash", "experiment-b.sh"]);
+		assert.equal(observed.secret, null);
+		assert.equal(observed.uvCache, join(paths.root, "uv-cache"));
+
+		await assert.rejects(
+			executeGrantedCapability(secondContext, {
+				kind: "host-command",
+				cwd: paths.project,
+				argv: ["uv", "run", "different.py"],
+			}, { env: { PATH: `${fakeBin}:${process.env.PATH}`, HOME: paths.root } }),
+			/Missing approved host-command capability/,
+		);
+	} finally {
+		rmSync(paths.root, { recursive: true, force: true });
+	}
+});
+
+test("code-string commands can be approved without granting a broader shell prefix", async () => {
+	const paths = fixture("research-pi-cap-code-string-");
+	try {
+		const context = await resolveCapabilityContext(paths.project, "session-code-string", { stateRoot: paths.stateRoot });
+		const argv = ["sh", "-c", "printf approved"];
+		const request = await prepareCapabilityRequest(context, { kind: "host-command", cwd: paths.project, argv });
+		assert.deepEqual(request.suggestedPrefix, argv);
+		const pythonCode = ["python3", "-c", "print('approved')"];
+		const pythonRequest = await prepareCapabilityRequest(context, {
+			kind: "host-command",
+			cwd: paths.project,
+			argv: pythonCode,
+		});
+		assert.deepEqual(pythonRequest.suggestedPrefix, pythonCode);
+		const grant = await createCapabilityGrant(context, request, "project");
+		assert.deepEqual(grant.argv, argv);
+		const result = await executeGrantedCapability(context, { kind: "host-command", cwd: paths.project, argv });
+		assert.equal(result.stdout, "approved");
+		await assert.rejects(
+			executeGrantedCapability(context, {
+				kind: "host-command",
+				cwd: paths.project,
+				argv: ["sh", "-c", "printf different"],
+			}),
+			/Missing approved host-command capability/,
+		);
+	} finally {
+		rmSync(paths.root, { recursive: true, force: true });
+	}
+});
+
 test("project-script grants pin both file hash and argv", async () => {
 	const paths = fixture("research-pi-cap-script-");
 	try {
