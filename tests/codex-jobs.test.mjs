@@ -391,6 +391,103 @@ test("mission routing reuses only the same mode and workspace", async () => {
 	}
 });
 
+test("sibling branches in one Pi session cannot observe or reuse each other's Codex jobs", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-branch-owner-"));
+	try {
+		const workspace = join(root, "workspace");
+		const jobRoot = join(root, "codex", "jobs");
+		mkdirSync(workspace, { recursive: true });
+		const codexBin = makeFakeCodex(root);
+		const sessionId = "pi-session-shared-tree";
+		const branchA = new Set(["root-entry", "branch-a-user"]);
+		const branchB = new Set(["root-entry", "branch-b-user"]);
+
+		const startA = await startCodexJob({
+			cwd: workspace,
+			jobRoot,
+			codexBin,
+			mode: "advisor",
+			mission: "shared-mission-name",
+			task: "analyze branch A",
+			leaderSessionId: sessionId,
+			leaderBranchAnchorId: "branch-a-user",
+		});
+		const jobA = await waitForCodexJob(startA.id, { jobRoot });
+		const startB = await startCodexJob({
+			cwd: workspace,
+			jobRoot,
+			codexBin,
+			mode: "advisor",
+			mission: "shared-mission-name",
+			task: "analyze branch B",
+			leaderSessionId: sessionId,
+			leaderBranchAnchorId: "branch-b-user",
+		});
+		const jobB = await waitForCodexJob(startB.id, { jobRoot });
+		await waitForCodexJob((await startCodexJob({
+			cwd: workspace,
+			jobRoot,
+			codexBin,
+			mode: "advisor",
+			mission: "legacy-ownerless",
+			task: "legacy compatibility fixture",
+			leaderSessionId: sessionId,
+		})).id, { jobRoot });
+
+		const jobsA = await listCodexJobs({
+			jobRoot,
+			cwd: workspace,
+			leaderSessionId: sessionId,
+			branchEntryIds: branchA,
+		});
+		const jobsB = await listCodexJobs({
+			jobRoot,
+			cwd: workspace,
+			leaderSessionId: sessionId,
+			branchEntryIds: branchB,
+		});
+		assert.deepEqual(jobsA.map((job) => job.id), [jobA.id]);
+		assert.deepEqual(jobsB.map((job) => job.id), [jobB.id]);
+
+		const reusableA = await findReusableCodexJob({
+			cwd: workspace,
+			jobRoot,
+			mode: "advisor",
+			mission: "shared-mission-name",
+			leaderSessionId: sessionId,
+			branchEntryIds: branchA,
+		});
+		assert.equal(reusableA.id, jobA.id);
+		assert.equal((await listCodexMissions({
+			cwd: workspace,
+			jobRoot,
+			leaderSessionId: sessionId,
+			branchEntryIds: branchA,
+		}))[0].latestJobId, jobA.id);
+
+		await assert.rejects(
+			readCodexJob(jobB.id, {
+				jobRoot,
+				expectedCwd: workspace,
+				expectedLeaderSessionId: sessionId,
+				expectedBranchEntryIds: branchA,
+			}),
+			/belongs to another branch/,
+		);
+		await assert.rejects(
+			readCodexJob(jobA.id, {
+				jobRoot,
+				expectedCwd: workspace,
+				expectedLeaderSessionId: "another-session",
+				expectedBranchEntryIds: branchA,
+			}),
+			/belongs to another Pi session/,
+		);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("app-server delegation supports live leader requests and durable session reattachment", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-live-"));
 	try {

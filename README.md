@@ -231,11 +231,11 @@ DeepSeek V4 Flash 使用 Max reasoning，但不把 1M 容量等同于等质量�
 - 每次调用都可覆盖 Codex model 和 reasoning effort；
 - executor 可在项目内修改或删除文件、安装项目依赖、自由提交，以及启动或取消昂贵实验；经过用户授权后，它还可通过 `research_pi_host` 使用精确外部只读、SSH target、host command 和严格固定脚本，不需要复制凭据或重开 delegation；WSL 下只有 SSH target 可持久信任，其他宿主执行为 one-shot；
 - Codex 通过本地 stdio App Server 运行，保存稳定的 thread/turn ID；长任务默认后台运行，通过同一个工具的 `status`、`result`、`respond`、`steer`、`resume` 和 `cancel` action 管理；
-- 连续处理同一研究子任务时，Pi 会给它稳定的 `mission` 标签并使用 `reuse=auto`：只有 workspace、mission 和 advisor/executor mode 都相同才会复用原 thread。独立批判、新研究路线或另一 worktree 会创建新 thread；不能仅因属于同一仓库就混用上下文；
-- `/codex missions` 可查看当前 workspace 的 mission/thread 链。job 管理和 resume 强制绑定原 workspace；续接前还会比较上次终态与当前 Git snapshot，若分支、HEAD 或工作树变化则要求 Codex 重新检查；
+- 连续处理同一研究子任务时，Pi 会给它稳定的 `mission` 标签并使用 `reuse=auto`：只有 workspace、Pi session branch、mission 和 advisor/executor mode 都相同才会复用原 thread。独立批判、新研究路线或另一 worktree 会创建新 thread；不能仅因属于同一仓库就混用上下文；
+- `/codex missions` 只查看当前 workspace、当前 Pi session branch 的 mission/thread 链。job 管理和 resume 强制绑定原 workspace 与分支归属；续接前还会比较上次终态与当前 Git snapshot，若分支、HEAD 或工作树变化则要求 Codex 重新检查；
 - `respond` 回答 Codex 在运行中提出的显式问题；`steer` 将修正或新证据注入仍在运行的 turn，不需要终止并重开任务；
-- 后台任务会在 Pi 底部状态栏持续显示 job 后八位、模式、运行状态与最近进度；完成、失败、取消或需要输入时，会把一条限长结构化事件送回最初的 Pi session 并自动触发 Leader 继续处理；
-- Pi 重启或恢复会话后会按 session ID 重新挂接仍在运行或尚未消费的 job。若输入框中已有草稿，事件排到下一轮，避免抢占用户正在写的内容；
+- 后台任务会在 Pi 底部状态栏持续显示 job 后八位、模式、运行状态与最近进度；完成、失败、取消或需要输入时，会把一条限长结构化事件只送回最初的 Pi session branch，并自动触发该分支的 Leader 继续处理；
+- Pi 重启、恢复会话或切换 `/tree` 节点后，会按 session ID 与分支祖先锚点重新挂接仍在运行或尚未消费的 job；兄弟分支不会看到、管理或复用彼此的 Codex job。若输入框中已有草稿，事件排到下一轮，避免抢占用户正在写的内容；
 - 不默认建立 worktree，同一目标工作区同时只允许一个写入型 Codex job。
 
 Codex job、请求账本、精简 JSONL 审计事件和委派 prompt 保存在状态目录的 `codex/`（源码模式即 `.pi/codex/`），不会进入 Git。默认不落盘 token delta、reasoning 生命周期或模型正文；`job.json` 仅在可见进度或语义状态变化时更新，并在 `workerIo` 中记录实际写入计数。审计事件和 stderr 每个 job 分别限制为 2 MiB。只有显式设置 `PI_CODEX_TRACE=1` 才记录上限 32 MiB 的原始 App Server event，用完应立即关闭。已经处理的普通响应只保留长度和 SHA-256，不长期保留正文；但响应首先会进入 Pi 模型上下文，因此绝不能通过该通道传递 API key 等秘密。普通 Codex 工具子进程不继承 DeepSeek key，也不能直接访问 SSH agent；只有 `research_pi_host` broker 在匹配用户 grant 后才把 `SSH_AUTH_SOCK` 不透明地交给系统 SSH 进程。Codex CLI 自身仍使用本机 Codex 登录完成模型调用，但该认证不会授予其工具访问用户目录。
