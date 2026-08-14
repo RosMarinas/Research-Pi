@@ -56,6 +56,16 @@ export function validateReasoningEffort(effort) {
 	return effort;
 }
 
+function codexJobOwnerError(message) {
+	const error = new Error(message);
+	error.code = "CODEX_JOB_OWNER_MISMATCH";
+	return error;
+}
+
+export function isCodexJobOwnerError(error) {
+	return error?.code === "CODEX_JOB_OWNER_MISMATCH";
+}
+
 export function normalizeCodexMission(value, { required = false } = {}) {
 	const mission = String(value ?? "")
 		.normalize("NFKC")
@@ -364,7 +374,7 @@ export async function startCodexJob(options) {
 			continuationNotice: options.continuationNotice,
 		});
 		const request = {
-			version: 3,
+			version: 4,
 			jobId,
 			mode,
 			model,
@@ -375,6 +385,7 @@ export async function startCodexJob(options) {
 			workspaceRoot,
 			workspaceKey,
 			projectKey,
+			leaderBranchAnchorId: options.leaderBranchAnchorId ?? null,
 			mission,
 			missionKey: mission ? missionKey(mission) : null,
 			prompt,
@@ -389,10 +400,11 @@ export async function startCodexJob(options) {
 			hostCapabilityContext,
 		};
 		const job = {
-			version: 3,
+			version: 4,
 			id: jobId,
 			transport: "app-server",
 			leaderSessionId: options.leaderSessionId ?? null,
+			leaderBranchAnchorId: options.leaderBranchAnchorId ?? null,
 			autoNotify: options.background ?? (mode === "executor"),
 			status: "starting",
 			mode,
@@ -474,6 +486,25 @@ export async function assertCodexJobWorkspace(job, expectedCwd) {
 	return job;
 }
 
+export function assertCodexJobLeader(job, options = {}) {
+	if (options.expectedLeaderSessionId && job.leaderSessionId !== options.expectedLeaderSessionId) {
+		throw codexJobOwnerError(`Codex job ${job.id} belongs to another Pi session`);
+	}
+	if (options.expectedBranchEntryIds) {
+		const branchIds = options.expectedBranchEntryIds instanceof Set
+			? options.expectedBranchEntryIds
+			: new Set(options.expectedBranchEntryIds);
+		if (!job.leaderBranchAnchorId) {
+			if (options.allowLegacyLeaderJob !== true) {
+				throw codexJobOwnerError(`Codex job ${job.id} predates branch-scoped ownership and must be inspected explicitly from its original session`);
+			}
+		} else if (!branchIds.has(job.leaderBranchAnchorId)) {
+			throw codexJobOwnerError(`Codex job ${job.id} belongs to another branch of this Pi session`);
+		}
+	}
+	return job;
+}
+
 export async function listCodexJobs(options = {}) {
 	const jobRoot = resolve(options.jobRoot ?? DEFAULT_CODEX_JOB_ROOT);
 	const filterIdentity = options.cwd ? await resolveCodexWorkspaceIdentity(options.cwd) : null;
@@ -490,6 +521,18 @@ export async function listCodexJobs(options = {}) {
 		try {
 			const job = await readCodexJob(entry.name, { jobRoot });
 			if (options.leaderSessionId && job.leaderSessionId !== options.leaderSessionId) continue;
+			if (options.branchEntryIds) {
+				try {
+					assertCodexJobLeader(job, {
+						expectedLeaderSessionId: options.leaderSessionId,
+						expectedBranchEntryIds: options.branchEntryIds,
+						allowLegacyLeaderJob: options.allowLegacyLeaderJobs === true,
+					});
+				} catch (error) {
+					if (isCodexJobOwnerError(error)) continue;
+					throw error;
+				}
+			}
 			if (filterIdentity && (await jobWorkspaceKey(job)) !== filterIdentity.workspaceKey) continue;
 			if (options.missionKey && job.missionKey !== options.missionKey) continue;
 			if (options.mode && job.mode !== options.mode) continue;
@@ -506,6 +549,8 @@ export async function findReusableCodexJob(options) {
 	const jobs = await listCodexJobs({
 		jobRoot: options.jobRoot,
 		cwd: options.cwd,
+		leaderSessionId: options.leaderSessionId,
+		branchEntryIds: options.branchEntryIds,
 		missionKey: missionKey(mission),
 		mode: options.mode,
 	});
@@ -513,7 +558,12 @@ export async function findReusableCodexJob(options) {
 }
 
 export async function listCodexMissions(options) {
-	const jobs = await listCodexJobs({ jobRoot: options.jobRoot, cwd: options.cwd });
+	const jobs = await listCodexJobs({
+		jobRoot: options.jobRoot,
+		cwd: options.cwd,
+		leaderSessionId: options.leaderSessionId,
+		branchEntryIds: options.branchEntryIds,
+	});
 	const groups = new Map();
 	for (const job of jobs) {
 		const key = `${job.missionKey ?? `unassigned:${job.id}`}:${job.mode}`;
@@ -537,12 +587,28 @@ export async function listCodexMissions(options) {
 async function queueCodexCommand(jobId, command, options = {}) {
 	validateJobId(jobId);
 	const jobRoot = resolve(options.jobRoot ?? DEFAULT_CODEX_JOB_ROOT);
-	const job = await readCodexJob(jobId, { jobRoot, expectedCwd: options.expectedCwd });
+	const job = await readCodexJob(jobId, {
+		jobRoot,
+		expectedCwd: options.expectedCwd,
+		expectedLeaderSessionId: options.expectedLeaderSessionId,
+		expectedBranchEntryIds: options.expectedBranchEntryIds,
+		allowLegacyLeaderJob: options.allowLegacyLeaderJob,
+	});
 	if (isTerminalStatus(job.status)) throw new Error(`Codex job ${jobId} is already ${job.status}`);
 	const commandId = createCommandId();
 	const payload = { version: 1, id: commandId, jobId, createdAt: now(), status: "pending", ...command };
 	await writeJsonAtomic(join(jobRoot, jobId, "commands", `${commandId}.json`), payload);
-	return { command: payload, job: await readCodexJob(jobId, { jobRoot, expectedCwd: options.expectedCwd, reconcile: false }) };
+	return {
+		command: payload,
+		job: await readCodexJob(jobId, {
+			jobRoot,
+			expectedCwd: options.expectedCwd,
+			expectedLeaderSessionId: options.expectedLeaderSessionId,
+			expectedBranchEntryIds: options.expectedBranchEntryIds,
+			allowLegacyLeaderJob: options.allowLegacyLeaderJob,
+			reconcile: false,
+		}),
+	};
 }
 
 export async function respondToCodexJob(jobId, options = {}) {
@@ -573,6 +639,7 @@ export async function readCodexJob(jobId, options = {}) {
 	const jobDir = join(jobRoot, jobId);
 	let job = await readJson(join(jobDir, "job.json"));
 	await assertCodexJobWorkspace(job, options.expectedCwd);
+	assertCodexJobLeader(job, options);
 	if (options.reconcile !== false && !isTerminalStatus(job.status)) {
 		const createdAge = Date.now() - Date.parse(job.createdAt);
 		if (job.workerPid && !processIsAlive(job.workerPid)) {
@@ -605,12 +672,18 @@ export async function readCodexJob(jobId, options = {}) {
 
 export async function waitForCodexJob(jobId, options = {}) {
 	let lastProgress;
+	const ownerOptions = {
+		expectedCwd: options.expectedCwd,
+		expectedLeaderSessionId: options.expectedLeaderSessionId,
+		expectedBranchEntryIds: options.expectedBranchEntryIds,
+		allowLegacyLeaderJob: options.allowLegacyLeaderJob,
+	};
 	while (true) {
 		if (options.signal?.aborted) {
-			await cancelCodexJob(jobId, { jobRoot: options.jobRoot, expectedCwd: options.expectedCwd });
-			return await readCodexJob(jobId, { jobRoot: options.jobRoot, expectedCwd: options.expectedCwd });
+			await cancelCodexJob(jobId, { jobRoot: options.jobRoot, ...ownerOptions });
+			return await readCodexJob(jobId, { jobRoot: options.jobRoot, ...ownerOptions });
 		}
-		const job = await readCodexJob(jobId, { jobRoot: options.jobRoot, expectedCwd: options.expectedCwd });
+		const job = await readCodexJob(jobId, { jobRoot: options.jobRoot, ...ownerOptions });
 		if (job.progress !== lastProgress) {
 			lastProgress = job.progress;
 			options.onUpdate?.(job);
@@ -624,7 +697,13 @@ export async function cancelCodexJob(jobId, options = {}) {
 	validateJobId(jobId);
 	const jobRoot = resolve(options.jobRoot ?? DEFAULT_CODEX_JOB_ROOT);
 	const jobDir = join(jobRoot, jobId);
-	let job = await readCodexJob(jobId, { jobRoot, expectedCwd: options.expectedCwd });
+	const ownerOptions = {
+		expectedCwd: options.expectedCwd,
+		expectedLeaderSessionId: options.expectedLeaderSessionId,
+		expectedBranchEntryIds: options.expectedBranchEntryIds,
+		allowLegacyLeaderJob: options.allowLegacyLeaderJob,
+	};
+	let job = await readCodexJob(jobId, { jobRoot, ...ownerOptions });
 	if (isTerminalStatus(job.status)) return job;
 	job = await updateJobFile(jobDir, (current) => ({
 		...current,
@@ -641,7 +720,7 @@ export async function cancelCodexJob(jobId, options = {}) {
 	}
 	for (let attempt = 0; attempt < 30; attempt++) {
 		await delay(100);
-		job = await readCodexJob(jobId, { jobRoot, expectedCwd: options.expectedCwd });
+		job = await readCodexJob(jobId, { jobRoot, ...ownerOptions });
 		if (isTerminalStatus(job.status)) return job;
 	}
 	if (processIsAlive(job.workerPid)) {
@@ -664,7 +743,13 @@ export async function cancelCodexJob(jobId, options = {}) {
 }
 
 export async function resumeCodexJob(jobId, options) {
-	const previous = await readCodexJob(jobId, { jobRoot: options.jobRoot, expectedCwd: options.expectedCwd });
+	const previous = await readCodexJob(jobId, {
+		jobRoot: options.jobRoot,
+		expectedCwd: options.expectedCwd,
+		expectedLeaderSessionId: options.expectedLeaderSessionId,
+		expectedBranchEntryIds: options.expectedBranchEntryIds,
+		allowLegacyLeaderJob: options.allowLegacyLeaderJob,
+	});
 	if (!previous.threadId) throw new Error(`Codex job ${jobId} has no resumable thread id`);
 	const requestedMission = normalizeCodexMission(options.mission);
 	if (requestedMission && previous.missionKey && missionKey(requestedMission) !== previous.missionKey) {
@@ -680,6 +765,7 @@ export async function resumeCodexJob(jobId, options) {
 		task: options.followUp,
 		continuationThreadId: previous.threadId,
 		continuationOf: previous.id,
+		leaderBranchAnchorId: options.leaderBranchAnchorId ?? previous.leaderBranchAnchorId ?? null,
 		mission: requestedMission ?? previous.mission ?? null,
 		continuationNotice: buildCodexContinuationNotice(previous, currentGit),
 		leaderSessionId: options.leaderSessionId ?? previous.leaderSessionId,
@@ -701,6 +787,8 @@ export function publicJobView(job) {
 		id: job.id,
 		transport: job.transport ?? "exec-json",
 		autoNotify: job.autoNotify ?? true,
+		leaderSessionId: job.leaderSessionId ?? null,
+		leaderBranchAnchorId: job.leaderBranchAnchorId ?? null,
 		status: job.status,
 		mode: job.mode,
 		model: job.model,
