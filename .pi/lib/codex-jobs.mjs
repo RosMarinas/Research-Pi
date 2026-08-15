@@ -374,7 +374,7 @@ export async function startCodexJob(options) {
 			continuationNotice: options.continuationNotice,
 		});
 		const request = {
-			version: 4,
+			version: 5,
 			jobId,
 			mode,
 			model,
@@ -385,6 +385,9 @@ export async function startCodexJob(options) {
 			workspaceRoot,
 			workspaceKey,
 			projectKey,
+			leaderActorId: options.leaderActorId ?? null,
+			actorId: options.actorId ?? `codex:${jobId}`,
+			actionId: options.actionId ?? `action:${jobId}`,
 			leaderBranchAnchorId: options.leaderBranchAnchorId ?? null,
 			mission,
 			missionKey: mission ? missionKey(mission) : null,
@@ -400,11 +403,14 @@ export async function startCodexJob(options) {
 			hostCapabilityContext,
 		};
 		const job = {
-			version: 4,
+			version: 5,
 			id: jobId,
 			transport: "app-server",
 			leaderSessionId: options.leaderSessionId ?? null,
+			leaderActorId: options.leaderActorId ?? null,
 			leaderBranchAnchorId: options.leaderBranchAnchorId ?? null,
+			actorId: options.actorId ?? `codex:${jobId}`,
+			actionId: options.actionId ?? `action:${jobId}`,
 			autoNotify: options.background ?? (mode === "executor"),
 			status: "starting",
 			mode,
@@ -423,6 +429,7 @@ export async function startCodexJob(options) {
 			finishedAt: null,
 			workerPid: null,
 			codexPid: null,
+			codexSqliteLogs: null,
 			threadId: options.continuationThreadId ?? null,
 			activeTurnId: null,
 			pendingRequest: null,
@@ -487,6 +494,20 @@ export async function assertCodexJobWorkspace(job, expectedCwd) {
 }
 
 export function assertCodexJobLeader(job, options = {}) {
+	if (options.expectedProjectKey || options.expectedLeaderActorId) {
+		if (options.expectedProjectKey && job.projectKey !== options.expectedProjectKey) {
+			throw codexJobOwnerError(`Codex job ${job.id} belongs to another Research Runtime project`);
+		}
+		if (job.leaderActorId) {
+			if (options.expectedLeaderActorId && job.leaderActorId !== options.expectedLeaderActorId) {
+				throw codexJobOwnerError(`Codex job ${job.id} belongs to another Runtime leader Actor`);
+			}
+			return job;
+		}
+		if (options.allowLegacyLeaderJob !== true) {
+			throw codexJobOwnerError(`Codex job ${job.id} predates project Actor ownership and remains bound to its original Pi session branch`);
+		}
+	}
 	if (options.expectedLeaderSessionId && job.leaderSessionId !== options.expectedLeaderSessionId) {
 		throw codexJobOwnerError(`Codex job ${job.id} belongs to another Pi session`);
 	}
@@ -520,6 +541,10 @@ export async function listCodexJobs(options = {}) {
 		if (!entry.isDirectory() || !JOB_ID_PATTERN.test(entry.name)) continue;
 		try {
 			const job = await readCodexJob(entry.name, { jobRoot });
+			if (options.legacyOnly && job.leaderActorId) continue;
+			if (options.projectKey && job.projectKey !== options.projectKey) continue;
+			if (options.leaderActorId && job.leaderActorId !== options.leaderActorId) continue;
+			if (options.actorId && job.actorId !== options.actorId) continue;
 			if (options.leaderSessionId && job.leaderSessionId !== options.leaderSessionId) continue;
 			if (options.branchEntryIds) {
 				try {
@@ -550,6 +575,9 @@ export async function findReusableCodexJob(options) {
 		jobRoot: options.jobRoot,
 		cwd: options.cwd,
 		leaderSessionId: options.leaderSessionId,
+		projectKey: options.projectKey,
+		leaderActorId: options.leaderActorId,
+		actorId: options.actorId,
 		branchEntryIds: options.branchEntryIds,
 		missionKey: missionKey(mission),
 		mode: options.mode,
@@ -562,6 +590,9 @@ export async function listCodexMissions(options) {
 		jobRoot: options.jobRoot,
 		cwd: options.cwd,
 		leaderSessionId: options.leaderSessionId,
+		projectKey: options.projectKey,
+		leaderActorId: options.leaderActorId,
+		legacyOnly: options.legacyOnly,
 		branchEntryIds: options.branchEntryIds,
 	});
 	const groups = new Map();
@@ -590,6 +621,8 @@ async function queueCodexCommand(jobId, command, options = {}) {
 	const job = await readCodexJob(jobId, {
 		jobRoot,
 		expectedCwd: options.expectedCwd,
+		expectedProjectKey: options.expectedProjectKey,
+		expectedLeaderActorId: options.expectedLeaderActorId,
 		expectedLeaderSessionId: options.expectedLeaderSessionId,
 		expectedBranchEntryIds: options.expectedBranchEntryIds,
 		allowLegacyLeaderJob: options.allowLegacyLeaderJob,
@@ -603,6 +636,8 @@ async function queueCodexCommand(jobId, command, options = {}) {
 		job: await readCodexJob(jobId, {
 			jobRoot,
 			expectedCwd: options.expectedCwd,
+			expectedProjectKey: options.expectedProjectKey,
+			expectedLeaderActorId: options.expectedLeaderActorId,
 			expectedLeaderSessionId: options.expectedLeaderSessionId,
 			expectedBranchEntryIds: options.expectedBranchEntryIds,
 			allowLegacyLeaderJob: options.allowLegacyLeaderJob,
@@ -674,6 +709,8 @@ export async function waitForCodexJob(jobId, options = {}) {
 	let lastProgress;
 	const ownerOptions = {
 		expectedCwd: options.expectedCwd,
+		expectedProjectKey: options.expectedProjectKey,
+		expectedLeaderActorId: options.expectedLeaderActorId,
 		expectedLeaderSessionId: options.expectedLeaderSessionId,
 		expectedBranchEntryIds: options.expectedBranchEntryIds,
 		allowLegacyLeaderJob: options.allowLegacyLeaderJob,
@@ -699,6 +736,8 @@ export async function cancelCodexJob(jobId, options = {}) {
 	const jobDir = join(jobRoot, jobId);
 	const ownerOptions = {
 		expectedCwd: options.expectedCwd,
+		expectedProjectKey: options.expectedProjectKey,
+		expectedLeaderActorId: options.expectedLeaderActorId,
 		expectedLeaderSessionId: options.expectedLeaderSessionId,
 		expectedBranchEntryIds: options.expectedBranchEntryIds,
 		allowLegacyLeaderJob: options.allowLegacyLeaderJob,
@@ -746,6 +785,8 @@ export async function resumeCodexJob(jobId, options) {
 	const previous = await readCodexJob(jobId, {
 		jobRoot: options.jobRoot,
 		expectedCwd: options.expectedCwd,
+		expectedProjectKey: options.expectedProjectKey,
+		expectedLeaderActorId: options.expectedLeaderActorId,
 		expectedLeaderSessionId: options.expectedLeaderSessionId,
 		expectedBranchEntryIds: options.expectedBranchEntryIds,
 		allowLegacyLeaderJob: options.allowLegacyLeaderJob,
@@ -769,6 +810,8 @@ export async function resumeCodexJob(jobId, options) {
 		mission: requestedMission ?? previous.mission ?? null,
 		continuationNotice: buildCodexContinuationNotice(previous, currentGit),
 		leaderSessionId: options.leaderSessionId ?? previous.leaderSessionId,
+		leaderActorId: options.leaderActorId ?? previous.leaderActorId ?? null,
+		actorId: options.actorId ?? previous.actorId ?? null,
 		background: options.background ?? previous.autoNotify,
 	});
 }
@@ -788,7 +831,10 @@ export function publicJobView(job) {
 		transport: job.transport ?? "exec-json",
 		autoNotify: job.autoNotify ?? true,
 		leaderSessionId: job.leaderSessionId ?? null,
+		leaderActorId: job.leaderActorId ?? null,
 		leaderBranchAnchorId: job.leaderBranchAnchorId ?? null,
+		actorId: job.actorId ?? null,
+		actionId: job.actionId ?? null,
 		status: job.status,
 		mode: job.mode,
 		model: job.model,

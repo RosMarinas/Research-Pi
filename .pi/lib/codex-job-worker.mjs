@@ -2,8 +2,10 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import { appendFile, mkdir, readdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { executeGrantedCapability } from "./host-capabilities.mjs";
+import { compactCodexAuditEvent, describeCodexNotification } from "./codex-activity.mjs";
+import { configureCodexSqliteLogs } from "./codex-sqlite-logs.mjs";
 import {
 	getGitSnapshot,
 	readJson,
@@ -59,74 +61,6 @@ function parseStructuredResult(text, error) {
 			return fallback;
 		}
 	}
-}
-
-function describeNotification(message) {
-	const method = message?.method;
-	const item = message?.params?.item ?? {};
-	if (method === "thread/started") return "Codex thread started";
-	if (method === "turn/started") return "Codex turn started";
-	if (method === "turn/completed") return `Codex turn ${message.params?.turn?.status ?? "completed"}`;
-	if (method === "error") return truncate(message.params?.error?.message ?? message.params?.message ?? "Codex error", 1000);
-	if (method !== "item/started" && method !== "item/completed") return null;
-	if (item.type === "commandExecution") return `${method}: ${truncate(String(item.command ?? "command").replace(/\s+/g, " "), 400)}`;
-	if (item.type === "fileChange") return `${method}: file changes`;
-	if (item.type === "mcpToolCall") return `${method}: MCP ${item.server ?? ""}/${item.tool ?? ""}`;
-	if (item.type === "webSearch") return `${method}: web search`;
-	if (item.type === "dynamicToolCall") return `${method}: ${item.tool ?? "dynamic tool"}`;
-	// Reasoning, user-message echoes, and partial/final prose are not operational
-	// progress. Persisting them would turn normal generation into job-state churn.
-	return null;
-}
-
-const DEFAULT_AUDIT_METHODS = new Set([
-	"thread/started",
-	"turn/started",
-	"turn/completed",
-	"error",
-	"item/started",
-	"item/completed",
-]);
-
-function compactAuditEvent(message) {
-	const method = message?.method;
-	if (method && message.id !== undefined) {
-		return {
-			timestamp: now(),
-			direction: "server_request",
-			id: message.id,
-			method,
-			threadId: message.params?.threadId,
-			turnId: message.params?.turnId,
-		};
-	}
-	if (message?.id !== undefined && !method) {
-		return {
-			timestamp: now(),
-			direction: "rpc_response",
-			id: message.id,
-			ok: !message.error,
-			...(message.error ? { error: truncate(message.error?.message ?? JSON.stringify(message.error), 1000) } : {}),
-		};
-	}
-	if (!DEFAULT_AUDIT_METHODS.has(method)) return null;
-	const params = message.params ?? {};
-	const item = params.item ?? {};
-	const summary = describeNotification(message);
-	if ((method === "item/started" || method === "item/completed") && !summary) {
-		// The structured result is persisted separately. Default audit mode keeps
-		// tool lifecycle, not model prose or reasoning lifecycle noise.
-		return null;
-	}
-	return {
-		timestamp: now(),
-		method,
-		threadId: params.threadId ?? params.thread?.id,
-		turnId: params.turnId ?? params.turn?.id,
-		...(item.id ? { itemId: item.id } : {}),
-		...(item.type ? { itemType: item.type } : {}),
-		summary: summary ?? method,
-	};
 }
 
 function requestId(jobId, rpcId, method) {
@@ -246,7 +180,7 @@ async function main() {
 	};
 
 	const writeAuditEvent = (message) => {
-		const record = rawEventTrace ? message : compactAuditEvent(message);
+		const record = rawEventTrace ? message : compactCodexAuditEvent(message);
 		if (!record) return;
 		if (writeBounded(eventsStream, `${JSON.stringify(record)}\n`, "event")) workerIo.auditRecordsWritten += 1;
 	};
@@ -462,7 +396,7 @@ async function main() {
 			lastAgentText = params.item.text;
 		}
 		if (method === "error") lastError = truncate(params.error?.message ?? params.message ?? JSON.stringify(params), 4000);
-		const progress = describeNotification(message);
+		const progress = describeCodexNotification(message);
 		const identityChanged = threadId !== previousThreadId || activeTurnId !== previousTurnId;
 		const progressChanged = progress && progress !== lastNotificationProgress;
 		if (progressChanged) lastNotificationProgress = progress;
@@ -646,6 +580,19 @@ async function main() {
 			},
 		}, 30_000);
 		send({ method: "initialized", params: {} });
+		try {
+			const sqliteLogs = configureCodexSqliteLogs(codexStateHome);
+			await enqueueJobUpdate({
+				codexSqliteLogs: {
+					mode: sqliteLogs.mode,
+					database: sqliteLogs.databasePath ? basename(sqliteLogs.databasePath) : null,
+				},
+			});
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			await appendFile(join(jobDir, "worker-errors.log"), `${now()} could not configure Codex SQLite logs: ${message}\n`, { mode: 0o600 });
+			await enqueueJobUpdate({ codexSqliteLogs: { mode: "unavailable", database: null, error: truncate(message, 1000) } });
+		}
 
 		const dynamicTools = [
 			{

@@ -101,7 +101,7 @@ async function spawnCore(argv) {
 	}
 	args.push(
 		"--provider", "deepseek",
-		"--model", "deepseek-v4-flash",
+		"--model", "deepseek-v4-pro",
 		"--thinking", "max",
 		"--session-dir", paths.sessionDir,
 		"--append-system-prompt", join(packageRoot, ".pi", "APPEND_SYSTEM.md"),
@@ -114,8 +114,11 @@ async function spawnCore(argv) {
 		"research-checkpoint.ts",
 		"research-memory.ts",
 		"research-compaction.ts",
+		"research-runtime.ts",
 		"research-side.ts",
 		"deepseek-web-search.ts",
+		"deepseek-v4-pro-anchor.ts",
+		"codex-watch.ts",
 		"codex-delegate.ts",
 	]) args.push("--extension", join(packageRoot, ".pi", "extensions", name));
 	if (process.env.RESEARCH_PI_TRACE === "1") {

@@ -13,7 +13,10 @@ Never commit:
 - `.pi/memory/`, which is a rebuildable local search index derived from sensitive sessions and experiment records;
 - `.pi/research/*.jsonl`, which may contain absolute paths, run IDs and project-sensitive observations;
 - `.pi/codex/`, which contains delegated prompts, Codex JSON events, local process metadata and structured results;
+- `.pi/runtime/`, which contains project Actor, Action and mailbox events and may include user or agent message text;
 - model checkpoints, datasets or experiment artifacts unless deliberately versioned elsewhere.
+
+`/watch` reads the existing bounded Codex audit stream and does not create another trace. Command output tails and subagent prompts are truncated and common credential patterns are replaced wholesale, but redaction is best-effort; do not make a delegated command print credentials merely because the panel is local.
 
 Model-generated Pi shell commands use an OS sandbox runtime (Seatbelt on macOS, bubblewrap/seccomp on Linux); `codex_delegate` jobs use Codex permission profiles. The current project is writable, including Git objects, refs, index and config; `.git/hooks` remains read-only. Proxy-aware Web traffic is allowed without a domain allowlist, but raw TCP clients such as OpenSSH do not receive implicit host access. Other user directories, Unix sockets, SSH agent access and secret-named environment variables are unavailable to ordinary model tool subprocesses. Pi shell has no general system-temp write access; macOS retains only the narrow `xcrun_db` cache paths Apple Git requires. Direct Pi file tools require human approval for outside or protected paths. Human-entered `!` / `!!` commands intentionally bypass the agent sandbox and run with the user's normal account permissions.
 

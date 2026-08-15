@@ -14,6 +14,7 @@ node_modules/
 .pi/research/*.jsonl
 .pi/memory/
 .pi/codex/
+.pi/runtime/
 .pi/capabilities/
 .pi/agent/*
 !.pi/agent/models.json

@@ -27,7 +27,7 @@ pi-traced
 
 科研 prompt、DeepSeek 配置、研究工具、Codex executor 和 session 由 harness 提供；文件操作、Git checkpoint、Codex 委派和实验账本作用在启动 `pi` 时所在的研究仓库。所有项目的 Research Pi session 集中保存在当前运行形态的状态目录，每个 session header 仍记录其原始工作目录。
 
-稳定包首次安装后运行 `pi setup`，随后在 `~/.config/research-pi/credentials.env` 填入 DeepSeek key。稳定包的 session、memory、Codex job、grant 和 trace 默认集中在 `~/.local/state/research-pi/`；源码开发入口仍使用 checkout 的 `.env` 与 `.pi/`，保证修改后可立即试用。`pi paths` 可确认当前运行的是哪一种形态。
+稳定包首次安装后运行 `pi setup`，随后在 `~/.config/research-pi/credentials.env` 填入 DeepSeek key。稳定包的 session、project Runtime、memory、Codex job、grant 和 trace 默认集中在 `~/.local/state/research-pi/`；源码开发入口仍使用 checkout 的 `.env` 与 `.pi/`，保证修改后可立即试用。`pi paths` 可确认当前运行的是哪一种形态。
 
 Research Pi 默认关闭 Pi 的 skill 和 executable extension 自动发现，只加载经过检查的研究白名单与 harness extensions。某次任务需要额外 skill 时可显式添加：
 
@@ -133,6 +133,9 @@ Pi 现在提供这些低摩擦研究工具：
 - `/side <问题>`：用当前上下文做一次隔离追问并持久保存；默认不进入主上下文。
 - `web_search`：通过 DeepSeek 原生搜索做简单、直接、带来源的网页查找。
 - `codex_delegate`：把工具密集或长程执行交给独立 Codex 上下文，或请求一个只读第二意见。Pi 仍负责研究规划与证据判断。
+- `/watch`：按需打开 Codex 客观执行面板；左右切换 Action，Tab 或上下切换 overview/activity/agents，`q`/`Esc` 关闭。观察内容不进入模型上下文。
+- `/actors`、`/inbox`：查看当前 project Runtime 的 Actors 与 durable mailbox。
+- `/message`、`/steer`：面向 Actor 通信；steer 默认等待下一安全模型边界，只有 `--preempt` 才主动中断。
 
 可以直接提出：
 
@@ -168,9 +171,19 @@ side 问答会以卡片保存在 session 中。`Ctrl+O` 展开完整内容，`/s
 把数据加载重构和完整回归测试交给 Codex executor。目标是消除当前内存峰值，允许它在项目内修改、删除、提交和运行实验。Codex 使用 gpt-5.6-sol/max；你负责给出成功标准，并在它返回后审查证据。若远程运行需要项目外 SSH 凭据，让它返回准确命令给我批准或直接执行。
 ```
 
-Pi 会获得一个 `codex-...` job ID。底部状态栏会持续显示 job 后八位、advisor/executor 模式、`starting/running/completed/failed/cancelled` 状态和最近进度；即使后台工具调用已返回也会继续更新。后台任务未结束时，应查询同一 job 的 status/result，或用 resume 继续该 Codex thread，而不是重复启动任务。状态、阻塞问题和完成事件只回到启动该 job 的 Pi session branch；同一 session 的兄弟 `/tree` 分支不会看到或接管它。默认 executor 是 project-write + public-network，advisor 是 project-read + public-network；两者默认都是 `gpt-5.6-sol/max`，也可以在具体委派时指定其他 Codex model。
+Pi 会获得一个 `codex-...` job ID。底部状态栏会持续显示 job 后八位、advisor/executor 模式、`starting/running/completed/failed/cancelled` 状态和最近进度；即使后台工具调用已返回也会继续更新。后台任务未结束时，应查询同一 job 的 status/result，或续接同一 Codex Actor，而不是重复启动任务。状态、阻塞问题和完成事件先进入项目 Runtime mailbox，再交给最近 attached 的 Research Leader session。默认 executor 是 project-write + public-network，advisor 是 project-read + public-network；两者默认都是 `gpt-5.6-sol/max`，也可以在具体委派时指定其他 Codex model。
 
-Pi 在连续处理同一研究子任务时应使用稳定、简短的 `mission` 标签。带 mission 的新派遣默认 `reuse=auto`：运行中的同 mission/mode job 会直接重新挂接，已完成的会通过 App Server `thread/resume` 续接历史；只有 workspace、Pi session branch、mode 和 mission 都匹配才会自动复用。续接时 Harness 会比较 Git snapshot，工作区发生变化则显式要求 Codex 重新检查当前文件。使用 `/codex missions` 查看当前分支的任务链；切换 `/tree` 节点时 Harness 会清理旧监视器并只挂接新活动分支拥有的 job。若要独立第二意见、开始另一研究路线或主动清除旧假设，使用新的 mission。
+用户可随时运行 `/watch` 查看最近的 active Action，也可用 `/watch <job后缀>`、`/watch <mission>` 或 `/watch @codex:<Actor短码>` 定位。面板直接投影命令、退出码和限长输出尾部、文件修改、搜索、MCP/动态工具及 Codex 内部 subagent 状态；内部 subagent 只是本次 Action 的临时子节点，不会污染 Project Actor 列表。
+
+Pi 在连续处理同一研究子任务时应使用稳定、简短的 `mission` 标签。带 mission 的新派遣默认 `reuse=auto`：运行中的同 mission/mode job 会直接重新挂接，已完成的会通过 App Server `thread/resume` 续接历史；同一精确 workspace、mode 和 mission 可跨 Pi session 复用。续接时 Runtime 会比较 Git snapshot，工作区变化则要求 Codex 重新检查当前文件。使用 `/codex missions` 查看项目任务链，使用 `/actors` 找到稳定的 `@codex:<Actor短码>`；若要独立第二意见、另一研究路线或主动清除旧假设，使用新的 mission。
+
+用户发现某个 Actor 跑偏时可以直接输入：
+
+```text
+/steer @codex:12ab34cd 先停止继续补丁；回到 H1/H2 的可区分预测，检查当前实验是否真的介入了目标变量。
+```
+
+默认 steer 不终止当前工具批次，而是在下一安全模型边界进入目标上下文。只有错误删除目标、明显错误的昂贵实验或其他继续运行具有实质代价的场景，才使用 `/steer --preempt ...`。`/message reply @codex:12ab34cd ...` 会优先回答该 Actor 当前的 blocking request。消息状态保存在用户状态目录的 project Runtime ledger；它不是科研结论，也不会永久重复注入模型上下文。
 
 ## 4. 会话、分支和恢复
 

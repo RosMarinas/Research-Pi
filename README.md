@@ -1,6 +1,6 @@
 # Research Pi
 
-Research Pi 是一个面向 AI、通信等计算实验的个人 Pi harness。它使用锁定版本的 Pi Core 和 DeepSeek V4 Flash，并加入科研优先的身份与工作约定、项目级命令边界、持久化 side 对话、DeepSeek 原生网页检索、实验记录、研究 checkpoint、非向量历史检索、结构化科研 compact、Codex 长程执行委派与按需 trace。
+Research Pi 是一个面向 AI、通信等计算实验的个人 Research Runtime。它使用锁定版本的 Pi Core 和 DeepSeek V4 Flash，并加入科研优先的身份与工作约定、项目级 Actor/mailbox、项目命令边界、持久化 side 对话、DeepSeek 原生网页检索、实验记录、研究 checkpoint、非向量历史检索、结构化科研 compact、Codex 长程执行委派与按需 trace。
 
 ## 开发仓库与稳定安装
 
@@ -11,7 +11,7 @@ Research Pi 是一个面向 AI、通信等计算实验的个人 Pi harness。它
 ```text
 npm 全局目录                  Research Pi 程序与锁定依赖
 ~/.config/research-pi/        credentials.env 等用户配置
-~/.local/state/research-pi/   sessions、memory、Codex jobs、grants、trace
+~/.local/state/research-pi/   sessions、project Runtime、memory、Codex jobs、grants、trace
 <research-project>/.pi/       该项目自己的实验记录与 checkpoint
 ```
 
@@ -163,6 +163,8 @@ pi doctor --workspace /path/to/research-project
 
 所有模型工具调用都会在 Pi 底部状态栏显示工具名、安全截断后的目标摘要、运行时间和成功/失败终态；并行调用显示当前数量与最近启动的工具。普通工具终态保留 5 秒，`codex_delegate` 的后台 job 另有持久状态，不会因委派工具返回而消失。
 
+运行 `/watch` 可按需打开紧凑的 Codex 执行 overlay；它不会长期占据编辑区。`←/→` 切换当前项目可见的 Codex Action，`Tab` 或 `↑/↓` 在 overview、activity、agents 三个视图间切换，`q`/`Esc` 关闭。面板直接读取脱敏的 App Server 客观事件，展示命令、退出码与限长输出尾部、文件修改、MCP/动态工具、搜索以及 Codex 内部 subagent 状态；不会经过 Research Leader 转述，也不会进入 DeepSeek 上下文。
+
 ### Research Mode
 
 Research Pi 默认处于探索与验证阶段：构造竞争假设，优先高信息增益且可逆的实验，将代码视为实验工具，并在证据支持路线或用户要求稳定交付后才进入收敛工程阶段。完成标准是研究判断得到推进，而不是代码发生修改。
@@ -223,14 +225,30 @@ DeepSeek V4 Flash 使用 Max reasoning，但不把 1M 容量等同于等质量�
 - 每次调用都可覆盖 Codex model 和 reasoning effort；
 - executor 可在项目内修改或删除文件、安装项目依赖、自由提交，以及启动或取消昂贵实验；经过用户授权后，它还可通过 `research_pi_host` 使用精确外部只读、SSH target 和固定脚本，不需要复制凭据或重开 delegation；
 - Codex 通过本地 stdio App Server 运行，保存稳定的 thread/turn ID；长任务默认后台运行，通过同一个工具的 `status`、`result`、`respond`、`steer`、`resume` 和 `cancel` action 管理；
-- 连续处理同一研究子任务时，Pi 会给它稳定的 `mission` 标签并使用 `reuse=auto`：只有 workspace、Pi session branch、mission 和 advisor/executor mode 都相同才会复用原 thread。独立批判、新研究路线或另一 worktree 会创建新 thread；不能仅因属于同一仓库就混用上下文；
-- `/codex missions` 只查看当前 workspace、当前 Pi session branch 的 mission/thread 链。job 管理和 resume 强制绑定原 workspace 与分支归属；续接前还会比较上次终态与当前 Git snapshot，若分支、HEAD 或工作树变化则要求 Codex 重新检查；
+- 连续处理同一研究子任务时，Pi 会给它稳定的 `mission` 标签并使用 `reuse=auto`：mission 对应一个 project Codex Actor，同一精确 workspace、mission 和 advisor/executor mode 可跨 Pi session 续接原 thread。独立批判、新研究路线或另一 worktree 会创建新 Actor/thread；不能仅因属于同一仓库就混用上下文；
+- `/codex missions` 查看当前 project workspace 的 mission/thread 链。新 job 由 `projectKey + research-leader Actor` 所有，不再绑定一个 conversation branch；文件操作仍强制绑定原精确 workspace。续接前会比较上次终态与当前 Git snapshot，变化时要求 Codex 重新检查；
 - `respond` 回答 Codex 在运行中提出的显式问题；`steer` 将修正或新证据注入仍在运行的 turn，不需要终止并重开任务；
-- 后台任务会在 Pi 底部状态栏持续显示 job 后八位、模式、运行状态与最近进度；完成、失败、取消或需要输入时，会把一条限长结构化事件只送回最初的 Pi session branch，并自动触发该分支的 Leader 继续处理；
-- Pi 重启、恢复会话或切换 `/tree` 节点后，会按 session ID 与分支祖先锚点重新挂接仍在运行或尚未消费的 job；兄弟分支不会看到、管理或复用彼此的 Codex job。若输入框中已有草稿，事件排到下一轮，避免抢占用户正在写的内容；
+- 后台任务会在 Pi 底部状态栏持续显示 job 后八位、模式、运行状态与最近进度；完成、失败、取消或需要输入时，限长结构化事件进入 project Runtime mailbox，只交给当前 attached Research Leader session；
+- Codex worker 与 Pi TUI 解耦：直接退出 Pi 不会取消正在运行的后台 Codex，之后重新进入同一 workspace 即可查看结果或继续通信；需要停止任务时显式使用 `cancel`；
+- `/watch [job后缀|mission|@codex:<Actor短码>]` 直接查看 executor 或 advisor 当前 Action 的客观执行；Codex 内部临时 subagent 作为 Action 子节点展示，不自动注册成长期 Project Actor；
+- 新开或恢复 Pi session 会 attach 到同一 project Research Leader Actor；最近收到用户输入的 session 成为当前接收者。消息先 durable queue，再进入一次模型上下文，settled 后不在后续 turn 反复注入。输入框中已有草稿时事件排到下一轮；
 - 不默认建立 worktree，同一目标工作区同时只允许一个写入型 Codex job。
 
-Codex job、请求账本、精简 JSONL 审计事件和委派 prompt 保存在状态目录的 `codex/`（源码模式即 `.pi/codex/`），不会进入 Git。默认不落盘 token delta、reasoning 生命周期或模型正文；`job.json` 仅在可见进度或语义状态变化时更新，并在 `workerIo` 中记录实际写入计数。审计事件和 stderr 每个 job 分别限制为 2 MiB。只有显式设置 `PI_CODEX_TRACE=1` 才记录上限 32 MiB 的原始 App Server event，用完应立即关闭。已经处理的普通响应只保留长度和 SHA-256，不长期保留正文；但响应首先会进入 Pi 模型上下文，因此绝不能通过该通道传递 API key 等秘密。普通 Codex 工具子进程不继承 DeepSeek key，也不能直接访问 SSH agent；只有 `research_pi_host` broker 在匹配用户 grant 后才把 `SSH_AUTH_SOCK` 不透明地交给系统 SSH 进程。Codex CLI 自身仍使用本机 Codex 登录完成模型调用，但该认证不会授予其工具访问用户目录。
+Codex job、请求账本、精简 JSONL 审计事件和委派 prompt 保存在状态目录的 `codex/`（源码模式即 `.pi/codex/`）；Actor、Action 与 mailbox 的稀疏语义事件保存在 `runtime/projects/<projectKey>/events.jsonl`（源码模式即 `.pi/runtime/`），两者都不会进入 Git。Runtime 不记录 token delta、heartbeat 或完整 conversation，并在物理追加前按确定性 event ID 去重。Codex `job.json` 仅在可见进度或语义状态变化时更新，并在 `workerIo` 中记录实际写入计数。`/watch` 增量读取已有审计流，不额外记录 token delta 或创建另一份高频 trace。审计事件和 stderr 每个 job 分别限制为 2 MiB；命令输出只保留限长尾部并对常见凭据模式整体遮蔽。Research Pi 默认抑制 Codex App Server 写入 `logs_*.sqlite` 的内部 TRACE/DEBUG 反馈日志，但保留 `state_*.sqlite` 的 thread/runtime 状态；只有排查 Codex 上游问题时才应显式设置 `PI_CODEX_SQLITE_LOGS=1` 恢复内部日志，用完立即关闭。该设置不会删除此前已经积累的日志。只有显式设置 `PI_CODEX_TRACE=1` 才记录上限 32 MiB 的原始 App Server event，用完也应立即关闭。已经处理的普通响应只保留长度和 SHA-256，不长期保留正文；但响应首先会进入 Pi 模型上下文，因此绝不能通过该通道传递 API key 等秘密。普通 Codex 工具子进程不继承 DeepSeek key，也不能直接访问 SSH agent；只有 `research_pi_host` broker 在匹配用户 grant 后才把 `SSH_AUTH_SOCK` 不透明地交给系统 SSH 进程。Codex CLI 自身仍使用本机 Codex 登录完成模型调用，但该认证不会授予其工具访问用户目录。
+
+### Project Runtime（第一阶段）
+
+当前只注册 `user`、`research-leader` 和 Codex mission Actors，不引入自动 Scheduler 或固定科研流程：
+
+- `/actors`：查看当前项目 Actors、可用的 `@target` 和 attached/suspended 状态；
+- `/inbox`：查看尚未投递的 durable 消息；`/inbox all` 查看最近状态；
+- `/message <ask|reply|notify|result> @actor <内容>`：向 Actor 发送有语义类型的消息；
+- `/steer @actor <修正>`：默认不 abort，投递到下一安全模型边界；
+- `/steer --preempt @actor <修正>`：只有继续运行存在实际代价时才中断并恢复目标 Actor。
+
+Runtime message 是瞬时控制/通信，不自动成为长期科研判断。实验结论仍由 `record_experiment` 与后续 ProjectView 承接。旧版本已经创建的 Codex job 保留原 session/branch 所有权；新 job 才使用 project Actor 所有权。
+
+职责、状态机、通信路径以及双 Session 真实项目 smoke 的逐项判定见 [Research Runtime 测试指南](docs/research-runtime-test-guide.md)。
 
 ### Trace
 

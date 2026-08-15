@@ -16,6 +16,19 @@ import {
 	steerCodexJob,
 	waitForCodexJob,
 } from "../lib/codex-jobs.mjs";
+import { registerCodexRuntimeAdapter } from "../lib/research-runtime-adapters.mjs";
+import {
+	RESEARCH_LEADER_ACTOR_ID,
+	RUNTIME_MESSAGE_KIND,
+	codexActorId,
+	isRuntimeActorAttached,
+	readRuntimeSnapshot,
+	recordCodexRuntimeEvent,
+	registerCodexRuntimeJob,
+	resolveResearchRuntime,
+	runtimeMessageText,
+	settleRuntimeMessage,
+} from "../lib/research-runtime.mjs";
 
 const ActionSchema = Type.Union(
 	[
@@ -141,9 +154,9 @@ function formatJob(job: ReturnType<typeof publicJobView>): string {
 }
 
 function formatMissions(missions: Awaited<ReturnType<typeof listCodexMissions>>): string {
-	if (missions.length === 0) return "No Codex missions exist in the current workspace and Pi session branch.";
+	if (missions.length === 0) return "No Codex missions exist in the current project workspace.";
 	return [
-		"Codex missions in the current workspace and Pi session branch:",
+		"Codex Actor missions in the current project workspace:",
 		...missions.map((mission) => {
 			const label = mission.mission ?? "(unlabelled standalone jobs)";
 			return `- ${label} · ${mission.mode} · ${mission.status} · ${mission.latestJobId} · ${mission.jobCount} job${mission.jobCount === 1 ? "" : "s"}${mission.reusable ? " · resumable" : ""}`;
@@ -164,21 +177,53 @@ function boundedProgress(progress: string | null | undefined): string {
 	return compact.length <= 72 ? compact : `${compact.slice(0, 69)}...`;
 }
 
-function leaderScope(ctx: ExtensionContext) {
+async function leaderScope(ctx: ExtensionContext) {
+	const runtime = await resolveResearchRuntime(ctx.cwd);
 	return {
+		runtime,
+		projectKey: runtime.projectKey,
+		leaderActorId: RESEARCH_LEADER_ACTOR_ID,
 		leaderSessionId: ctx.sessionManager.getSessionId(),
 		leaderBranchAnchorId: ctx.sessionManager.getLeafId(),
 		branchEntryIds: new Set(ctx.sessionManager.getBranch().map((entry) => entry.id)),
 	};
 }
 
-function jobManagementScope(ctx: ExtensionContext) {
-	const scope = leaderScope(ctx);
+function projectJobManagementScope(ctx: ExtensionContext, scope: Awaited<ReturnType<typeof leaderScope>>) {
+	return {
+		expectedCwd: ctx.cwd,
+		expectedProjectKey: scope.projectKey,
+		expectedLeaderActorId: scope.leaderActorId,
+	};
+}
+
+async function jobManagementScope(ctx: ExtensionContext, jobId: string) {
+	const scope = await leaderScope(ctx);
+	const job = await readCodexJob(jobId, { expectedCwd: ctx.cwd });
+	if (job.leaderActorId) return projectJobManagementScope(ctx, scope);
 	return {
 		expectedCwd: ctx.cwd,
 		expectedLeaderSessionId: scope.leaderSessionId,
 		expectedBranchEntryIds: scope.branchEntryIds,
 	};
+}
+
+async function listOwnedCodexJobs(ctx: ExtensionContext) {
+	const scope = await leaderScope(ctx);
+	const [projectJobs, legacyJobs] = await Promise.all([
+		listCodexJobs({ cwd: ctx.cwd, projectKey: scope.projectKey, leaderActorId: scope.leaderActorId }),
+		listCodexJobs({ cwd: ctx.cwd, leaderSessionId: scope.leaderSessionId, branchEntryIds: scope.branchEntryIds, legacyOnly: true }),
+	]);
+	return [...new Map([...projectJobs, ...legacyJobs].map((job) => [job.id, job])).values()];
+}
+
+async function listOwnedCodexMissions(ctx: ExtensionContext) {
+	const scope = await leaderScope(ctx);
+	const [projectMissions, legacyMissions] = await Promise.all([
+		listCodexMissions({ cwd: ctx.cwd, projectKey: scope.projectKey, leaderActorId: scope.leaderActorId }),
+		listCodexMissions({ cwd: ctx.cwd, leaderSessionId: scope.leaderSessionId, branchEntryIds: scope.branchEntryIds, legacyOnly: true }),
+	]);
+	return [...projectMissions, ...legacyMissions];
 }
 
 export function formatCodexStatus(job: CodexJobView, activeCount = 1): string {
@@ -255,17 +300,34 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			.join("\n");
 	};
 
-	const deliverJobEvent = (job: CodexJobView, ctx: ExtensionContext) => {
+	const deliverJobEvent = async (job: CodexJobView, ctx: ExtensionContext) => {
 		const id = eventId(job);
 		if (!id || deliveredEvents.has(id)) return;
+		const runtime = await resolveResearchRuntime(ctx.cwd);
+		const message = await recordCodexRuntimeEvent(runtime, job, eventContent(job));
+		if (!message || message.status !== "queued") {
+			deliveredEvents.add(id);
+			return;
+		}
+		if (!(await isRuntimeActorAttached(runtime, RESEARCH_LEADER_ACTOR_ID, ctx.sessionManager.getSessionId()))) return;
 		const editorHasDraft = ctx.hasUI && Boolean(ctx.ui.getEditorText?.().trim());
 		try {
 			pi.sendMessage(
 				{
-					customType: EVENT_KIND,
-					content: eventContent(job),
+					customType: RUNTIME_MESSAGE_KIND,
+					content: runtimeMessageText(message),
 					display: true,
-					details: { eventId: id, jobId: job.id, status: job.status, requestId: job.pendingRequest?.id ?? null },
+					details: {
+						eventId: id,
+						messageId: message.id,
+						type: message.type,
+						from: message.from,
+						to: message.to,
+						jobId: job.id,
+						status: job.status,
+						requestId: job.pendingRequest?.id ?? null,
+						transient: true,
+					},
 				},
 				{
 					deliverAs: editorHasDraft ? "nextTurn" : "followUp",
@@ -276,6 +338,10 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			if (ctx.hasUI) ctx.ui.notify(`Could not deliver Codex event: ${error instanceof Error ? error.message : String(error)}`, "warning");
 			return;
 		}
+		await settleRuntimeMessage(runtime, message.id, "delivered", {
+			sessionId: ctx.sessionManager.getSessionId(),
+			actorId: RESEARCH_LEADER_ACTOR_ID,
+		});
 		deliveredEvents.add(id);
 		if (editorHasDraft && ctx.hasUI) {
 			ctx.ui.notify(`Codex ${shortJobId(job.id)} ${job.status}; the event is queued behind your editor draft.`, "info");
@@ -284,15 +350,17 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 
 	const monitorJob = (initial: CodexJobView, ctx: ExtensionContext) => {
 		rememberJob(initial, ctx);
-		deliverJobEvent(initial, ctx);
+		void deliverJobEvent(initial, ctx).catch((error) => {
+			if (ctx.hasUI) ctx.ui.notify(`Could not persist Codex Runtime event: ${error instanceof Error ? error.message : String(error)}`, "warning");
+		});
 		if (TERMINAL_JOB_STATUSES.has(initial.status) || monitorTimers.has(initial.id)) return;
 
 		const poll = async () => {
 			if (shuttingDown) return;
 			try {
-				const current = publicJobView(await readCodexJob(initial.id, jobManagementScope(ctx)));
+				const current = publicJobView(await readCodexJob(initial.id, await jobManagementScope(ctx, initial.id)));
 				rememberJob(current, ctx);
-				deliverJobEvent(current, ctx);
+				await deliverJobEvent(current, ctx);
 				if (TERMINAL_JOB_STATUSES.has(current.status)) {
 					monitorTimers.delete(current.id);
 					return;
@@ -337,17 +405,15 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		deliveredEvents.clear();
 		const branch = ctx.sessionManager.getBranch();
 		for (const entry of branch) {
-			if (entry.type === "custom_message" && entry.customType === EVENT_KIND && entry.details?.eventId) {
+			if (entry.type === "custom_message" && [EVENT_KIND, RUNTIME_MESSAGE_KIND].includes(entry.customType) && entry.details?.eventId) {
 				deliveredEvents.add(String(entry.details.eventId));
 			}
 		}
 		try {
-			const jobs = await listCodexJobs({
-				leaderSessionId: ctx.sessionManager.getSessionId(),
-				branchEntryIds: new Set(branch.map((entry) => entry.id)),
-				cwd: ctx.cwd,
-			});
+			const runtime = await resolveResearchRuntime(ctx.cwd);
+			const jobs = await listOwnedCodexJobs(ctx);
 			for (const job of jobs) {
+				if (job.leaderActorId) await registerCodexRuntimeJob(runtime, publicJobView(job));
 				if (TERMINAL_JOB_STATUSES.has(job.status) && job.autoNotify === false) continue;
 				monitorJob(publicJobView(job), ctx);
 			}
@@ -355,6 +421,60 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			if (ctx.hasUI) ctx.ui.notify(`Could not reattach Codex jobs: ${error instanceof Error ? error.message : String(error)}`, "warning");
 		}
 	};
+
+	registerCodexRuntimeAdapter({
+		dispatch: async ({ runtime, actor, message, preempt, ctx }) => {
+			const owner = await leaderScope(ctx);
+			const jobs = await listCodexJobs({
+				cwd: ctx.cwd,
+				projectKey: owner.projectKey,
+				leaderActorId: owner.leaderActorId,
+				actorId: actor.id,
+			});
+			const latest = jobs.at(-1);
+			if (!latest) return { status: "queued", detail: `${actor.label} has no resumable Codex thread yet` };
+			const ownerCheck = projectJobManagementScope(ctx, owner);
+			const live = !TERMINAL_JOB_STATUSES.has(latest.status);
+			const instruction = runtimeMessageText(message, (await readRuntimeSnapshot(runtime)).actors);
+			let nextJob = latest;
+
+			if (message.type === "reply" && live && latest.pendingRequest?.id) {
+				const queued = await respondToCodexJob(latest.id, {
+					requestId: latest.pendingRequest.id,
+					response: message.body,
+					...ownerCheck,
+				});
+				nextJob = queued.job;
+			} else if (live && !preempt) {
+				const queued = await steerCodexJob(latest.id, { message: instruction, ...ownerCheck });
+				nextJob = queued.job;
+			} else {
+				if (live) await cancelCodexJob(latest.id, ownerCheck);
+				if (!latest.threadId) return { status: "queued", detail: `${actor.label} has no resumable Codex thread` };
+				nextJob = await resumeCodexJob(latest.id, {
+					followUp: instruction,
+					leaderSessionId: owner.leaderSessionId,
+					leaderBranchAnchorId: owner.leaderBranchAnchorId,
+					leaderActorId: owner.leaderActorId,
+					actorId: actor.id,
+					background: true,
+					...ownerCheck,
+				});
+			}
+
+			const view = publicJobView(nextJob);
+			await registerCodexRuntimeJob(runtime, view);
+			monitorJob(view, ctx);
+			return {
+				status: "delivered",
+				detail: preempt
+					? `interrupted ${shortJobId(latest.id)} and resumed ${shortJobId(view.id)}`
+					: live
+						? `delivered to active Codex job ${shortJobId(view.id)}`
+						: `resumed Codex job ${shortJobId(view.id)}`,
+			};
+		},
+	});
 
 	pi.on("session_start", async (_event, ctx) => {
 		shuttingDown = false;
@@ -371,7 +491,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("codex", {
-		description: "Inspect Codex mission threads on this Pi session branch (/codex missions)",
+		description: "Inspect project Codex Actor mission threads (/codex missions)",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const action = args.trim() || "missions";
 			if (action !== "missions" && action !== "list") {
@@ -379,12 +499,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 				return;
 			}
 			try {
-				const scope = leaderScope(ctx);
-				ctx.ui.notify(formatMissions(await listCodexMissions({
-					cwd: ctx.cwd,
-					leaderSessionId: scope.leaderSessionId,
-					branchEntryIds: scope.branchEntryIds,
-				})), "info");
+				ctx.ui.notify(formatMissions(await listOwnedCodexMissions(ctx)), "info");
 			} catch (error) {
 				ctx.ui.notify(`Could not list Codex missions: ${error instanceof Error ? error.message : String(error)}`, "error");
 			}
@@ -399,15 +514,15 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			`Both modes default to ${DEFAULT_CODEX_MODEL}/${DEFAULT_CODEX_REASONING_EFFORT}.`,
 			"Executor jobs run automatically inside the current project boundary. They may edit/delete files, freely commit, use public network, and run expensive experiments. Exact user-approved external-read, SSH-target, or fixed-script capabilities are available through an opaque host broker; raw credentials never enter Codex.",
 			"Pi remains responsible for framing the research question, judging evidence, and choosing the next research action.",
-			"Give related work a stable mission label and use reuse=auto to continue its exact Codex thread on the active Pi branch; use action=missions to inspect branch-local mission threads.",
-			"Use action=status/result/cancel/resume/respond/steer with the returned job id; jobs from another workspace, Pi session, or sibling branch cannot be managed or resumed.",
-			"Background completion and blocking requests are delivered only into the originating Pi session branch. respond answers an explicit request; steer corrects an active turn without restarting it.",
+			"Give related work a stable mission label and use reuse=auto to continue its exact Codex Actor thread across Pi sessions in this project workspace; use action=missions to inspect project mission threads.",
+			"Use action=status/result/cancel/resume/respond/steer with the returned job id; Actor-owned jobs remain bound to the exact project workspace but are not owned by one Pi conversation.",
+			"Background completion and blocking requests enter the project Runtime mailbox and are delivered to the currently attached Research Leader session. respond answers an explicit request; steer corrects an active turn without restarting it.",
 		].join(" "),
 		promptSnippet: "Delegate long operational work or a bounded second opinion to local Codex",
 		promptGuidelines: [
 			"Use codex_delegate when a bounded execution task would require many tools or produce enough intermediate output to pollute the research context; delegation is for context isolation, not automatic parallelism.",
 			"Before starting Codex, state the objective and success criteria. Send only relevant research context; do not copy the full conversation or ask Codex to decide the research objective.",
-			"Use a stable mission label for consecutive work on one research subtask and reuse=auto. Reuse is restricted to the active Pi session branch. Start a fresh mission for an independent critique, a different research route, a different workspace, or substantially stale assumptions.",
+			"Use a stable mission label for consecutive work on one research subtask and reuse=auto. The mission is a project Codex Actor and survives Pi session rotation. Start a fresh mission for an independent critique, a different research route, a different workspace, or substantially stale assumptions.",
 			"Use mode=executor when Codex should actually complete the work. It has standing authority for destructive, long-running, and expensive steps inside the current project and should not be micromanaged command by command.",
 			"If Codex needs an unapproved outside path, SSH target, or host script, review the exact request and ask the user for the returned /boundary grant. After approval, respond so Codex can retry the same turn. Do not disguise the operation as a new delegation.",
 			"Use mode=advisor only for a genuinely useful independent proposal or critique. Advisor is read-only but still uses max reasoning by default.",
@@ -420,12 +535,9 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const requestedMode = params.mode;
 			const startMode = requestedMode ?? "executor";
-			const owner = leaderScope(ctx);
-			const ownerCheck = {
-				expectedCwd: ctx.cwd,
-				expectedLeaderSessionId: owner.leaderSessionId,
-				expectedBranchEntryIds: owner.branchEntryIds,
-			};
+			const owner = await leaderScope(ctx);
+			const projectOwnerCheck = projectJobManagementScope(ctx, owner);
+			let ownerCheck = projectOwnerCheck;
 			let effectiveBackground = params.background ?? (startMode === "executor");
 			let job;
 			let commandReceipt: string | undefined;
@@ -439,6 +551,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 					case "start": {
 						const task = requireText(params.task, "task");
 						const reuse = params.reuse ?? (params.mission ? "auto" : "never");
+						const actorId = params.mission ? codexActorId({ mission: params.mission, mode: startMode }) : undefined;
 						const common = {
 							cwd: ctx.cwd,
 							mode: startMode,
@@ -449,7 +562,9 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 							reasoningEffort: params.reasoningEffort,
 							timeoutMinutes: params.timeoutMinutes ?? null,
 							leaderSessionId: owner.leaderSessionId,
+							leaderActorId: owner.leaderActorId,
 							leaderBranchAnchorId: owner.leaderBranchAnchorId,
+							actorId,
 							background: effectiveBackground,
 						};
 						const reusable = reuse === "auto"
@@ -457,8 +572,9 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 								cwd: ctx.cwd,
 								mission: params.mission,
 								mode: startMode,
-								leaderSessionId: owner.leaderSessionId,
-								branchEntryIds: owner.branchEntryIds,
+								projectKey: owner.projectKey,
+								leaderActorId: owner.leaderActorId,
+								actorId,
 							})
 							: null;
 						if (reusable && !TERMINAL_JOB_STATUSES.has(reusable.status)) {
@@ -476,8 +592,10 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 						}
 						break;
 					}
-					case "resume":
-						job = await resumeCodexJob(requireText(params.jobId, "jobId"), {
+					case "resume": {
+						const jobId = requireText(params.jobId, "jobId");
+						ownerCheck = await jobManagementScope(ctx, jobId);
+						job = await resumeCodexJob(jobId, {
 							followUp: requireText(params.followUp, "followUp"),
 							mode: params.mode,
 							model: params.model,
@@ -487,14 +605,19 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 							mission: params.mission,
 							timeoutMinutes: params.timeoutMinutes ?? null,
 							leaderSessionId: owner.leaderSessionId,
+							leaderActorId: owner.leaderActorId,
 							leaderBranchAnchorId: owner.leaderBranchAnchorId,
 							background: params.background,
 							...ownerCheck,
 						});
+						ownerCheck = projectOwnerCheck;
 						effectiveBackground = params.background ?? job.autoNotify ?? (job.mode === "executor");
 						break;
+					}
 					case "respond": {
-						const queued = await respondToCodexJob(requireText(params.jobId, "jobId"), {
+						const jobId = requireText(params.jobId, "jobId");
+						ownerCheck = await jobManagementScope(ctx, jobId);
+						const queued = await respondToCodexJob(jobId, {
 							requestId: requireText(params.requestId, "requestId"),
 							response: params.response,
 							answers: params.answers,
@@ -505,7 +628,9 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 						break;
 					}
 					case "steer": {
-						const queued = await steerCodexJob(requireText(params.jobId, "jobId"), {
+						const jobId = requireText(params.jobId, "jobId");
+						ownerCheck = await jobManagementScope(ctx, jobId);
+						const queued = await steerCodexJob(jobId, {
 							message: requireText(params.message, "message"),
 							...ownerCheck,
 						});
@@ -514,18 +639,20 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 						break;
 					}
 					case "status":
-					case "result":
-						job = await readCodexJob(requireText(params.jobId, "jobId"), ownerCheck);
+					case "result": {
+						const jobId = requireText(params.jobId, "jobId");
+						ownerCheck = await jobManagementScope(ctx, jobId);
+						job = await readCodexJob(jobId, ownerCheck);
 						break;
-					case "cancel":
-						job = await cancelCodexJob(requireText(params.jobId, "jobId"), ownerCheck);
+					}
+					case "cancel": {
+						const jobId = requireText(params.jobId, "jobId");
+						ownerCheck = await jobManagementScope(ctx, jobId);
+						job = await cancelCodexJob(jobId, ownerCheck);
 						break;
+					}
 					case "missions": {
-						const missions = await listCodexMissions({
-							cwd: ctx.cwd,
-							leaderSessionId: owner.leaderSessionId,
-							branchEntryIds: owner.branchEntryIds,
-						});
+						const missions = await listOwnedCodexMissions(ctx);
 						return {
 							content: [{ type: "text", text: formatMissions(missions) }],
 							details: { missions },
@@ -536,6 +663,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 				}
 
 				let view = publicJobView(job);
+				await registerCodexRuntimeJob(owner.runtime, view);
 				rememberJob(view, ctx);
 				if ((params.action === "start" || params.action === "resume") && !effectiveBackground) {
 					job = await waitForCodexJob(job.id, {
@@ -552,6 +680,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 						},
 					});
 					view = publicJobView(job);
+					await registerCodexRuntimeJob(owner.runtime, view);
 					rememberJob(view, ctx);
 				} else if (!TERMINAL_JOB_STATUSES.has(view.status)) {
 					monitorJob(view, ctx);

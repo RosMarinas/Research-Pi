@@ -6,6 +6,11 @@
           "compat": {
             "maxTokensField": "max_tokens"
           }
+        },
+        "deepseek-v4-pro": {
+          "compat": {
+            "maxTokensField": "max_tokens"
+          }
         }
       }
     }

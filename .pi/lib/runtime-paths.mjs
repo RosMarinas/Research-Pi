@@ -33,6 +33,7 @@ export function resolveResearchPiPaths(options) {
 		agentDir: join(stateRoot, "agent"),
 		sessionDir: join(stateRoot, "sessions"),
 		memoryDir: join(stateRoot, "memory"),
+		runtimeDir: join(stateRoot, "runtime"),
 		codexDir: join(stateRoot, "codex"),
 		capabilityDir: join(stateRoot, "capabilities"),
 		traceDir: join(stateRoot, "agent", "traces"),

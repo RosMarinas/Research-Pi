@@ -136,6 +136,11 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         send({ method: "item/agentMessage/delta", params: { threadId: "thread-fake-123", turnId: activeTurn, itemId: "message-1", delta: "x" } });
       }
     }
+    if (prompt.includes("objective activity")) {
+      send({ method: "item/started", params: { threadId: "thread-fake-123", turnId: activeTurn, item: { id: "command-observed", type: "commandExecution", status: "inProgress", command: "python3 probe.py", commandActions: [], cwd: process.cwd(), durationMs: null, exitCode: null, aggregatedOutput: null } } });
+      send({ method: "item/completed", params: { threadId: "thread-fake-123", turnId: activeTurn, item: { id: "command-observed", type: "commandExecution", status: "completed", command: "python3 probe.py", commandActions: [], cwd: process.cwd(), durationMs: 12, exitCode: 0, aggregatedOutput: "probe-ok" } } });
+      send({ method: "item/completed", params: { threadId: "thread-fake-123", turnId: activeTurn, item: { id: "collab-observed", type: "collabAgentToolCall", tool: "spawnAgent", status: "completed", senderThreadId: "thread-fake-123", receiverThreadIds: ["thread-child-1"], agentsStates: { "thread-child-1": { status: "running", message: "checking probe" } }, model: "gpt-5.6-luna", reasoningEffort: "high", prompt: "Check the probe result" } } });
+    }
     if (prompt.includes("ask the leader live")) {
       send({ id: "server-question-1", method: "item/tool/call", params: { threadId: "thread-fake-123", turnId: activeTurn, callId: "call-1", tool: "consult_research_pi", arguments: { audience: "leader", question: "Choose H1 or H2", why_blocking: "The experiment differs", options: ["H1", "H2"] } } });
     } else if (prompt.includes("HOST_READ_PATH=")) {
@@ -469,6 +474,135 @@ test("sibling branches in one Pi session cannot observe or reuse each other's Co
 	}
 });
 
+test("project Actor ownership survives Pi session rotation without crossing workspaces", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-project-actor-"));
+	try {
+		const workspace = join(root, "workspace");
+		const otherWorkspace = join(root, "other-workspace");
+		const jobRoot = join(root, "codex", "jobs");
+		mkdirSync(workspace, { recursive: true });
+		mkdirSync(otherWorkspace, { recursive: true });
+		const codexBin = makeFakeCodex(root);
+		const leaderActorId = "research-leader";
+		const actorId = "codex:mission-project-runtime:advisor";
+		const firstStart = await startCodexJob({
+			cwd: workspace,
+			jobRoot,
+			codexBin,
+			mode: "advisor",
+			mission: "project runtime handoff",
+			task: "inspect the project runtime boundary",
+			leaderSessionId: "pi-session-a",
+			leaderBranchAnchorId: "branch-a",
+			leaderActorId,
+			actorId,
+		});
+		const first = await waitForCodexJob(firstStart.id, { jobRoot });
+		const actorScope = {
+			expectedCwd: workspace,
+			expectedProjectKey: first.projectKey,
+			expectedLeaderActorId: leaderActorId,
+		};
+
+		const seenFromSessionB = await readCodexJob(first.id, { jobRoot, ...actorScope });
+		assert.equal(seenFromSessionB.leaderSessionId, "pi-session-a");
+		assert.equal(seenFromSessionB.leaderActorId, leaderActorId);
+		assert.equal(seenFromSessionB.actorId, actorId);
+		const reusable = await findReusableCodexJob({
+			cwd: workspace,
+			jobRoot,
+			mode: "advisor",
+			mission: "project runtime handoff",
+			projectKey: first.projectKey,
+			leaderActorId,
+			actorId,
+		});
+		assert.equal(reusable.id, first.id);
+
+		const resumedStart = await resumeCodexJob(first.id, {
+			jobRoot,
+			codexBin,
+			followUp: "continue from Pi session B",
+			leaderSessionId: "pi-session-b",
+			leaderBranchAnchorId: "branch-b",
+			leaderActorId,
+			actorId,
+			...actorScope,
+		});
+		const resumed = await waitForCodexJob(resumedStart.id, { jobRoot, ...actorScope });
+		assert.equal(resumed.status, "completed");
+		assert.equal(resumed.leaderSessionId, "pi-session-b");
+		assert.equal(resumed.leaderActorId, leaderActorId);
+		assert.equal(resumed.actorId, actorId);
+		assert.equal(resumed.threadId, first.threadId);
+		assert.equal(resumed.continuationOf, first.id);
+
+		await assert.rejects(
+			readCodexJob(first.id, { jobRoot, expectedCwd: otherWorkspace, expectedProjectKey: first.projectKey, expectedLeaderActorId: leaderActorId }),
+			/belongs to another workspace/,
+		);
+		await assert.rejects(
+			readCodexJob(first.id, { jobRoot, expectedCwd: workspace, expectedProjectKey: first.projectKey, expectedLeaderActorId: "another-leader" }),
+			/belongs to another Runtime leader Actor/,
+		);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("an active Codex Actor accepts cross-session steer and cancellation through project ownership", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-project-steer-"));
+	try {
+		const workspace = join(root, "workspace");
+		const jobRoot = join(root, "codex", "jobs");
+		mkdirSync(workspace, { recursive: true });
+		const codexBin = makeFakeCodex(root, 10_000);
+		const started = await startCodexJob({
+			cwd: workspace,
+			jobRoot,
+			codexBin,
+			mode: "advisor",
+			mission: "live project actor",
+			task: "stay active for steering",
+			leaderSessionId: "pi-session-a",
+			leaderBranchAnchorId: "branch-a",
+			leaderActorId: "research-leader",
+			actorId: "codex:mission-live-project-actor:advisor",
+		});
+		let running;
+		for (let attempt = 0; attempt < 200; attempt++) {
+			running = await readCodexJob(started.id, { jobRoot });
+			if (running.activeTurnId) break;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		assert.ok(running.activeTurnId, JSON.stringify(running));
+		const actorScope = {
+			expectedCwd: workspace,
+			expectedProjectKey: running.projectKey,
+			expectedLeaderActorId: "research-leader",
+		};
+		const steering = await steerCodexJob(started.id, {
+			jobRoot,
+			message: "Use the corrected validity criterion.",
+			...actorScope,
+		});
+		for (let attempt = 0; attempt < 100; attempt++) {
+			const command = JSON.parse(readFileSync(join(jobRoot, started.id, "commands", `${steering.command.id}.json`), "utf8"));
+			if (command.status === "applied") break;
+			if (command.status === "failed") assert.fail(command.error);
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		assert.equal(
+			JSON.parse(readFileSync(join(jobRoot, started.id, "commands", `${steering.command.id}.json`), "utf8")).status,
+			"applied",
+		);
+		const cancelled = await cancelCodexJob(started.id, { jobRoot, ...actorScope });
+		assert.equal(cancelled.status, "cancelled");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("app-server delegation supports live leader requests and durable session reattachment", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-live-"));
 	try {
@@ -565,6 +699,37 @@ test("token delta storms do not amplify job-state or default audit-log writes", 
 		assert.ok(events.trim().split("\n").length < 20, events);
 		assert.ok(readdirSync(jobDir).includes("stderr.log"));
 		assert.ok(!readdirSync(jobDir).includes("stderr-tail.log"));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("App Server objective command and subagent events reach the bounded audit projection", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-observe-"));
+	try {
+		const workspace = join(root, "workspace");
+		const jobRoot = join(root, "codex", "jobs");
+		mkdirSync(workspace, { recursive: true });
+		const codexBin = makeFakeCodex(root);
+		const started = await startCodexJob({
+			cwd: workspace,
+			jobRoot,
+			codexBin,
+			mode: "advisor",
+			task: "emit objective activity for the TUI",
+		});
+		const completed = await waitForCodexJob(started.id, { jobRoot });
+		assert.equal(completed.status, "completed");
+		const events = readFileSync(join(jobRoot, started.id, "events.jsonl"), "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line));
+		const command = events.find((event) => event.category === "command" && event.phase === "completed");
+		assert.equal(command.exitCode, 0);
+		assert.equal(command.outputTail, "probe-ok");
+		const subagent = events.find((event) => event.category === "subagent");
+		assert.deepEqual(subagent.receiverThreadIds, ["thread-child-1"]);
+		assert.equal(subagent.model, "gpt-5.6-luna");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
