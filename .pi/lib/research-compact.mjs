@@ -187,6 +187,8 @@ export function mergeProjectRuntimeEvidence(evidence, runtimeSnapshot) {
 			nextStep: text(record.nextStep, 2_000),
 			runId: text(record.runId, 300) || undefined,
 			artifacts: list(record.artifacts, 12, 1_000),
+			trackRef: text(record.trackRef, 300) || "project:initial",
+			trackLabel: text(record.trackLabel, 600) || "initial project track",
 			contentHash: hash(JSON.stringify(record)),
 			projectRuntimeSource: true,
 		});
@@ -372,6 +374,7 @@ Rules:
 5. Separate what was observed from how it was interpreted.
 6. Match the dominant language of the conversation.
 7. A recorded project transition with archived/superseded disposition changes the active research route. Keep the old route as retrievable history, but do not present its claim or next experiment as current. A parallel disposition does not retire it.
+8. Experiment trackRef/trackLabel identify route provenance. Evidence from a retired route may remain scientifically relevant, but do not silently use it as evidence that the current route's intervention occurred.
 
 Required schema:
 {
@@ -491,7 +494,7 @@ export function renderResearchSummary(state, evidence, fileOps = {}) {
 	if (!recentExperiments.length) lines.push("- 当前分支没有 record_experiment 记录。");
 	for (const item of recentExperiments) {
 		lines.push(
-			`- ${item.ref} [${item.validityJudgment}]${item.runId ? ` run=${item.runId}` : ""}: ${item.conclusion || item.observation || item.hypothesis}`,
+			`- ${item.ref} [${item.validityJudgment}] track=${item.trackRef ?? "project:initial"}${item.runId ? ` run=${item.runId}` : ""}: ${item.conclusion || item.observation || item.hypothesis}`,
 		);
 	}
 	for (const item of evidence.checkpoints.slice(-12)) {

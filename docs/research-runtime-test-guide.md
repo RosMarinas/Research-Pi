@@ -1,7 +1,7 @@
 # Research Runtime：Codex 职责、状态与真实项目测试指南
 
-状态：Milestone 2 已实测；ProjectView、outcome recovery、lifecycle recommendation 与人工 Session rotation 已实现
-更新：2026-08-19
+状态：Milestone 2 已实测；下一阶段的多 Session 所有权、路线 provenance 与 ledger 恢复已实现，等待真实项目验证
+更新：2026-08-20
 适用版本：包含 `research-runtime.ts` 的 Research Pi 开发版
 
 ## 1. 先把几个对象分开
@@ -92,6 +92,8 @@ queued -> delivered -> consumed
 
 投递采用 at-least-once 的恢复思路：如果进程在模型看到消息后、`agent_settled` 前崩溃，消息可能在恢复时再出现一次；不会为了追求 exactly-once 而增加高频事务写入。
 
+状态折叠是单调的：`consumed`/`superseded` 不会被迟到的 `delivered` 回退；Action 的 `completed`/`failed`/`cancelled` 也不会重新变成 running。`outcome_unknown` 只能通过显式 reconcile 进入一个终态。
+
 ### 3.4 副作用恢复边界
 
 executor 的 job 先记录 `intent_recorded`，在 App Server `turn/start` 前把 `started` 耐久落盘。若 worker 在 started 后消失或被强杀，恢复只能知道“副作用可能发生”，因此标为 `outcome_unknown`。Runtime 会阻止同一精确 workspace 的新 executor，避免重复提交、重复远程运行或在未知状态上继续写；advisor 不写项目，仍可用于检查。只有在检查 Git、文件、远程 run/job 等实际状态后，才可用 `codex_delegate action=reconcile` 提交 terminal outcome 与证据 note。Harness 不自动猜测。
@@ -157,16 +159,19 @@ sequenceDiagram
 
 用户仍可使用原生 `/new`。它同样会生成 ProjectView，但绕过 readiness 与 rotation request/completion 审计，因此不用于验证“Project 是否足以接管 Session”这一 Runtime 性质。Research Pi 永远不会自动执行轮换。
 
+普通第二个 TUI 启动时不会静默抢走仍 attached 的 Leader。`/runtime`、`/runtime health|recommend|view`、`/actors` 和 `/inbox` 都是只读观察；一条真正的研究输入会在旧 Leader 没有 active agent run 时转移 attachment。若旧 Session 正在生成，输入会保留在编辑器并提示等待；只有 `/runtime takeover <reason>` 会显式越过该保护。claim 与 activation start 在同一个 ledger lock 中竞争，因此不会同时产生两个合法 owner。attachment epoch 变化后，旧 Session 在下一模型边界 abort；旧 shutdown 不能 detach 新 epoch，旧 settled run 不能消费消息，改变 Codex 状态的操作也必须持有当前 attachment lease。open message 会重投给新 owner。
+
 这里没有把 A 的完整 transcript 注入 B。最近一次结构化 research compact 会提交带 Project revision 的 state；B 在模型调用前得到确定性的限长 ProjectView，优先合并 active transition、freshness、state provenance、project evidence 索引、Git 摘要、未结 Action 和 mailbox ID。它不包含完整旧 transcript，重要证据仍须通过引用或 memory read 精确读取。
 
-方向切换不等待 compact。`record_research_transition` 立即使旧 state 变为 stale，并说明旧路线是 archived、superseded 还是 parallel；下一次 compact 才综合形成新 state。superseded/archived 时不会机械搬运旧假设，旧证据仍可检索。Project revision 使用 compare-and-append：压缩基于旧 revision 时只写 Session 历史，并产生 rejected-state 记录，不覆盖当前 Project State。
+方向切换不等待 compact。`record_research_transition` 立即使旧 state 变为 stale，并说明旧路线是 archived、superseded 还是 parallel；下一次 compact 才综合形成新 state。superseded/archived 时不会机械搬运旧假设，旧证据仍可检索；parallel 路线的存活状态会跨后续主路线切换保留，并可用精确 `fromTrackRef` 从任一 live route 继续。Evidence、Action、message、Project State 与 Codex job 都携带 track provenance；延迟返回的实验可显式保留旧 `trackRef`。ProjectView 根据 compacted state 自己的 track 判断它是否 retired，而不是只看最后一次 transition。Project revision 使用 compare-and-append：压缩或换轨基于旧 revision 时不会覆盖当前状态。ProjectView 另外观察 ledger semantic event count，所以跨 Session 新增 Action/mailbox 会在下一模型边界刷新，即使它不改变科研 revision。
 
 ## 5. 所有权与边界
 
-新 Codex job 使用两层检查：
+新 Codex job 使用三层检查：
 
 ```text
 projectKey + research-leader Actor    逻辑所有权，可跨 Pi Session
+Leader session + attachment epoch     当前控制权；状态写入期间持有短 lease
 exact workspaceKey/root               文件与副作用边界，不可跨 worktree
 ```
 
@@ -189,6 +194,7 @@ exact workspaceKey/root               文件与副作用边界，不可跨 workt
 /runtime health
 /runtime recommend
 /runtime view
+/runtime takeover <reason>
 /runtime rotate [reason]
 ```
 
@@ -207,8 +213,10 @@ node --test tests/research-runtime.test.mjs tests/runtime-board.test.mjs
 覆盖：
 
 - Project 内稳定 user/Research Leader Actor；
-- Session B attachment 替代 A，A 随后 detach 不会误删 B；
+- Session B attachment 替代 A，A 随后 detach（包括同 sessionId 的旧 epoch）不会误删 B；
+- read-only Board/health/view/actors/inbox 不会抢 attachment；active Leader 阻止隐式接管，显式 takeover 产生新 epoch；
 - message queued/delivered/consumed；
+- message/Action 终态不被迟到事件回退，部分 JSONL 尾记录可恢复而中部损坏仍报错；
 - mission 规范化与 advisor/executor Actor 隔离；
 - Codex ask/result 的幂等投影；
 - default steer 不 abort；
@@ -216,8 +224,9 @@ node --test tests/research-runtime.test.mjs tests/runtime-board.test.mjs
 - consumed transient message 不再进入后续 context。
 - rotation readiness 会阻止缺失/陈旧 Project State、`outcome_unknown` 和无外部身份的 active Action；
 - rotation request/completion 可从 Project ledger 重建；
-- delivered 但尚未 consumed 的 Leader 消息可在新 Session 重投。
-- Runtime Board 不重新激活 superseded claim，只展示为 prior claim；active Actor 优先、settled mailbox 被过滤，窄终端输出不越界；没有按 `r` 时不会轮询。
+- delivered 但尚未 consumed 的 Leader 消息可在新 Session 重投，旧 epoch 的 settled run 不能抢先 consume。
+- 另一 Session 的 transition、Action 或 mailbox 在下一模型边界刷新 ProjectView。
+- Runtime Board 不重新激活 superseded claim，只展示为 prior claim；active Actor 优先、settled mailbox 被过滤，四个分页都适配 24 行终端的 92% overlay；没有按 `r` 时不会轮询。
 - 从旧 Session 打开 Board 不会抢占当前 attached Research Leader，即使 cwd 经过 macOS `/var` 等规范路径别名。
 
 ### Layer 2：Fake Codex App Server
@@ -229,6 +238,8 @@ node --test tests/codex-jobs.test.mjs
 覆盖：
 
 - Session B 以同一 Project/Leader Actor 读取并续接 A 的 job；
+- 只有同 workspace/mission/mode/track 自动复用；显式跨 track resume 带 route-change 警告；
+- 已失去 Leader attachment 的 Session 不能启动新的 Codex Action；
 - thread ID 保持，新的 Action 记录新的 job ID；
 - 另一 workspace 和错误 Leader Actor 被拒绝；
 - active Actor 接收跨 Session steer/cancel；
@@ -316,7 +327,13 @@ Codex 尚未发出阻塞问题时，立即在终端 B 用同一 workspace 启动
 /actors
 ```
 
-终端 B 的 Research Leader 应显示 attached 到 B。阻塞问题应以 Runtime ask 卡片到达 B。若问题已经先在 A 被消费，使用新的唯一 mission 重做一次；不要把已消费消息的“不重复投递”误判为失败。
+此时 B 只是观察者，Research Leader 应仍 attached 到 A。然后显式执行：
+
+```text
+/runtime takeover mailbox handoff smoke from terminal A to B
+```
+
+终端 B 的 Research Leader attachment epoch 应改变并指向 B；若 A 正在生成，它应在下一模型边界停止。随后阻塞问题应以 Runtime ask 卡片到达 B。若问题已经先在 A 被消费，使用新的唯一 mission 重做一次；不要把已消费消息的“不重复投递”误判为失败。
 
 在 B 回复：
 
@@ -392,6 +409,7 @@ Action 完成后，在当前 attached Session 输入：
 |---|---|---|
 | Actor 稳定 | 新 Action 保持同一 `@codex` Actor | 每次续接都出现无关 Actor |
 | Session 解耦 | B 能管理 A 创建的新 Actor-owned job | 提示 belongs to another Pi session |
+| Leader 单写者 | 观察命令不抢占；active run 阻止隐式接管；显式 takeover 后旧 Session 停止 | 两个 Session 都能继续改变 Codex/模型状态 |
 | Workspace 隔离 | 只有相同精确 workspace 可管理 | 另一 worktree 能接管 |
 | ask/reply | 原 turn 在 reply 后继续 | 新建无关 delegation 或 request 丢失 |
 | default steer | 原 Action 继续、无 cancel | 普通 steer 导致 cancelled |

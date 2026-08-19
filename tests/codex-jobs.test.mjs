@@ -24,6 +24,11 @@ import {
 } from "../.pi/lib/codex-jobs.mjs";
 import { CODEX_ADVISOR_PROFILE, CODEX_EXECUTOR_PROFILE } from "../.pi/lib/project-boundary.mjs";
 import {
+	RESEARCH_LEADER_ACTOR_ID,
+	attachRuntimeActor,
+	initializeResearchRuntime,
+} from "../.pi/lib/research-runtime.mjs";
+import {
 	createCapabilityGrant,
 	prepareCapabilityRequest,
 	resolveCapabilityContext,
@@ -64,6 +69,43 @@ test("Codex delegation exposes bounded running and terminal footer states", () =
 		progress: "completed",
 	});
 	assert.equal(completed, "✓ Codex advisor abcdef12 · completed · completed");
+});
+
+test("a stale Pi Session cannot start new Codex work after Leader ownership moves", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-stale-leader-"));
+	const previousRuntimeRoot = process.env.RESEARCH_PI_RUNTIME_DIR;
+	process.env.RESEARCH_PI_RUNTIME_DIR = join(root, "runtime");
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace, { recursive: true });
+		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a", branchAnchorId: "leaf-a" });
+		await attachRuntimeActor(runtime, RESEARCH_LEADER_ACTOR_ID, { sessionId: "session-b", branchAnchorId: "leaf-b" });
+
+		let registered;
+		codexDelegateExtension({
+			registerTool(tool) { registered = tool; },
+			registerCommand() {},
+			on() {},
+			sendMessage() {},
+		});
+		const ctx = {
+			cwd: workspace,
+			hasUI: false,
+			sessionManager: {
+				getSessionId: () => "session-a",
+				getLeafId: () => "leaf-a",
+				getBranch: () => [],
+			},
+		};
+		await assert.rejects(
+			registered.execute("tool-call", { action: "start", task: "must not launch" }, new AbortController().signal, undefined, ctx),
+			/no longer owns the Research Leader/,
+		);
+	} finally {
+		if (previousRuntimeRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
+		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRuntimeRoot;
+		rmSync(root, { recursive: true, force: true });
+	}
 });
 
 function makeFakeCodex(root, delayMs = 0) {
@@ -464,6 +506,66 @@ test("mission routing reuses only the same mode and workspace", async () => {
 			}),
 			/belongs to mission/,
 		);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("automatic Codex reuse stays on one research route while explicit continuation crosses with a warning", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-route-"));
+	try {
+		const workspace = join(root, "workspace");
+		const jobRoot = join(root, "codex", "jobs");
+		mkdirSync(workspace, { recursive: true });
+		const codexBin = makeFakeCodex(root);
+		const firstStart = await startCodexJob({
+			cwd: workspace,
+			jobRoot,
+			codexBin,
+			mode: "advisor",
+			mission: "compare world-model objectives",
+			task: "inspect route A",
+			projectRevision: 4,
+			researchTrackRef: "transition:route-a",
+			researchTrackLabel: "route A",
+		});
+		const first = await waitForCodexJob(firstStart.id, { jobRoot });
+		assert.equal((await findReusableCodexJob({
+			cwd: workspace,
+			jobRoot,
+			mode: "advisor",
+			mission: "compare world-model objectives",
+			researchTrackRef: "transition:route-a",
+		})).id, first.id);
+		assert.equal(await findReusableCodexJob({
+			cwd: workspace,
+			jobRoot,
+			mode: "advisor",
+			mission: "compare world-model objectives",
+			researchTrackRef: "transition:route-b",
+		}), null);
+
+		const resumedStart = await resumeCodexJob(first.id, {
+			cwd: workspace,
+			expectedCwd: workspace,
+			jobRoot,
+			codexBin,
+			followUp: "re-evaluate under route B",
+			projectRevision: 5,
+			researchTrackRef: "transition:route-b",
+			researchTrackLabel: "route B",
+		});
+		const resumed = await waitForCodexJob(resumedStart.id, { jobRoot, expectedCwd: workspace });
+		assert.equal(resumed.researchTrackRef, "transition:route-b");
+		assert.equal(resumed.projectRevision, 5);
+		assert.match(readFileSync(join(jobRoot, resumed.id, "request.json"), "utf8"), /RESEARCH ROUTE CHANGED from transition:route-a to transition:route-b/);
+
+		const missions = await listCodexMissions({ cwd: workspace, jobRoot });
+		assert.equal(missions.length, 2);
+		assert.deepEqual(new Set(missions.map((item) => item.researchTrackRef)), new Set([
+			"transition:route-a",
+			"transition:route-b",
+		]));
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

@@ -78,6 +78,11 @@ export function buildRuntimeBoardModel({ runtime, snapshot, view, health, sessio
 		return String(right.action?.updatedAt ?? "").localeCompare(String(left.action?.updatedAt ?? ""));
 	});
 	const leaderAttachment = snapshot.attachments.find((item) => item.actorId === RESEARCH_LEADER_ACTOR_ID) ?? null;
+	const leaderActivation = [...(snapshot.activeActivations ?? [])].reverse().find((item) =>
+		item.actorId === RESEARCH_LEADER_ACTOR_ID
+		&& item.sessionId === leaderAttachment?.sessionId
+		&& (!leaderAttachment?.epoch || item.attachmentEpoch === leaderAttachment.epoch),
+	) ?? null;
 	const openMessageRecords = snapshot.messages.filter((message) => OPEN_MESSAGE_STATUSES.has(message.status));
 	const openMessages = openMessageRecords
 		.slice(-8)
@@ -125,7 +130,7 @@ export function buildRuntimeBoardModel({ runtime, snapshot, view, health, sessio
 		},
 		research: {
 			activeTrack: inline(transition?.to, 300),
-			previousTrack: transitionSupersedesState ? inline(transition?.from, 240) : "",
+			previousTrack: transitionSupersedesState ? inline(view.stateTrackLabel, 240) : "",
 			question: currentQuestion,
 			claim: transitionSupersedesState ? "" : inline(state?.currentClaim, 300),
 			previousClaim: transitionSupersedesState ? inline(state?.currentClaim, 300) : "",
@@ -144,6 +149,12 @@ export function buildRuntimeBoardModel({ runtime, snapshot, view, health, sessio
 			isCurrentSessionAttached: Boolean(sessionId && leaderAttachment?.sessionId === sessionId),
 			branchAnchorId: leaderAttachment?.branchAnchorId ?? null,
 			attachedAt: leaderAttachment?.attachedAt ?? null,
+			attachmentEpoch: leaderAttachment?.epoch ?? null,
+			activation: leaderActivation ? {
+				id: leaderActivation.id,
+				sessionId: leaderActivation.sessionId,
+				startedAt: leaderActivation.startedAt ?? null,
+			} : null,
 		},
 		counts: {
 			active: health.active,

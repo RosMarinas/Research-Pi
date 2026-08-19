@@ -18,6 +18,7 @@ import {
 	initializeResearchRuntime,
 	readRuntimeSnapshot,
 	recordResearchTransition,
+	runtimeTrackStatus,
 } from "../.pi/lib/research-runtime.mjs";
 
 function compaction(id = "compact-1") {
@@ -124,6 +125,153 @@ test("a research transition makes the old state stale and blocks a stale compact
 		assert.match(text, /Active research track: CSB-Parameterized-v0 Q1/);
 		assert.match(text, /Previous compacted state \(not current\)/);
 		assert.doesNotMatch(text, /^Next experiment:/m);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a parallel research transition keeps the previous route current while adding explicit lineage", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-project-parallel-"));
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace);
+		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a" }, { runtimeRoot: join(root, "runtime") });
+		await commitProjectState(runtime, {
+			compactionEntry: compaction("route-a-state"),
+			sessionId: "session-a",
+			appendRuntimeEvent,
+			appendRuntimeEventAtRevision,
+			readRuntimeSnapshot,
+		});
+		const transition = await recordResearchTransition(runtime, {
+			id: "transition-parallel-b",
+			from: "route A",
+			to: "route B",
+			reason: "both interventions remain independently informative",
+			oldDisposition: "parallel",
+			authorityRefs: ["user-decision:parallel"],
+		});
+		const snapshot = await readRuntimeSnapshot(runtime);
+		const view = buildProjectView({ runtime, snapshot, git: {}, experiments: [] });
+		const text = renderProjectView(view);
+		assert.equal(transition.fromTrackRef, "project:initial");
+		assert.equal(view.transitionSupersedesState, false);
+		assert.match(text, /Active research track: route B/);
+		assert.match(text, /Last compacted research question: Does intervention A/);
+		assert.doesNotMatch(text, /Previous compacted state \(not current\)/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("parallel route lineage survives a later transition of the primary route", async () => {
+	const snapshot = {
+		transitions: [
+			{
+				id: "transition-b",
+				trackRef: "transition:transition-b",
+				fromTrackRef: "project:initial",
+				to: "route B",
+				oldDisposition: "parallel",
+			},
+			{
+				id: "transition-c",
+				trackRef: "transition:transition-c",
+				fromTrackRef: "transition:transition-b",
+				to: "route C",
+				oldDisposition: "superseded",
+			},
+		],
+		activeTransition: {
+			id: "transition-c",
+			trackRef: "transition:transition-c",
+			fromTrackRef: "transition:transition-b",
+			to: "route C",
+			oldDisposition: "superseded",
+		},
+	};
+	assert.equal(runtimeTrackStatus(snapshot, "project:initial"), "parallel");
+	assert.equal(runtimeTrackStatus(snapshot, "transition:transition-b"), "retired");
+	assert.equal(runtimeTrackStatus(snapshot, "transition:transition-c"), "current");
+});
+
+test("a superseded state stays retired when the latest transition is parallel", () => {
+	const state = compaction().details.researchState;
+	const snapshot = {
+		projectState: { state, source: { trackRef: "project:initial" }, revision: 1 },
+		actors: [],
+		actions: [],
+		messages: [],
+		evidence: [],
+		transitions: [
+			{ id: "route-a", trackRef: "transition:route-a", fromTrackRef: "project:initial", to: "route A", oldDisposition: "superseded", revision: 2 },
+			{ id: "route-b", trackRef: "transition:route-b", fromTrackRef: "transition:route-a", to: "route B", oldDisposition: "parallel", revision: 3 },
+		],
+		activeTransition: { id: "route-b", trackRef: "transition:route-b", fromTrackRef: "transition:route-a", to: "route B", oldDisposition: "parallel", revision: 3 },
+		revision: 3,
+	};
+	const view = buildProjectView({ runtime: { projectKey: "project-routes", workspaceRoot: "/workspace" }, snapshot, git: {}, experiments: [] });
+	assert.equal(view.stateRouteStatus, "retired");
+	assert.equal(view.transitionSupersedesState, true);
+	assert.match(renderProjectView(view), /Previous compacted state \(not current\)/);
+});
+
+test("a transition can continue an explicit live parallel route", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-project-parallel-source-"));
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace);
+		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a" }, { runtimeRoot: join(root, "runtime") });
+		await recordResearchTransition(runtime, {
+			id: "route-b",
+			to: "route B",
+			reason: "keep the initial route alive",
+			oldDisposition: "parallel",
+			authorityRefs: ["user-decision:parallel"],
+		});
+		const routeC = await recordResearchTransition(runtime, {
+			id: "route-c",
+			fromTrackRef: "project:initial",
+			to: "route C",
+			reason: "continue and replace only the initial route",
+			oldDisposition: "superseded",
+			authorityRefs: ["experiment:route-c"],
+		});
+		const snapshot = await readRuntimeSnapshot(runtime);
+		assert.equal(routeC.fromTrackRef, "project:initial");
+		assert.equal(runtimeTrackStatus(snapshot, "transition:route-b"), "parallel");
+		assert.equal(runtimeTrackStatus(snapshot, "transition:route-c"), "current");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("research transitions use Project revision compare-and-append", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-project-transition-cas-"));
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace);
+		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a" }, { runtimeRoot: join(root, "runtime") });
+		await recordResearchTransition(runtime, {
+			id: "transition-first",
+			to: "route B",
+			reason: "first accepted transition",
+			oldDisposition: "superseded",
+			authorityRefs: ["user-decision:first"],
+			basedOnRevision: 0,
+		});
+		await assert.rejects(
+			recordResearchTransition(runtime, {
+				id: "transition-stale",
+				to: "route C",
+				reason: "stale competing transition",
+				oldDisposition: "superseded",
+				authorityRefs: ["user-decision:stale"],
+				basedOnRevision: 0,
+			}),
+			/refresh ProjectView/,
+		);
+		assert.deepEqual((await readRuntimeSnapshot(runtime)).transitions.map((item) => item.id), ["transition-first"]);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

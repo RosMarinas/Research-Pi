@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -15,20 +15,28 @@ import {
 	RUNTIME_MESSAGE_KIND,
 	attachRuntimeActor,
 	appendRuntimeEventAtRevision,
+	claimRuntimeActorAttachment,
 	codexActorId,
+	consumeRuntimeMessageForAttachment,
 	createRuntimeMessage,
 	detachRuntimeActor,
 	initializeResearchRuntime,
 	pendingRuntimeMessages,
 	readRuntimeSnapshot,
+	recordResearchTransition,
 	recordCodexRuntimeEvent,
 	requestRuntimeSessionRotation,
 	resolveResearchRuntime,
 	resolveRuntimeActor,
+	runtimeActorAttachment,
 	runtimeActorTarget,
 	settleRuntimeMessage,
+	settleRuntimeActorActivation,
 	settleRuntimeSessionRotation,
+	startRuntimeActorActivation,
+	upsertRuntimeAction,
 	unconsumedRuntimeMessages,
+	withRuntimeActorAttachment,
 } from "../.pi/lib/research-runtime.mjs";
 
 test("Runtime status reports live activation instead of historical Actor count", () => {
@@ -116,6 +124,143 @@ test("Session rotation readiness requires recoverable Project and Action state",
 	assert.match(blocked.blockers.join(" "), /have not reached structured state/);
 	assert.match(blocked.blockers.join(" "), /unknown/);
 	assert.match(blocked.blockers.join(" "), /external identity/);
+});
+
+test("Runtime message and Action terminal states cannot regress under delayed cross-session events", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-monotonic-"));
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace);
+		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a" }, { runtimeRoot: join(root, "runtime") });
+		const message = await createRuntimeMessage(runtime, {
+			id: "message-monotonic",
+			type: "notify",
+			from: "user",
+			to: RESEARCH_LEADER_ACTOR_ID,
+			body: "one delivery only",
+		});
+		await settleRuntimeMessage(runtime, message.id, "delivered", { sessionId: "session-a" });
+		await settleRuntimeMessage(runtime, message.id, "consumed", { sessionId: "session-a" });
+		await settleRuntimeMessage(runtime, message.id, "delivered", { sessionId: "session-b" });
+
+		await upsertRuntimeAction(runtime, { id: "action-terminal", status: "running" });
+		await upsertRuntimeAction(runtime, { id: "action-terminal", status: "completed" });
+		await upsertRuntimeAction(runtime, { id: "action-terminal", status: "running" });
+		await upsertRuntimeAction(runtime, { id: "action-unknown", status: "outcome_unknown" });
+		await upsertRuntimeAction(runtime, { id: "action-unknown", status: "completed" });
+
+		const snapshot = await readRuntimeSnapshot(runtime);
+		assert.equal(snapshot.messages.find((item) => item.id === message.id)?.status, "consumed");
+		assert.equal(snapshot.actions.find((item) => item.id === "action-terminal")?.status, "completed");
+		assert.equal(snapshot.actions.find((item) => item.id === "action-unknown")?.status, "completed");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("Runtime repairs only a partial final ledger record and keeps prior semantic events", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-tail-"));
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace);
+		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a" }, { runtimeRoot: join(root, "runtime") });
+		const eventsBefore = (await readRuntimeSnapshot(runtime)).actors.length;
+		appendFileSync(runtime.ledgerPath, "{\"partial\":", "utf8");
+		assert.equal((await readRuntimeSnapshot(runtime)).actors.length, eventsBefore);
+		await createRuntimeMessage(runtime, {
+			id: "message-after-tail-repair",
+			type: "notify",
+			from: "user",
+			to: RESEARCH_LEADER_ACTOR_ID,
+			body: "ledger remains writable",
+		});
+		const text = readFileSync(runtime.ledgerPath, "utf8");
+		assert.doesNotMatch(text, /\{"partial":/);
+		assert.equal((await readRuntimeSnapshot(runtime)).messages.at(-1)?.id, "message-after-tail-repair");
+
+		appendFileSync(runtime.ledgerPath, JSON.stringify({
+			version: 1,
+			id: "valid-unterminated-tail",
+			type: "diagnostic.fixture",
+			at: new Date().toISOString(),
+			projectKey: runtime.projectKey,
+			data: {},
+		}), "utf8");
+		await createRuntimeMessage(runtime, {
+			id: "message-after-valid-tail",
+			type: "notify",
+			from: "user",
+			to: RESEARCH_LEADER_ACTOR_ID,
+			body: "valid final JSON is preserved and newline-normalized",
+		});
+		const normalizedLines = readFileSync(runtime.ledgerPath, "utf8").trim().split(/\r?\n/).map((line) => JSON.parse(line));
+		assert.ok(normalizedLines.some((event) => event.id === "valid-unterminated-tail"));
+		assert.ok(normalizedLines.some((event) => event.data?.id === "message-after-valid-tail"));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("Actor attachment and activation events are idempotent and carry an ownership epoch", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-activation-"));
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace);
+		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a", branchAnchorId: "leaf-a" }, { runtimeRoot: join(root, "runtime") });
+		const first = (await readRuntimeSnapshot(runtime)).attachments[0];
+		const linesBefore = readFileSync(runtime.ledgerPath, "utf8").trim().split(/\r?\n/).length;
+		const repeated = await attachRuntimeActor(runtime, RESEARCH_LEADER_ACTOR_ID, { sessionId: "session-a", branchAnchorId: "leaf-a" });
+		await detachRuntimeActor(runtime, RESEARCH_LEADER_ACTOR_ID, "another-session");
+		assert.equal(repeated.epoch, first.epoch);
+		assert.equal(readFileSync(runtime.ledgerPath, "utf8").trim().split(/\r?\n/).length, linesBefore);
+		const replaced = await attachRuntimeActor(runtime, RESEARCH_LEADER_ACTOR_ID, { sessionId: "session-a", branchAnchorId: "leaf-new" });
+		await detachRuntimeActor(runtime, RESEARCH_LEADER_ACTOR_ID, "session-a", first.epoch);
+		assert.equal(runtimeActorAttachment(await readRuntimeSnapshot(runtime), RESEARCH_LEADER_ACTOR_ID)?.epoch, replaced.epoch);
+
+		const activation = await startRuntimeActorActivation(runtime, RESEARCH_LEADER_ACTOR_ID, {
+			sessionId: "session-a",
+			attachmentEpoch: replaced.epoch,
+		});
+		assert.equal((await readRuntimeSnapshot(runtime)).activeActivations[0].attachmentEpoch, replaced.epoch);
+		await settleRuntimeActorActivation(runtime, activation.id);
+		assert.equal((await readRuntimeSnapshot(runtime)).activeActivations.length, 0);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("Leader activation and attachment claim serialize into one valid owner", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-claim-race-"));
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace);
+		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a", branchAnchorId: "leaf-a" }, { runtimeRoot: join(root, "runtime") });
+		const attachmentA = (await readRuntimeSnapshot(runtime)).attachments[0];
+		const [activationResult, claimResult] = await Promise.allSettled([
+			startRuntimeActorActivation(runtime, RESEARCH_LEADER_ACTOR_ID, {
+				id: "activation-race-a",
+				sessionId: "session-a",
+				attachmentEpoch: attachmentA.epoch,
+			}),
+			claimRuntimeActorAttachment(runtime, RESEARCH_LEADER_ACTOR_ID, {
+				sessionId: "session-b",
+				branchAnchorId: "leaf-b",
+			}, { force: false }),
+		]);
+		const snapshot = await readRuntimeSnapshot(runtime);
+		const current = runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID);
+		const activeForCurrent = snapshot.activeActivations.filter((activation) =>
+			activation.sessionId === current.sessionId
+			&& activation.attachmentEpoch === current.epoch,
+		);
+		assert.ok(
+			(activationResult.status === "fulfilled" && claimResult.status === "fulfilled" && claimResult.value.status === "busy" && current.sessionId === "session-a" && activeForCurrent.length === 1)
+			|| (activationResult.status === "rejected" && claimResult.status === "fulfilled" && claimResult.value.status === "attached" && current.sessionId === "session-b" && activeForCurrent.length === 0),
+			JSON.stringify({ activationResult, claimResult, current, activeForCurrent }),
+		);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });
 
 test("Project Runtime keeps Actor identity across session attachment and message settlement", async () => {
@@ -442,8 +587,164 @@ test("opening the Runtime Board does not steal the Leader attachment from anothe
 		assert.equal((await readRuntimeSnapshot(runtime)).attachments.find((item) => item.actorId === RESEARCH_LEADER_ACTOR_ID)?.sessionId, "session-b");
 
 		await commands.get("runtime").handler("", ctx);
+		await commands.get("runtime").handler("health", ctx);
+		await commands.get("runtime").handler("recommend", ctx);
+		await commands.get("runtime").handler("view", ctx);
+		await commands.get("actors").handler("all", ctx);
+		await commands.get("inbox").handler("all", ctx);
 		assert.equal(customCalls, 1);
 		assert.equal((await readRuntimeSnapshot(runtime)).attachments.find((item) => item.actorId === RESEARCH_LEADER_ACTOR_ID)?.sessionId, "session-b");
+	} finally {
+		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
+		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("an active Leader Session blocks silent takeover but explicit takeover advances the attachment epoch", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-takeover-"));
+	const previousRoot = process.env.RESEARCH_PI_RUNTIME_DIR;
+	process.env.RESEARCH_PI_RUNTIME_DIR = join(root, "runtime");
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace);
+		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a", branchAnchorId: "leaf-a" });
+		const attachmentA = (await readRuntimeSnapshot(runtime)).attachments[0];
+		const message = await createRuntimeMessage(runtime, {
+			id: "message-takeover-redelivery",
+			type: "notify",
+			from: "user",
+			to: RESEARCH_LEADER_ACTOR_ID,
+			body: "must follow the current attachment",
+		});
+		await settleRuntimeMessage(runtime, message.id, "delivered", {
+			sessionId: "session-a",
+			actorId: RESEARCH_LEADER_ACTOR_ID,
+			attachmentEpoch: attachmentA.epoch,
+		});
+		await startRuntimeActorActivation(runtime, RESEARCH_LEADER_ACTOR_ID, {
+			sessionId: "session-a",
+			attachmentEpoch: attachmentA.epoch,
+		});
+
+		const handlers = new Map();
+		const commands = new Map();
+		const notices = [];
+		const sent = [];
+		let restoredEditor = "";
+		const pi = {
+			on(name, handler) { handlers.set(name, handler); },
+			registerCommand(name, command) { commands.set(name, command); },
+			registerMessageRenderer() {},
+			registerEntryRenderer() {},
+			sendMessage(payload) { sent.push(payload); },
+			appendEntry() {},
+		};
+		researchRuntimeExtension(pi);
+		const ctx = {
+			cwd: workspace,
+			hasUI: true,
+			ui: {
+				setStatus() {},
+				notify(message) { notices.push(message); },
+				setEditorText(text) { restoredEditor = text; },
+			},
+			sessionManager: {
+				getSessionId: () => "session-b",
+				getLeafId: () => "leaf-b",
+				getBranch: () => [],
+			},
+			getContextUsage: () => ({ tokens: 0, contextWindow: 384_000, percent: 0 }),
+			isIdle: () => true,
+			abort() {},
+		};
+
+		await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
+		assert.equal((await readRuntimeSnapshot(runtime)).attachments[0].sessionId, "session-a");
+		const blocked = await handlers.get("input")({ type: "input", text: "do not lose this prompt", source: "interactive" }, ctx);
+		assert.deepEqual(blocked, { action: "handled" });
+		assert.equal(restoredEditor, "do not lose this prompt");
+		assert.match(notices.at(-1), /active in Session/);
+
+		await commands.get("runtime").handler("takeover explicit user takeover for a stalled Session", ctx);
+		const attachmentB = (await readRuntimeSnapshot(runtime)).attachments[0];
+		assert.equal(attachmentB.sessionId, "session-b");
+		assert.notEqual(attachmentB.epoch, attachmentA.epoch);
+		assert.ok(sent.some((payload) => payload.details?.messageId === message.id));
+		assert.equal((await readRuntimeSnapshot(runtime)).messages.find((item) => item.id === message.id)?.attachmentEpoch, attachmentB.epoch);
+		assert.equal((await consumeRuntimeMessageForAttachment(runtime, message.id, {
+			sessionId: "session-a",
+			actorId: RESEARCH_LEADER_ACTOR_ID,
+			attachmentEpoch: attachmentA.epoch,
+		})).status, "stale_attachment");
+		assert.equal((await readRuntimeSnapshot(runtime)).messages.find((item) => item.id === message.id)?.status, "delivered");
+		await assert.rejects(
+			withRuntimeActorAttachment(runtime, RESEARCH_LEADER_ACTOR_ID, {
+				sessionId: "session-a",
+				attachmentEpoch: attachmentA.epoch,
+			}, async () => "must not run"),
+			/attachment changed/,
+		);
+	} finally {
+		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
+		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a cross-session research transition refreshes ProjectView at the next model boundary", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-boundary-refresh-"));
+	const previousRoot = process.env.RESEARCH_PI_RUNTIME_DIR;
+	process.env.RESEARCH_PI_RUNTIME_DIR = join(root, "runtime");
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace);
+		const handlers = new Map();
+		const pi = {
+			on(name, handler) { handlers.set(name, handler); },
+			registerCommand() {},
+			registerMessageRenderer() {},
+			registerEntryRenderer() {},
+			sendMessage() {},
+			appendEntry() {},
+		};
+		researchRuntimeExtension(pi);
+		const ctx = {
+			cwd: workspace,
+			hasUI: true,
+			ui: { setStatus() {}, notify() {} },
+			sessionManager: {
+				getSessionId: () => "session-a",
+				getLeafId: () => "leaf-a",
+				getBranch: () => [],
+			},
+			getContextUsage: () => null,
+			isIdle: () => false,
+			abort() {},
+		};
+		await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
+		const runtime = await resolveResearchRuntime(workspace);
+		await recordResearchTransition(runtime, {
+			id: "transition-safe-boundary",
+			from: "route A",
+			to: "route B",
+			reason: "another Session changed the accepted research direction",
+			oldDisposition: "superseded",
+			authorityRefs: ["user-decision:safe-boundary"],
+		});
+		const result = await handlers.get("context")({ type: "context", messages: [{ role: "user", content: "continue" }] }, ctx);
+		const projectView = result.messages.find((message) => message.customType === "research-project-view");
+		assert.match(String(projectView?.content), /Active research track: route B/);
+
+		await upsertRuntimeAction(runtime, {
+			id: "cross-session-action",
+			actorId: "research-leader",
+			status: "running",
+			label: "route B diagnostic",
+		});
+		const activityResult = await handlers.get("context")({ type: "context", messages: [{ role: "user", content: "continue again" }] }, ctx);
+		const refreshedView = activityResult.messages.find((message) => message.customType === "research-project-view");
+		assert.match(String(refreshedView?.content), /cross-session-action \[running\]/);
 	} finally {
 		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
 		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;

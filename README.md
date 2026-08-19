@@ -187,11 +187,11 @@ Research Pi 默认处于探索与验证阶段：构造竞争假设，优先高�
 
 ### `record_experiment`
 
-当一次运行会改变后续研究判断时，记录假设、介入、预期、有效性检查、观察与下一步。记录写入目标科研项目的 `.pi/research/experiments.jsonl`，该文件默认不应进入版本控制。
+当一次运行会改变后续研究判断时，记录假设、介入、预期、有效性检查、观察与下一步。记录写入目标科研项目的 `.pi/research/experiments.jsonl`，该文件默认不应进入版本控制。若结果在换轨后才返回，可显式填写原 `trackRef`，避免把旧路线实验误标为当前路线证据。
 
 ### `record_research_transition`
 
-只在研究问题或实验路线实质换轨时记录旧路线处置、新 active track、理由、依据与下一决策。普通 next step、代码重构或 Codex completed 不触发；旧证据保留为可检索的 contract-bound 历史，不会因换轨被重写。
+只在研究问题或实验路线实质换轨时记录旧路线处置、新 active track、理由、依据与下一决策。普通 next step、代码重构或 Codex completed 不触发；旧证据保留为可检索的 contract-bound 历史，不会因换轨被重写。已有 parallel 分支时，只有继续非 primary 路线才显式提供其精确 `fromTrackRef`。
 
 ### `research_checkpoint`
 
@@ -245,13 +245,14 @@ DeepSeek V4 Pro/Flash 使用 Max reasoning，但不把 1M 容量等同于等质�
 - 每次调用都可覆盖 Codex model 和 reasoning effort；
 - executor 可在项目内修改或删除文件、安装项目依赖、自由提交，以及启动或取消昂贵实验；经过用户授权后，它还可通过 `research_pi_host` 使用精确外部只读、SSH target 和固定脚本，不需要复制凭据或重开 delegation；
 - Codex 通过本地 stdio App Server 运行，保存稳定的 thread/turn ID；长任务默认后台运行，通过同一个工具的 `status`、`result`、`respond`、`steer`、`resume`、`cancel` 和 `reconcile` action 管理；
-- 连续处理同一研究子任务时，Pi 会给它稳定的 `mission` 标签并使用 `reuse=auto`：mission 对应一个 project Codex Actor，同一精确 workspace、mission 和 advisor/executor mode 可跨 Pi session 续接原 thread。独立批判、新研究路线或另一 worktree 会创建新 Actor/thread；不能仅因属于同一仓库就混用上下文；
-- `/codex missions` 查看当前 project workspace 的 mission/thread 链。新 job 由 `projectKey + research-leader Actor` 所有，不再绑定一个 conversation branch；文件操作仍强制绑定原精确 workspace。续接前会比较上次终态与当前 Git snapshot，变化时要求 Codex 重新检查；
+- 连续处理同一研究子任务时，Pi 会给它稳定的 `mission` 标签并使用 `reuse=auto`：只有同一精确 workspace、mission、advisor/executor mode 和 research track 才自动续接原 thread。跨 Pi Session 可以复用；换轨后即使复用了旧 mission 也会新建 thread。独立批判、主动清除旧假设或另一 worktree 应使用新 mission；
+- `/codex missions` 查看当前 project workspace 按 research track 分组的 mission/thread 链。新 job 由 `projectKey + research-leader Actor` 所有，不再绑定一个 conversation branch；文件操作仍强制绑定原精确 workspace。续接前会比较上次终态与当前 Git snapshot；显式跨 track 恢复旧 thread 时还会加入醒目的 route-change 提示，要求 Codex 重新确认介入、有效性标准与决策目标；
 - `respond` 回答 Codex 在运行中提出的显式问题；`steer` 将修正或新证据注入仍在运行的 turn，不需要终止并重开任务；
 - 后台任务会在 Pi 底部状态栏持续显示 job 后八位、模式、运行状态与最近进度；完成、失败、取消或需要输入时，限长结构化事件进入 project Runtime mailbox，只交给当前 attached Research Leader session；
 - Codex worker 与 Pi TUI 解耦：直接退出 Pi 不会取消正在运行的后台 Codex，之后重新进入同一 workspace 即可查看结果或继续通信；需要停止任务时显式使用 `cancel`；
 - `/watch [job后缀|mission|@codex:<Actor短码>]` 直接查看 executor 或 advisor 当前 Action 的客观执行；Codex 内部临时 subagent 作为 Action 子节点展示，不自动注册成长期 Project Actor；
-- 新开或恢复 Pi session 会 attach 到同一 project Research Leader Actor；最近收到用户输入的 session 成为当前接收者。消息先 durable queue，再进入一次模型上下文，settled 后不在后续 turn 反复注入。输入框中已有草稿时事件排到下一轮；
+- Project 同时只有一个 attached Research Leader Session。新开的第二个 TUI 先作为观察者；普通研究输入会在旧 Session 没有 active agent run 时接管，旧 Session 正在生成时则保留输入并提示等待。需要明确越过该保护时使用 `/runtime takeover <reason>`。claim、activation start 和 Codex 状态写入都受同一 attachment lease 约束；每次 attachment 都有 epoch，失去所有权的 Session 会在下一模型边界停止，不能再启动、取消或回复 Codex 工作，也不能把旧 epoch 已 materialize 的消息标为 consumed；
+- 消息先 durable queue，再进入一次模型上下文，settled 后不在后续 turn 反复注入。`consumed`/`superseded` 与 Action 终态不会被迟到的跨 Session 事件回退；输入框中已有草稿时事件排到下一轮；
 - 不默认建立 worktree，同一目标工作区同时只允许一个写入型 Codex job。
 - executor 在发送执行 turn 前先耐久记录 side-effect intent/start；如果此后 worker 消失或被强杀，job 进入 `outcome_unknown`，不会伪装成普通 failed/cancelled。同一 workspace 的新 executor 会被阻止，直到人或 advisor 检查 Git、远程 run 等外部状态，再用 `reconcile` 带证据说明显式结案。
 
@@ -267,11 +268,13 @@ Codex job、请求账本、精简 JSONL 审计事件和委派 prompt 保存在�
 - `/message <ask|reply|notify|result> @actor <内容>`：向 Actor 发送有语义类型的消息；
 - `/steer @actor <修正>`：默认不 abort，投递到下一安全模型边界；
 - `/steer --preempt @actor <修正>`：只有继续运行存在实际代价时才中断并恢复目标 Actor。
-- `/runtime health`：查看 context、compaction、Project memory lag、active/waiting、`outcome_unknown` 与 Session rotation readiness；`/runtime recommend` 只给出 continue/continue-then-compact/compact/consider-rotation/reconcile 建议，不自动轮换；`/runtime view` 显示当前注入的 ProjectView；`/runtime rotate [reason]` 在显式请求后写入 durable handoff、创建空白 Session，并在新 Session 记录 ProjectView receipt。它不会复制旧 transcript，也不会自动触发。
+- `/runtime health`：查看 context、compaction、Project memory lag、active/waiting、`outcome_unknown` 与 Session rotation readiness；`/runtime recommend` 只给出建议，`/runtime view` 显示当前 ProjectView。这些命令和 `/runtime`、`/actors`、`/inbox` 都是观察操作，不会抢占另一 Session；
+- `/runtime takeover <reason>`：显式把 Research Leader attachment 移到当前 Session，即使旧 Session 正在生成；旧运行只在下一安全模型边界停止，因此仅用于确实需要接管的情形；
+- `/runtime rotate [reason]`：在显式请求后写入 durable handoff、创建空白 Session，并在新 Session 记录 ProjectView receipt。它不会复制旧 transcript，也不会自动触发。
 
-Runtime message 是瞬时控制/通信，不自动成为长期科研判断。每次结构化 research compact 会把 `researchState + provenance + basedOnProjectRevision` 提交到 project ledger；如果压缩期间出现了新 transition/evidence，陈旧 compact 只保留在原 Session，不能覆盖 Project State。新 Session 得到一个限长、不可见的 ProjectView，优先展示 active research track、memory freshness、当前决策、关键约束与未结 Action；实验只显示短索引，详情按需检索。较新的 transition/evidence 会把旧 state 标为 stale；较新的 Action/Git 只标为 unconfirmed，不会由文件变化自动推断科研结论。ProjectView 不复制完整旧 transcript，也不会把 Codex completed 自动提升为科学结论。Runtime rotation 会重投 queued 或 delivered-but-unconsumed 的 Leader 消息；已经 consumed 的消息仍被过滤。
+Runtime message 是瞬时控制/通信，不自动成为长期科研判断。每次结构化 research compact 会把 `researchState + provenance + basedOnProjectRevision` 提交到 project ledger；如果压缩期间出现了新 transition/evidence，陈旧 compact 只保留在原 Session，不能覆盖 Project State。新 Session 得到一个限长、不可见的 ProjectView，优先展示 active research track、memory freshness、当前决策、关键约束与未结 Action；实验只显示短索引，详情按需检索。Evidence、Action、message 与 Codex job 都带 research-track 来源，旧路线信息可以保留，但不会静默当作当前介入的证据；`parallel` 路线可跨后续主路线切换继续保持并列。较新的 transition/evidence 会把旧 state 标为 stale；较新的 Action/Git 只标为 unconfirmed，不会由文件变化自动推断科研结论。下一模型边界会按 Runtime ledger 的语义事件数刷新 ProjectView，因此另一 Session 新增的 Action/mailbox 不依赖 compact 才能被看到。ProjectView 不复制完整旧 transcript，也不会把 Codex completed 自动提升为科学结论。Runtime rotation 会重投 queued 或 delivered-but-unconsumed 的 Leader 消息；已经 consumed 的消息仍被过滤。
 
-Runtime Board 是既有 ledger/ProjectView 的只读投影，不进入模型上下文，也不创建另一份日志或 heartbeat。它不会后台轮询；只有打开面板和按 `r` 时读取当前状态，也不会为了观察而抢占另一个 Session 的 Research Leader attachment。需要连续观察 Codex 执行细节时使用 `/watch`。
+Runtime Board 是既有 ledger/ProjectView 的只读投影，不进入模型上下文，也不创建另一份日志或 heartbeat。它不会后台轮询；只有打开面板和按 `r` 时读取当前状态，sessions 页会显示 attachment 与当前 agent activation，也不会为了观察而抢占另一个 Session。一次 Leader agent run 只写 start/settled 两个稀疏 activation 事件。Ledger 启动写入前只检查最后一条 JSONL；崩溃留下的末尾半条记录会在锁内截断，历史中部损坏仍明确报错而不静默跳过。需要连续观察 Codex 执行细节时使用 `/watch`。
 
 职责、状态机、通信路径以及双 Session 真实项目 smoke 的逐项判定见 [Research Runtime 测试指南](docs/research-runtime-test-guide.md)。
 

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { RESEARCH_COMPACTION_KIND, RESEARCH_COMPACTION_VERSION } from "./research-compact.mjs";
+import { runtimeResearchTrack, runtimeTrackStatus } from "./research-runtime.mjs";
 
 export const PROJECT_VIEW_KIND = "research-project-view";
 export const PROJECT_VIEW_VERSION = 1;
@@ -30,6 +31,7 @@ export async function commitProjectState(runtime, input) {
 		|| !entry.details?.researchState
 	) return null;
 	const snapshot = await input.readRuntimeSnapshot(runtime);
+	const track = runtimeResearchTrack(snapshot);
 	const basedOnRevision = Number.isInteger(entry.details.projectRevision)
 		? entry.details.projectRevision
 		: snapshot.revision;
@@ -46,6 +48,8 @@ export async function commitProjectState(runtime, input) {
 			dirty: input.git.dirty ?? null,
 		} : null,
 		warnings: Array.isArray(entry.details.validationWarnings) ? entry.details.validationWarnings.slice(0, 20) : [],
+		trackRef: track.ref,
+		trackLabel: track.label,
 	};
 	const result = await input.appendRuntimeEventAtRevision(runtime, "project.state.committed", {
 		state: entry.details.researchState,
@@ -143,10 +147,14 @@ export async function readRecentExperiments(path, maxRecords = 6) {
 
 export function buildProjectView({ runtime, snapshot, git = {}, experiments = [] }) {
 	const openMessages = snapshot.messages.filter((message) => message.status === "queued" || message.status === "delivered");
+	const currentTrack = runtimeResearchTrack(snapshot);
 	const actions = snapshot.actions.filter((action) =>
 		["starting", "running", "input_required", "cancelling", "outcome_unknown"].includes(action.status),
-	).slice(-8);
+	).slice(-8).map((action) => ({ ...action, routeStatus: runtimeTrackStatus(snapshot, action.trackRef) }));
 	const stateRevision = snapshot.projectState?.revision ?? 0;
+	const stateTrackRef = snapshot.projectState?.source?.trackRef ?? "project:initial";
+	const stateTrackLabel = snapshot.projectState?.source?.trackLabel ?? snapshot.projectState?.state?.researchQuestion ?? "initial project track";
+	const stateRouteStatus = runtimeTrackStatus(snapshot, stateTrackRef);
 	const transitionAfterState = snapshot.transitions?.find((transition) => transition.revision > stateRevision);
 	const evidenceAfterState = snapshot.evidence?.filter((item) => item.revision > stateRevision) ?? [];
 	const actionAfterState = snapshot.projectState
@@ -179,7 +187,8 @@ export function buildProjectView({ runtime, snapshot, git = {}, experiments = []
 	for (const item of snapshot.evidence ?? []) if (item?.id) evidenceById.set(item.id, { ...evidenceById.get(item.id), ...item });
 	const recentEvidence = [...evidenceById.values()]
 		.sort((left, right) => Date.parse(left.timestamp ?? left.recordedAt ?? "") - Date.parse(right.timestamp ?? right.recordedAt ?? ""))
-		.slice(-6);
+		.slice(-6)
+		.map((item) => ({ ...item, routeStatus: runtimeTrackStatus(snapshot, item.trackRef) }));
 	return {
 		version: PROJECT_VIEW_VERSION,
 		projectKey: runtime.projectKey,
@@ -191,11 +200,26 @@ export function buildProjectView({ runtime, snapshot, git = {}, experiments = []
 		projectRevision: snapshot.revision ?? 0,
 		freshness,
 		freshnessReasons,
+		currentTrack,
+		stateTrackRef,
+		stateTrackLabel,
+		stateRouteStatus,
 		activeTransition: snapshot.activeTransition ?? null,
-		transitionSupersedesState: Boolean(snapshot.activeTransition && snapshot.activeTransition.revision > stateRevision),
+		transitionSupersedesState: Boolean(
+			snapshot.projectState
+			&& stateRouteStatus === "retired",
+		),
 		experiments: recentEvidence,
 		actions,
-		openMessages: openMessages.slice(-8).map((message) => ({ id: message.id, type: message.type, from: message.from, status: message.status, body: compact(message.body, 240) })),
+		openMessages: openMessages.slice(-8).map((message) => ({
+			id: message.id,
+			type: message.type,
+			from: message.from,
+			status: message.status,
+			body: compact(message.body, 240),
+			trackRef: message.trackRef ?? null,
+			routeStatus: runtimeTrackStatus(snapshot, message.trackRef),
+		})),
 		generatedFrom: {
 			actors: snapshot.actors.length,
 			actions: snapshot.actions.length,
@@ -216,6 +240,7 @@ export function renderProjectView(view) {
 		`Project: ${view.projectKey} · ${view.workspaceRoot}`,
 		`Git: branch=${view.git.branch ?? "unknown"} commit=${view.git.commit ?? "unknown"} dirty=${view.git.dirty ?? "unknown"}`,
 		`Project revision: ${view.projectRevision} · compacted state revision: ${view.stateRevision || "none"} · memory freshness: ${view.freshness}`,
+		`Current research track: ${view.currentTrack?.ref ?? "project:initial"} · ${compact(view.currentTrack?.label, 600) || "unnamed"}`,
 	];
 	if (view.freshness !== "current") {
 		lines.push(
@@ -234,6 +259,7 @@ export function renderProjectView(view) {
 		);
 	}
 	if (state) {
+		lines.push(`Compacted state track: ${view.stateTrackRef} [${view.stateRouteStatus}] · ${compact(view.stateTrackLabel, 600)}`);
 		if (view.transitionSupersedesState) {
 			lines.push(
 				`Previous compacted state (not current): S:${view.stateSource?.sessionId}/E:${view.stateSource?.entryId} hash=${view.stateSource?.contentHash ?? "unknown"}`,
@@ -260,11 +286,11 @@ export function renderProjectView(view) {
 	}
 	lines.push(
 		"Recent project evidence index (read exact records on demand):",
-		...bullets(view.experiments, (item) => `${item.id} [${item.validityJudgment ?? "inconclusive"}] ${compact(item.question, 300)} -> ${compact(item.conclusion, 380)}${item.runId ? ` | run=${compact(item.runId, 140)}` : ""}`, "none recorded"),
+		...bullets(view.experiments, (item) => `${item.id} [${item.validityJudgment ?? "inconclusive"}] [route=${item.routeStatus}] ${compact(item.question, 300)} -> ${compact(item.conclusion, 380)}${item.runId ? ` | run=${compact(item.runId, 140)}` : ""}`, "none recorded"),
 		"Live/unresolved Runtime actions:",
-		...bullets(view.actions, (item) => `${item.id} [${item.status}] ${compact(item.label, 300)} external=${item.externalId ?? "none"}`, "none"),
+		...bullets(view.actions, (item) => `${item.id} [${item.status}] [route=${item.routeStatus}] ${compact(item.label, 300)} external=${item.externalId ?? "none"}`, "none"),
 		"Open Runtime messages (queued or delivered but not consumed):",
-		...bullets(view.openMessages, (item) => `${item.id} [${item.status}] ${item.type} from=${item.from}: ${item.body}`, "none"),
+		...bullets(view.openMessages, (item) => `${item.id} [${item.status}] [route=${item.routeStatus}] ${item.type} from=${item.from}: ${item.body}`, "none"),
 		"</research_project_view>",
 	);
 	const rendered = lines.filter(Boolean).join("\n");

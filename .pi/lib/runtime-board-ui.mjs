@@ -174,14 +174,15 @@ export class RuntimeBoardOverlay {
 			"",
 			` ${leader.isCurrentSessionAttached ? th.fg("success", "✓ current TUI owns Research Leader") : th.fg("warning", "! Research Leader is attached elsewhere")}`,
 			`   session ${leader.sessionSuffix || "none"}${leader.branchAnchorId ? ` · branch anchor ${shortId(leader.branchAnchorId, 10)}` : ""}`,
+			`   ${leader.activation ? th.fg("warning", `active agent run · ${shortId(leader.activation.id, 12)} · since ${clock(leader.activation.startedAt)}`) : th.fg("dim", "no active agent run")}`,
 			"",
 			` ${th.fg("dim", "Recent explicit handoffs")}`,
 		];
-		for (const rotation of rotations.slice(0, 4)) {
+		for (const rotation of rotations.slice(0, 3)) {
 			rows.push(` ${th.fg(stateColor(rotation.status), `${stateIcon(rotation.status)} ${rotation.status}`)} · ${shortId(rotation.fromSessionId, 8)} → ${shortId(rotation.toSessionId, 8) || "pending"} · ${clock(rotation.at)}${rotation.reason ? ` · ${th.fg("dim", rotation.reason)}` : ""}`);
 		}
 		if (!rotations.length) rows.push(` ${th.fg("dim", "No explicit Runtime rotation has been recorded.")}`);
-		else if (this.model.counts.rotations > 4) rows.push(` ${th.fg("dim", `… ${this.model.counts.rotations - 4} earlier · use the Runtime ledger for provenance`)}`);
+		else if (this.model.counts.rotations > 3) rows.push(` ${th.fg("dim", `… ${this.model.counts.rotations - 3} earlier · use the Runtime ledger for provenance`)}`);
 		rows.push("", ` ${health.ready ? th.fg("success", "Ready for /runtime rotate") : th.fg("warning", `Rotation blocked · ${health.blockers[0] || "Project state unavailable"}`)}`);
 		return rows;
 	}

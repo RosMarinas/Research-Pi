@@ -139,8 +139,8 @@ Pi 会自行选择工具。若想明确控制，可以直接说：
 
 Pi 现在提供这些低摩擦研究工具：
 
-- `record_experiment`：当一个运行结果真正支持、削弱或无法区分研究假设时，Pi 可调用它追加一条 `.pi/research/experiments.jsonl`。普通搜索和调试不会自动记录。
-- `record_research_transition`：当用户明确改变研究问题，或有效证据使旧路线成为 archived/superseded/parallel 时，记录一次 project-level 换轨。普通 next step、代码重构或 Codex completed 不触发。
+- `record_experiment`：当一个运行结果真正支持、削弱或无法区分研究假设时，Pi 可调用它追加一条 `.pi/research/experiments.jsonl`。普通搜索和调试不会自动记录；延迟返回的旧路线结果可携带其精确 `trackRef`。
+- `record_research_transition`：当用户明确改变研究问题，或有效证据使旧路线成为 archived/superseded/parallel 时，记录一次 project-level 换轨。普通 next step、代码重构或 Codex completed 不触发；parallel 分支可用精确 `fromTrackRef` 指定从哪条 live route 继续。
 - `research_checkpoint`：在大步替换、回滚或废弃路线前，把当前 tracked Git 状态保存到 `refs/pi-research/checkpoints/...`。它不会切分支或清理工作树，也不会捕获 untracked 文件。
 - `research_memory_search`：在旧 session 和实验记录中进行本地全文检索；默认仅限当前 Git 项目，并排除当前 session 和废弃分支。
 - `research_memory_read`：根据搜索结果中的 session/entry ID 读取精确原文和小范围上下文。
@@ -152,6 +152,7 @@ Pi 现在提供这些低摩擦研究工具：
 - `/message`、`/steer`：面向 Actor 通信；steer 默认等待下一安全模型边界，只有 `--preempt` 才主动中断。
 - `/runtime`（或 `/runtime board`）：打开 Project 控制面；左右或 Tab 切换 overview/actors/messages/sessions，`r` 手动刷新，`v` 查看完整 ProjectView，`w` 准备切到 Codex Watch。面板不进入模型上下文，也不后台轮询。
 - `/runtime health|recommend|view`：查看 Project Runtime 健康度、只读生命周期建议或当前 ProjectView。
+- `/runtime takeover <reason>`：当另一 Session 正在占用 Research Leader 且确实需要人工接管时，显式转移 attachment；旧运行会在下一模型边界停止。
 - `/runtime rotate [reason]`：在 Project State 可恢复且没有未知副作用时，人工创建一个不复制旧 transcript 的新 Leader Session；Runtime 会记录交接和新 ProjectView receipt。不会自动触发。
 - `/config`：打开 Research Pi model profile 面板；`/config show|path|use <profile>` 可检查或持久切换配置。
 
@@ -195,7 +196,7 @@ Pi 会获得一个 `codex-...` job ID。底部状态栏会持续显示 job 后�
 
 用户可随时运行 `/watch` 查看最近的 active Action，也可用 `/watch <job后缀>`、`/watch <mission>` 或 `/watch @codex:<Actor短码>` 定位。`←/→` 切换 Action；`Tab` 或 `↑/↓` 切换 overview/activity/agents；`r` 刷新；`q`/`Esc` 关闭。agents 视图显示 Codex 内部 subagent 的 thread、路径、状态、模型和最近消息。内部 subagent 只是本次 Action 的临时子节点，不会污染 Project Actor 列表。
 
-Pi 在连续处理同一研究子任务时应使用稳定、简短的 `mission` 标签。带 mission 的新派遣默认 `reuse=auto`：运行中的同 mission/mode job 会直接重新挂接，已完成的会通过 App Server `thread/resume` 续接历史；同一精确 workspace、mode 和 mission 可跨 Pi session 复用。续接时 Runtime 会比较 Git snapshot，工作区变化则要求 Codex 重新检查当前文件。使用 `/codex missions` 查看项目任务链，使用 `/actors` 找当前活跃 Actor，或用 `/actors all` 找 suspended Actor 的稳定 `@codex:<Actor短码>`；若要独立第二意见、另一研究路线或主动清除旧假设，使用新的 mission。
+Pi 在连续处理同一研究子任务时应使用稳定、简短的 `mission` 标签。带 mission 的新派遣默认 `reuse=auto`：运行中的同 mission/mode/track job 会直接重新挂接，已完成的会通过 App Server `thread/resume` 续接历史；同一精确 workspace、mode、mission 和 research track 可跨 Pi session 复用。换轨后默认开启新 thread；只有用户或 Leader 显式恢复旧 job 才跨 track 续接，并会收到 route-change 警告。续接时 Runtime 也会比较 Git snapshot，工作区变化则要求 Codex 重新检查当前文件。使用 `/codex missions` 查看按 track 分组的任务链，使用 `/actors` 找当前活跃 Actor，或用 `/actors all` 找 suspended Actor 的稳定 `@codex:<Actor短码>`；若要独立第二意见或主动清除旧假设，使用新的 mission。
 
 用户发现某个 Actor 跑偏时可以直接输入：
 

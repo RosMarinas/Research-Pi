@@ -20,11 +20,13 @@ import {
 	RESEARCH_LEADER_ACTOR_ID,
 	RUNTIME_EVENT_ENTRY_KIND,
 	RUNTIME_MESSAGE_KIND,
+	RuntimeAttachmentChangedError,
 	USER_ACTOR_ID,
-	attachRuntimeActor,
 	appendRuntimeEvent,
 	appendRuntimeEventAtRevision,
+	claimRuntimeActorAttachment,
 	createRuntimeMessage,
+	consumeRuntimeMessageForAttachment,
 	detachRuntimeActor,
 	initializeResearchRuntime,
 	isRuntimeActorAttached,
@@ -32,16 +34,29 @@ import {
 	readRuntimeSnapshot,
 	requestRuntimeSessionRotation,
 	resolveRuntimeActor,
+	runtimeActorAttachment,
 	runtimeActorTarget,
 	runtimeMessageText,
+	settleRuntimeActorActivation,
 	settleRuntimeMessage,
 	settleRuntimeSessionRotation,
+	startRuntimeActorActivation,
 	unconsumedRuntimeMessages,
 } from "../lib/research-runtime.mjs";
 
 type RuntimeContext = Awaited<ReturnType<typeof initializeResearchRuntime>>;
 type RuntimeMessage = ReturnType<typeof pendingRuntimeMessages>[number];
 type RuntimeSnapshot = Awaited<ReturnType<typeof readRuntimeSnapshot>>;
+type RuntimeActivation = RuntimeSnapshot["activations"][number];
+
+class RuntimeLeaderBusyError extends Error {
+	readonly activation: RuntimeActivation;
+	constructor(activation: RuntimeActivation) {
+		super(`Research Leader is active in Session ${String(activation.sessionId).slice(-8)}. Wait for it to settle or use /runtime takeover <reason>.`);
+		this.name = "RuntimeLeaderBusyError";
+		this.activation = activation;
+	}
+}
 
 const MESSAGE_TYPES = new Set(["ask", "reply", "notify", "result"]);
 const ACTIVE_ACTION_STATUSES = new Set(["starting", "running", "cancelling"]);
@@ -200,30 +215,52 @@ function inboxLines(snapshot: Awaited<ReturnType<typeof readRuntimeSnapshot>>, i
 export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	let runtime: RuntimeContext | undefined;
 	let runtimeInputCwd: string | undefined;
-	let attachedSessionId: string | undefined;
+	let localSessionId: string | undefined;
+	let localAttachmentEpoch: string | undefined;
+	let activeActivationId: string | undefined;
 	const consumedMessageIds = new Set<string>();
-	const materializedMessageIds = new Set<string>();
+	const materializedMessages = new Map<string, string | null>();
 	const migrationAttemptedProjects = new Set<string>();
 	let projectViewText = "";
 	let projectViewHash = "";
+	let projectViewEventCount = -1;
+	let attachmentLossNotified = false;
 
-	const getRuntime = async (ctx: ExtensionContext, options: { claim?: boolean } = {}): Promise<RuntimeContext> => {
+	const getRuntime = async (
+		ctx: ExtensionContext,
+		options: { claim?: boolean; force?: boolean; reason?: string } = {},
+	): Promise<RuntimeContext> => {
 		const sessionId = ctx.sessionManager.getSessionId();
-		if (runtime && runtimeInputCwd === ctx.cwd && attachedSessionId === sessionId) {
-			if (options.claim && !(await isRuntimeActorAttached(runtime, RESEARCH_LEADER_ACTOR_ID, sessionId))) {
-				await attachRuntimeActor(runtime, RESEARCH_LEADER_ACTOR_ID, {
+		if (runtime && runtimeInputCwd === ctx.cwd && localSessionId === sessionId) {
+			if (!options.claim || await isRuntimeActorAttached(runtime, RESEARCH_LEADER_ACTOR_ID, sessionId)) return runtime;
+		} else {
+			runtime = await initializeResearchRuntime(ctx.cwd, {
+				sessionId,
+				branchAnchorId: ctx.sessionManager.getLeafId(),
+			}, { attach: false });
+			runtimeInputCwd = ctx.cwd;
+			localSessionId = sessionId;
+			const snapshot = await readRuntimeSnapshot(runtime);
+			const existingAttachment = runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID);
+			if (existingAttachment?.sessionId === sessionId) localAttachmentEpoch = existingAttachment.epoch ?? undefined;
+			if (!existingAttachment) {
+				const claim = await claimRuntimeActorAttachment(runtime, RESEARCH_LEADER_ACTOR_ID, {
 					sessionId,
 					branchAnchorId: ctx.sessionManager.getLeafId(),
-				});
+					reason: "first live Session",
+				}, { onlyIfUnattached: true });
+				if (claim.attachment?.sessionId === sessionId) localAttachmentEpoch = claim.attachment.epoch ?? undefined;
 			}
-			return runtime;
 		}
-		runtime = await initializeResearchRuntime(ctx.cwd, {
-			sessionId,
-			branchAnchorId: ctx.sessionManager.getLeafId(),
-		});
-		runtimeInputCwd = ctx.cwd;
-		attachedSessionId = sessionId;
+		if (options.claim && !(await isRuntimeActorAttached(runtime, RESEARCH_LEADER_ACTOR_ID, sessionId))) {
+			const claim = await claimRuntimeActorAttachment(runtime, RESEARCH_LEADER_ACTOR_ID, {
+				sessionId,
+				branchAnchorId: ctx.sessionManager.getLeafId(),
+				reason: options.reason ?? (options.force ? "explicit takeover" : "user activity"),
+			}, { force: options.force === true });
+			if (claim.status === "busy") throw new RuntimeLeaderBusyError(claim.activation);
+			if (claim.attachment?.sessionId === sessionId) localAttachmentEpoch = claim.attachment.epoch ?? undefined;
+		}
 		return runtime;
 	};
 
@@ -234,9 +271,9 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		ctx.ui.setStatus("research_runtime", formatRuntimeStatus(activeRuntime.projectKey, snapshot));
 	};
 
-	const refreshProjectView = async (ctx: ExtensionContext) => {
+	const refreshProjectView = async (ctx: ExtensionContext, suppliedSnapshot?: RuntimeSnapshot) => {
 		const activeRuntime = await getRuntime(ctx);
-		let snapshot = await readRuntimeSnapshot(activeRuntime);
+		let snapshot = suppliedSnapshot ?? await readRuntimeSnapshot(activeRuntime);
 		if (!snapshot.projectState && !migrationAttemptedProjects.has(activeRuntime.projectKey)) {
 			migrationAttemptedProjects.add(activeRuntime.projectKey);
 			if (!snapshot.activeTransition && snapshot.revision === 0) {
@@ -258,6 +295,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		const view = buildProjectView({ runtime: activeRuntime, snapshot, git, experiments });
 		projectViewText = renderProjectView(view);
 		projectViewHash = projectViewFingerprint(view);
+		projectViewEventCount = snapshot.ledgerEventCount;
 		return { snapshot, view };
 	};
 
@@ -323,7 +361,8 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		options: { preempt?: boolean; triggerTurn?: boolean } = {},
 	) => {
 		const sessionId = ctx.sessionManager.getSessionId();
-		if (!(await isRuntimeActorAttached(activeRuntime, RESEARCH_LEADER_ACTOR_ID, sessionId))) {
+		const attachment = runtimeActorAttachment(await readRuntimeSnapshot(activeRuntime), RESEARCH_LEADER_ACTOR_ID, sessionId);
+		if (!attachment) {
 			return { status: "queued" as const, detail: "Research Leader is attached to another Pi session" };
 		}
 		if (options.preempt && !ctx.isIdle()) ctx.abort();
@@ -333,19 +372,45 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 				customType: RUNTIME_MESSAGE_KIND,
 				content: runtimeMessageText(message),
 				display: true,
-				details: {
+					details: {
 					messageId: message.id,
 					type: message.type,
 					from: message.from,
 					to: message.to,
-					transient: true,
+						transient: true,
+						attachmentEpoch: attachment.epoch ?? null,
 				},
 			},
 			idle
 				? { triggerTurn: options.triggerTurn ?? true }
 				: { triggerTurn: false, deliverAs: "followUp" },
 		);
-		return { status: "delivered" as const, detail: idle ? "started a leader turn" : "queued for the next safe leader turn" };
+		return {
+			status: "delivered" as const,
+			detail: idle ? "started a leader turn" : "queued for the next safe leader turn",
+			attachmentEpoch: attachment.epoch ?? null,
+		};
+	};
+
+	const deliverOpenLeaderMessages = async (
+		activeRuntime: RuntimeContext,
+		snapshot: RuntimeSnapshot,
+		ctx: ExtensionContext,
+		options: { triggerTurn?: boolean } = {},
+	) => {
+		const sessionId = ctx.sessionManager.getSessionId();
+		let delivered = 0;
+		for (const message of unconsumedRuntimeMessages(snapshot, { to: RESEARCH_LEADER_ACTOR_ID, forSessionId: sessionId })) {
+			const result = await deliverToCurrentLeader(activeRuntime, message, ctx, { triggerTurn: options.triggerTurn });
+			if (result.status !== "delivered") continue;
+			await settleRuntimeMessage(activeRuntime, message.id, "delivered", {
+				sessionId,
+				actorId: RESEARCH_LEADER_ACTOR_ID,
+				attachmentEpoch: result.attachmentEpoch,
+			});
+			delivered += 1;
+		}
+		return delivered;
 	};
 
 	const dispatchMessage = async (
@@ -401,7 +466,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		const activeRuntime = await getRuntime(ctx);
 		const { snapshot, view } = await refreshProjectView(ctx);
 		consumedMessageIds.clear();
-		materializedMessageIds.clear();
+		materializedMessages.clear();
 		if (event.reason === "new") {
 			const currentSessionId = ctx.sessionManager.getSessionId();
 			const pendingRotation = [...(snapshot.pendingRotations ?? [])].reverse().find((rotation) => {
@@ -430,41 +495,91 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		for (const message of snapshot.messages) {
 			if (message.status === "consumed") consumedMessageIds.add(message.id);
 		}
-		const currentSessionId = ctx.sessionManager.getSessionId();
-		for (const message of unconsumedRuntimeMessages(snapshot, { to: RESEARCH_LEADER_ACTOR_ID, forSessionId: currentSessionId })) {
-			const result = await deliverToCurrentLeader(activeRuntime, message, ctx, { triggerTurn: false });
-			if (result.status === "delivered") {
-				await settleRuntimeMessage(activeRuntime, message.id, "delivered", {
-					sessionId: currentSessionId,
-					actorId: RESEARCH_LEADER_ACTOR_ID,
-				});
-			}
-		}
+		await deliverOpenLeaderMessages(activeRuntime, snapshot, ctx, { triggerTurn: false });
 		await refreshStatus(ctx);
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
-		if (!runtime || !attachedSessionId) return;
-		await detachRuntimeActor(runtime, RESEARCH_LEADER_ACTOR_ID, attachedSessionId);
+		if (!runtime || !localSessionId) return;
+		if (activeActivationId) {
+			await settleRuntimeActorActivation(runtime, activeActivationId, { reason: "session shutdown" });
+			activeActivationId = undefined;
+		}
+		await detachRuntimeActor(runtime, RESEARCH_LEADER_ACTOR_ID, localSessionId, localAttachmentEpoch);
 		if (ctx.hasUI) ctx.ui.setStatus("research_runtime", undefined);
 		runtime = undefined;
 		runtimeInputCwd = undefined;
-		attachedSessionId = undefined;
+		localSessionId = undefined;
+		localAttachmentEpoch = undefined;
+		projectViewEventCount = -1;
 	});
 
 	pi.on("input", async (event, ctx) => {
 		if (event.source === "extension") return;
-		await getRuntime(ctx, { claim: true });
-		await refreshProjectView(ctx);
+		try {
+			const activeRuntime = await getRuntime(ctx, { claim: true });
+			attachmentLossNotified = false;
+			const { snapshot } = await refreshProjectView(ctx);
+			if (await deliverOpenLeaderMessages(activeRuntime, snapshot, ctx, { triggerTurn: false })) {
+				await refreshProjectView(ctx);
+			}
+		} catch (error) {
+			if (!(error instanceof RuntimeLeaderBusyError)) throw error;
+			if (ctx.hasUI) {
+				ctx.ui.setEditorText(event.text);
+				ctx.ui.notify(error.message, "warning");
+			}
+			return { action: "handled" as const };
+		}
 	});
 
-	pi.on("context", (event) => {
+	pi.on("agent_start", async (_event, ctx) => {
+		const activeRuntime = await getRuntime(ctx);
+		const sessionId = ctx.sessionManager.getSessionId();
+		const attachment = runtimeActorAttachment(await readRuntimeSnapshot(activeRuntime), RESEARCH_LEADER_ACTOR_ID, sessionId);
+		if (!attachment) {
+			ctx.abort();
+			if (ctx.hasUI) ctx.ui.notify("This Session no longer owns the Research Leader; the agent run was stopped before further model work.", "warning");
+			return;
+		}
+		try {
+			const activation = await startRuntimeActorActivation(activeRuntime, RESEARCH_LEADER_ACTOR_ID, {
+				sessionId,
+				attachmentEpoch: attachment.epoch,
+			});
+			activeActivationId = activation.id;
+		} catch (error) {
+			if (!(error instanceof RuntimeAttachmentChangedError)) throw error;
+			ctx.abort();
+			if (ctx.hasUI) ctx.ui.notify("Research Leader ownership changed while this run was starting; no model work was allowed to begin.", "warning");
+		}
+	});
+
+	pi.on("agent_end", async () => {
+		if (!runtime || !activeActivationId) return;
+		await settleRuntimeActorActivation(runtime, activeActivationId, { reason: "agent end" });
+		activeActivationId = undefined;
+	});
+
+	pi.on("context", async (event, ctx) => {
+		const activeRuntime = await getRuntime(ctx);
+		const snapshot = await readRuntimeSnapshot(activeRuntime);
+		const sessionId = ctx.sessionManager.getSessionId();
+		if (!runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID, sessionId)) {
+			ctx.abort();
+			if (ctx.hasUI && !attachmentLossNotified) {
+				attachmentLossNotified = true;
+				ctx.ui.notify("Research Leader ownership moved to another Session; this run stopped at the next model boundary.", "warning");
+			}
+			return { messages: event.messages };
+		}
+		if (snapshot.ledgerEventCount !== projectViewEventCount) await refreshProjectView(ctx, snapshot);
 		const messages = event.messages.filter((message) => {
 			if (message.role !== "custom" || message.customType !== RUNTIME_MESSAGE_KIND) return true;
 			const messageId = String(message.details?.messageId ?? "");
 			if (!messageId) return true;
 			if (consumedMessageIds.has(messageId)) return false;
-			materializedMessageIds.add(messageId);
+			materializedMessages.set(messageId, String(message.details?.attachmentEpoch ?? "") || null);
 			return true;
 		});
 		return { messages: materializeProjectView(messages, projectViewText, { fingerprint: projectViewHash }) };
@@ -491,14 +606,18 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_settled", async (_event, ctx) => {
-		if (!materializedMessageIds.size) return;
+		if (!materializedMessages.size) return;
 		const activeRuntime = await getRuntime(ctx);
 		const sessionId = ctx.sessionManager.getSessionId();
-		for (const messageId of materializedMessageIds) {
-			await settleRuntimeMessage(activeRuntime, messageId, "consumed", { sessionId, actorId: RESEARCH_LEADER_ACTOR_ID });
-			consumedMessageIds.add(messageId);
+		for (const [messageId, attachmentEpoch] of materializedMessages) {
+			const result = await consumeRuntimeMessageForAttachment(activeRuntime, messageId, {
+				sessionId,
+				actorId: RESEARCH_LEADER_ACTOR_ID,
+				attachmentEpoch,
+			});
+			if (result.status === "consumed") consumedMessageIds.add(messageId);
 		}
-		materializedMessageIds.clear();
+		materializedMessages.clear();
 		await refreshProjectView(ctx);
 		await refreshStatus(ctx);
 	});
@@ -508,14 +627,27 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			try {
 				const [mode = "board", ...rest] = args.trim().split(/\s+/).filter(Boolean);
-				if (!["board", "health", "recommend", "view", "rotate"].includes(mode)) throw new Error("Usage: /runtime [board|health|recommend|view|rotate [reason]]");
+				if (!["board", "health", "recommend", "view", "rotate", "takeover"].includes(mode)) throw new Error("Usage: /runtime [board|health|recommend|view|rotate [reason]|takeover <reason>]");
 				if (mode === "board") {
 					await showRuntimeBoard(ctx);
 					await refreshStatus(ctx);
 					return;
 				}
+				if (mode === "takeover") {
+					const reason = rest.join(" ").trim();
+					if (!reason) throw new Error("Usage: /runtime takeover <reason>");
+					const activeRuntime = await getRuntime(ctx, { claim: true, force: true, reason });
+					attachmentLossNotified = false;
+					const { snapshot } = await refreshProjectView(ctx);
+					if (await deliverOpenLeaderMessages(activeRuntime, snapshot, ctx, { triggerTurn: true })) {
+						await refreshProjectView(ctx);
+					}
+					ctx.ui.notify("This Session now owns the Research Leader. A previous active Session will stop at its next model boundary.", "warning");
+					await refreshStatus(ctx);
+					return;
+				}
 				if (mode === "rotate") await ctx.waitForIdle();
-				const activeRuntime = await getRuntime(ctx, { claim: true });
+				const activeRuntime = await getRuntime(ctx, { claim: mode === "rotate" });
 				const { snapshot, view } = await refreshProjectView(ctx);
 				if (mode === "rotate") {
 					const readiness = runtimeRotationReadiness(snapshot);
@@ -562,7 +694,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			try {
 				const mode = args.trim() || "active";
 				if (mode !== "active" && mode !== "all") throw new Error("Usage: /actors [active|all]");
-				const activeRuntime = await getRuntime(ctx, { claim: true });
+				const activeRuntime = await getRuntime(ctx);
 				ctx.ui.notify(actorLines(await readRuntimeSnapshot(activeRuntime), mode !== "all"), "info");
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -574,7 +706,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		description: "Inspect open project Runtime messages (/inbox all includes settled messages)",
 		handler: async (args, ctx) => {
 			try {
-				const activeRuntime = await getRuntime(ctx, { claim: true });
+				const activeRuntime = await getRuntime(ctx);
 				ctx.ui.notify(inboxLines(await readRuntimeSnapshot(activeRuntime), args.trim() === "all"), "info");
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -602,6 +734,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 				if (result.status === "delivered") await settleRuntimeMessage(activeRuntime, message.id, "delivered", {
 					actorId: actor.id,
 					...(actor.id === RESEARCH_LEADER_ACTOR_ID ? { sessionId: ctx.sessionManager.getSessionId() } : {}),
+					...(actor.id === RESEARCH_LEADER_ACTOR_ID ? { attachmentEpoch: result.attachmentEpoch } : {}),
 				});
 				displayOperationalCard(message, result.status);
 				ctx.ui.notify(`${message.id}: ${result.detail}`, result.status === "delivered" ? "info" : "warning");
@@ -633,6 +766,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 				if (result.status === "delivered") await settleRuntimeMessage(activeRuntime, message.id, "delivered", {
 					actorId: actor.id,
 					...(actor.id === RESEARCH_LEADER_ACTOR_ID ? { sessionId: ctx.sessionManager.getSessionId() } : {}),
+					...(actor.id === RESEARCH_LEADER_ACTOR_ID ? { attachmentEpoch: result.attachmentEpoch } : {}),
 				});
 				if (actor.id !== RESEARCH_LEADER_ACTOR_ID) displayOperationalCard(message, result.status);
 				ctx.ui.notify(`${message.id}: ${result.detail}`, result.status === "delivered" ? "info" : "warning");

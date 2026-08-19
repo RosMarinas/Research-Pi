@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import recordExperimentExtension from "../.pi/extensions/record-experiment.ts";
 import researchTransitionExtension from "../.pi/extensions/research-transition.ts";
-import { readRuntimeSnapshot, resolveResearchRuntime } from "../.pi/lib/research-runtime.mjs";
+import { readRuntimeSnapshot, recordResearchTransition, resolveResearchRuntime } from "../.pi/lib/research-runtime.mjs";
 
 function toolFrom(extension, extra = {}) {
 	let tool;
@@ -26,6 +26,14 @@ test("record_experiment mirrors concise evidence into Project Runtime", async ()
 	try {
 		const workspace = join(root, "workspace");
 		mkdirSync(workspace);
+		const runtime = await resolveResearchRuntime(workspace);
+		await recordResearchTransition(runtime, {
+			id: "new-current-route",
+			to: "new current route",
+			reason: "exercise explicit provenance for a delayed old-route result",
+			oldDisposition: "superseded",
+			authorityRefs: ["user-decision:test"],
+		});
 		const tool = toolFrom(recordExperimentExtension, {
 			exec: async () => ({ code: 1, stdout: "", stderr: "" }),
 		});
@@ -40,16 +48,19 @@ test("record_experiment mirrors concise evidence into Project Runtime", async ()
 			conclusion: "The parameterized route merits a formal frozen test.",
 			nextStep: "Freeze decision lines after family3 hardening.",
 			artifacts: [],
+			trackRef: "project:initial",
 		}, undefined, undefined, {
 			cwd: workspace,
 			sessionManager: { getSessionId: () => "session-evidence", getSessionFile: () => join(root, "session.jsonl") },
 			model: null,
 		});
 		assert.equal(result.details.runtimeMirrored, true);
-		const snapshot = await readRuntimeSnapshot(await resolveResearchRuntime(workspace));
+		const snapshot = await readRuntimeSnapshot(runtime);
 		assert.equal(snapshot.evidence.length, 1);
 		assert.equal(snapshot.evidence[0].validityJudgment, "valid");
-		assert.equal(snapshot.revision, 1);
+		assert.equal(snapshot.evidence[0].trackRef, "project:initial");
+		assert.equal(snapshot.evidence[0].trackLabel, "initial project track");
+		assert.equal(snapshot.revision, 2);
 	} finally {
 		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
 		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;

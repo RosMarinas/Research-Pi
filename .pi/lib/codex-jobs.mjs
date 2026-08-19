@@ -344,19 +344,26 @@ function gitSnapshotFingerprint(snapshot) {
 		.slice(0, 16);
 }
 
-export function buildCodexContinuationNotice(previousJob, currentGit) {
+export function buildCodexContinuationNotice(previousJob, currentGit, currentResearch = {}) {
 	const previousGit = previousJob.gitAfter ?? previousJob.gitBefore ?? {};
 	const previousFingerprint = gitSnapshotFingerprint(previousGit);
 	const currentFingerprint = gitSnapshotFingerprint(currentGit);
 	const describe = (snapshot, fingerprint) =>
 		`branch=${snapshot?.branch || "unknown"}, commit=${snapshot?.commit?.slice(0, 12) || "unknown"}, dirty=${snapshot?.dirty ?? "unknown"}, state=${fingerprint || "unavailable"}`;
+	const previousTrackRef = previousJob.researchTrackRef ?? "project:initial";
+	const currentTrackRef = currentResearch.researchTrackRef ?? previousTrackRef;
+	const routeNotice = previousTrackRef === currentTrackRef
+		? `Research track remains ${currentTrackRef}.`
+		: `RESEARCH ROUTE CHANGED from ${previousTrackRef} to ${currentTrackRef}${currentResearch.researchTrackLabel ? ` (${currentResearch.researchTrackLabel})` : ""}. Prior route assumptions are not current; re-establish the intervention, validity criteria, and decision target before acting.`;
+	let gitNotice;
 	if (!previousFingerprint || !currentFingerprint) {
-		return `This continues Codex thread ${previousJob.threadId} from job ${previousJob.id}, but Git freshness could not be fully verified. Re-inspect every file and external run state relevant to the follow-up before acting.`;
+		gitNotice = `Git freshness could not be fully verified. Re-inspect every file and external run state relevant to the follow-up before acting.`;
+	} else if (previousFingerprint === currentFingerprint) {
+		gitNotice = `The Git snapshot matches the previous terminal snapshot (${describe(currentGit, currentFingerprint)}). Re-check runtime and untracked external state when it matters.`;
+	} else {
+		gitNotice = `The workspace changed after that job. Previous: ${describe(previousGit, previousFingerprint)}. Current: ${describe(currentGit, currentFingerprint)}. Treat prior file observations as stale and re-inspect the current workspace before editing, running, or interpreting evidence.`;
 	}
-	if (previousFingerprint === currentFingerprint) {
-		return `This continues Codex thread ${previousJob.threadId} from job ${previousJob.id}. The Git snapshot matches the previous terminal snapshot (${describe(currentGit, currentFingerprint)}). Re-check runtime and untracked external state when it matters.`;
-	}
-	return `This continues Codex thread ${previousJob.threadId} from job ${previousJob.id}, but the workspace changed after that job. Previous: ${describe(previousGit, previousFingerprint)}. Current: ${describe(currentGit, currentFingerprint)}. Treat prior file observations as stale and re-inspect the current workspace before editing, running, or interpreting evidence.`;
+	return `This continues Codex thread ${previousJob.threadId} from job ${previousJob.id}. ${routeNotice} ${gitNotice}`;
 }
 
 function createJobId() {
@@ -426,6 +433,9 @@ export async function startCodexJob(options) {
 			workspaceRoot,
 			workspaceKey,
 			projectKey,
+			projectRevision: Number.isInteger(options.projectRevision) ? options.projectRevision : null,
+			researchTrackRef: options.researchTrackRef ?? "project:initial",
+			researchTrackLabel: options.researchTrackLabel ?? null,
 			leaderActorId: options.leaderActorId ?? null,
 			actorId: options.actorId ?? `codex:${jobId}`,
 			actionId: options.actionId ?? `action:${jobId}`,
@@ -462,6 +472,9 @@ export async function startCodexJob(options) {
 			workspaceRoot,
 			workspaceKey,
 			projectKey,
+			projectRevision: Number.isInteger(options.projectRevision) ? options.projectRevision : null,
+			researchTrackRef: options.researchTrackRef ?? "project:initial",
+			researchTrackLabel: options.researchTrackLabel ?? null,
 			mission,
 			missionKey: mission ? missionKey(mission) : null,
 			writerRoot,
@@ -605,6 +618,7 @@ export async function listCodexJobs(options = {}) {
 			if (filterIdentity && (await jobWorkspaceKey(job)) !== filterIdentity.workspaceKey) continue;
 			if (options.missionKey && job.missionKey !== options.missionKey) continue;
 			if (options.mode && job.mode !== options.mode) continue;
+			if (options.researchTrackRef && (job.researchTrackRef ?? "project:initial") !== options.researchTrackRef) continue;
 			jobs.push(job);
 		} catch {
 			// One damaged job must not prevent the remaining session jobs from reattaching.
@@ -625,6 +639,7 @@ export async function findReusableCodexJob(options) {
 		branchEntryIds: options.branchEntryIds,
 		missionKey: missionKey(mission),
 		mode: options.mode,
+		researchTrackRef: options.researchTrackRef,
 	});
 	return jobs.reverse().find((job) => !isTerminalStatus(job.status) || Boolean(job.threadId)) ?? null;
 }
@@ -641,12 +656,15 @@ export async function listCodexMissions(options) {
 	});
 	const groups = new Map();
 	for (const job of jobs) {
-		const key = `${job.missionKey ?? `unassigned:${job.id}`}:${job.mode}`;
+		const researchTrackRef = job.researchTrackRef ?? "project:initial";
+		const key = `${job.missionKey ?? `unassigned:${job.id}`}:${job.mode}:${researchTrackRef}`;
 		const current = groups.get(key);
 		groups.set(key, {
 			mission: job.mission ?? null,
 			missionKey: job.missionKey ?? null,
 			mode: job.mode,
+			researchTrackRef,
+			researchTrackLabel: job.researchTrackLabel ?? null,
 			jobCount: (current?.jobCount ?? 0) + 1,
 			latestJobId: job.id,
 			threadId: job.threadId ?? current?.threadId ?? null,
@@ -890,7 +908,13 @@ export async function resumeCodexJob(jobId, options) {
 		continuationOf: previous.id,
 		leaderBranchAnchorId: options.leaderBranchAnchorId ?? previous.leaderBranchAnchorId ?? null,
 		mission: requestedMission ?? previous.mission ?? null,
-		continuationNotice: buildCodexContinuationNotice(previous, currentGit),
+		continuationNotice: buildCodexContinuationNotice(previous, currentGit, {
+			researchTrackRef: options.researchTrackRef ?? previous.researchTrackRef ?? "project:initial",
+			researchTrackLabel: options.researchTrackLabel ?? previous.researchTrackLabel ?? null,
+		}),
+		projectRevision: Number.isInteger(options.projectRevision) ? options.projectRevision : previous.projectRevision,
+		researchTrackRef: options.researchTrackRef ?? previous.researchTrackRef ?? "project:initial",
+		researchTrackLabel: options.researchTrackLabel ?? previous.researchTrackLabel ?? null,
 		leaderSessionId: options.leaderSessionId ?? previous.leaderSessionId,
 		leaderActorId: options.leaderActorId ?? previous.leaderActorId ?? null,
 		actorId: options.actorId ?? previous.actorId ?? null,
@@ -926,6 +950,9 @@ export function publicJobView(job) {
 		workspaceRoot: job.workspaceRoot ?? job.writerRoot ?? job.cwd,
 		workspaceKey: job.workspaceKey ?? null,
 		projectKey: job.projectKey ?? null,
+		projectRevision: Number.isInteger(job.projectRevision) ? job.projectRevision : null,
+		researchTrackRef: job.researchTrackRef ?? "project:initial",
+		researchTrackLabel: job.researchTrackLabel ?? null,
 		mission: job.mission ?? null,
 		missionKey: job.missionKey ?? null,
 		createdAt: job.createdAt,

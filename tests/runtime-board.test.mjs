@@ -116,8 +116,12 @@ test("Runtime Board renders within terminal width and exposes keyboard sections 
 	const narrow = overlay.render(40);
 	assert.ok(narrow.every((line) => visibleWidth(line) <= 40));
 	assert.ok(narrow.length < 30, "dashboard rows should stay bounded on a small terminal");
+	for (const section of ["1", "2", "3", "4"]) {
+		overlay.handleInput(section);
+		assert.ok(overlay.render(78).length <= 22, `section ${section} must fit a 24-row terminal at 92% overlay height`);
+	}
 
-	overlay.handleInput("\u001b[C");
+	overlay.handleInput("2");
 	const actors = overlay.render(78).join("\n");
 	assert.match(actors, /Stable Project Actors/);
 	assert.match(actors, /qualification executor/);
@@ -159,6 +163,6 @@ test("Runtime Board keeps mailbox counts exact while bounding visible rows", () 
 	assert.match(overlay.render(78).join("\n"), /… 6 more · use \/inbox/);
 	overlay.handleInput("4");
 	const sessions = overlay.render(40);
-	assert.ok(sessions.length < 24, "Session history must leave room for the footer on a 24-row terminal");
+	assert.ok(sessions.length <= 22, "Session history must fit the 92% overlay height on a 24-row terminal");
 	assert.match(sessions.join("\n"), /earlier/);
 });

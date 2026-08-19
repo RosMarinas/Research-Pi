@@ -25,6 +25,7 @@ interface ExperimentRecord {
 	nextStep: string;
 	runId?: string;
 	artifacts: string[];
+	trackRef?: string;
 	sessionId: string;
 	sessionFile?: string;
 	model?: string;
@@ -64,6 +65,7 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Use record_experiment only after a result materially supports, weakens, or leaves unresolved a research hypothesis; do not record routine probes or plans.",
 			"Before record_experiment, verify that the intervention actually occurred and that the stated validity checks justify interpreting the observation.",
+			"If this result was produced under an earlier research route after the Project changed direction, provide that exact trackRef from ProjectView or the originating Codex job; do not relabel it as current-route evidence.",
 		],
 		parameters: Type.Object({
 			question: Type.String({ description: "Research question or concrete design uncertainty" }),
@@ -83,6 +85,7 @@ export default function (pi: ExtensionAPI) {
 			nextStep: Type.String({ description: "Next highest-information action" }),
 			runId: Type.Optional(Type.String({ description: "External training/evaluation run identifier, if any" })),
 			artifacts: Type.Optional(Type.Array(Type.String(), { description: "Relevant artifact paths or URLs" })),
+			trackRef: Type.Optional(Type.String({ description: "Exact Runtime research-track provenance when this result belongs to a non-current route" })),
 		}),
 
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
@@ -105,6 +108,7 @@ export default function (pi: ExtensionAPI) {
 				nextStep: params.nextStep,
 				runId: params.runId,
 				artifacts: params.artifacts ?? [],
+				trackRef: params.trackRef,
 				sessionId: ctx.sessionManager.getSessionId(),
 				sessionFile: ctx.sessionManager.getSessionFile(),
 				model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,

@@ -15,10 +15,20 @@ export const RUNTIME_MESSAGE_KIND = "research-runtime-message";
 export const RUNTIME_EVENT_ENTRY_KIND = "research-runtime-event";
 export const DEFAULT_RESEARCH_RUNTIME_ROOT = join(researchPiStateRoot(HARNESS_ROOT), "runtime", "projects");
 
+export class RuntimeAttachmentChangedError extends Error {
+	constructor(actorId) {
+		super(`${actorId} attachment changed before the operation could be committed`);
+		this.name = "RuntimeAttachmentChangedError";
+		this.actorId = actorId;
+	}
+}
+
 const ACTOR_ID_PATTERN = /^[a-z][a-z0-9._:-]{0,191}$/;
 const MESSAGE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/;
 const MESSAGE_TYPES = new Set(["ask", "reply", "notify", "result", "steer"]);
 const MESSAGE_STATES = new Set(["delivered", "consumed", "superseded"]);
+const TERMINAL_MESSAGE_STATES = new Set(["consumed", "superseded"]);
+const FINAL_ACTION_STATES = new Set(["completed", "failed", "cancelled"]);
 const ROTATION_STATES = new Set(["completed", "cancelled"]);
 const MAX_MESSAGE_LENGTH = 16_000;
 const LEDGER_LOCK_STALE_MS = 30_000;
@@ -86,6 +96,50 @@ async function withRuntimeLedgerLock(runtime, operation) {
 	throw new Error(`Timed out acquiring Research Runtime ledger lock: ${lockPath}`);
 }
 
+async function repairRuntimeLedgerTail(runtime) {
+	let handle;
+	try {
+		handle = await open(runtime.ledgerPath, "r+");
+	} catch (error) {
+		if (error?.code === "ENOENT") return;
+		throw error;
+	}
+	try {
+		const info = await handle.stat();
+		if (!info.size) return;
+		const lastByte = Buffer.allocUnsafe(1);
+		await handle.read(lastByte, 0, 1, info.size - 1);
+		if (lastByte[0] === 0x0a) return;
+
+		const chunks = [];
+		let cursor = info.size;
+		let prefixBytes = 0;
+		while (cursor > 0) {
+			const length = Math.min(cursor, 64 * 1024);
+			cursor -= length;
+			const chunk = Buffer.allocUnsafe(length);
+			await handle.read(chunk, 0, length, cursor);
+			const newline = chunk.lastIndexOf(0x0a);
+			if (newline >= 0) {
+				prefixBytes = cursor + newline + 1;
+				chunks.unshift(chunk.subarray(newline + 1));
+				break;
+			}
+			chunks.unshift(chunk);
+		}
+		let validTail = true;
+		try {
+			JSON.parse(Buffer.concat(chunks).toString("utf8"));
+		} catch {
+			validTail = false;
+		}
+		if (validTail) await handle.write("\n", info.size, "utf8");
+		else await handle.truncate(prefixBytes);
+	} finally {
+		await handle.close();
+	}
+}
+
 export function codexActorId({ missionKey, mission, jobId, mode } = {}) {
 	const modeSuffix = mode ? `:${String(mode).toLowerCase()}` : "";
 	if (missionKey) return validateActorId(`codex:${String(missionKey).toLowerCase()}${modeSuffix}`);
@@ -112,7 +166,7 @@ export async function resolveResearchRuntime(cwd, options = {}) {
 	};
 }
 
-export async function appendRuntimeEvent(runtime, eventType, data = {}, options = {}) {
+function prepareRuntimeEvent(runtime, eventType, data = {}, options = {}) {
 	if (!runtime?.projectKey || !runtime?.ledgerPath) throw new Error("A resolved Research Runtime context is required");
 	const event = {
 		version: RESEARCH_RUNTIME_VERSION,
@@ -123,18 +177,23 @@ export async function appendRuntimeEvent(runtime, eventType, data = {}, options 
 		data,
 	};
 	validateMessageId(event.id);
+	return event;
+}
+
+async function writeRuntimeEvent(runtime, event) {
+	await appendFile(runtime.ledgerPath, `${JSON.stringify(event)}\n`, { encoding: "utf8", mode: 0o600 });
+}
+
+export async function appendRuntimeEvent(runtime, eventType, data = {}, options = {}) {
+	const event = prepareRuntimeEvent(runtime, eventType, data, options);
 	await mkdir(runtime.projectDir, { recursive: true, mode: 0o700 });
-	if (!options.id) {
-		await appendFile(runtime.ledgerPath, `${JSON.stringify(event)}\n`, { encoding: "utf8", mode: 0o600 });
-		return event;
-	}
-	const findExisting = async () => (await readRuntimeEvents(runtime)).find((candidate) => candidate.id === event.id);
-	const existing = await findExisting();
-	if (existing) return existing;
 	return await withRuntimeLedgerLock(runtime, async () => {
-		const current = await findExisting();
-		if (current) return current;
-		await appendFile(runtime.ledgerPath, `${JSON.stringify(event)}\n`, { encoding: "utf8", mode: 0o600 });
+		await repairRuntimeLedgerTail(runtime);
+		if (options.id) {
+			const current = (await readRuntimeEvents(runtime)).find((candidate) => candidate.id === event.id);
+			if (current) return current;
+		}
+		await writeRuntimeEvent(runtime, event);
 		return event;
 	});
 }
@@ -144,25 +203,17 @@ export function runtimeRevisionFromEvents(events) {
 }
 
 export async function appendRuntimeEventAtRevision(runtime, eventType, data, expectedRevision, options = {}) {
-	if (!runtime?.projectKey || !runtime?.ledgerPath) throw new Error("A resolved Research Runtime context is required");
 	if (!Number.isInteger(expectedRevision) || expectedRevision < 0) throw new Error("A non-negative expected Project revision is required");
-	const event = {
-		version: RESEARCH_RUNTIME_VERSION,
-		id: options.id ?? createEventId("evt"),
-		type: eventType,
-		at: options.at ?? now(),
-		projectKey: runtime.projectKey,
-		data,
-	};
-	validateMessageId(event.id);
+	const event = prepareRuntimeEvent(runtime, eventType, data, options);
 	await mkdir(runtime.projectDir, { recursive: true, mode: 0o700 });
 	return await withRuntimeLedgerLock(runtime, async () => {
+		await repairRuntimeLedgerTail(runtime);
 		const events = await readRuntimeEvents(runtime);
 		const existing = events.find((candidate) => candidate.id === event.id);
 		if (existing) return { status: "existing", event: existing, revision: runtimeRevisionFromEvents(events) };
 		const revision = runtimeRevisionFromEvents(events);
 		if (revision !== expectedRevision) return { status: "conflict", event: null, revision };
-		await appendFile(runtime.ledgerPath, `${JSON.stringify(event)}\n`, { encoding: "utf8", mode: 0o600 });
+		await writeRuntimeEvent(runtime, event);
 		return {
 			status: "appended",
 			event,
@@ -181,12 +232,14 @@ export async function readRuntimeEvents(runtime) {
 	}
 	const events = [];
 	const seen = new Set();
-	for (const [index, line] of text.split(/\r?\n/).entries()) {
+	const lines = text.split(/\r?\n/);
+	for (const [index, line] of lines.entries()) {
 		if (!line.trim()) continue;
 		let event;
 		try {
 			event = JSON.parse(line);
 		} catch {
+			if (index === lines.length - 1 && !text.endsWith("\n")) break;
 			throw new Error(`Research Runtime ledger contains invalid JSON at line ${index + 1}`);
 		}
 		if (event.projectKey !== runtime.projectKey || seen.has(event.id)) continue;
@@ -204,10 +257,12 @@ export async function readRuntimeSnapshot(runtime) {
 	const evidence = new Map();
 	const transitions = [];
 	const rotations = new Map();
+	const activations = new Map();
 	const rejectedStates = [];
 	let projectState = null;
 	let revision = 0;
-	for (const event of await readRuntimeEvents(runtime)) {
+	const events = await readRuntimeEvents(runtime);
+	for (const event of events) {
 		const data = event.data ?? {};
 		if (PROJECT_REVISION_EVENT_TYPES.has(event.type)) revision += 1;
 		switch (event.type) {
@@ -221,7 +276,10 @@ export async function readRuntimeSnapshot(runtime) {
 				break;
 			case "actor.detached": {
 				const current = attachments.get(data.actorId);
-				if (current?.sessionId === data.sessionId) attachments.delete(data.actorId);
+				if (
+					current?.sessionId === data.sessionId
+					&& (!data.attachmentEpoch || !current.epoch || current.epoch === data.attachmentEpoch)
+				) attachments.delete(data.actorId);
 				break;
 			}
 			case "message.queued":
@@ -234,13 +292,26 @@ export async function readRuntimeSnapshot(runtime) {
 				const current = messages.get(id);
 				if (current) {
 					const status = event.type.slice("message.".length);
-					messages.set(id, { ...current, ...data, id, status, [`${status}At`]: event.at });
+					if (!TERMINAL_MESSAGE_STATES.has(current.status)) {
+						messages.set(id, { ...current, ...data, id, status, [`${status}At`]: event.at });
+					}
 				}
 				break;
 			}
 			case "action.upsert": {
 				const current = actions.get(data.id) ?? {};
-				actions.set(data.id, { ...current, ...data, createdAt: current.createdAt ?? data.createdAt ?? event.at, updatedAt: event.at });
+				const mayReconcileUnknown = current.status === "outcome_unknown" && FINAL_ACTION_STATES.has(data.status);
+				if (!FINAL_ACTION_STATES.has(current.status) && (current.status !== "outcome_unknown" || mayReconcileUnknown)) {
+					actions.set(data.id, { ...current, ...data, createdAt: current.createdAt ?? data.createdAt ?? event.at, updatedAt: event.at });
+				}
+				break;
+			}
+			case "actor.activation.started":
+				activations.set(data.id, { ...data, status: "active", startedAt: event.at });
+				break;
+			case "actor.activation.settled": {
+				const current = activations.get(data.activationId);
+				if (current) activations.set(data.activationId, { ...current, ...data, id: data.activationId, status: "settled", settledAt: event.at });
 				break;
 			}
 			case "project.state.committed":
@@ -273,6 +344,7 @@ export async function readRuntimeSnapshot(runtime) {
 		}
 	}
 	const rotationList = [...rotations.values()];
+	const activationList = [...activations.values()];
 	return {
 		projectKey: runtime.projectKey,
 		workspaceKey: runtime.workspaceKey,
@@ -287,9 +359,57 @@ export async function readRuntimeSnapshot(runtime) {
 		rejectedStates,
 		rotations: rotationList,
 		pendingRotations: rotationList.filter((rotation) => rotation.status === "pending"),
+		activations: activationList,
+		activeActivations: activationList.filter((activation) => activation.status === "active"),
 		projectState,
 		revision,
+		ledgerEventCount: events.length,
 	};
+}
+
+export function runtimeResearchTrack(snapshot) {
+	const transition = snapshot?.activeTransition;
+	if (transition?.id) {
+		return {
+			ref: transition.trackRef ?? `transition:${transition.id}`,
+			label: transition.to ?? "unnamed research track",
+			transitionId: transition.id,
+			fromTrackRef: transition.fromTrackRef ?? null,
+			oldDisposition: transition.oldDisposition ?? null,
+		};
+	}
+	return {
+		ref: "project:initial",
+		label: snapshot?.projectState?.state?.researchQuestion ?? "initial project track",
+		transitionId: null,
+		fromTrackRef: null,
+		oldDisposition: null,
+	};
+}
+
+export function runtimeTrackStatus(snapshot, trackRef) {
+	const current = runtimeResearchTrack(snapshot);
+	const ref = trackRef ?? "project:initial";
+	if (ref === current.ref) return "current";
+	const liveTracks = new Set(["project:initial"]);
+	let primaryTrack = "project:initial";
+	for (const transition of snapshot?.transitions ?? []) {
+		const fromTrackRef = transition.fromTrackRef ?? primaryTrack;
+		if (transition.oldDisposition !== "parallel") liveTracks.delete(fromTrackRef);
+		const nextTrackRef = transition.trackRef ?? `transition:${transition.id}`;
+		liveTracks.add(nextTrackRef);
+		primaryTrack = nextTrackRef;
+	}
+	if (liveTracks.has(ref)) return "parallel";
+	return "retired";
+}
+
+function runtimeTrackLabel(snapshot, trackRef) {
+	if (trackRef === "project:initial") return "initial project track";
+	const transition = (snapshot?.transitions ?? []).find((item) =>
+		(item.trackRef ?? `transition:${item.id}`) === trackRef,
+	);
+	return transition?.to ?? null;
 }
 
 export async function ensureRuntimeActor(runtime, actor) {
@@ -315,27 +435,94 @@ export async function ensureRuntimeActor(runtime, actor) {
 }
 
 export async function attachRuntimeActor(runtime, actorId, session) {
+	const result = await claimRuntimeActorAttachment(runtime, actorId, session, { force: true });
+	return result.attachment;
+}
+
+export async function withRuntimeActorAttachment(runtime, actorId, expected, operation) {
+	validateActorId(actorId);
+	const sessionId = String(expected.sessionId);
+	await mkdir(runtime.projectDir, { recursive: true, mode: 0o700 });
+	return await withRuntimeLedgerLock(runtime, async () => {
+		await repairRuntimeLedgerTail(runtime);
+		const snapshot = await readRuntimeSnapshot(runtime);
+		const attachment = runtimeActorAttachment(snapshot, actorId, sessionId);
+		if (!attachment || (expected.attachmentEpoch && attachment.epoch !== expected.attachmentEpoch)) {
+			throw new RuntimeAttachmentChangedError(actorId);
+		}
+		return await operation({ snapshot, attachment });
+	});
+}
+
+export async function claimRuntimeActorAttachment(runtime, actorId, session, options = {}) {
 	validateActorId(actorId);
 	const data = {
 		actorId,
 		sessionId: String(session.sessionId),
 		branchAnchorId: session.branchAnchorId ?? null,
 		workspaceKey: runtime.workspaceKey,
+		epoch: validateMessageId(session.epoch ?? createEventId("attachment")),
+		reason: boundedRuntimeText(session.reason, 400) || null,
 	};
-	await appendRuntimeEvent(runtime, "actor.attached", data, {
-		id: `attach:${actorId}:${shortHash(`${data.sessionId}:${data.branchAnchorId ?? ""}:${Date.now()}`, 20)}`,
+	await mkdir(runtime.projectDir, { recursive: true, mode: 0o700 });
+	return await withRuntimeLedgerLock(runtime, async () => {
+		await repairRuntimeLedgerTail(runtime);
+		const snapshot = await readRuntimeSnapshot(runtime);
+		const current = runtimeActorAttachment(snapshot, actorId);
+		if (
+			current?.sessionId === data.sessionId
+			&& current?.branchAnchorId === data.branchAnchorId
+			&& current?.workspaceKey === data.workspaceKey
+		) return { status: "current", attachment: current, activation: null };
+		if (current && options.onlyIfUnattached) {
+			return { status: "occupied", attachment: current, activation: null };
+		}
+		const activation = snapshot.activeActivations.find((item) =>
+			item.actorId === actorId
+			&& item.sessionId === current?.sessionId
+			&& (!current?.epoch || item.attachmentEpoch === current.epoch),
+		) ?? null;
+		if (activation && !options.force) return { status: "busy", attachment: current ?? null, activation };
+		const event = prepareRuntimeEvent(runtime, "actor.attached", data, { id: `actor-attachment:${data.epoch}` });
+		await writeRuntimeEvent(runtime, event);
+		return { status: "attached", attachment: data, activation: null, event };
 	});
-	return data;
 }
 
-export async function detachRuntimeActor(runtime, actorId, sessionId) {
+export async function detachRuntimeActor(runtime, actorId, sessionId, attachmentEpoch = null) {
 	validateActorId(actorId);
-	return await appendRuntimeEvent(runtime, "actor.detached", { actorId, sessionId: String(sessionId) });
+	const normalizedSessionId = String(sessionId);
+	await mkdir(runtime.projectDir, { recursive: true, mode: 0o700 });
+	return await withRuntimeLedgerLock(runtime, async () => {
+		await repairRuntimeLedgerTail(runtime);
+		const current = runtimeActorAttachment(await readRuntimeSnapshot(runtime), actorId);
+		if (
+			!current
+			|| current.sessionId !== normalizedSessionId
+			|| (attachmentEpoch && current.epoch !== attachmentEpoch)
+		) return { actorId, sessionId: normalizedSessionId, status: "ignored" };
+		const data = {
+			actorId,
+			sessionId: normalizedSessionId,
+			attachmentEpoch: current.epoch ?? null,
+		};
+		const event = prepareRuntimeEvent(runtime, "actor.detached", data, {
+			id: `actor-detachment:${current.epoch ?? createEventId("attachment")}`,
+		});
+		await writeRuntimeEvent(runtime, event);
+		return event;
+	});
+}
+
+export function runtimeActorAttachment(snapshot, actorId, sessionId) {
+	return snapshot.attachments.find((attachment) =>
+		attachment.actorId === actorId && (!sessionId || attachment.sessionId === sessionId),
+	) ?? null;
 }
 
 export async function isRuntimeActorAttached(runtime, actorId, sessionId) {
 	const snapshot = await readRuntimeSnapshot(runtime);
-	return snapshot.attachments.some((attachment) => attachment.actorId === actorId && attachment.sessionId === sessionId);
+	return Boolean(runtimeActorAttachment(snapshot, actorId, sessionId));
 }
 
 export async function initializeResearchRuntime(cwd, session, options = {}) {
@@ -347,8 +534,43 @@ export async function initializeResearchRuntime(cwd, session, options = {}) {
 		label: "Research Leader",
 		provider: "pi",
 	});
-	await attachRuntimeActor(runtime, RESEARCH_LEADER_ACTOR_ID, session);
+	if (options.attach !== false) await attachRuntimeActor(runtime, RESEARCH_LEADER_ACTOR_ID, session);
 	return runtime;
+}
+
+export async function startRuntimeActorActivation(runtime, actorId, input) {
+	validateActorId(actorId);
+	const id = validateMessageId(input.id ?? createEventId("activation"));
+	await mkdir(runtime.projectDir, { recursive: true, mode: 0o700 });
+	return await withRuntimeLedgerLock(runtime, async () => {
+		await repairRuntimeLedgerTail(runtime);
+		const snapshot = await readRuntimeSnapshot(runtime);
+		const existing = snapshot.activations.find((activation) => activation.id === id);
+		if (existing) return existing;
+		const attachment = runtimeActorAttachment(snapshot, actorId, input.sessionId);
+		if (!attachment || (input.attachmentEpoch && attachment.epoch !== input.attachmentEpoch)) {
+			throw new RuntimeAttachmentChangedError(actorId);
+		}
+		const data = {
+			id,
+			actorId,
+			sessionId: String(input.sessionId),
+			attachmentEpoch: attachment.epoch ?? null,
+		};
+		const event = prepareRuntimeEvent(runtime, "actor.activation.started", data, { id: `actor-activation:${id}:started` });
+		await writeRuntimeEvent(runtime, event);
+		return { ...data, status: "active" };
+	});
+}
+
+export async function settleRuntimeActorActivation(runtime, activationId, details = {}) {
+	validateMessageId(activationId);
+	const data = {
+		activationId,
+		reason: boundedRuntimeText(details.reason, 240) || "settled",
+	};
+	await appendRuntimeEvent(runtime, "actor.activation.settled", data, { id: `actor-activation:${activationId}:settled` });
+	return { ...data, status: "settled" };
 }
 
 function boundedRuntimeText(value, max) {
@@ -358,6 +580,11 @@ function boundedRuntimeText(value, max) {
 
 export async function recordRuntimeEvidence(runtime, record) {
 	if (!record?.id) throw new Error("Project evidence id is required");
+	const snapshot = await readRuntimeSnapshot(runtime);
+	const track = runtimeResearchTrack(snapshot);
+	const trackRef = record.trackRef ?? track.ref;
+	const trackLabel = record.trackLabel ?? (trackRef === track.ref ? track.label : runtimeTrackLabel(snapshot, trackRef));
+	if (!trackLabel) throw new Error(`Unknown research track provenance: ${trackRef}`);
 	const data = {
 		id: String(record.id),
 		timestamp: record.timestamp ?? now(),
@@ -374,6 +601,9 @@ export async function recordRuntimeEvidence(runtime, record) {
 			ledgerPath: boundedRuntimeText(record.source?.ledgerPath, 4000) || null,
 			sessionId: boundedRuntimeText(record.source?.sessionId, 200) || null,
 		},
+		projectRevision: snapshot.revision,
+		trackRef,
+		trackLabel,
 	};
 	return await appendRuntimeEvent(runtime, "evidence.recorded", data, { id: `evidence:${data.id}` });
 }
@@ -387,6 +617,13 @@ export async function recordResearchTransition(runtime, transition) {
 		? transition.authorityRefs.map((item) => boundedRuntimeText(item, 1000)).filter(Boolean).slice(0, 16)
 		: [];
 	if (!authorityRefs.length) throw new Error("Research transition requires at least one authority reference");
+	const snapshot = await readRuntimeSnapshot(runtime);
+	const basedOnRevision = Number.isInteger(transition.basedOnRevision) ? transition.basedOnRevision : snapshot.revision;
+	const previousTrack = runtimeResearchTrack(snapshot);
+	const fromTrackRef = boundedRuntimeText(transition.fromTrackRef, 300) || previousTrack.ref;
+	if (runtimeTrackStatus(snapshot, fromTrackRef) === "retired") {
+		throw new Error(`Research transition source ${fromTrackRef} is not a current or parallel track`);
+	}
 	const data = {
 		id,
 		from: boundedRuntimeText(transition.from, 240) || null,
@@ -397,6 +634,9 @@ export async function recordResearchTransition(runtime, transition) {
 			: "superseded",
 		nextDecision: boundedRuntimeText(transition.nextDecision, 2000) || null,
 		authorityRefs,
+		trackRef: `transition:${id}`,
+		fromTrackRef,
+		basedOnRevision,
 		sessionId: transition.sessionId ?? null,
 		workspaceRoot: transition.workspaceRoot ?? runtime.workspaceRoot,
 		git: transition.git ? {
@@ -406,8 +646,11 @@ export async function recordResearchTransition(runtime, transition) {
 			dirty: transition.git.dirty ?? null,
 		} : null,
 	};
-	await appendRuntimeEvent(runtime, "research.transition.recorded", data, { id: `research-transition:${id}` });
-	return data;
+	const result = await appendRuntimeEventAtRevision(runtime, "research.transition.recorded", data, basedOnRevision, { id: `research-transition:${id}` });
+	if (result.status === "conflict") {
+		throw new Error(`Research transition was based on Project revision ${basedOnRevision}, but revision ${result.revision} is current; refresh ProjectView and record the intended route change again.`);
+	}
+	return { ...data, revision: result.revision };
 }
 
 export async function createRuntimeMessage(runtime, input) {
@@ -419,6 +662,7 @@ export async function createRuntimeMessage(runtime, input) {
 	const body = String(input.body ?? "").trim();
 	if (!body) throw new Error("Runtime message body is required");
 	if (body.length > MAX_MESSAGE_LENGTH) throw new Error(`Runtime message body must be at most ${MAX_MESSAGE_LENGTH} characters`);
+	const snapshot = await readRuntimeSnapshot(runtime);
 	const message = {
 		id,
 		type,
@@ -428,8 +672,9 @@ export async function createRuntimeMessage(runtime, input) {
 		relatesTo: input.relatesTo ?? null,
 		payloadRef: input.payloadRef ?? null,
 		metadata: input.metadata ?? {},
+		projectRevision: Number.isInteger(input.projectRevision) ? input.projectRevision : snapshot.revision,
+		trackRef: input.trackRef ?? runtimeResearchTrack(snapshot).ref,
 	};
-	const snapshot = await readRuntimeSnapshot(runtime);
 	const existing = snapshot.messages.find((candidate) => candidate.id === id);
 	if (existing) return existing;
 	await appendRuntimeEvent(runtime, "message.queued", message, { id: `message:${id}:queued` });
@@ -440,9 +685,39 @@ export async function settleRuntimeMessage(runtime, messageId, status, details =
 	validateMessageId(messageId);
 	if (!MESSAGE_STATES.has(status)) throw new Error(`Unsupported Runtime message state: ${status}`);
 	await appendRuntimeEvent(runtime, `message.${status}`, { messageId, ...details }, {
-		id: `message:${messageId}:${status}:${details.sessionId ?? details.actorId ?? "runtime"}`,
+		id: `message:${messageId}:${status}:${details.attachmentEpoch ?? details.sessionId ?? details.actorId ?? "runtime"}`,
 	});
 	return { messageId, status, ...details };
+}
+
+export async function consumeRuntimeMessageForAttachment(runtime, messageId, details) {
+	validateMessageId(messageId);
+	validateActorId(details.actorId);
+	const sessionId = String(details.sessionId);
+	await mkdir(runtime.projectDir, { recursive: true, mode: 0o700 });
+	return await withRuntimeLedgerLock(runtime, async () => {
+		await repairRuntimeLedgerTail(runtime);
+		const snapshot = await readRuntimeSnapshot(runtime);
+		const attachment = runtimeActorAttachment(snapshot, details.actorId, sessionId);
+		if (!attachment || (details.attachmentEpoch && attachment.epoch !== details.attachmentEpoch)) {
+			return { messageId, status: "stale_attachment", sessionId, attachmentEpoch: details.attachmentEpoch ?? null };
+		}
+		const message = snapshot.messages.find((candidate) => candidate.id === messageId);
+		if (!message || TERMINAL_MESSAGE_STATES.has(message.status)) {
+			return { messageId, status: message?.status ?? "missing", sessionId, attachmentEpoch: attachment.epoch ?? null };
+		}
+		const data = {
+			messageId,
+			sessionId,
+			actorId: details.actorId,
+			attachmentEpoch: attachment.epoch ?? null,
+		};
+		const event = prepareRuntimeEvent(runtime, "message.consumed", data, {
+			id: `message:${messageId}:consumed:${attachment.epoch ?? sessionId}`,
+		});
+		await writeRuntimeEvent(runtime, event);
+		return { ...data, status: "consumed" };
+	});
 }
 
 export function pendingRuntimeMessages(snapshot, options = {}) {
@@ -507,6 +782,8 @@ export async function settleRuntimeSessionRotation(runtime, rotationId, status, 
 
 export async function upsertRuntimeAction(runtime, action) {
 	if (!action?.id) throw new Error("Runtime Action id is required");
+	const snapshot = await readRuntimeSnapshot(runtime);
+	const track = runtimeResearchTrack(snapshot);
 	const data = {
 		id: String(action.id),
 		kind: action.kind ?? "delegation",
@@ -515,6 +792,9 @@ export async function upsertRuntimeAction(runtime, action) {
 		label: action.label ? String(action.label).slice(0, 240) : null,
 		externalId: action.externalId ?? null,
 		metadata: action.metadata ?? {},
+		projectRevision: Number.isInteger(action.projectRevision) ? action.projectRevision : snapshot.revision,
+		trackRef: action.trackRef ?? track.ref,
+		trackLabel: action.trackLabel ?? track.label,
 	};
 	await appendRuntimeEvent(runtime, "action.upsert", data, {
 		id: `action:${data.id}:${data.status}:${shortHash(JSON.stringify(data), 12)}`,
@@ -550,6 +830,10 @@ export function runtimeMessageText(message, actors = []) {
 }
 
 export async function registerCodexRuntimeJob(runtime, job) {
+	const snapshot = await readRuntimeSnapshot(runtime);
+	const currentTrack = runtimeResearchTrack(snapshot);
+	const trackRef = job.researchTrackRef ?? currentTrack.ref;
+	const trackLabel = job.researchTrackLabel ?? currentTrack.label;
 	const actorId = job.actorId ?? codexActorId(job);
 	await ensureRuntimeActor(runtime, {
 		id: actorId,
@@ -563,6 +847,8 @@ export async function registerCodexRuntimeJob(runtime, job) {
 			model: job.model,
 			threadId: job.threadId ?? null,
 			latestJobId: job.id,
+			researchTrackRef: trackRef,
+			researchTrackLabel: trackLabel,
 		},
 	});
 	await upsertRuntimeAction(runtime, {
@@ -573,6 +859,9 @@ export async function registerCodexRuntimeJob(runtime, job) {
 		label: job.mission ?? `${job.mode} ${String(job.id).slice(-8)}`,
 		externalId: job.id,
 		metadata: { threadId: job.threadId ?? null, mode: job.mode, model: job.model },
+		projectRevision: Number.isInteger(job.projectRevision) ? job.projectRevision : snapshot.revision,
+		trackRef,
+		trackLabel,
 	});
 	return actorId;
 }
@@ -594,5 +883,7 @@ export async function recordCodexRuntimeEvent(runtime, job, content) {
 		body: content,
 		relatesTo: job.pendingRequest?.id ?? job.actionId ?? `action:${job.id}`,
 		metadata: { jobId: job.id, status: job.status, requestId: job.pendingRequest?.id ?? null },
+		projectRevision: job.projectRevision,
+		trackRef: job.researchTrackRef,
 	});
 }
