@@ -1,8 +1,8 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
-	DEFAULT_CODEX_MODEL,
-	DEFAULT_CODEX_REASONING_EFFORT,
+	defaultCodexModel,
+	defaultCodexReasoningEffort,
 	cancelCodexJob,
 	findReusableCodexJob,
 	isCodexJobOwnerError,
@@ -59,7 +59,7 @@ const EffortSchema = Type.Union(
 		Type.Literal("max"),
 		Type.Literal("ultra"),
 	],
-	{ description: `Codex reasoning effort; default ${DEFAULT_CODEX_REASONING_EFFORT}` },
+	{ description: "Codex reasoning effort; advisor and executor defaults are configured separately" },
 );
 
 const ReuseSchema = Type.Union([Type.Literal("auto"), Type.Literal("never")], {
@@ -95,7 +95,7 @@ const ParamsSchema = Type.Object({
 	reuse: Type.Optional(ReuseSchema),
 	model: Type.Optional(
 		Type.String({
-			description: `Codex model override; default ${DEFAULT_CODEX_MODEL}`,
+			description: `Codex model override; configured defaults advisor=${defaultCodexModel("advisor")}, executor=${defaultCodexModel("executor")}`,
 			minLength: 1,
 		}),
 	),
@@ -533,7 +533,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		label: "Codex Delegate",
 		description: [
 			"Delegate bounded operational work to a context-isolated local Codex executor, or obtain a read-only Codex second opinion.",
-			`Both modes default to ${DEFAULT_CODEX_MODEL}/${DEFAULT_CODEX_REASONING_EFFORT}.`,
+			`Configured defaults: advisor ${defaultCodexModel("advisor")}/${defaultCodexReasoningEffort("advisor")}; executor ${defaultCodexModel("executor")}/${defaultCodexReasoningEffort("executor")}.`,
 			"Executor jobs run automatically inside the current project boundary. They may edit/delete files, freely commit, use public network, and run expensive experiments. Exact user-approved external-read, SSH-target, or fixed-script capabilities are available through an opaque host broker; raw credentials never enter Codex.",
 			"Pi remains responsible for framing the research question, judging evidence, and choosing the next research action.",
 			"Give related work a stable mission label and use reuse=auto to continue its exact Codex Actor thread across Pi sessions in this project workspace; use action=missions to inspect project mission threads.",

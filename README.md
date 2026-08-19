@@ -1,6 +1,6 @@
 # Research Pi
 
-Research Pi 是一个面向 AI、通信等计算实验的个人 Research Runtime。它使用锁定版本的 Pi Core 和 DeepSeek V4 Flash，并加入科研优先的身份与工作约定、项目级 Actor/mailbox、项目命令边界、持久化 side 对话、DeepSeek 原生网页检索、实验记录、研究 checkpoint、非向量历史检索、结构化科研 compact、Codex 长程执行委派与按需 trace。
+Research Pi 是一个面向 AI、通信等计算实验的个人 Research Runtime。它使用锁定版本的 Pi Core 和可切换的 DeepSeek V4 Pro/Flash profiles，并加入科研优先的身份与工作约定、项目级 Actor/mailbox、项目命令边界、持久化 side 对话、DeepSeek 原生网页检索、实验记录、研究 checkpoint、非向量历史检索、结构化科研 compact、Codex 长程执行委派与按需 trace。
 
 ## 开发仓库与稳定安装
 
@@ -10,7 +10,7 @@ Research Pi 是一个面向 AI、通信等计算实验的个人 Research Runtime
 
 ```text
 npm 全局目录                  Research Pi 程序与锁定依赖
-~/.config/research-pi/        credentials.env 等用户配置
+~/.config/research-pi/        config.json、schema 与 credentials.env
 ~/.local/state/research-pi/   sessions、project Runtime、memory、Codex jobs、grants、trace
 <research-project>/.pi/       该项目自己的实验记录与 checkpoint
 ```
@@ -31,7 +31,7 @@ npm install -g 'git+ssh://git@github.com/RosMarinas/Research-Pi.git#v0.2.0'
 pi setup
 ```
 
-`pi setup` 只创建权限为 `0600` 的用户配置模板，不生成或提交密钥。填入 `~/.config/research-pi/credentials.env` 后即可在任意项目运行 `pi`。使用 `pi paths` 可检查当前程序、配置和状态目录；使用 `pi doctor` 可在不调用模型的情况下验证宿主 Git/Python 与 Codex sandbox。
+`pi setup` 创建权限为 `0600` 的 `config.json` 与凭据模板，不生成或提交密钥。填入 `~/.config/research-pi/credentials.env` 后即可在任意项目运行 `pi`。使用 `pi paths` 可检查当前程序、配置和状态目录；使用 `pi doctor` 可在不调用模型的情况下验证宿主 Git/Python 与 Codex sandbox。
 
 ## 从源码快速开发
 
@@ -63,7 +63,7 @@ cd /path/to/research-project
 pi
 ```
 
-更完整的命令说明见 [`docs/pi-basic-guide.md`](docs/pi-basic-guide.md)。
+更完整的命令说明见 [`docs/pi-basic-guide.md`](docs/pi-basic-guide.md)，配置字段与优先级见 [`docs/configuration.md`](docs/configuration.md)。
 
 ## 命令入口
 
@@ -77,19 +77,35 @@ pi
 
 - Pi Core：`0.84.1`
 - Provider：`deepseek`
-- Model：`deepseek-v4-flash`
+- Active profile：`deepseek-pro`
+- Model：`deepseek-v4-pro`（可持久切换到 `deepseek-flash`）
 - Endpoint：`https://api.deepseek.com`
 - Thinking level：`max`（通过官方 `reasoning_effort: "max"` 启用；384K 是最大输出上限，不是输入上下文或压缩阈值）
 
-源码开发模式的 Harness 配置位于：
+### 单一配置入口
 
-- `.pi/settings.json`：模型、thinking 和 retry 设置。
-- `.pi/agent/settings.json`：在其他科研项目中调用 `pi` 时仍生效的 retry 和 compact 默认值。
-- `.pi/agent/models.json`：DeepSeek 请求字段兼容配置。
-- `.pi/APPEND_SYSTEM.md`：追加到 Pi 默认提示后的稳定 Research Contract。
-- `.pi/extensions/`：Research Pi 提供的工具扩展。
+普通行为配置统一放在一份 JSON 中：
 
-打包模式会在启动时把经过审查的 `models.json` 和 `settings.json` 部署到用户状态目录；API key、session、memory、trace、Codex job 和 capability ledger 不写入 npm 安装目录。
+- 源码开发：`.pi/config.json`（本地生成、Git 忽略、每个 worktree 独立）；
+- 稳定安装：`~/.config/research-pi/config.json`；
+- 审查过的初始模板：`.pi/config.defaults.json`；
+- API key：仍在 `.env` 或 `credentials.env`，永远不进入 config。
+
+这份 config 统一管理 leader model profiles、Pi Core settings、Codex advisor/executor defaults、research compact、Web Search、skill 白名单、TUI 选项与 diagnostics。安全边界、凭据内容和不可破坏的恢复 invariant 不作为普通偏好开关。
+
+常用入口：
+
+```sh
+pi config show                    # 查看完整生效配置
+pi config path                    # 找到配置文件
+pi config list                    # 列出模型 profiles
+pi config use deepseek-flash      # 持久切换默认 profile
+pi --profile deepseek-pro         # 只覆盖本次启动
+```
+
+交互界面输入 `/config` 会打开居中的原生 TUI profile 面板；选择后立即切换当前 Session 的模型与 thinking，并持久保存。`/config show` 和 `/config path` 可在 TUI 内检查来源。底部只显示紧凑的 `◇ profile`；实际 model/thinking 继续由 Pi 原生 footer 展示，避免重复占用 TUI。
+
+Research Pi 会从 config 生成内部 Pi `settings.json/models.json` adapter；这些文件位于状态目录，用户不再手工维护。源码模式沿用 Git 忽略的 `.pi/agent/`，已有 trust、trace 等本地状态不需要迁移。`.pi/APPEND_SYSTEM.md` 和 `.pi/extensions/` 仍分别承载稳定 Research Contract 与受审查扩展代码。
 
 运行其他科研仓库时，该仓库自身的 `AGENTS.md` 等项目上下文仍会正常加载。
 
@@ -97,7 +113,7 @@ pi
 
 ## Skill 白名单
 
-启动器使用 Pi 原生的 `--no-skills` 关闭全局和项目 skill 自动发现，再通过 `--skill` 只加载经过检查的默认白名单：
+启动器使用 Pi 原生的 `--no-skills` 关闭全局和项目 skill 自动发现，再从 `config.json` 的 `resources.skills` 通过 `--skill` 加载经过检查的默认白名单：
 
 - `~/.agents/skills/cognitive-knowledge-network`：研究概念、方法和证据导航；
 - `~/.codex/skills/remote-workspace`：远程环境、实验和 GPU 执行。
@@ -205,13 +221,13 @@ Research Pi 默认处于探索与验证阶段：构造竞争假设，优先高�
 
 ### Web Search
 
-`web_search` 通过 DeepSeek Anthropic-compatible API 的原生 Web Search 做简单、直接、带结构化来源的当前信息检索，复用同一个 `DEEPSEEK_API_KEY`，无需额外搜索服务密钥。若 API 没有返回结构化来源，工具会明确标为未核验模型综合。
+`web_search` 通过 DeepSeek Anthropic-compatible API 的原生 Web Search 做简单、直接、带结构化来源的当前信息检索，复用同一个 `DEEPSEEK_API_KEY`，无需额外搜索服务密钥。搜索模型、thinking budget、默认搜索次数与来源上限来自 `config.json` 的 `research.search`。若 API 没有返回结构化来源，工具会明确标为未核验模型综合。
 
 Pi 可直接完成有界的小型调研；当用户指定，或任务确实需要大量搜索、交叉核验和中间材料整理时，再交给 Codex 隔离过程。
 
 ### Research Compaction
 
-DeepSeek V4 Flash 使用 Max reasoning，但不把 1M 容量等同于等质量注意力。Research Pi 在约 272K 总上下文时标记软 compact，384K 作为硬触发线；真正压缩只在当前 agent run（包括工具调用链）完整 settled 后开始，不会为压缩 abort 尚未完成的科研任务。压缩后的原始 recent tail 按当前分支第 1/2/3 次 compact 取约 32K/40K/48K，之后固定在 48K。结构化研究状态和可检索历史负责承接更早证据。
+DeepSeek V4 Pro/Flash 使用 Max reasoning，但不把 1M 容量等同于等质量注意力。默认在约 272K 总上下文时标记软 compact，384K 作为硬触发线；阈值与 recent-tail schedule 由 `config.json` 的 `research.compaction` 管理。真正压缩只在当前 agent run（包括工具调用链）完整 settled 后开始，不会为压缩 abort 尚未完成的科研任务。默认 recent tail 按当前分支第 1/2/3 次 compact 取约 32K/40K/48K，之后固定在 48K。结构化研究状态和可检索历史负责承接更早证据。
 
 `/compact` 或自动 compact 时，扩展同时生成：
 
@@ -224,8 +240,8 @@ DeepSeek V4 Flash 使用 Max reasoning，但不把 1M 容量等同于等质量�
 
 `codex_delegate` 将本地 Codex CLI 作为上下文隔离的执行器或顾问，Pi 继续负责研究问题、假设、证据判断和下一步决策。
 
-- `advisor`：只读分析，默认 `gpt-5.6-sol`、reasoning `max`；
-- `executor`：完整执行任务，默认 `gpt-5.6-sol`、reasoning `max`、自动使用 project-write permission profile；
+- `advisor`：只读分析，模型与 reasoning 默认值来自 `config.json` 的 `codex.advisor`；
+- `executor`：完整执行任务，模型与 reasoning 默认值来自 `codex.executor`，自动使用 project-write permission profile；
 - 每次调用都可覆盖 Codex model 和 reasoning effort；
 - executor 可在项目内修改或删除文件、安装项目依赖、自由提交，以及启动或取消昂贵实验；经过用户授权后，它还可通过 `research_pi_host` 使用精确外部只读、SSH target 和固定脚本，不需要复制凭据或重开 delegation；
 - Codex 通过本地 stdio App Server 运行，保存稳定的 thread/turn ID；长任务默认后台运行，通过同一个工具的 `status`、`result`、`respond`、`steer`、`resume`、`cancel` 和 `reconcile` action 管理；
@@ -239,7 +255,7 @@ DeepSeek V4 Flash 使用 Max reasoning，但不把 1M 容量等同于等质量�
 - 不默认建立 worktree，同一目标工作区同时只允许一个写入型 Codex job。
 - executor 在发送执行 turn 前先耐久记录 side-effect intent/start；如果此后 worker 消失或被强杀，job 进入 `outcome_unknown`，不会伪装成普通 failed/cancelled。同一 workspace 的新 executor 会被阻止，直到人或 advisor 检查 Git、远程 run 等外部状态，再用 `reconcile` 带证据说明显式结案。
 
-Codex job、请求账本、精简 JSONL 审计事件和委派 prompt 保存在状态目录的 `codex/`（源码模式即 `.pi/codex/`）；Actor、Action 与 mailbox 的稀疏语义事件保存在 `runtime/projects/<projectKey>/events.jsonl`（源码模式即 `.pi/runtime/`），两者都不会进入 Git。Runtime 不记录 token delta、heartbeat 或完整 conversation，并在物理追加前按确定性 event ID 去重。Codex `job.json` 仅在可见进度或语义状态变化时更新，并在 `workerIo` 中记录实际写入计数。`/watch` 增量读取已有审计流，不额外记录 token delta 或创建另一份高频 trace。审计事件和 stderr 每个 job 分别限制为 2 MiB；命令输出只保留限长尾部并对常见凭据模式整体遮蔽。Research Pi 默认抑制 Codex App Server 写入 `logs_*.sqlite` 的内部 TRACE/DEBUG 反馈日志，但保留 `state_*.sqlite` 的 thread/runtime 状态；只有排查 Codex 上游问题时才应显式设置 `PI_CODEX_SQLITE_LOGS=1` 恢复内部日志，用完立即关闭。该设置不会删除此前已经积累的日志。只有显式设置 `PI_CODEX_TRACE=1` 才记录上限 32 MiB 的原始 App Server event，用完也应立即关闭。已经处理的普通响应只保留长度和 SHA-256，不长期保留正文；但响应首先会进入 Pi 模型上下文，因此绝不能通过该通道传递 API key 等秘密。普通 Codex 工具子进程不继承 DeepSeek key，也不能直接访问 SSH agent；只有 `research_pi_host` broker 在匹配用户 grant 后才把 `SSH_AUTH_SOCK` 不透明地交给系统 SSH 进程。Codex CLI 自身仍使用本机 Codex 登录完成模型调用，但该认证不会授予其工具访问用户目录。
+Codex job、请求账本、精简 JSONL 审计事件和委派 prompt 保存在状态目录的 `codex/`（源码模式即 `.pi/codex/`）；Actor、Action 与 mailbox 的稀疏语义事件保存在 `runtime/projects/<projectKey>/events.jsonl`（源码模式即 `.pi/runtime/`），两者都不会进入 Git。Runtime 不记录 token delta、heartbeat 或完整 conversation，并在物理追加前按确定性 event ID 去重。Codex `job.json` 仅在可见进度或语义状态变化时更新，并在 `workerIo` 中记录实际写入计数。`/watch` 增量读取已有审计流，不额外记录 token delta 或创建另一份高频 trace。审计事件和 stderr 每个 job 分别限制为 2 MiB；命令输出只保留限长尾部并对常见凭据模式整体遮蔽。Research Pi 默认抑制 Codex App Server 写入 `logs_*.sqlite` 的内部 TRACE/DEBUG 反馈日志，但保留 `state_*.sqlite` 的 thread/runtime 状态；只有排查 Codex 上游问题时才应通过 `diagnostics.codexSqliteLogs` 或显式环境变量临时恢复内部日志，用完立即关闭。该设置不会删除此前已经积累的日志。只有 `diagnostics.trace`、`pi-traced` 或显式 `PI_CODEX_TRACE=1` 才记录限额原始 event，用完也应立即关闭。已经处理的普通响应只保留长度和 SHA-256，不长期保留正文；但响应首先会进入 Pi 模型上下文，因此绝不能通过该通道传递 API key 等秘密。普通 Codex 工具子进程不继承 DeepSeek key，也不能直接访问 SSH agent；只有 `research_pi_host` broker 在匹配用户 grant 后才把 `SSH_AUTH_SOCK` 不透明地交给系统 SSH 进程。Codex CLI 自身仍使用本机 Codex 登录完成模型调用，但该认证不会授予其工具访问用户目录。
 
 ### Project Runtime
 
@@ -276,4 +292,4 @@ Runtime message 是瞬时控制/通信，不自动成为长期科研判断。每
 
 ## 敏感信息
 
-`.env`、认证信息、session、memory index、trace 和本地实验记录均被排除在版本控制之外。仓库只跟踪不含真实密钥的 `.env.example`，以及经过审查且不含凭证的模型/运行设置。提交前检查规则见 [`SECURITY.md`](SECURITY.md)。
+`.env`、`credentials.env`、本地 `config.json`、认证信息、session、memory index、trace 和本地实验记录均被排除在版本控制之外。仓库只跟踪不含真实密钥的 `.env.example`、配置 schema 与默认模板。提交前检查规则见 [`SECURITY.md`](SECURITY.md)。

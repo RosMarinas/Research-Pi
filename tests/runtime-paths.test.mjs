@@ -10,6 +10,8 @@ test("development launcher keeps fast-iteration state in the checkout", () => {
 	});
 	assert.equal(paths.development, true);
 	assert.equal(paths.credentialsPath, "/workspace/Research-Pi/.env");
+	assert.equal(paths.configPath, "/workspace/Research-Pi/.pi/config.json");
+	assert.equal(paths.agentDir, "/workspace/Research-Pi/.pi/agent");
 	assert.equal(paths.sessionDir, "/workspace/Research-Pi/.pi/sessions");
 });
 
@@ -24,6 +26,8 @@ test("packaged launcher separates configuration and state from installed code", 
 	});
 	assert.equal(paths.development, false);
 	assert.equal(paths.credentialsPath, "/home/user/.config/research-pi/credentials.env");
+	assert.equal(paths.configPath, "/home/user/.config/research-pi/config.json");
+	assert.equal(paths.agentDir, "/home/user/.local/state/research-pi/agent");
 	assert.equal(paths.sessionDir, "/home/user/.local/state/research-pi/sessions");
 	assert.ok(!paths.stateRoot.startsWith(paths.harnessRoot));
 });

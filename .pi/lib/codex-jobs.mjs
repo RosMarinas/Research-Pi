@@ -19,8 +19,12 @@ export const RESEARCH_PI_STATE_ROOT = researchPiStateRoot(HARNESS_ROOT);
 export const DEFAULT_CODEX_JOB_ROOT = join(RESEARCH_PI_STATE_ROOT, "codex", "jobs");
 export const DEFAULT_CODEX_SCHEMA_PATH = join(HARNESS_ROOT, ".pi", "schemas", "codex-delegate-result.json");
 export const CODEX_JOB_WORKER_PATH = join(LIB_DIR, "codex-job-worker.mjs");
-export const DEFAULT_CODEX_MODEL = "gpt-5.6-sol";
-export const DEFAULT_CODEX_REASONING_EFFORT = "max";
+export const DEFAULT_CODEX_ADVISOR_MODEL = process.env.RESEARCH_PI_CODEX_ADVISOR_MODEL?.trim() || "gpt-5.6-sol";
+export const DEFAULT_CODEX_ADVISOR_REASONING_EFFORT = process.env.RESEARCH_PI_CODEX_ADVISOR_EFFORT?.trim() || "max";
+export const DEFAULT_CODEX_EXECUTOR_MODEL = process.env.RESEARCH_PI_CODEX_EXECUTOR_MODEL?.trim() || "gpt-5.6-sol";
+export const DEFAULT_CODEX_EXECUTOR_REASONING_EFFORT = process.env.RESEARCH_PI_CODEX_EXECUTOR_EFFORT?.trim() || "max";
+export const DEFAULT_CODEX_MODEL = DEFAULT_CODEX_EXECUTOR_MODEL;
+export const DEFAULT_CODEX_REASONING_EFFORT = DEFAULT_CODEX_EXECUTOR_REASONING_EFFORT;
 
 const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled", "outcome_unknown"]);
 const RECONCILABLE_OUTCOMES = new Set(["completed", "failed", "cancelled"]);
@@ -55,6 +59,14 @@ export function validateModel(model) {
 export function validateReasoningEffort(effort) {
 	if (!EFFORTS.has(effort)) throw new Error(`Unsupported Codex reasoning effort: ${effort}`);
 	return effort;
+}
+
+export function defaultCodexModel(mode) {
+	return mode === "advisor" ? DEFAULT_CODEX_ADVISOR_MODEL : DEFAULT_CODEX_EXECUTOR_MODEL;
+}
+
+export function defaultCodexReasoningEffort(mode) {
+	return mode === "advisor" ? DEFAULT_CODEX_ADVISOR_REASONING_EFFORT : DEFAULT_CODEX_EXECUTOR_REASONING_EFFORT;
 }
 
 function codexJobOwnerError(message) {
@@ -360,8 +372,8 @@ function createCommandId() {
 export async function startCodexJob(options) {
 	if (typeof options.task !== "string" || !options.task.trim()) throw new Error("Codex task is required");
 	const mode = options.mode === "advisor" ? "advisor" : "executor";
-	const model = validateModel(options.model ?? DEFAULT_CODEX_MODEL);
-	const reasoningEffort = validateReasoningEffort(options.reasoningEffort ?? DEFAULT_CODEX_REASONING_EFFORT);
+	const model = validateModel(options.model ?? defaultCodexModel(mode));
+	const reasoningEffort = validateReasoningEffort(options.reasoningEffort ?? defaultCodexReasoningEffort(mode));
 	const identity = await resolveCodexWorkspaceIdentity(options.cwd);
 	const { cwd, workspaceRoot, workspaceKey, projectKey } = identity;
 	const mission = normalizeCodexMission(options.mission);

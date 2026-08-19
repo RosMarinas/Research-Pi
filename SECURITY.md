@@ -7,8 +7,9 @@ The source checkout is a fast-iteration development harness. Stable npm installs
 Never commit:
 
 - `.env` or any real API key;
+- local `.pi/config.json` or stable-install `credentials.env`; `config.json` is designed to be non-secret but remains a user-local preference file;
 - `.npmrc`, private keys or credential files;
-- `.pi/agent/*` except the reviewed, credential-free `.pi/agent/models.json` and `.pi/agent/settings.json` configurations;
+- `.pi/agent/*`, which contains generated Pi Core adapter settings, trust state, and traces for the current worktree;
 - Pi sessions or traces, which contain prompts, reasoning, tool arguments and outputs;
 - `.pi/memory/`, which is a rebuildable local search index derived from sensitive sessions and experiment records;
 - `.pi/research/*.jsonl`, which may contain absolute paths, run IDs and project-sensitive observations;

@@ -25,12 +25,23 @@ test("packaged launcher creates external config/state and runs the pinned core",
 		const credentials = join(config, "credentials.env");
 		assert.match(readFileSync(credentials, "utf8"), /DEEPSEEK_API_KEY=/);
 		assert.equal(statSync(credentials).mode & 0o777, 0o600);
+		const configPath = join(config, "config.json");
+		assert.equal(JSON.parse(readFileSync(configPath, "utf8")).activeProfile, "deepseek-pro");
+		assert.equal(statSync(configPath).mode & 0o777, 0o600);
+		assert.ok(statSync(join(config, "schemas", "research-pi-config.schema.json")).isFile());
 
 		const paths = spawnSync(process.execPath, [launcher, "paths"], { encoding: "utf8", env: environment });
 		assert.equal(paths.status, 0, paths.stderr);
 		const parsed = JSON.parse(paths.stdout);
 		assert.equal(parsed.stateRoot, state);
 		assert.ok(!parsed.stateRoot.startsWith(root));
+		assert.equal(parsed.configPath, configPath);
+
+		const switchProfile = spawnSync(process.execPath, [launcher, "config", "use", "deepseek-flash"], { encoding: "utf8", env: environment });
+		assert.equal(switchProfile.status, 0, switchProfile.stderr);
+		assert.match(switchProfile.stdout, /deepseek-flash/);
+		assert.equal(JSON.parse(readFileSync(configPath, "utf8")).activeProfile, "deepseek-flash");
+		assert.equal(JSON.parse(readFileSync(join(state, "agent", "settings.json"), "utf8")).defaultModel, "deepseek-v4-flash");
 
 		const version = spawnSync(process.execPath, [launcher, "--version"], { encoding: "utf8", env: environment });
 		assert.equal(version.status, 0, version.stderr);

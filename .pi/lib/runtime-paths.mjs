@@ -24,10 +24,16 @@ export function resolveResearchPiPaths(options) {
 	const development = environment.RESEARCH_PI_DEV_MODE === "1";
 	const configRoot = development ? harnessRoot : defaultConfigRoot(environment, platform);
 	const stateRoot = development ? join(harnessRoot, ".pi") : defaultStateRoot(environment, platform);
+	const configPath = environment.RESEARCH_PI_CONFIG_FILE
+		? resolve(environment.RESEARCH_PI_CONFIG_FILE)
+		: development
+			? join(harnessRoot, ".pi", "config.json")
+			: join(configRoot, "config.json");
 	return {
 		development,
 		harnessRoot,
 		configRoot,
+		configPath,
 		stateRoot,
 		credentialsPath: development ? join(harnessRoot, ".env") : join(configRoot, "credentials.env"),
 		agentDir: join(stateRoot, "agent"),

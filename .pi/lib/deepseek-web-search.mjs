@@ -1,5 +1,6 @@
 const MAX_ANSWER_CHARS = 16_000;
-const MAX_SOURCES = 12;
+const configuredMaxSources = Number(process.env.RESEARCH_PI_SEARCH_MAX_SOURCES);
+const MAX_SOURCES = Number.isInteger(configuredMaxSources) && configuredMaxSources > 0 ? configuredMaxSources : 12;
 
 function bounded(value, maxChars) {
 	const text = String(value ?? "").trim();

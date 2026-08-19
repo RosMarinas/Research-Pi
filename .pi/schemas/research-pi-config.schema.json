@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/RosMarinas/Research-Pi/research-pi-config.schema.json",
+  "title": "Research Pi Configuration",
+  "type": "object",
+  "required": ["version", "activeProfile", "profiles"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "const": 1 },
+    "activeProfile": { "type": "string", "minLength": 1 },
+    "profiles": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "required": ["provider", "model", "thinking"],
+        "properties": {
+          "label": { "type": "string" },
+          "description": { "type": "string" },
+          "provider": { "type": "string", "minLength": 1 },
+          "model": { "type": "string", "minLength": 1 },
+          "thinking": { "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"] }
+        },
+        "additionalProperties": false
+      }
+    },
+    "pi": {
+      "type": "object",
+      "properties": {
+        "settings": {
+          "type": "object",
+          "description": "Pi core settings, written to the generated internal settings.json adapter."
+        }
+      },
+      "additionalProperties": false
+    },
+    "codex": { "type": "object" },
+    "research": { "type": "object" },
+    "resources": { "type": "object" },
+    "ui": { "type": "object" },
+    "diagnostics": { "type": "object" },
+    "providerCompat": { "type": "object" }
+  },
+  "additionalProperties": false
+}

@@ -21,11 +21,16 @@ const forbidden = files.filter((path) =>
 	/(?:^|\/)(?:\.env|auth\.json|models-store\.json|sessions|traces|memory\.sqlite|codex\/jobs|capabilities)(?:$|\/)/.test(path),
 );
 assert.deepEqual(forbidden, [], `Sensitive runtime files would enter the npm package: ${forbidden.join(", ")}`);
+assert.ok(!files.includes(".pi/config.json"), "The user-local Research Pi config would enter the npm package");
+assert.ok(!files.some((path) => path.startsWith(".pi/agent/")), "Generated Pi agent state would enter the npm package");
 for (const required of [
 	"bin/pi.mjs",
 	".pi/APPEND_SYSTEM.md",
-	".pi/agent/models.json",
-	".pi/agent/settings.json",
+	".pi/config.defaults.json",
+	".pi/schemas/research-pi-config.schema.json",
+	".pi/extensions/research-config.ts",
+	".pi/lib/research-config.mjs",
+	"docs/configuration.md",
 	".pi/extensions/project-boundary.ts",
 	".pi/lib/project-boundary.mjs",
 ]) {

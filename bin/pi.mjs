@@ -1,14 +1,25 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { formatBoundaryDoctor, runBoundaryDoctor } from "../.pi/lib/boundary-doctor.mjs";
+import {
+	ensureResearchPiConfig,
+	researchPiConfigSummary,
+	researchPiEnvironment,
+	researchPiProfile,
+	resolveResearchPiConfig,
+	writeResearchPiAgentConfig,
+	writeResearchPiConfig,
+} from "../.pi/lib/research-config.mjs";
 import { resolveResearchPiPaths } from "../.pi/lib/runtime-paths.mjs";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const paths = resolveResearchPiPaths({ harnessRoot: packageRoot });
+const packageJson = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
+const coreVersion = String(packageJson.dependencies?.["@earendil-works/pi-coding-agent"] ?? "").replace(/^[^0-9]*/, "");
 
 function parseCredentialFile(path) {
 	if (!existsSync(path)) return {};
@@ -27,22 +38,21 @@ function parseCredentialFile(path) {
 	return result;
 }
 
-function ensureRuntimeLayout() {
+function ensureRuntimeLayout(config) {
 	for (const path of [paths.configRoot, paths.stateRoot, paths.agentDir, paths.sessionDir]) {
 		mkdirSync(path, { recursive: true, mode: 0o700 });
 	}
-	for (const name of ["models.json", "settings.json"]) {
-		const source = join(packageRoot, ".pi", "agent", name);
-		const destination = join(paths.agentDir, name);
-		if (resolve(source) !== resolve(destination)) {
-			copyFileSync(source, destination);
-			chmodSync(destination, 0o600);
-		}
-	}
+	writeResearchPiAgentConfig(paths.agentDir, config, { coreVersion });
+}
+
+function prepareConfig() {
+	const config = ensureResearchPiConfig(paths.configPath);
+	ensureRuntimeLayout(config);
+	return config;
 }
 
 function setup() {
-	ensureRuntimeLayout();
+	prepareConfig();
 	if (!existsSync(paths.credentialsPath)) {
 		mkdirSync(dirname(paths.credentialsPath), { recursive: true, mode: 0o700 });
 		writeFileSync(paths.credentialsPath, "# Research Pi credentials; never commit this file.\nDEEPSEEK_API_KEY=\n", {
@@ -54,6 +64,7 @@ function setup() {
 		process.stdout.write(`Credentials file already exists: ${paths.credentialsPath}\n`);
 	}
 	process.stdout.write(`State directory: ${paths.stateRoot}\n`);
+	process.stdout.write(`Config file: ${paths.configPath}\n`);
 }
 
 function loadConfigurationEnvironment() {
@@ -63,7 +74,7 @@ function loadConfigurationEnvironment() {
 	}
 }
 
-function takeWorkspace(argv) {
+function takeResearchOptions(argv, config) {
 	const args = [...argv];
 	let workspace = process.env.PI_RESEARCH_WORKSPACE ?? process.cwd();
 	const index = args.indexOf("--workspace");
@@ -72,14 +83,67 @@ function takeWorkspace(argv) {
 		workspace = args[index + 1];
 		args.splice(index, 2);
 	}
-	return { workspace: resolve(workspace), args };
+	let effectiveConfig = config;
+	const profileIndex = args.indexOf("--profile");
+	if (profileIndex >= 0) {
+		if (!args[profileIndex + 1]) throw new Error("Usage: pi --profile <name> [pi options...]");
+		const profile = args[profileIndex + 1];
+		if (!config.profiles[profile]) throw new Error(`Unknown Research Pi model profile: ${profile}`);
+		effectiveConfig = resolveResearchPiConfig({ ...config, activeProfile: profile });
+		args.splice(profileIndex, 2);
+	}
+	return { workspace: resolve(workspace), args, config: effectiveConfig };
+}
+
+function applyConfigurationEnvironment(config) {
+	for (const [name, value] of Object.entries(researchPiEnvironment(config))) {
+		if (process.env[name] === undefined) process.env[name] = value;
+	}
+	process.env.RESEARCH_PI_CONFIG_FILE = paths.configPath;
+}
+
+function expandUserPath(path) {
+	if (path === "~") return homedir();
+	if (path.startsWith("~/")) return join(homedir(), path.slice(2));
+	return resolve(path);
+}
+
+function configCommand(argv) {
+	const config = prepareConfig();
+	const action = argv[0] ?? "show";
+	if (action === "path") {
+		process.stdout.write(`${paths.configPath}\n`);
+		return;
+	}
+	if (action === "show") {
+		process.stdout.write(`${researchPiConfigSummary(config, paths.configPath)}\n\n${JSON.stringify(config, null, 2)}\n`);
+		return;
+	}
+	if (action === "list") {
+		for (const name of Object.keys(config.profiles)) {
+			const profile = researchPiProfile(config, name);
+			process.stdout.write(`${name === config.activeProfile ? "*" : " "} ${name}\t${profile.provider}/${profile.model}\t${profile.thinking}\n`);
+		}
+		return;
+	}
+	if (action === "use") {
+		const name = argv[1];
+		if (!name || !config.profiles[name]) throw new Error(`Usage: pi config use <${Object.keys(config.profiles).join("|")}>`);
+		const next = writeResearchPiConfig(paths.configPath, { ...config, activeProfile: name });
+		writeResearchPiAgentConfig(paths.agentDir, next, { coreVersion });
+		process.stdout.write(`${researchPiConfigSummary(next, paths.configPath)}\n`);
+		return;
+	}
+	throw new Error("Usage: pi config [show|path|list|use <profile>]");
 }
 
 async function spawnCore(argv) {
-	ensureRuntimeLayout();
-	const { workspace, args: userArgs } = takeWorkspace(argv);
+	const baseConfig = prepareConfig();
+	const { workspace, args: userArgs, config } = takeResearchOptions(argv, baseConfig);
+	writeResearchPiAgentConfig(paths.agentDir, config, { coreVersion });
 	if (!existsSync(workspace)) throw new Error(`Research workspace does not exist: ${workspace}`);
 	loadConfigurationEnvironment();
+	applyConfigurationEnvironment(config);
 	const informational = userArgs.some((arg) => ["--version", "--help", "-h"].includes(arg));
 	if (!informational && !process.env.DEEPSEEK_API_KEY?.trim()) {
 		throw new Error(`DEEPSEEK_API_KEY is missing. Run 'pi setup', then edit ${paths.credentialsPath}.`);
@@ -93,22 +157,22 @@ async function spawnCore(argv) {
 	const coreCli = join(packageRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
 	if (!existsSync(coreCli)) throw new Error(`Pinned Pi core is missing: ${coreCli}`);
 	const args = ["--no-skills", "--no-extensions"];
-	for (const skill of [
-		join(homedir(), ".codex", "skills", "remote-workspace"),
-		join(homedir(), ".agents", "skills", "cognitive-knowledge-network"),
-	]) {
+	for (const configuredPath of config.resources.skills) {
+		const skill = expandUserPath(configuredPath);
 		if (existsSync(join(skill, "SKILL.md"))) args.push("--skill", skill);
 	}
+	const profile = researchPiProfile(config);
 	args.push(
-		"--provider", "deepseek",
-		"--model", "deepseek-v4-pro",
-		"--thinking", "max",
+		"--provider", profile.provider,
+		"--model", profile.model,
+		"--thinking", profile.thinking,
 		"--session-dir", paths.sessionDir,
 		"--append-system-prompt", join(packageRoot, ".pi", "APPEND_SYSTEM.md"),
 	);
 	for (const name of [
 		"project-boundary.ts",
 		"tool-activity.ts",
+		"research-config.ts",
 		"research-mode.ts",
 		"record-experiment.ts",
 		"research-transition.ts",
@@ -145,14 +209,16 @@ async function spawnCore(argv) {
 async function main() {
 	const argv = process.argv.slice(2);
 	if (argv[0] === "setup") return setup();
+	if (argv[0] === "config") return configCommand(argv.slice(1));
 	if (argv[0] === "paths") {
 		process.stdout.write(`${JSON.stringify(paths, null, 2)}\n`);
 		return;
 	}
 	if (argv[0] === "doctor") {
-		ensureRuntimeLayout();
+		const config = prepareConfig();
 		loadConfigurationEnvironment();
-		const { workspace } = takeWorkspace(argv.slice(1));
+		applyConfigurationEnvironment(config);
+		const { workspace } = takeResearchOptions(argv.slice(1), config);
 		const result = await runBoundaryDoctor({ cwd: workspace, environment: process.env });
 		process.stdout.write(`${formatBoundaryDoctor(result)}\n`);
 		if (!result.ok) process.exitCode = 1;

@@ -1,0 +1,87 @@
+{
+  "$schema": "./schemas/research-pi-config.schema.json",
+  "version": 1,
+  "activeProfile": "deepseek-pro",
+  "profiles": {
+    "deepseek-pro": {
+      "label": "DeepSeek V4 Pro",
+      "description": "Best quality for research leadership.",
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "thinking": "max"
+    },
+    "deepseek-flash": {
+      "label": "DeepSeek V4 Flash",
+      "description": "Lower latency for bounded work.",
+      "provider": "deepseek",
+      "model": "deepseek-v4-flash",
+      "thinking": "max"
+    }
+  },
+  "pi": {
+    "settings": {
+      "theme": "dark",
+      "tuiMode": "regular",
+      "retry": {
+        "enabled": true,
+        "maxRetries": 2,
+        "provider": {
+          "maxRetries": 0,
+          "maxRetryDelayMs": 30000
+        }
+      },
+      "compaction": {
+        "enabled": true,
+        "reserveTokens": 16384,
+        "keepRecentTokens": 32768
+      }
+    }
+  },
+  "codex": {
+    "advisor": {
+      "model": "gpt-5.6-sol",
+      "reasoningEffort": "max"
+    },
+    "executor": {
+      "model": "gpt-5.6-sol",
+      "reasoningEffort": "max"
+    }
+  },
+  "research": {
+    "compaction": {
+      "softTokens": 278528,
+      "hardTokens": 393216,
+      "recentTailTokens": [32768, 40960, 49152]
+    },
+    "search": {
+      "model": "deepseek-v4-flash",
+      "thinkingBudgetTokens": 1024,
+      "maxSources": 12,
+      "defaultMaxUses": 3
+    }
+  },
+  "resources": {
+    "skills": [
+      "~/.codex/skills/remote-workspace",
+      "~/.agents/skills/cognitive-knowledge-network"
+    ]
+  },
+  "ui": {
+    "showProfileStatus": true,
+    "configPanelRows": 8
+  },
+  "diagnostics": {
+    "trace": false,
+    "codexSqliteLogs": false
+  },
+  "providerCompat": {
+    "deepseek": {
+      "deepseek-v4-flash": {
+        "maxTokensField": "max_tokens"
+      },
+      "deepseek-v4-pro": {
+        "maxTokensField": "max_tokens"
+      }
+    }
+  }
+}

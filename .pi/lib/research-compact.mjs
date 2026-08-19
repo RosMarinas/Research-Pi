@@ -3,9 +3,23 @@ import { createHash } from "node:crypto";
 export const RESEARCH_COMPACTION_KIND = "research-pi-compaction";
 export const RESEARCH_COMPACTION_VERSION = 1;
 export const RESEARCH_COMPACTION_POLICY_VERSION = 1;
-export const RESEARCH_SOFT_COMPACT_TOKENS = 272 * 1024;
-export const RESEARCH_HARD_COMPACT_TOKENS = 384 * 1024;
-export const RESEARCH_RECENT_TAIL_SCHEDULE = Object.freeze([32 * 1024, 40 * 1024, 48 * 1024]);
+
+function configuredPositiveInteger(name, fallback) {
+	const value = Number(process.env[name]);
+	return Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+function configuredTailSchedule() {
+	const values = String(process.env.RESEARCH_PI_COMPACT_RECENT_TAIL_TOKENS ?? "")
+		.split(",")
+		.map((value) => Number(value.trim()))
+		.filter((value) => Number.isInteger(value) && value > 0);
+	return values.length ? values : [32 * 1024, 40 * 1024, 48 * 1024];
+}
+
+export const RESEARCH_SOFT_COMPACT_TOKENS = configuredPositiveInteger("RESEARCH_PI_COMPACT_SOFT_TOKENS", 272 * 1024);
+export const RESEARCH_HARD_COMPACT_TOKENS = configuredPositiveInteger("RESEARCH_PI_COMPACT_HARD_TOKENS", 384 * 1024);
+export const RESEARCH_RECENT_TAIL_SCHEDULE = Object.freeze(configuredTailSchedule());
 
 const MAX_HYPOTHESES = 24;
 const MAX_OBSERVATIONS = 32;
