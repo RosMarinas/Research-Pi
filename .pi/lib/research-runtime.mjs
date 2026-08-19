@@ -19,6 +19,7 @@ const ACTOR_ID_PATTERN = /^[a-z][a-z0-9._:-]{0,191}$/;
 const MESSAGE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/;
 const MESSAGE_TYPES = new Set(["ask", "reply", "notify", "result", "steer"]);
 const MESSAGE_STATES = new Set(["delivered", "consumed", "superseded"]);
+const ROTATION_STATES = new Set(["completed", "cancelled"]);
 const MAX_MESSAGE_LENGTH = 16_000;
 const LEDGER_LOCK_STALE_MS = 30_000;
 const LEDGER_LOCK_WAIT_MS = 10;
@@ -202,6 +203,7 @@ export async function readRuntimeSnapshot(runtime) {
 	const actions = new Map();
 	const evidence = new Map();
 	const transitions = [];
+	const rotations = new Map();
 	const rejectedStates = [];
 	let projectState = null;
 	let revision = 0;
@@ -255,8 +257,22 @@ export async function readRuntimeSnapshot(runtime) {
 				evidence.set(data.id, { ...current, ...data, recordedAt: event.at, revision });
 				break;
 			}
+			case "session.rotation.requested":
+				rotations.set(data.id, { ...data, status: "pending", requestedAt: event.at });
+				break;
+			case "session.rotation.completed":
+			case "session.rotation.cancelled": {
+				const id = data.rotationId;
+				const current = rotations.get(id);
+				if (current) {
+					const status = event.type.slice("session.rotation.".length);
+					rotations.set(id, { ...current, ...data, id, status, [`${status}At`]: event.at });
+				}
+				break;
+			}
 		}
 	}
+	const rotationList = [...rotations.values()];
 	return {
 		projectKey: runtime.projectKey,
 		workspaceKey: runtime.workspaceKey,
@@ -269,6 +285,8 @@ export async function readRuntimeSnapshot(runtime) {
 		transitions,
 		activeTransition: transitions.at(-1) ?? null,
 		rejectedStates,
+		rotations: rotationList,
+		pendingRotations: rotationList.filter((rotation) => rotation.status === "pending"),
 		projectState,
 		revision,
 	};
@@ -434,6 +452,57 @@ export function pendingRuntimeMessages(snapshot, options = {}) {
 		if (options.from && message.from !== options.from) return false;
 		return true;
 	});
+}
+
+export function unconsumedRuntimeMessages(snapshot, options = {}) {
+	return snapshot.messages.filter((message) => {
+		if (message.status !== "queued" && message.status !== "delivered") return false;
+		if (options.to && message.to !== options.to) return false;
+		if (options.from && message.from !== options.from) return false;
+		if (options.forSessionId && message.status === "delivered" && message.sessionId === options.forSessionId) return false;
+		return true;
+	});
+}
+
+export async function requestRuntimeSessionRotation(runtime, input) {
+	const fromSessionId = boundedRuntimeText(input.fromSessionId, 200);
+	if (!fromSessionId) throw new Error("Runtime Session rotation requires a source Session id");
+	const existing = (await readRuntimeSnapshot(runtime)).pendingRotations
+		.find((rotation) => rotation.fromSessionId === fromSessionId);
+	if (existing) return existing;
+	const id = validateMessageId(input.id ?? createEventId("rotation"));
+	const data = {
+		id,
+		fromSessionId,
+		fromSessionFile: boundedRuntimeText(input.fromSessionFile, 4000) || null,
+		projectRevision: Number.isInteger(input.projectRevision) ? input.projectRevision : 0,
+		stateRevision: Number.isInteger(input.stateRevision) ? input.stateRevision : 0,
+		projectViewFingerprint: boundedRuntimeText(input.projectViewFingerprint, 160) || null,
+		projectViewFreshness: boundedRuntimeText(input.projectViewFreshness, 80) || null,
+		reason: boundedRuntimeText(input.reason, 1200) || "manual Runtime rotation",
+		activeActionIds: Array.isArray(input.activeActionIds) ? input.activeActionIds.map(String).slice(0, 32) : [],
+		openMessageIds: Array.isArray(input.openMessageIds) ? input.openMessageIds.map(String).slice(0, 32) : [],
+	};
+	await appendRuntimeEvent(runtime, "session.rotation.requested", data, { id: `session-rotation:${id}:requested` });
+	return { ...data, status: "pending" };
+}
+
+export async function settleRuntimeSessionRotation(runtime, rotationId, status, details = {}) {
+	validateMessageId(rotationId);
+	if (!ROTATION_STATES.has(status)) throw new Error(`Unsupported Runtime Session rotation state: ${status}`);
+	const data = {
+		rotationId,
+		toSessionId: details.toSessionId ? String(details.toSessionId) : null,
+		toSessionFile: boundedRuntimeText(details.toSessionFile, 4000) || null,
+		projectRevision: Number.isInteger(details.projectRevision) ? details.projectRevision : null,
+		projectViewFingerprint: boundedRuntimeText(details.projectViewFingerprint, 160) || null,
+		projectViewFreshness: boundedRuntimeText(details.projectViewFreshness, 80) || null,
+		reason: boundedRuntimeText(details.reason, 1200) || null,
+	};
+	await appendRuntimeEvent(runtime, `session.rotation.${status}`, data, {
+		id: `session-rotation:${rotationId}:${status}`,
+	});
+	return { rotationId, status, ...data };
 }
 
 export async function upsertRuntimeAction(runtime, action) {

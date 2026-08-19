@@ -1,6 +1,6 @@
 # Research Runtime：Codex 职责、状态与真实项目测试指南
 
-状态：Milestone 2 已实测；ProjectView v0、outcome recovery 与 lifecycle observe-only 已实现
+状态：Milestone 2 已实测；ProjectView、outcome recovery、lifecycle recommendation 与人工 Session rotation 已实现
 更新：2026-08-19
 适用版本：包含 `research-runtime.ts` 的 Research Pi 开发版
 
@@ -145,12 +145,17 @@ sequenceDiagram
 
 ### 4.4 Pi Session 轮换
 
-1. Session A 启动 Codex Action；
-2. Session B 在同一精确 workspace 启动或收到用户输入；
-3. Session B 成为 Research Leader Actor 的最新 attachment；
-4. 新产生的 ask/result 投递给 B；A 的后台 monitor 即使观察到终态也不会消费；
-5. B 可以管理 Actor-owned job 或恢复 thread；
-6. 已 consumed 的消息不会因 A 再次获得 attachment 而重复注入。
+推荐从 Session A 执行 `/runtime rotate [reason]`，而不是把原生 `/new` 当成可审计交接：
+
+1. Runtime 检查 Project State 可恢复、Project revision 已综合、没有 `outcome_unknown`，并确认未结 Action 有外部 job/run 身份；
+2. 先写入 `session.rotation.requested`，记录源 Session、ProjectView fingerprint、未结 Action 和未消费消息 ID；
+3. Pi 创建空白 Session B，只记录 parent Session provenance，不复制 A 的 transcript；
+4. B attach 到同一个 Research Leader Actor，重新生成最新 ProjectView；
+5. Runtime 写入 `session.rotation.completed` 和 B 的 ProjectView receipt；
+6. queued 或已经 delivered 但尚未 consumed 的消息重投到 B；已 consumed 的消息不会重复注入；
+7. B 可以继续管理原 Actor-owned job 或恢复 Codex thread。
+
+用户仍可使用原生 `/new`。它同样会生成 ProjectView，但绕过 readiness 与 rotation request/completion 审计，因此不用于验证“Project 是否足以接管 Session”这一 Runtime 性质。Research Pi 永远不会自动执行轮换。
 
 这里没有把 A 的完整 transcript 注入 B。最近一次结构化 research compact 会提交带 Project revision 的 state；B 在模型调用前得到确定性的限长 ProjectView，优先合并 active transition、freshness、state provenance、project evidence 索引、Git 摘要、未结 Action 和 mailbox ID。它不包含完整旧 transcript，重要证据仍须通过引用或 memory read 精确读取。
 
@@ -183,6 +188,7 @@ exact workspaceKey/root               文件与副作用边界，不可跨 workt
 /runtime health
 /runtime recommend
 /runtime view
+/runtime rotate [reason]
 ```
 
 Runtime mailbox 会保存消息正文，因此不要在这些命令中输入 API key、私钥或其他凭据。
@@ -205,6 +211,9 @@ node --test tests/research-runtime.test.mjs
 - default steer 不 abort；
 - `--preempt` 才 abort；
 - consumed transient message 不再进入后续 context。
+- rotation readiness 会阻止缺失/陈旧 Project State、`outcome_unknown` 和无外部身份的 active Action；
+- rotation request/completion 可从 Project ledger 重建；
+- delivered 但尚未 consumed 的 Leader 消息可在新 Session 重投。
 
 ### Layer 2：Fake Codex App Server
 
@@ -225,7 +234,7 @@ node --test tests/codex-jobs.test.mjs
 - compaction project state 的幂等提交、active-branch session migration 和 ProjectView 插入位置；
 - transition/evidence 使旧 state stale、superseding transition 停止旧假设回流，以及陈旧 compact 不覆盖新 revision；
 - 较新的 Runtime Action 在没有明确 transition 时只触发 unconfirmed 警告；
-- lifecycle health 只观察/建议，不自动 compact、rotate 或 reconcile。
+- lifecycle health 只观察/建议，不自动 compact、rotate 或 reconcile；只有显式 `/runtime rotate` 才创建新 Session。
 
 当前自动测试使用 Fake App Server 和本地 ledger，不调用真实模型/API；实际科研判断质量仍需要在真实 Project 中持续测试。
 
@@ -344,6 +353,34 @@ Action 完成后，在当前 attached Session 输入：
 
 通过标准：若 interrupt 在可靠 turn 终态前完成，旧 Action cancelled，新 Action 使用同一 Actor/thread 继续；若 worker 被强杀且外部效果无法确认，应出现 `outcome_unknown`，不得自动重跑。真实测试只在你愿意检查并 reconcile 外部状态的任务上制造 crash。
 
+### 8.7 F：验证 Runtime 管理的 Session 轮换
+
+选择一个已经做过至少一次有效 research compact、ProjectView 能代表当前方向的真实任务。先运行：
+
+```text
+/runtime health
+/runtime view
+```
+
+通过前置条件：health 显示 `Rotation: ready for /runtime rotate`；ProjectView 的 Project revision 与 compacted state revision 一致。`unconfirmed`（例如 Git 或可恢复 Action 较新）可以轮换，但 `missing`、`transitioning`、`stale`、memory lag 或 `outcome_unknown` 会阻止轮换。不要为了通过门槛伪造 compact；先让 Project State 真正表达当前研究方向。
+
+执行：
+
+```text
+/runtime rotate handoff smoke after current research compact
+```
+
+预期：
+
+- TUI 切到一个没有旧 transcript 的新 Session；
+- 出现 rotation completed 与 ProjectView revision/freshness 提示；
+- `/runtime view` 仍能看到相同 Project、当前研究方向、关键约束、evidence 索引和未结 Action；
+- `/actors` 仍显示原 Codex Actor/Action，而不是创建副本；
+- `/inbox all` 中已 consumed 消息不重现，delivered 但未 consumed 的消息可以重新投递；
+- 在新 Session 提出下一条科研问题时，模型依据 ProjectView 接手，但需要精确证据时仍使用 memory read 或原 artifact，而不是把摘要当证据。
+
+若 Pi 的 session replacement 被其他 extension 取消，rotation 会落为 `cancelled`，当前 Session 保持 attached。若切换过程中进程退出，request 仍留在 Project ledger；从原 Session 再次执行 `/runtime rotate` 会复用该 pending request，下一次成功的新 Session 会完成它。
+
 ## 9. 真实测试判定表
 
 | 检查项 | 通过 | 失败信号 |
@@ -356,6 +393,7 @@ Action 完成后，在当前 attached Session 输入：
 | preempt | 旧 Action cancelled，新 Action 续接 thread | 旧 job 被改回 running 或 thread 丢失 |
 | unknown outcome | 新 executor 被阻止；检查外部状态后 reconcile | 自动当作 failed 并重复执行 |
 | ProjectView | 新 Session 可见 compact provenance、有效性标签和未结 Action | 注入整段旧 transcript 或把 completed 当证据 |
+| Runtime rotation | request/completed 有审计，新 Session 有相同 ProjectView revision，旧 transcript 不复制 | 无 readiness 仍切换、pending 消息丢失或 Action 身份改变 |
 | 单次投递 | result 只由当前 attached Leader 消费 | A/B 同时触发相同 result turn |
 | Context 清理 | consumed message 后续不再注入 | 每轮重复出现旧 steer/result |
 | 科研边界 | completion 不自动宣称假设成立 | job success 被当成科学结论 |

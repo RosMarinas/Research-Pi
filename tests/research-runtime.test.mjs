@@ -8,11 +8,13 @@ import researchRuntimeExtension, {
 	formatRuntimeStatus,
 	runtimeHealth,
 	runtimeActorSummary,
+	runtimeRotationReadiness,
 } from "../.pi/extensions/research-runtime.ts";
 import {
 	RESEARCH_LEADER_ACTOR_ID,
 	RUNTIME_MESSAGE_KIND,
 	attachRuntimeActor,
+	appendRuntimeEventAtRevision,
 	codexActorId,
 	createRuntimeMessage,
 	detachRuntimeActor,
@@ -20,9 +22,13 @@ import {
 	pendingRuntimeMessages,
 	readRuntimeSnapshot,
 	recordCodexRuntimeEvent,
+	requestRuntimeSessionRotation,
+	resolveResearchRuntime,
 	resolveRuntimeActor,
 	runtimeActorTarget,
 	settleRuntimeMessage,
+	settleRuntimeSessionRotation,
+	unconsumedRuntimeMessages,
 } from "../.pi/lib/research-runtime.mjs";
 
 test("Runtime status reports live activation instead of historical Actor count", () => {
@@ -86,6 +92,32 @@ test("lifecycle health exposes Project evidence that has not reached structured 
 	assert.match(health.reason, /newer than structured state/);
 });
 
+test("Session rotation readiness requires recoverable Project and Action state", () => {
+	const ready = runtimeRotationReadiness({
+		projectState: { revision: 3, state: {}, source: {} },
+		revision: 3,
+		actions: [{ id: "job-a", status: "running", externalId: "codex-a" }],
+		messages: [{ id: "message-a", status: "delivered", to: RESEARCH_LEADER_ACTOR_ID }],
+	});
+	assert.equal(ready.ready, true);
+	assert.deepEqual(ready.activeActionIds, ["job-a"]);
+	assert.deepEqual(ready.openMessageIds, ["message-a"]);
+
+	const blocked = runtimeRotationReadiness({
+		projectState: { revision: 2, state: {}, source: {} },
+		revision: 3,
+		actions: [
+			{ id: "unknown", status: "outcome_unknown", externalId: "codex-unknown" },
+			{ id: "untracked", status: "running", externalId: null },
+		],
+		messages: [],
+	});
+	assert.equal(blocked.ready, false);
+	assert.match(blocked.blockers.join(" "), /have not reached structured state/);
+	assert.match(blocked.blockers.join(" "), /unknown/);
+	assert.match(blocked.blockers.join(" "), /external identity/);
+});
+
 test("Project Runtime keeps Actor identity across session attachment and message settlement", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-"));
 	try {
@@ -114,6 +146,60 @@ test("Project Runtime keeps Actor identity across session attachment and message
 		snapshot = await readRuntimeSnapshot(runtime);
 		assert.equal(snapshot.messages.find((candidate) => candidate.id === message.id)?.status, "consumed");
 		assert.equal(pendingRuntimeMessages(snapshot).length, 0);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("delivered but unconsumed messages remain recoverable across Leader Session rotation", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-redelivery-"));
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace, { recursive: true });
+		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a" }, { runtimeRoot: join(root, "runtime") });
+		const message = await createRuntimeMessage(runtime, {
+			type: "result",
+			from: "user",
+			to: RESEARCH_LEADER_ACTOR_ID,
+			body: "Result awaiting a settled Leader turn",
+		});
+		await settleRuntimeMessage(runtime, message.id, "delivered", { sessionId: "session-a" });
+		const snapshot = await readRuntimeSnapshot(runtime);
+		assert.equal(pendingRuntimeMessages(snapshot).length, 0);
+		assert.deepEqual(unconsumedRuntimeMessages(snapshot).map((item) => item.id), [message.id]);
+		assert.equal(unconsumedRuntimeMessages(snapshot, { forSessionId: "session-a" }).length, 0);
+		assert.deepEqual(unconsumedRuntimeMessages(snapshot, { forSessionId: "session-b" }).map((item) => item.id), [message.id]);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("Runtime Session rotation is durably requested and settled", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-rotation-ledger-"));
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace, { recursive: true });
+		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a" }, { runtimeRoot: join(root, "runtime") });
+		const rotation = await requestRuntimeSessionRotation(runtime, {
+			fromSessionId: "session-a",
+			fromSessionFile: join(root, "session-a.jsonl"),
+			projectRevision: 4,
+			stateRevision: 4,
+			projectViewFingerprint: "view-a",
+			projectViewFreshness: "current",
+		});
+		assert.equal((await readRuntimeSnapshot(runtime)).pendingRotations[0].id, rotation.id);
+		await settleRuntimeSessionRotation(runtime, rotation.id, "completed", {
+			toSessionId: "session-b",
+			toSessionFile: join(root, "session-b.jsonl"),
+			projectRevision: 4,
+			projectViewFingerprint: "view-b",
+			projectViewFreshness: "current",
+		});
+		const snapshot = await readRuntimeSnapshot(runtime);
+		assert.equal(snapshot.pendingRotations.length, 0);
+		assert.equal(snapshot.rotations[0].status, "completed");
+		assert.equal(snapshot.rotations[0].toSessionId, "session-b");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -221,6 +307,87 @@ test("Runtime steer is non-preemptive by default and leaves context after one se
 		await commands.get("steer").handler("--preempt @research-leader urgent correction", ctx);
 		assert.equal(aborts, 1);
 		assert.equal(sent.at(-1).options.deliverAs, "followUp");
+	} finally {
+		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
+		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("/runtime rotate creates a fresh Session and records a ProjectView receipt", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-rotate-command-"));
+	const previousRoot = process.env.RESEARCH_PI_RUNTIME_DIR;
+	process.env.RESEARCH_PI_RUNTIME_DIR = join(root, "runtime");
+	try {
+		const workspace = join(root, "workspace");
+		const oldSessionFile = join(root, "session-old.jsonl");
+		const newSessionFile = join(root, "session-new.jsonl");
+		mkdirSync(workspace, { recursive: true });
+		const handlers = new Map();
+		const commands = new Map();
+		const notices = [];
+		const sent = [];
+		let replacementOptions;
+		const pi = {
+			on(name, handler) { handlers.set(name, handler); },
+			registerCommand(name, command) { commands.set(name, command); },
+			registerMessageRenderer() {},
+			registerEntryRenderer() {},
+			sendMessage(message, options) { sent.push({ message, options }); },
+			appendEntry() {},
+		};
+		researchRuntimeExtension(pi);
+		const baseContext = (sessionId, sessionFile) => ({
+			cwd: workspace,
+			hasUI: true,
+			ui: { setStatus() {}, notify(message) { notices.push(message); } },
+			sessionManager: {
+				getSessionId: () => sessionId,
+				getSessionFile: () => sessionFile,
+				getLeafId: () => `leaf-${sessionId}`,
+				getBranch: () => [],
+			},
+			getContextUsage: () => ({ tokens: 40_000, contextWindow: 384_000, percent: 10.4 }),
+			isIdle: () => true,
+			abort() {},
+			waitForIdle: async () => {},
+			newSession: async (options) => {
+				replacementOptions = options;
+				return { cancelled: false };
+			},
+		});
+		const oldContext = baseContext("session-old", oldSessionFile);
+		await handlers.get("session_start")({ type: "session_start", reason: "startup" }, oldContext);
+		const runtime = await resolveResearchRuntime(workspace);
+		await appendRuntimeEventAtRevision(runtime, "project.state.committed", {
+			state: { researchIntent: "test durable Session rotation" },
+			source: { sessionId: "session-old", entryId: "compact-old" },
+		}, 0, { id: "project-state:rotation-test" });
+		const openMessage = await createRuntimeMessage(runtime, {
+			type: "notify",
+			from: "user",
+			to: RESEARCH_LEADER_ACTOR_ID,
+			body: "carry this unconsumed message into the replacement Session",
+		});
+		await settleRuntimeMessage(runtime, openMessage.id, "delivered", { sessionId: "session-old" });
+
+		await commands.get("runtime").handler("rotate switch after compact", oldContext);
+		assert.equal(replacementOptions.parentSession, oldSessionFile);
+		let snapshot = await readRuntimeSnapshot(runtime);
+		assert.equal(snapshot.pendingRotations.length, 1);
+		assert.equal(snapshot.pendingRotations[0].reason, "switch after compact");
+
+		await handlers.get("session_shutdown")({ type: "session_shutdown" }, oldContext);
+		const newContext = baseContext("session-new", newSessionFile);
+		await handlers.get("session_start")({ type: "session_start", reason: "new", previousSessionFile: oldSessionFile }, newContext);
+		snapshot = await readRuntimeSnapshot(runtime);
+		assert.equal(snapshot.pendingRotations.length, 0);
+		assert.equal(snapshot.rotations[0].status, "completed");
+		assert.equal(snapshot.rotations[0].toSessionId, "session-new");
+		assert.match(snapshot.rotations[0].projectViewFingerprint, /^[a-f0-9]{20}$/);
+		assert.equal(sent.length, 1);
+		assert.equal(sent[0].message.details.messageId, openMessage.id);
+		assert.ok(notices.some((message) => /ProjectView r1 \(current\) is ready/.test(message)));
 	} finally {
 		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
 		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;

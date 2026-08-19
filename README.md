@@ -246,13 +246,13 @@ Codex job、请求账本、精简 JSONL 审计事件和委派 prompt 保存在�
 当前只注册 `user`、`research-leader` 和 Codex mission Actors，不引入自动 Scheduler 或固定科研流程：
 
 - `/actors` 或 `/actors active`：只查看当前 running/starting/cancelling/waiting 的 project Actors；`/actors all` 才显示历史注册和 suspended Actors。底部 Runtime 状态同样只显示 active/waiting/idle，不再把历史注册总数冒充活跃数；
-- `/inbox`：查看尚未投递的 durable 消息；`/inbox all` 查看最近状态；
+- `/inbox`：查看 queued 或 delivered-but-unconsumed 的 durable 消息；`/inbox all` 查看最近 settled 状态；
 - `/message <ask|reply|notify|result> @actor <内容>`：向 Actor 发送有语义类型的消息；
 - `/steer @actor <修正>`：默认不 abort，投递到下一安全模型边界；
 - `/steer --preempt @actor <修正>`：只有继续运行存在实际代价时才中断并恢复目标 Actor。
-- `/runtime health`：查看 context、compaction、Project memory lag、active/waiting 与 `outcome_unknown`；`/runtime recommend` 只给出 continue/continue-then-compact/compact/consider-rotation/reconcile 建议，不自动轮换；`/runtime view` 显示当前注入的 ProjectView。
+- `/runtime health`：查看 context、compaction、Project memory lag、active/waiting、`outcome_unknown` 与 Session rotation readiness；`/runtime recommend` 只给出 continue/continue-then-compact/compact/consider-rotation/reconcile 建议，不自动轮换；`/runtime view` 显示当前注入的 ProjectView；`/runtime rotate [reason]` 在显式请求后写入 durable handoff、创建空白 Session，并在新 Session 记录 ProjectView receipt。它不会复制旧 transcript，也不会自动触发。
 
-Runtime message 是瞬时控制/通信，不自动成为长期科研判断。每次结构化 research compact 会把 `researchState + provenance + basedOnProjectRevision` 提交到 project ledger；如果压缩期间出现了新 transition/evidence，陈旧 compact 只保留在原 Session，不能覆盖 Project State。新 Session 得到一个限长、不可见的 ProjectView，优先展示 active research track、memory freshness、当前决策、关键约束与未结 Action；实验只显示短索引，详情按需检索。较新的 transition/evidence 会把旧 state 标为 stale；较新的 Action/Git 只标为 unconfirmed，不会由文件变化自动推断科研结论。ProjectView 不复制完整旧 transcript，也不会把 Codex completed 自动提升为科学结论。
+Runtime message 是瞬时控制/通信，不自动成为长期科研判断。每次结构化 research compact 会把 `researchState + provenance + basedOnProjectRevision` 提交到 project ledger；如果压缩期间出现了新 transition/evidence，陈旧 compact 只保留在原 Session，不能覆盖 Project State。新 Session 得到一个限长、不可见的 ProjectView，优先展示 active research track、memory freshness、当前决策、关键约束与未结 Action；实验只显示短索引，详情按需检索。较新的 transition/evidence 会把旧 state 标为 stale；较新的 Action/Git 只标为 unconfirmed，不会由文件变化自动推断科研结论。ProjectView 不复制完整旧 transcript，也不会把 Codex completed 自动提升为科学结论。Runtime rotation 会重投 queued 或 delivered-but-unconsumed 的 Leader 消息；已经 consumed 的消息仍被过滤。
 
 职责、状态机、通信路径以及双 Session 真实项目 smoke 的逐项判定见 [Research Runtime 测试指南](docs/research-runtime-test-guide.md)。
 

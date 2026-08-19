@@ -137,7 +137,8 @@ Pi 现在提供这些低摩擦研究工具：
 - `/watch`：按需打开 Codex 客观执行面板；左右切换 Action，Tab 或上下切换 overview/activity/agents，`q`/`Esc` 关闭。观察内容不进入模型上下文。
 - `/actors`（等同 `/actors active`）、`/inbox`：查看当前 active/waiting 的 project Runtime Actors 与 durable mailbox；`/actors all` 查看历史注册和 suspended Actors。
 - `/message`、`/steer`：面向 Actor 通信；steer 默认等待下一安全模型边界，只有 `--preempt` 才主动中断。
-- `/runtime health|recommend|view`：查看 Project Runtime 健康度、只读生命周期建议或当前 ProjectView；不会自动创建新 Session。
+- `/runtime health|recommend|view`：查看 Project Runtime 健康度、只读生命周期建议或当前 ProjectView。
+- `/runtime rotate [reason]`：在 Project State 可恢复且没有未知副作用时，人工创建一个不复制旧 transcript 的新 Leader Session；Runtime 会记录交接和新 ProjectView receipt。不会自动触发。
 
 可以直接提出：
 
@@ -208,6 +209,7 @@ Pi 在连续处理同一研究子任务时应使用稳定、简短的 `mission` 
 | 查看/提升 side 内容 | `/side show <id>`、`/side use <id>` |
 | 查看最近结构化科研状态 | `/research-state` |
 | 查看 Project Runtime/ProjectView | `/runtime health`、`/runtime view` |
+| 用 Project State 交接到空白 Session | `/runtime rotate [reason]` |
 
 科研中推荐这样区分：
 
@@ -215,7 +217,7 @@ Pi 在连续处理同一研究子任务时应使用稳定、简短的 `mission` 
 - 已经切换成新的研究问题或正式实验阶段：使用 `/fork` 或 `/new`；
 - 会话很长但仍在解决同一问题：可手动使用 `/compact`。Research Pi 也会在约 272K/384K 总上下文处标记自动压缩，但会等当前 agent run 及其工具调用链完整 settled 后才执行，不会中断正在进行的任务。压缩按当前分支第 1/2/3 次 compact 保留约 32K/40K/48K recent tail；竞争假设、有效性、evidence refs 与下一实验写入结构化 compact，完整 JSONL 历史仍保留。
 - 新会话需要恢复旧证据：使用 memory search/read，不必先恢复整个旧 session。
-- 新 Session 会自动收到基于最近 structured compact、实验账本、Git 和 Runtime 的限长 ProjectView；它是导航信息而非证据替代。用 `/runtime view` 可检查来源，用 `/runtime recommend` 可查看是否值得 compact 或轮换，但轮换仍由用户/Leader 决定。
+- 新 Session 会自动收到基于最近 structured compact、实验账本、Git 和 Runtime 的限长 ProjectView；它是导航信息而非证据替代。用 `/runtime view` 可检查来源，用 `/runtime recommend` 可查看是否值得 compact 或轮换。确定交接时优先使用 `/runtime rotate`：它先检查 Project State、未知副作用与 Action 恢复身份，再创建空白 Session；原生 `/new` 不做这份 readiness/audit。
 - ProjectView 显示 `current/unconfirmed/stale/transitioning/missing` freshness。新 experiment 或 research transition 晚于最近 compact 时，旧 claim/next experiment 不再作为当前结论；只有较新的 Action 或 Git 变化时标为 unconfirmed，要求确认但不自动宣布换轨。
 
 方向实质变化时可以直接告诉 Pi：

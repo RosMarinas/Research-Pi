@@ -28,10 +28,13 @@ import {
 	isRuntimeActorAttached,
 	pendingRuntimeMessages,
 	readRuntimeSnapshot,
+	requestRuntimeSessionRotation,
 	resolveRuntimeActor,
 	runtimeActorTarget,
 	runtimeMessageText,
 	settleRuntimeMessage,
+	settleRuntimeSessionRotation,
+	unconsumedRuntimeMessages,
 } from "../lib/research-runtime.mjs";
 
 type RuntimeContext = Awaited<ReturnType<typeof initializeResearchRuntime>>;
@@ -40,6 +43,7 @@ type RuntimeSnapshot = Awaited<ReturnType<typeof readRuntimeSnapshot>>;
 
 const MESSAGE_TYPES = new Set(["ask", "reply", "notify", "result"]);
 const ACTIVE_ACTION_STATUSES = new Set(["starting", "running", "cancelling"]);
+const RECOVERABLE_ACTION_STATUSES = new Set([...ACTIVE_ACTION_STATUSES, "input_required"]);
 
 function compact(text: string, limit = 160): string {
 	const value = String(text ?? "").replace(/\s+/g, " ").trim();
@@ -70,15 +74,39 @@ export function runtimeActorSummary(snapshot: RuntimeSnapshot) {
 	return { active, waiting, registered: snapshot.actors.length };
 }
 
+export function runtimeRotationReadiness(snapshot: RuntimeSnapshot) {
+	const blockers: string[] = [];
+	const revision = snapshot.revision ?? 0;
+	const stateRevision = snapshot.projectState?.revision ?? 0;
+	const unknown = snapshot.actions.filter((action) => action.status === "outcome_unknown");
+	const untrackedActive = snapshot.actions.filter((action) =>
+		RECOVERABLE_ACTION_STATUSES.has(action.status) && !action.externalId,
+	);
+	if (!snapshot.projectState) blockers.push("no structured Project State is available");
+	else if (revision > stateRevision) blockers.push(`${revision - stateRevision} Project revision(s) have not reached structured state`);
+	if (unknown.length) blockers.push(`${unknown.length} executor outcome(s) are unknown`);
+	if (untrackedActive.length) blockers.push(`${untrackedActive.length} active Action(s) have no recoverable external identity`);
+	return {
+		ready: blockers.length === 0,
+		blockers,
+		projectRevision: revision,
+		stateRevision,
+		activeActionIds: snapshot.actions
+			.filter((action) => RECOVERABLE_ACTION_STATUSES.has(action.status))
+			.map((action) => action.id),
+		openMessageIds: unconsumedRuntimeMessages(snapshot, { to: RESEARCH_LEADER_ACTOR_ID }).map((message) => message.id),
+	};
+}
+
 export function formatRuntimeStatus(projectKey: string, snapshot: RuntimeSnapshot): string {
 	const { active, waiting } = runtimeActorSummary(snapshot);
-	const queued = pendingRuntimeMessages(snapshot).length;
+	const open = unconsumedRuntimeMessages(snapshot).length;
 	const states = [
 		active ? `${active} active` : "",
 		waiting ? `${waiting} waiting` : "",
 	].filter(Boolean);
 	if (!states.length) states.push("idle");
-	if (queued) states.push(`${queued} queued`);
+	if (open) states.push(`${open} open`);
 	return `Runtime ${projectKey.slice(-8)} · ${states.join(" · ")}`;
 }
 
@@ -88,6 +116,7 @@ export function runtimeHealth(snapshot: RuntimeSnapshot, usage: ReturnType<Exten
 	const compactions = branchEntries.filter((entry) => entry.type === "compaction").length;
 	const memoryLag = Math.max(0, (snapshot.revision ?? 0) - (snapshot.projectState?.revision ?? 0));
 	const tokens = usage?.tokens ?? null;
+	const rotation = runtimeRotationReadiness(snapshot);
 	let recommendation = "continue";
 	let reason = "No Runtime recovery issue or context-pressure threshold currently requires intervention.";
 	if (unknown) {
@@ -100,12 +129,12 @@ export function runtimeHealth(snapshot: RuntimeSnapshot, usage: ReturnType<Exten
 		recommendation = "compact";
 		reason = `Context is at or above the ${RESEARCH_HARD_COMPACT_TOKENS.toLocaleString()} hard research threshold.`;
 	} else if (tokens !== null && tokens >= RESEARCH_SOFT_COMPACT_TOKENS) {
-		recommendation = snapshot.projectState && compactions >= 2 && !actionSummary.active && !actionSummary.waiting ? "consider-rotation" : "compact";
+		recommendation = rotation.ready && compactions >= 2 && !actionSummary.active && !actionSummary.waiting ? "consider-rotation" : "compact";
 		reason = recommendation === "consider-rotation"
 			? "A structured project state exists, actions are settled, and context pressure is high; a fresh Session may now be cheaper than another long continuation."
 			: "Context is above the soft research threshold; compact before evidence is displaced by overflow.";
 	}
-	return { tokens, contextWindow: usage?.contextWindow ?? null, percent: usage?.percent ?? null, compactions, unknown, memoryLag, ...actionSummary, recommendation, reason };
+	return { tokens, contextWindow: usage?.contextWindow ?? null, percent: usage?.percent ?? null, compactions, unknown, memoryLag, ...actionSummary, ...rotation, recommendation, reason };
 }
 
 export function formatRuntimeHealth(health: ReturnType<typeof runtimeHealth>): string {
@@ -114,9 +143,10 @@ export function formatRuntimeHealth(health: ReturnType<typeof runtimeHealth>): s
 		`Session: ${health.compactions} compaction(s)`,
 		`Runtime: ${health.active} active · ${health.waiting} waiting · ${health.unknown} outcome_unknown`,
 		`Project memory: ${health.memoryLag ? `${health.memoryLag} revision(s) pending synthesis` : "current"}`,
+		`Rotation: ${health.ready ? "ready for /runtime rotate" : `blocked (${health.blockers.join("; ")})`}`,
 		`Recommendation: ${health.recommendation}`,
 		health.reason,
-		"Observe-only: Research Pi does not rotate or reconcile automatically.",
+		"Lifecycle remains manual: Research Pi never rotates or reconciles automatically.",
 	].join("\n");
 }
 
@@ -156,10 +186,10 @@ export function actorLines(snapshot: RuntimeSnapshot, activeOnly = true): string
 
 function inboxLines(snapshot: Awaited<ReturnType<typeof readRuntimeSnapshot>>, includeSettled = false): string {
 	const messages = snapshot.messages
-		.filter((message) => includeSettled || message.status === "queued")
+		.filter((message) => includeSettled || message.status === "queued" || message.status === "delivered")
 		.slice(-30)
 		.reverse();
-	if (!messages.length) return includeSettled ? "The project Runtime mailbox is empty." : "No queued Runtime messages.";
+	if (!messages.length) return includeSettled ? "The project Runtime mailbox is empty." : "No open Runtime messages.";
 	return messages
 		.map((message) => `${message.status.padEnd(10)} ${message.type.padEnd(7)} ${message.id} · ${message.from} -> ${message.to}\n${compact(message.body, 240)}`)
 		.join("\n\n");
@@ -320,19 +350,45 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		return card;
 	});
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
 		const activeRuntime = await getRuntime(ctx);
-		const { snapshot } = await refreshProjectView(ctx);
+		const { snapshot, view } = await refreshProjectView(ctx);
 		consumedMessageIds.clear();
 		materializedMessageIds.clear();
+		if (event.reason === "new") {
+			const currentSessionId = ctx.sessionManager.getSessionId();
+			const pendingRotation = [...(snapshot.pendingRotations ?? [])].reverse().find((rotation) => {
+				if (rotation.fromSessionId === currentSessionId) return false;
+				if (event.previousSessionFile && rotation.fromSessionFile) {
+					return event.previousSessionFile === rotation.fromSessionFile;
+				}
+				return !event.previousSessionFile || !rotation.fromSessionFile;
+			});
+			if (pendingRotation) {
+				await settleRuntimeSessionRotation(activeRuntime, pendingRotation.id, "completed", {
+					toSessionId: currentSessionId,
+					toSessionFile: ctx.sessionManager.getSessionFile(),
+					projectRevision: snapshot.revision,
+					projectViewFingerprint: projectViewHash,
+					projectViewFreshness: view.freshness,
+				});
+				if (ctx.hasUI) {
+					ctx.ui.notify(
+						`Runtime rotation ${pendingRotation.id} completed. ProjectView r${snapshot.revision} (${view.freshness}) is ready in the new Session.`,
+						"info",
+					);
+				}
+			}
+		}
 		for (const message of snapshot.messages) {
 			if (message.status === "consumed") consumedMessageIds.add(message.id);
 		}
-		for (const message of pendingRuntimeMessages(snapshot, { to: RESEARCH_LEADER_ACTOR_ID })) {
+		const currentSessionId = ctx.sessionManager.getSessionId();
+		for (const message of unconsumedRuntimeMessages(snapshot, { to: RESEARCH_LEADER_ACTOR_ID, forSessionId: currentSessionId })) {
 			const result = await deliverToCurrentLeader(activeRuntime, message, ctx, { triggerTurn: false });
 			if (result.status === "delivered") {
 				await settleRuntimeMessage(activeRuntime, message.id, "delivered", {
-					sessionId: ctx.sessionManager.getSessionId(),
+					sessionId: currentSessionId,
 					actorId: RESEARCH_LEADER_ACTOR_ID,
 				});
 			}
@@ -400,13 +456,41 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("runtime", {
-		description: "Inspect project Runtime health, recommendation, or injected ProjectView",
+		description: "Inspect project Runtime health/View or manually rotate the Leader Session",
 		handler: async (args, ctx) => {
 			try {
-				const mode = args.trim() || "health";
-				if (!["health", "recommend", "view"].includes(mode)) throw new Error("Usage: /runtime [health|recommend|view]");
+				const [mode = "health", ...rest] = args.trim().split(/\s+/).filter(Boolean);
+				if (!["health", "recommend", "view", "rotate"].includes(mode)) throw new Error("Usage: /runtime [health|recommend|view|rotate [reason]]");
+				if (mode === "rotate") await ctx.waitForIdle();
 				const activeRuntime = await getRuntime(ctx, { claim: true });
-				const { snapshot } = await refreshProjectView(ctx);
+				const { snapshot, view } = await refreshProjectView(ctx);
+				if (mode === "rotate") {
+					const readiness = runtimeRotationReadiness(snapshot);
+					if (!readiness.ready) {
+						throw new Error(`Runtime rotation is blocked: ${readiness.blockers.join("; ")}. Refresh Project State with /compact or reconcile the listed Action first.`);
+					}
+					const fromSessionId = ctx.sessionManager.getSessionId();
+					const fromSessionFile = ctx.sessionManager.getSessionFile();
+					const rotation = await requestRuntimeSessionRotation(activeRuntime, {
+						fromSessionId,
+						fromSessionFile,
+						projectRevision: readiness.projectRevision,
+						stateRevision: readiness.stateRevision,
+						projectViewFingerprint: projectViewHash,
+						projectViewFreshness: view.freshness,
+						reason: rest.join(" ") || "manual Runtime rotation",
+						activeActionIds: readiness.activeActionIds,
+						openMessageIds: readiness.openMessageIds,
+					});
+					const result = await ctx.newSession({
+						...(fromSessionFile ? { parentSession: fromSessionFile } : {}),
+					});
+					if (result.cancelled) {
+						await settleRuntimeSessionRotation(activeRuntime, rotation.id, "cancelled", { reason: "Pi session replacement was cancelled" });
+						ctx.ui.notify(`Runtime rotation ${rotation.id} was cancelled; the current Session remains attached.`, "info");
+					}
+					return;
+				}
 				if (mode === "view") ctx.ui.notify(projectViewText, "info");
 				else {
 					const health = runtimeHealth(snapshot, ctx.getContextUsage(), ctx.sessionManager.getBranch());
@@ -434,7 +518,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("inbox", {
-		description: "Inspect queued project Runtime messages (/inbox all includes settled messages)",
+		description: "Inspect open project Runtime messages (/inbox all includes settled messages)",
 		handler: async (args, ctx) => {
 			try {
 				const activeRuntime = await getRuntime(ctx, { claim: true });
@@ -462,7 +546,10 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 					body,
 				});
 				const result = await dispatchMessage(activeRuntime, message, actor, ctx);
-				if (result.status === "delivered") await settleRuntimeMessage(activeRuntime, message.id, "delivered", { actorId: actor.id });
+				if (result.status === "delivered") await settleRuntimeMessage(activeRuntime, message.id, "delivered", {
+					actorId: actor.id,
+					...(actor.id === RESEARCH_LEADER_ACTOR_ID ? { sessionId: ctx.sessionManager.getSessionId() } : {}),
+				});
 				displayOperationalCard(message, result.status);
 				ctx.ui.notify(`${message.id}: ${result.detail}`, result.status === "delivered" ? "info" : "warning");
 				await refreshStatus(ctx);
@@ -490,7 +577,10 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 					body,
 				});
 				const result = await dispatchMessage(activeRuntime, message, actor, ctx, { preempt });
-				if (result.status === "delivered") await settleRuntimeMessage(activeRuntime, message.id, "delivered", { actorId: actor.id });
+				if (result.status === "delivered") await settleRuntimeMessage(activeRuntime, message.id, "delivered", {
+					actorId: actor.id,
+					...(actor.id === RESEARCH_LEADER_ACTOR_ID ? { sessionId: ctx.sessionManager.getSessionId() } : {}),
+				});
 				if (actor.id !== RESEARCH_LEADER_ACTOR_ID) displayOperationalCard(message, result.status);
 				ctx.ui.notify(`${message.id}: ${result.detail}`, result.status === "delivered" ? "info" : "warning");
 				await refreshStatus(ctx);

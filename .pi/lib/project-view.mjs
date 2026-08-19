@@ -142,7 +142,7 @@ export async function readRecentExperiments(path, maxRecords = 6) {
 }
 
 export function buildProjectView({ runtime, snapshot, git = {}, experiments = [] }) {
-	const queued = snapshot.messages.filter((message) => message.status === "queued");
+	const openMessages = snapshot.messages.filter((message) => message.status === "queued" || message.status === "delivered");
 	const actions = snapshot.actions.filter((action) =>
 		["starting", "running", "input_required", "cancelling", "outcome_unknown"].includes(action.status),
 	).slice(-8);
@@ -195,7 +195,7 @@ export function buildProjectView({ runtime, snapshot, git = {}, experiments = []
 		transitionSupersedesState: Boolean(snapshot.activeTransition && snapshot.activeTransition.revision > stateRevision),
 		experiments: recentEvidence,
 		actions,
-		queuedMessages: queued.slice(-8).map((message) => ({ id: message.id, type: message.type, from: message.from, body: compact(message.body, 240) })),
+		openMessages: openMessages.slice(-8).map((message) => ({ id: message.id, type: message.type, from: message.from, status: message.status, body: compact(message.body, 240) })),
 		generatedFrom: {
 			actors: snapshot.actors.length,
 			actions: snapshot.actions.length,
@@ -263,8 +263,8 @@ export function renderProjectView(view) {
 		...bullets(view.experiments, (item) => `${item.id} [${item.validityJudgment ?? "inconclusive"}] ${compact(item.question, 300)} -> ${compact(item.conclusion, 380)}${item.runId ? ` | run=${compact(item.runId, 140)}` : ""}`, "none recorded"),
 		"Live/unresolved Runtime actions:",
 		...bullets(view.actions, (item) => `${item.id} [${item.status}] ${compact(item.label, 300)} external=${item.externalId ?? "none"}`, "none"),
-		"Queued Runtime messages:",
-		...bullets(view.queuedMessages, (item) => `${item.id} ${item.type} from=${item.from}: ${item.body}`, "none"),
+		"Open Runtime messages (queued or delivered but not consumed):",
+		...bullets(view.openMessages, (item) => `${item.id} [${item.status}] ${item.type} from=${item.from}: ${item.body}`, "none"),
 		"</research_project_view>",
 	);
 	const rendered = lines.filter(Boolean).join("\n");
