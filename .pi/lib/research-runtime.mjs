@@ -23,6 +23,11 @@ const MAX_MESSAGE_LENGTH = 16_000;
 const LEDGER_LOCK_STALE_MS = 30_000;
 const LEDGER_LOCK_WAIT_MS = 10;
 const LEDGER_LOCK_ATTEMPTS = 500;
+const PROJECT_REVISION_EVENT_TYPES = new Set([
+	"project.state.committed",
+	"research.transition.recorded",
+	"evidence.recorded",
+]);
 
 function now() {
 	return new Date().toISOString();
@@ -133,6 +138,38 @@ export async function appendRuntimeEvent(runtime, eventType, data = {}, options 
 	});
 }
 
+export function runtimeRevisionFromEvents(events) {
+	return events.reduce((revision, event) => revision + (PROJECT_REVISION_EVENT_TYPES.has(event.type) ? 1 : 0), 0);
+}
+
+export async function appendRuntimeEventAtRevision(runtime, eventType, data, expectedRevision, options = {}) {
+	if (!runtime?.projectKey || !runtime?.ledgerPath) throw new Error("A resolved Research Runtime context is required");
+	if (!Number.isInteger(expectedRevision) || expectedRevision < 0) throw new Error("A non-negative expected Project revision is required");
+	const event = {
+		version: RESEARCH_RUNTIME_VERSION,
+		id: options.id ?? createEventId("evt"),
+		type: eventType,
+		at: options.at ?? now(),
+		projectKey: runtime.projectKey,
+		data,
+	};
+	validateMessageId(event.id);
+	await mkdir(runtime.projectDir, { recursive: true, mode: 0o700 });
+	return await withRuntimeLedgerLock(runtime, async () => {
+		const events = await readRuntimeEvents(runtime);
+		const existing = events.find((candidate) => candidate.id === event.id);
+		if (existing) return { status: "existing", event: existing, revision: runtimeRevisionFromEvents(events) };
+		const revision = runtimeRevisionFromEvents(events);
+		if (revision !== expectedRevision) return { status: "conflict", event: null, revision };
+		await appendFile(runtime.ledgerPath, `${JSON.stringify(event)}\n`, { encoding: "utf8", mode: 0o600 });
+		return {
+			status: "appended",
+			event,
+			revision: revision + (PROJECT_REVISION_EVENT_TYPES.has(eventType) ? 1 : 0),
+		};
+	});
+}
+
 export async function readRuntimeEvents(runtime) {
 	let text;
 	try {
@@ -163,9 +200,14 @@ export async function readRuntimeSnapshot(runtime) {
 	const attachments = new Map();
 	const messages = new Map();
 	const actions = new Map();
+	const evidence = new Map();
+	const transitions = [];
+	const rejectedStates = [];
 	let projectState = null;
+	let revision = 0;
 	for (const event of await readRuntimeEvents(runtime)) {
 		const data = event.data ?? {};
+		if (PROJECT_REVISION_EVENT_TYPES.has(event.type)) revision += 1;
 		switch (event.type) {
 			case "actor.registered": {
 				const current = actors.get(data.id) ?? {};
@@ -200,8 +242,19 @@ export async function readRuntimeSnapshot(runtime) {
 				break;
 			}
 			case "project.state.committed":
-				projectState = { ...data, committedAt: event.at };
+				projectState = { ...data, committedAt: event.at, revision };
 				break;
+			case "project.state.rejected":
+				rejectedStates.push({ ...data, rejectedAt: event.at });
+				break;
+			case "research.transition.recorded":
+				transitions.push({ ...data, recordedAt: event.at, revision });
+				break;
+			case "evidence.recorded": {
+				const current = evidence.get(data.id) ?? {};
+				evidence.set(data.id, { ...current, ...data, recordedAt: event.at, revision });
+				break;
+			}
 		}
 	}
 	return {
@@ -212,7 +265,12 @@ export async function readRuntimeSnapshot(runtime) {
 		attachments: [...attachments.values()],
 		messages: [...messages.values()],
 		actions: [...actions.values()],
+		evidence: [...evidence.values()],
+		transitions,
+		activeTransition: transitions.at(-1) ?? null,
+		rejectedStates,
 		projectState,
+		revision,
 	};
 }
 
@@ -273,6 +331,65 @@ export async function initializeResearchRuntime(cwd, session, options = {}) {
 	});
 	await attachRuntimeActor(runtime, RESEARCH_LEADER_ACTOR_ID, session);
 	return runtime;
+}
+
+function boundedRuntimeText(value, max) {
+	const text = String(value ?? "").replace(/\s+/g, " ").trim();
+	return text.length <= max ? text : `${text.slice(0, max - 3)}...`;
+}
+
+export async function recordRuntimeEvidence(runtime, record) {
+	if (!record?.id) throw new Error("Project evidence id is required");
+	const data = {
+		id: String(record.id),
+		timestamp: record.timestamp ?? now(),
+		question: boundedRuntimeText(record.question, 1200),
+		validityJudgment: ["valid", "invalid", "inconclusive"].includes(record.validityJudgment)
+			? record.validityJudgment
+			: "inconclusive",
+		conclusion: boundedRuntimeText(record.conclusion, 2000),
+		nextStep: boundedRuntimeText(record.nextStep, 1200),
+		runId: boundedRuntimeText(record.runId, 300) || null,
+		artifacts: Array.isArray(record.artifacts) ? record.artifacts.map((item) => boundedRuntimeText(item, 1000)).filter(Boolean).slice(0, 12) : [],
+		source: {
+			workspaceRoot: boundedRuntimeText(record.source?.workspaceRoot, 4000) || null,
+			ledgerPath: boundedRuntimeText(record.source?.ledgerPath, 4000) || null,
+			sessionId: boundedRuntimeText(record.source?.sessionId, 200) || null,
+		},
+	};
+	return await appendRuntimeEvent(runtime, "evidence.recorded", data, { id: `evidence:${data.id}` });
+}
+
+export async function recordResearchTransition(runtime, transition) {
+	const id = validateMessageId(transition.id ?? createEventId("transition"));
+	const to = boundedRuntimeText(transition.to, 240);
+	const reason = boundedRuntimeText(transition.reason, 3000);
+	if (!to || !reason) throw new Error("Research transition requires the new active track and a reason");
+	const authorityRefs = Array.isArray(transition.authorityRefs)
+		? transition.authorityRefs.map((item) => boundedRuntimeText(item, 1000)).filter(Boolean).slice(0, 16)
+		: [];
+	if (!authorityRefs.length) throw new Error("Research transition requires at least one authority reference");
+	const data = {
+		id,
+		from: boundedRuntimeText(transition.from, 240) || null,
+		to,
+		reason,
+		oldDisposition: ["archived", "superseded", "parallel"].includes(transition.oldDisposition)
+			? transition.oldDisposition
+			: "superseded",
+		nextDecision: boundedRuntimeText(transition.nextDecision, 2000) || null,
+		authorityRefs,
+		sessionId: transition.sessionId ?? null,
+		workspaceRoot: transition.workspaceRoot ?? runtime.workspaceRoot,
+		git: transition.git ? {
+			root: boundedRuntimeText(transition.git.root, 4000) || null,
+			branch: boundedRuntimeText(transition.git.branch, 500) || null,
+			commit: boundedRuntimeText(transition.git.commit, 160) || null,
+			dirty: transition.git.dirty ?? null,
+		} : null,
+	};
+	await appendRuntimeEvent(runtime, "research.transition.recorded", data, { id: `research-transition:${id}` });
+	return data;
 }
 
 export async function createRuntimeMessage(runtime, input) {

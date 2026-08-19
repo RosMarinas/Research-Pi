@@ -173,6 +173,10 @@ Research Pi 默认处于探索与验证阶段：构造竞争假设，优先高�
 
 当一次运行会改变后续研究判断时，记录假设、介入、预期、有效性检查、观察与下一步。记录写入目标科研项目的 `.pi/research/experiments.jsonl`，该文件默认不应进入版本控制。
 
+### `record_research_transition`
+
+只在研究问题或实验路线实质换轨时记录旧路线处置、新 active track、理由、依据与下一决策。普通 next step、代码重构或 Codex completed 不触发；旧证据保留为可检索的 contract-bound 历史，不会因换轨被重写。
+
 ### `research_checkpoint`
 
 在大步实验修改、回滚或废弃路线前，为当前已跟踪 Git 状态创建独立的研究 checkpoint，不切换分支，也不修改工作树。
@@ -214,7 +218,7 @@ DeepSeek V4 Flash 使用 Max reasoning，但不把 1M 容量等同于等质量�
 - 给模型继续工作的科研状态摘要；
 - 存在 compaction entry `details` 中的结构化 `researchState`、evidence ledger 和 provenance。
 
-强结论必须引用有效的 `record_experiment` entry；仅引用无效或 inconclusive 运行的 supported/weakened/rejected 状态会被降级。模型输出不能解析或校验时，自动回退到 Pi 原生 compact。使用 `/research-state` 可检查最近一次结构化状态。
+强结论必须引用有效的 `record_experiment` entry；仅引用无效或 inconclusive 运行的 supported/weakened/rejected 状态会被降级。实验记录同时镜像为精简的 project-level evidence，同一 Git Project 的其他已知 worktree 可索引原 ledger。模型输出不能解析或校验时，自动回退到 Pi 原生 compact。使用 `/research-state` 可检查最近一次结构化状态。
 
 ### Codex Executor
 
@@ -246,9 +250,9 @@ Codex job、请求账本、精简 JSONL 审计事件和委派 prompt 保存在�
 - `/message <ask|reply|notify|result> @actor <内容>`：向 Actor 发送有语义类型的消息；
 - `/steer @actor <修正>`：默认不 abort，投递到下一安全模型边界；
 - `/steer --preempt @actor <修正>`：只有继续运行存在实际代价时才中断并恢复目标 Actor。
-- `/runtime health`：查看 context、compaction、active/waiting 与 `outcome_unknown`；`/runtime recommend` 只给出 continue/compact/consider-rotation/reconcile 建议，不自动轮换；`/runtime view` 显示当前注入的 ProjectView。
+- `/runtime health`：查看 context、compaction、Project memory lag、active/waiting 与 `outcome_unknown`；`/runtime recommend` 只给出 continue/continue-then-compact/compact/consider-rotation/reconcile 建议，不自动轮换；`/runtime view` 显示当前注入的 ProjectView。
 
-Runtime message 是瞬时控制/通信，不自动成为长期科研判断。每次结构化 research compact 会把 `researchState + provenance` 提交到 project ledger；新 Session 会得到一个限长、不可见的 ProjectView，包含当前研究问题/竞争假设/决策/混淆因素、最近实验记录、Git 摘要、未结 Action 与 mailbox ID。ProjectView 是确定性投影，不复制完整旧 transcript，也不会把 Codex completed 自动提升为科学结论。旧版本已经创建的 Codex job 保留原 session/branch 所有权；新 job 才使用 project Actor 所有权。
+Runtime message 是瞬时控制/通信，不自动成为长期科研判断。每次结构化 research compact 会把 `researchState + provenance + basedOnProjectRevision` 提交到 project ledger；如果压缩期间出现了新 transition/evidence，陈旧 compact 只保留在原 Session，不能覆盖 Project State。新 Session 得到一个限长、不可见的 ProjectView，优先展示 active research track、memory freshness、当前决策、关键约束与未结 Action；实验只显示短索引，详情按需检索。较新的 transition/evidence 会把旧 state 标为 stale；较新的 Action/Git 只标为 unconfirmed，不会由文件变化自动推断科研结论。ProjectView 不复制完整旧 transcript，也不会把 Codex completed 自动提升为科学结论。
 
 职责、状态机、通信路径以及双 Session 真实项目 smoke 的逐项判定见 [Research Runtime 测试指南](docs/research-runtime-test-guide.md)。
 

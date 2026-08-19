@@ -127,6 +127,7 @@ Pi 会自行选择工具。若想明确控制，可以直接说：
 Pi 现在提供这些低摩擦研究工具：
 
 - `record_experiment`：当一个运行结果真正支持、削弱或无法区分研究假设时，Pi 可调用它追加一条 `.pi/research/experiments.jsonl`。普通搜索和调试不会自动记录。
+- `record_research_transition`：当用户明确改变研究问题，或有效证据使旧路线成为 archived/superseded/parallel 时，记录一次 project-level 换轨。普通 next step、代码重构或 Codex completed 不触发。
 - `research_checkpoint`：在大步替换、回滚或废弃路线前，把当前 tracked Git 状态保存到 `refs/pi-research/checkpoints/...`。它不会切分支或清理工作树，也不会捕获 untracked 文件。
 - `research_memory_search`：在旧 session 和实验记录中进行本地全文检索；默认仅限当前 Git 项目，并排除当前 session 和废弃分支。
 - `research_memory_read`：根据搜索结果中的 session/entry ID 读取精确原文和小范围上下文。
@@ -215,6 +216,15 @@ Pi 在连续处理同一研究子任务时应使用稳定、简短的 `mission` 
 - 会话很长但仍在解决同一问题：可手动使用 `/compact`。Research Pi 也会在约 272K/384K 总上下文处标记自动压缩，但会等当前 agent run 及其工具调用链完整 settled 后才执行，不会中断正在进行的任务。压缩按当前分支第 1/2/3 次 compact 保留约 32K/40K/48K recent tail；竞争假设、有效性、evidence refs 与下一实验写入结构化 compact，完整 JSONL 历史仍保留。
 - 新会话需要恢复旧证据：使用 memory search/read，不必先恢复整个旧 session。
 - 新 Session 会自动收到基于最近 structured compact、实验账本、Git 和 Runtime 的限长 ProjectView；它是导航信息而非证据替代。用 `/runtime view` 可检查来源，用 `/runtime recommend` 可查看是否值得 compact 或轮换，但轮换仍由用户/Leader 决定。
+- ProjectView 显示 `current/unconfirmed/stale/transitioning/missing` freshness。新 experiment 或 research transition 晚于最近 compact 时，旧 claim/next experiment 不再作为当前结论；只有较新的 Action 或 Git 变化时标为 unconfirmed，要求确认但不自动宣布换轨。
+
+方向实质变化时可以直接告诉 Pi：
+
+```text
+旧离散契约路线保留为 contract-bound 负结果，但不再是当前默认路线。当前转向参数化连续契约；请记录 research transition，依据是用户决策、对应实验和框架文档，下一决策是 family3 后冻结正式 test 判定线。
+```
+
+Transition 会立即影响后续 Session 的 ProjectView，不必等待 `/compact`。下一次 compact 基于 Project revision 形成新的 active state；旧 Session 随后提交的陈旧 compact 不会覆盖它。
 
 从终端恢复最近会话：
 

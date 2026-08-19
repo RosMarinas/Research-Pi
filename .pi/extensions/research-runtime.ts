@@ -21,6 +21,7 @@ import {
 	USER_ACTOR_ID,
 	attachRuntimeActor,
 	appendRuntimeEvent,
+	appendRuntimeEventAtRevision,
 	createRuntimeMessage,
 	detachRuntimeActor,
 	initializeResearchRuntime,
@@ -85,12 +86,16 @@ export function runtimeHealth(snapshot: RuntimeSnapshot, usage: ReturnType<Exten
 	const actionSummary = runtimeActorSummary(snapshot);
 	const unknown = snapshot.actions.filter((action) => action.status === "outcome_unknown").length;
 	const compactions = branchEntries.filter((entry) => entry.type === "compaction").length;
+	const memoryLag = Math.max(0, (snapshot.revision ?? 0) - (snapshot.projectState?.revision ?? 0));
 	const tokens = usage?.tokens ?? null;
 	let recommendation = "continue";
 	let reason = "No Runtime recovery issue or context-pressure threshold currently requires intervention.";
 	if (unknown) {
 		recommendation = "reconcile";
 		reason = `${unknown} executor outcome(s) are unknown; inspect external state before further writes.`;
+	} else if (memoryLag > 0) {
+		recommendation = actionSummary.active || actionSummary.waiting ? "continue-then-compact" : "compact";
+		reason = `${memoryLag} Project transition/evidence revision(s) are newer than structured state${actionSummary.active || actionSummary.waiting ? "; let active work settle, then refresh state" : "; compact can refresh state now"}.`;
 	} else if (tokens !== null && tokens >= RESEARCH_HARD_COMPACT_TOKENS) {
 		recommendation = "compact";
 		reason = `Context is at or above the ${RESEARCH_HARD_COMPACT_TOKENS.toLocaleString()} hard research threshold.`;
@@ -100,7 +105,7 @@ export function runtimeHealth(snapshot: RuntimeSnapshot, usage: ReturnType<Exten
 			? "A structured project state exists, actions are settled, and context pressure is high; a fresh Session may now be cheaper than another long continuation."
 			: "Context is above the soft research threshold; compact before evidence is displaced by overflow.";
 	}
-	return { tokens, contextWindow: usage?.contextWindow ?? null, percent: usage?.percent ?? null, compactions, unknown, ...actionSummary, recommendation, reason };
+	return { tokens, contextWindow: usage?.contextWindow ?? null, percent: usage?.percent ?? null, compactions, unknown, memoryLag, ...actionSummary, recommendation, reason };
 }
 
 export function formatRuntimeHealth(health: ReturnType<typeof runtimeHealth>): string {
@@ -108,6 +113,7 @@ export function formatRuntimeHealth(health: ReturnType<typeof runtimeHealth>): s
 		`Context: ${health.tokens?.toLocaleString() ?? "unknown"}/${health.contextWindow?.toLocaleString() ?? "unknown"}${health.percent === null ? "" : ` (${health.percent.toFixed(1)}%)`}`,
 		`Session: ${health.compactions} compaction(s)`,
 		`Runtime: ${health.active} active · ${health.waiting} waiting · ${health.unknown} outcome_unknown`,
+		`Project memory: ${health.memoryLag ? `${health.memoryLag} revision(s) pending synthesis` : "current"}`,
 		`Recommendation: ${health.recommendation}`,
 		health.reason,
 		"Observe-only: Research Pi does not rotate or reconcile automatically.",
@@ -199,12 +205,16 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		let snapshot = await readRuntimeSnapshot(activeRuntime);
 		if (!snapshot.projectState && !migrationAttemptedProjects.has(activeRuntime.projectKey)) {
 			migrationAttemptedProjects.add(activeRuntime.projectKey);
-			await migrateLatestProjectState({
-				runtime: activeRuntime,
-				sessionDir: resolveResearchPiPaths({ harnessRoot: HARNESS_ROOT }).sessionDir,
-				cwd: ctx.cwd,
-				appendRuntimeEvent,
-			});
+			if (!snapshot.activeTransition && snapshot.revision === 0) {
+				await migrateLatestProjectState({
+					runtime: activeRuntime,
+					sessionDir: resolveResearchPiPaths({ harnessRoot: HARNESS_ROOT }).sessionDir,
+					cwd: ctx.cwd,
+					appendRuntimeEvent,
+					appendRuntimeEventAtRevision,
+					readRuntimeSnapshot,
+				});
+			}
 			snapshot = await readRuntimeSnapshot(activeRuntime);
 		}
 		const [git, experiments] = await Promise.all([
@@ -358,11 +368,20 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 
 	pi.on("session_compact", async (event, ctx) => {
 		const activeRuntime = await getRuntime(ctx, { claim: true });
-		await commitProjectState(activeRuntime, {
+		const result = await commitProjectState(activeRuntime, {
 			compactionEntry: event.compactionEntry,
 			sessionId: ctx.sessionManager.getSessionId(),
 			appendRuntimeEvent,
+			appendRuntimeEventAtRevision,
+			readRuntimeSnapshot,
+			git: await getGitSnapshot(ctx.cwd),
 		});
+		if (result?.status === "conflict" && ctx.hasUI) {
+			ctx.ui.notify(
+				`Research compact preserved as Session history but did not replace Project State: it was based on an older Project revision (${result.revision} is current).`,
+				"warning",
+			);
+		}
 		await refreshProjectView(ctx);
 		await refreshStatus(ctx);
 	});

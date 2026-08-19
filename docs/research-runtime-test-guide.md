@@ -152,7 +152,9 @@ sequenceDiagram
 5. B 可以管理 Actor-owned job 或恢复 thread；
 6. 已 consumed 的消息不会因 A 再次获得 attachment 而重复注入。
 
-这里没有把 A 的完整 transcript 注入 B。最近一次结构化 research compact 会提交 project state；B 在模型调用前得到确定性的限长 ProjectView，合并 state provenance、最近 experiment records、Git 摘要、未结 Action 和 mailbox ID。它不包含完整旧 transcript，重要证据仍须通过引用或 memory read 精确读取。
+这里没有把 A 的完整 transcript 注入 B。最近一次结构化 research compact 会提交带 Project revision 的 state；B 在模型调用前得到确定性的限长 ProjectView，优先合并 active transition、freshness、state provenance、project evidence 索引、Git 摘要、未结 Action 和 mailbox ID。它不包含完整旧 transcript，重要证据仍须通过引用或 memory read 精确读取。
+
+方向切换不等待 compact。`record_research_transition` 立即使旧 state 变为 stale，并说明旧路线是 archived、superseded 还是 parallel；下一次 compact 才综合形成新 state。superseded/archived 时不会机械搬运旧假设，旧证据仍可检索。Project revision 使用 compare-and-append：压缩基于旧 revision 时只写 Session 历史，并产生 rejected-state 记录，不覆盖当前 Project State。
 
 ## 5. 所有权与边界
 
@@ -221,6 +223,8 @@ node --test tests/codex-jobs.test.mjs
 - 1000 个 token delta 不放大 job-state/默认 audit 写入。
 - executor 在 durable side-effect barrier 后崩溃进入 `outcome_unknown`，阻止第二 writer，显式 reconcile 后恢复；
 - compaction project state 的幂等提交、active-branch session migration 和 ProjectView 插入位置；
+- transition/evidence 使旧 state stale、superseding transition 停止旧假设回流，以及陈旧 compact 不覆盖新 revision；
+- 较新的 Runtime Action 在没有明确 transition 时只触发 unconfirmed 警告；
 - lifecycle health 只观察/建议，不自动 compact、rotate 或 reconcile。
 
 当前自动测试使用 Fake App Server 和本地 ledger，不调用真实模型/API；实际科研判断质量仍需要在真实 Project 中持续测试。

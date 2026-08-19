@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { openMemoryIndex, readMemory, searchMemory, syncMemoryIndex } from "../lib/research-memory.mjs";
+import { readRuntimeSnapshot, resolveResearchRuntime } from "../lib/research-runtime.mjs";
 import { researchPiStateRoot } from "../lib/runtime-paths.mjs";
 
 const harnessRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -12,13 +13,31 @@ const memoryDir = join(stateRoot, "memory");
 const databasePath = join(memoryDir, "memory.sqlite");
 const sessionDir = join(stateRoot, "sessions");
 
-function withIndex<T>(cwd: string, operation: (db: ReturnType<typeof openMemoryIndex>, sync: unknown) => T): T {
+async function projectExperimentLedgerPaths(cwd: string): Promise<string[]> {
+	const runtime = await resolveResearchRuntime(cwd);
+	const snapshot = await readRuntimeSnapshot(runtime);
+	const candidates = new Map<string, string>();
+	candidates.set(resolve(cwd), join(resolve(cwd), ".pi", "research", "experiments.jsonl"));
+	for (const evidence of snapshot.evidence ?? []) {
+		const workspaceRoot = evidence.source?.workspaceRoot;
+		const ledgerPath = evidence.source?.ledgerPath;
+		if (!workspaceRoot || !ledgerPath) continue;
+		const workspace = resolve(workspaceRoot);
+		const expected = join(workspace, ".pi", "research", "experiments.jsonl");
+		if (resolve(ledgerPath) !== expected) continue;
+		const candidateRuntime = await resolveResearchRuntime(workspace).catch(() => null);
+		if (candidateRuntime?.projectKey === runtime.projectKey) candidates.set(workspace, expected);
+	}
+	return [...candidates.values()];
+}
+
+async function withIndex<T>(cwd: string, operation: (db: ReturnType<typeof openMemoryIndex>, sync: unknown) => T): Promise<T> {
 	mkdirSync(memoryDir, { recursive: true });
 	const db = openMemoryIndex(databasePath);
 	try {
 		const sync = syncMemoryIndex(db, {
 			sessionDir,
-			experimentLedgerPaths: [join(cwd, ".pi", "research", "experiments.jsonl")],
+			experimentLedgerPaths: await projectExperimentLedgerPaths(cwd),
 		});
 		return operation(db, sync);
 	} finally {
@@ -66,6 +85,7 @@ export default function (pi: ExtensionAPI) {
 					Type.Union([
 						Type.Literal("experiment"),
 						Type.Literal("checkpoint"),
+						Type.Literal("transition"),
 						Type.Literal("side"),
 						Type.Literal("user"),
 						Type.Literal("assistant"),
@@ -87,7 +107,7 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const currentProjectRoot = await resolveProjectRoot(pi, ctx.cwd, _signal);
-			const payload = withIndex(ctx.cwd, (db, sync) => {
+			const payload = await withIndex(ctx.cwd, (db, sync) => {
 				const results = searchMemory(db, {
 					query: params.query,
 					scope: params.scope === "all_projects" ? "all" : "current",
@@ -129,7 +149,7 @@ export default function (pi: ExtensionAPI) {
 			),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const payload = withIndex(ctx.cwd, (db, sync) => ({
+			const payload = await withIndex(ctx.cwd, (db, sync) => ({
 				sync,
 				result: readMemory(db, {
 					sessionId: params.sessionId,
@@ -164,7 +184,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			try {
 				const currentProjectRoot = await resolveProjectRoot(pi, ctx.cwd);
-				const payload = withIndex(ctx.cwd, (db) =>
+				const payload = await withIndex(ctx.cwd, (db) =>
 					searchMemory(db, {
 						query,
 						scope: "current",

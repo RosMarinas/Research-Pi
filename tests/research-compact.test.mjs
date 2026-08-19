@@ -4,6 +4,7 @@ import researchCompactionExtension from "../.pi/extensions/research-compaction.t
 import {
 	buildResearchCompactionDetails,
 	collectResearchEvidence,
+	mergeProjectRuntimeEvidence,
 	normalizeResearchState,
 	parseResearchState,
 	RESEARCH_HARD_COMPACT_TOKENS,
@@ -149,6 +150,36 @@ test("structured compaction preserves prior hypotheses and downgrades unsupporte
 	assert.equal(details.kind, "research-pi-compaction");
 	assert.equal(details.evidenceLedger.experiments.length, 2);
 	assert.ok(details.validationWarnings.length >= 2);
+});
+
+test("a superseding Project transition retires automatic carry-over of old hypotheses", () => {
+	const evidence = mergeProjectRuntimeEvidence(
+		{
+			experiments: [],
+			checkpoints: [],
+			previousState: { hypotheses: [{ id: "H-old", statement: "旧离散契约路线", status: "active", evidenceRefs: [] }] },
+			validRefs: new Set(),
+			sourceCatalog: [],
+		},
+		{
+			projectState: { revision: 1 },
+			evidence: [],
+			activeTransition: { revision: 2, to: "参数化契约", oldDisposition: "archived" },
+		},
+	);
+	const normalized = normalizeResearchState({
+		researchQuestion: "参数化契约能否区分连续学习与查表",
+		currentClaim: "待验证",
+		hypotheses: [{ id: "H-new", statement: "共享连续模型可以学习", status: "active", evidenceRefs: [] }],
+		observations: [],
+		decisions: [],
+		unresolvedConfounders: [],
+		openQuestions: [],
+		nextExperiment: {},
+		criticalContext: [],
+	}, evidence);
+	assert.deepEqual(normalized.state.hypotheses.map((item) => item.id), ["H-new"]);
+	assert.match(normalized.warnings.join("\n"), /superseding research transition/);
 });
 
 test("parses fenced JSON output", () => {

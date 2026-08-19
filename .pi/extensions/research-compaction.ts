@@ -10,6 +10,7 @@ import {
 	buildResearchCompactionDetails,
 	buildResearchCompactionPrompt,
 	collectResearchEvidence,
+	mergeProjectRuntimeEvidence,
 	normalizeResearchState,
 	parseResearchState,
 	RESEARCH_HARD_COMPACT_TOKENS,
@@ -19,6 +20,7 @@ import {
 	RESEARCH_SOFT_COMPACT_TOKENS,
 	selectResearchCompactionPolicy,
 } from "../lib/research-compact.mjs";
+import { readRuntimeSnapshot, resolveResearchRuntime } from "../lib/research-runtime.mjs";
 
 function fileLists(fileOps: { read: Set<string>; written: Set<string>; edited: Set<string> }) {
 	const modified = new Set([...fileOps.written, ...fileOps.edited]);
@@ -133,10 +135,15 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const { branchEntries, customInstructions, reason, signal } = event;
+		const runtimeSnapshot = await readRuntimeSnapshot(await resolveResearchRuntime(ctx.cwd));
+		const projectRevision = runtimeSnapshot.revision;
 		const policy = selectResearchCompactionPolicy(branchEntries);
 		const preparation = prepareWithDynamicTail(event, policy.keepRecentTokens);
 		const sessionId = ctx.sessionManager.getSessionId();
-		const evidence = collectResearchEvidence(branchEntries, sessionId, preparation.firstKeptEntryId);
+		const evidence = mergeProjectRuntimeEvidence(
+			collectResearchEvidence(branchEntries, sessionId, preparation.firstKeptEntryId),
+			runtimeSnapshot,
+		);
 		const conversationText = serializeConversation(
 			convertToLlm([...preparation.messagesToSummarize, ...preparation.turnPrefixMessages]),
 		);
@@ -147,6 +154,7 @@ export default function (pi: ExtensionAPI) {
 			experiments: evidence.experiments,
 			checkpoints: evidence.checkpoints,
 			sourceCatalog: evidence.sourceCatalog,
+			projectTransitions: runtimeSnapshot.transitions?.slice(-4) ?? [],
 			customInstructions,
 		});
 
@@ -193,6 +201,7 @@ export default function (pi: ExtensionAPI) {
 				tokensBefore: preparation.tokensBefore,
 				fileOps: files,
 				policy,
+				projectRevision,
 			});
 
 			if (normalized.warnings.length) {

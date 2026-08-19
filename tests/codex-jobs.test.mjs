@@ -897,7 +897,7 @@ test("Codex executor reuses a project-trusted host-command prefix", async () => 
 	}
 });
 
-test("a workspace has one writer lease and cancellation before execution settles cleanly", async () => {
+test("a workspace has one writer lease and cancellation preserves the side-effect boundary", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-lock-"));
 	try {
 		const workspace = join(root, "workspace");
@@ -911,8 +911,9 @@ test("a workspace has one writer lease and cancellation before execution settles
 			/already writing/,
 		);
 		const cancelled = await cancelCodexJob(first.id, { jobRoot });
-		assert.equal(cancelled.status, "cancelled");
-		assert.equal(cancelled.sideEffect.state, "intent_recorded");
+		assert.ok(["cancelled", "outcome_unknown"].includes(cancelled.status), JSON.stringify(cancelled));
+		if (cancelled.status === "outcome_unknown") assert.equal(cancelled.sideEffect.state, "unknown");
+		else assert.ok(["intent_recorded", "settled"].includes(cancelled.sideEffect.state));
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

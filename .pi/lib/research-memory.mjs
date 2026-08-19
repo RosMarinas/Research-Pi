@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 export const MEMORY_SCHEMA_VERSION = 1;
-export const MEMORY_EXTRACTOR_VERSION = "research-pi-memory-v2";
+export const MEMORY_EXTRACTOR_VERSION = "research-pi-memory-v3";
 
 const MAX_INDEXED_CHARS = 64_000;
 const DEFAULT_RESULT_LIMIT = 6;
@@ -84,6 +84,20 @@ function sideText(record) {
 		`Question: ${scalar(record.question, 4_000)}`,
 		`Answer: ${scalar(record.answer, 12_000)}`,
 		`Model: ${scalar(record.model?.provider, 160)}/${scalar(record.model?.id, 160)}`,
+	]
+		.filter((line) => !line.endsWith(": "))
+		.join("\n");
+}
+
+function transitionText(record) {
+	return [
+		`Research transition ${scalar(record.id, 160)}`,
+		`From: ${scalar(record.from, 500)}`,
+		`To: ${scalar(record.to, 500)}`,
+		`Old route disposition: ${scalar(record.oldDisposition, 80)}`,
+		`Reason: ${scalar(record.reason, 4_000)}`,
+		`Next decision: ${scalar(record.nextDecision, 2_000)}`,
+		`Authority: ${Array.isArray(record.authorityRefs) ? record.authorityRefs.map((value) => scalar(value, 700)).join("; ") : ""}`,
 	]
 		.filter((line) => !line.endsWith(": "))
 		.join("\n");
@@ -223,6 +237,18 @@ export function extractSessionUnits(path) {
 				entry,
 				kind: "side",
 				text: sideText(entry.data ?? {}),
+				active: active.has(entry.id),
+			});
+		} else if (entry.type === "custom" && entry.customType === "research-transition") {
+			unit = makeUnit({
+				sourcePath,
+				sourceKind: "session",
+				sessionId,
+				projectCwd,
+				sessionName,
+				entry,
+				kind: "transition",
+				text: transitionText(entry.data ?? {}),
 				active: active.has(entry.id),
 			});
 		}
@@ -495,7 +521,7 @@ function snippetFor(text, query, tokens, maxChars = 420) {
 
 function reliability(kind) {
 	if (kind === "experiment") return "recorded-evidence";
-	if (kind === "checkpoint") return "recorded-state";
+	if (kind === "checkpoint" || kind === "transition") return "recorded-state";
 	if (kind === "user") return "user-statement";
 	if (kind === "compaction" || kind === "branch_summary") return "derived-summary";
 	return "assistant-synthesis";
@@ -554,6 +580,7 @@ export function searchMemory(db, options) {
 	const tokenLowers = tokens.map((token) => token.toLocaleLowerCase());
 	const kindWeights = {
 		experiment: 45,
+		transition: 40,
 		checkpoint: 28,
 		user: 18,
 		side: 8,

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { CONFIG_DIR_NAME, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { recordRuntimeEvidence, resolveResearchRuntime } from "../lib/research-runtime.mjs";
 
 interface GitIdentity {
 	root?: string;
@@ -113,15 +114,28 @@ export default function (pi: ExtensionAPI) {
 			await mkdir(ledgerDir, { recursive: true });
 			await appendFile(ledgerPath, `${JSON.stringify(record)}\n`, "utf8");
 			pi.appendEntry<ExperimentRecord>("research-experiment", record);
+			let runtimeWarning: string | undefined;
+			try {
+				await recordRuntimeEvidence(await resolveResearchRuntime(ctx.cwd), {
+					...record,
+					source: {
+						workspaceRoot: ctx.cwd,
+						ledgerPath,
+						sessionId: record.sessionId,
+					},
+				});
+			} catch (error) {
+				runtimeWarning = error instanceof Error ? error.message : String(error);
+			}
 
 			return {
 				content: [
 					{
 						type: "text",
-						text: `Recorded ${id} in ${join(CONFIG_DIR_NAME, "research", "experiments.jsonl")}.`,
+						text: `Recorded ${id} in ${join(CONFIG_DIR_NAME, "research", "experiments.jsonl")}.${runtimeWarning ? ` Project Runtime mirror warning: ${runtimeWarning}` : ""}`,
 					},
 				],
-				details: record,
+				details: { ...record, runtimeMirrored: !runtimeWarning, runtimeWarning },
 			};
 		},
 	});

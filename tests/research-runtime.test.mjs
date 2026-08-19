@@ -71,6 +71,21 @@ test("lifecycle health is observe-only and prioritizes ambiguous side effects", 
 	assert.equal(snapshot.actions[0].status, "outcome_unknown");
 });
 
+test("lifecycle health exposes Project evidence that has not reached structured state", () => {
+	const snapshot = {
+		projectState: { revision: 1, state: {}, source: {} },
+		revision: 2,
+		actors: [],
+		attachments: [],
+		messages: [],
+		actions: [],
+	};
+	const health = runtimeHealth(snapshot, { tokens: 10_000, contextWindow: 1_000_000, percent: 1 }, []);
+	assert.equal(health.memoryLag, 1);
+	assert.equal(health.recommendation, "compact");
+	assert.match(health.reason, /newer than structured state/);
+});
+
 test("Project Runtime keeps Actor identity across session attachment and message settlement", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-"));
 	try {

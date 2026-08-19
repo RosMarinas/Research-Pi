@@ -29,16 +29,35 @@ export async function commitProjectState(runtime, input) {
 		|| entry.details?.version !== RESEARCH_COMPACTION_VERSION
 		|| !entry.details?.researchState
 	) return null;
+	const snapshot = await input.readRuntimeSnapshot(runtime);
+	const basedOnRevision = Number.isInteger(entry.details.projectRevision)
+		? entry.details.projectRevision
+		: snapshot.revision;
 	const source = {
 		sessionId: String(input.sessionId),
 		entryId: String(entry.id),
 		contentHash: fingerprint(entry.details.researchState),
-		warnings: Array.isArray(entry.details.warnings) ? entry.details.warnings.slice(0, 20) : [],
+		generatedAt: entry.details.generatedAt ?? null,
+		basedOnRevision,
+		git: input.git ? {
+			root: input.git.root ?? null,
+			branch: input.git.branch ?? null,
+			commit: input.git.commit ?? null,
+			dirty: input.git.dirty ?? null,
+		} : null,
+		warnings: Array.isArray(entry.details.validationWarnings) ? entry.details.validationWarnings.slice(0, 20) : [],
 	};
-	return await input.appendRuntimeEvent(runtime, "project.state.committed", {
+	const result = await input.appendRuntimeEventAtRevision(runtime, "project.state.committed", {
 		state: entry.details.researchState,
 		source,
-	}, { id: `project-state:${source.sessionId}:${source.entryId}` });
+	}, basedOnRevision, { id: `project-state:${source.sessionId}:${source.entryId}` });
+	if (result.status !== "conflict") return result;
+	await input.appendRuntimeEvent(runtime, "project.state.rejected", {
+		source,
+		reason: `Compaction was based on Project revision ${basedOnRevision}, but current revision is ${result.revision}`,
+		currentRevision: result.revision,
+	}, { id: `project-state-rejected:${source.sessionId}:${source.entryId}` });
+	return result;
 }
 
 function activeBranch(entries) {
@@ -70,7 +89,7 @@ async function sessionCandidates(sessionDir) {
 	return described.filter(Boolean).sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, MAX_SESSION_FILES);
 }
 
-export async function migrateLatestProjectState({ runtime, sessionDir, cwd, appendRuntimeEvent }) {
+export async function migrateLatestProjectState({ runtime, sessionDir, cwd, appendRuntimeEvent, appendRuntimeEventAtRevision, readRuntimeSnapshot }) {
 	let bytes = 0;
 	for (const candidate of await sessionCandidates(sessionDir)) {
 		if (bytes + candidate.size > MAX_SESSION_BYTES) break;
@@ -94,6 +113,8 @@ export async function migrateLatestProjectState({ runtime, sessionDir, cwd, appe
 			compactionEntry: compaction,
 			sessionId: header.id,
 			appendRuntimeEvent,
+			appendRuntimeEventAtRevision,
+			readRuntimeSnapshot,
 		});
 	}
 	return null;
@@ -125,6 +146,40 @@ export function buildProjectView({ runtime, snapshot, git = {}, experiments = []
 	const actions = snapshot.actions.filter((action) =>
 		["starting", "running", "input_required", "cancelling", "outcome_unknown"].includes(action.status),
 	).slice(-8);
+	const stateRevision = snapshot.projectState?.revision ?? 0;
+	const transitionAfterState = snapshot.transitions?.find((transition) => transition.revision > stateRevision);
+	const evidenceAfterState = snapshot.evidence?.filter((item) => item.revision > stateRevision) ?? [];
+	const actionAfterState = snapshot.projectState
+		? actions.some((action) => Date.parse(action.updatedAt ?? action.createdAt ?? "") > Date.parse(snapshot.projectState.committedAt ?? ""))
+		: actions.length > 0;
+	const sourceGit = snapshot.projectState?.source?.git;
+	const gitChanged = Boolean(
+		snapshot.projectState
+		&& sourceGit
+		&& ((sourceGit.commit && git.commit && sourceGit.commit !== git.commit) || (sourceGit.branch && git.branch && sourceGit.branch !== git.branch)),
+	);
+	let freshness = "current";
+	const freshnessReasons = [];
+	if (!snapshot.projectState) {
+		freshness = snapshot.activeTransition || (snapshot.evidence?.length ?? 0) > 0 ? "transitioning" : "missing";
+		if (snapshot.activeTransition) freshnessReasons.push("No compacted state has incorporated the active transition yet.");
+		if (snapshot.evidence?.length) freshnessReasons.push(`${snapshot.evidence.length} project experiment record(s) have not yet been synthesized into structured state.`);
+		if (!snapshot.activeTransition && !snapshot.evidence?.length) freshnessReasons.push("No structured Project State exists yet.");
+	} else if (transitionAfterState || evidenceAfterState.length) {
+		freshness = "stale";
+		if (transitionAfterState) freshnessReasons.push(`Research transition to ${transitionAfterState.to} occurred after the last compacted state.`);
+		if (evidenceAfterState.length) freshnessReasons.push(`${evidenceAfterState.length} experiment record(s) are newer than the last compacted state.`);
+	} else if (actionAfterState || gitChanged) {
+		freshness = "unconfirmed";
+		if (actionAfterState) freshnessReasons.push("Runtime activity is newer than the last compacted state.");
+		if (gitChanged) freshnessReasons.push("The Git branch or commit changed after the last compacted state.");
+	}
+	const evidenceById = new Map();
+	for (const item of experiments) if (item?.id) evidenceById.set(item.id, item);
+	for (const item of snapshot.evidence ?? []) if (item?.id) evidenceById.set(item.id, { ...evidenceById.get(item.id), ...item });
+	const recentEvidence = [...evidenceById.values()]
+		.sort((left, right) => Date.parse(left.timestamp ?? left.recordedAt ?? "") - Date.parse(right.timestamp ?? right.recordedAt ?? ""))
+		.slice(-6);
 	return {
 		version: PROJECT_VIEW_VERSION,
 		projectKey: runtime.projectKey,
@@ -132,7 +187,13 @@ export function buildProjectView({ runtime, snapshot, git = {}, experiments = []
 		git: { branch: git.branch ?? null, commit: git.commit?.slice(0, 12) ?? null, dirty: git.dirty ?? null },
 		state: snapshot.projectState?.state ?? null,
 		stateSource: snapshot.projectState?.source ?? null,
-		experiments: experiments.slice(-6),
+		stateRevision,
+		projectRevision: snapshot.revision ?? 0,
+		freshness,
+		freshnessReasons,
+		activeTransition: snapshot.activeTransition ?? null,
+		transitionSupersedesState: Boolean(snapshot.activeTransition && snapshot.activeTransition.revision > stateRevision),
+		experiments: recentEvidence,
 		actions,
 		queuedMessages: queued.slice(-8).map((message) => ({ id: message.id, type: message.type, from: message.from, body: compact(message.body, 240) })),
 		generatedFrom: {
@@ -154,34 +215,60 @@ export function renderProjectView(view) {
 		"Deterministic project-level working view. Compaction-derived claims are fallible; validate important claims against the cited experiment/run/artifact before acting.",
 		`Project: ${view.projectKey} · ${view.workspaceRoot}`,
 		`Git: branch=${view.git.branch ?? "unknown"} commit=${view.git.commit ?? "unknown"} dirty=${view.git.dirty ?? "unknown"}`,
+		`Project revision: ${view.projectRevision} · compacted state revision: ${view.stateRevision || "none"} · memory freshness: ${view.freshness}`,
 	];
-	if (state) {
+	if (view.freshness !== "current") {
 		lines.push(
+			"MEMORY FRESHNESS WARNING: do not execute the compacted nextExperiment as current until the active research direction is confirmed.",
+			...view.freshnessReasons.map((reason) => `- ${reason}`),
+		);
+	}
+	if (view.activeTransition) {
+		const transition = view.activeTransition;
+		lines.push(
+			`Active research track: ${compact(transition.to, 600)}`,
+			transition.from ? `Previous track: ${compact(transition.from, 500)} (${transition.oldDisposition})` : undefined,
+			`Transition reason: ${compact(transition.reason, 1200)}`,
+			transition.nextDecision ? `Current next decision: ${compact(transition.nextDecision, 1000)}` : undefined,
+			transition.authorityRefs?.length ? `Transition authority: ${transition.authorityRefs.join(" | ")}` : undefined,
+		);
+	}
+	if (state) {
+		if (view.transitionSupersedesState) {
+			lines.push(
+				`Previous compacted state (not current): S:${view.stateSource?.sessionId}/E:${view.stateSource?.entryId} hash=${view.stateSource?.contentHash ?? "unknown"}`,
+				`Previous research question: ${compact(state.researchQuestion, 700) || "unknown"}`,
+				`Previous claim: ${compact(state.currentClaim, 700) || "none recorded"}`,
+				"Previous hypotheses and experiment details remain retrievable through research_memory_search/read; they are not expanded into the active context.",
+			);
+		} else lines.push(
 			`State provenance: S:${view.stateSource?.sessionId}/E:${view.stateSource?.entryId} hash=${view.stateSource?.contentHash ?? "unknown"}`,
-			`Research question: ${compact(state.researchQuestion, 900) || "unknown"}`,
-			`Current claim: ${compact(state.currentClaim, 900) || "no supported claim recorded"}`,
-			"Competing hypotheses:",
-			...bullets(list(state.hypotheses, 8), (item) => `${item.id} [${item.status}] ${compact(item.statement, 700)}${item.evidenceRefs?.length ? ` refs=${item.evidenceRefs.join(",")}` : ""}`, "none recorded"),
+			`${view.freshness === "current" ? "Research question" : "Last compacted research question"}: ${compact(state.researchQuestion, 900) || "unknown"}`,
+			`${view.freshness === "current" ? "Current claim" : "Last compacted claim (verify freshness)"}: ${compact(state.currentClaim, 900) || "no supported claim recorded"}`,
+			`${view.freshness === "current" ? "Competing hypotheses" : "Last compacted hypotheses"}:`,
+			...bullets(list(state.hypotheses, 6), (item) => `${item.id} [${item.status}] ${compact(item.statement, 600)}${item.evidenceRefs?.length ? ` refs=${item.evidenceRefs.join(",")}` : ""}`, "none recorded"),
 			"Research decisions:",
-			...bullets(list(state.decisions, 4), (item) => `${compact(item.decision, 600)} (${item.reversible === false ? "frozen" : "reversible"})${item.evidenceRefs?.length ? ` refs=${item.evidenceRefs.join(",")}` : ""}`, "none recorded"),
+			...bullets(list(state.decisions, 4), (item) => `${compact(item.decision, 500)} (${item.reversible === false ? "frozen" : "reversible"})${item.evidenceRefs?.length ? ` refs=${item.evidenceRefs.join(",")}` : ""}`, "none recorded"),
+			"Decision-critical context:",
+			...bullets(list(state.criticalContext, 4), (item) => compact(item, 500), "none recorded"),
 			"Unresolved confounders/open questions:",
-			...bullets([...list(state.unresolvedConfounders, 4), ...list(state.openQuestions, 4)], (item) => compact(item, 600), "none recorded"),
-			`Next experiment: ${compact(state.nextExperiment?.question, 700) || "not determined"} | intervention=${compact(state.nextExperiment?.intervention, 900) || "not determined"}`,
+			...bullets([...list(state.unresolvedConfounders, 3), ...list(state.openQuestions, 3)], (item) => compact(item, 500), "none recorded"),
+			`${view.freshness === "current" ? "Next experiment" : "Previous next experiment (not authoritative while memory is not current)"}: ${compact(state.nextExperiment?.question, 600) || "not determined"} | intervention=${compact(state.nextExperiment?.intervention, 700) || "not determined"}`,
 		);
 	} else {
 		lines.push("Structured project state: unavailable; do not infer continuity from absence. A later research compaction can establish it.");
 	}
 	lines.push(
-		"Recent experiment records:",
-		...bullets(view.experiments, (item) => `${item.id} [${item.validityJudgment ?? "inconclusive"}] ${compact(item.question, 500)} | observation=${compact(item.observation, 500)} | conclusion=${compact(item.conclusion, 500)}${item.runId ? ` | run=${compact(item.runId, 160)}` : ""}`, "none recorded"),
+		"Recent project evidence index (read exact records on demand):",
+		...bullets(view.experiments, (item) => `${item.id} [${item.validityJudgment ?? "inconclusive"}] ${compact(item.question, 300)} -> ${compact(item.conclusion, 380)}${item.runId ? ` | run=${compact(item.runId, 140)}` : ""}`, "none recorded"),
 		"Live/unresolved Runtime actions:",
 		...bullets(view.actions, (item) => `${item.id} [${item.status}] ${compact(item.label, 300)} external=${item.externalId ?? "none"}`, "none"),
 		"Queued Runtime messages:",
 		...bullets(view.queuedMessages, (item) => `${item.id} ${item.type} from=${item.from}: ${item.body}`, "none"),
 		"</research_project_view>",
 	);
-	const rendered = lines.join("\n");
-	return rendered.length <= 16_000 ? rendered : `${rendered.slice(0, 15_950)}\n[ProjectView truncated]\n</research_project_view>`;
+	const rendered = lines.filter(Boolean).join("\n");
+	return rendered.length <= 12_000 ? rendered : `${rendered.slice(0, 11_950)}\n[ProjectView truncated]\n</research_project_view>`;
 }
 
 export function materializeProjectView(messages, text, details = {}) {

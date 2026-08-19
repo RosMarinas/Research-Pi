@@ -149,6 +149,46 @@ export function collectResearchEvidence(branchEntries, sessionId, firstKeptEntry
 	};
 }
 
+export function mergeProjectRuntimeEvidence(evidence, runtimeSnapshot) {
+	const seen = new Set(evidence.experiments.map((item) => item.id));
+	for (const record of runtimeSnapshot?.evidence ?? []) {
+		if (!record?.id || seen.has(record.id)) continue;
+		const sessionId = text(record.source?.sessionId, 200) || "project-runtime";
+		const ref = refFor(sessionId, record.id);
+		evidence.experiments.push({
+			ref,
+			entryId: record.id,
+			id: record.id,
+			timestamp: text(record.timestamp, 80),
+			question: text(record.question),
+			hypothesis: "",
+			intervention: "",
+			prediction: "",
+			validityChecks: [],
+			observation: "",
+			validityJudgment: ["valid", "invalid", "inconclusive"].includes(record.validityJudgment)
+				? record.validityJudgment
+				: "inconclusive",
+			conclusion: text(record.conclusion, 4_000),
+			nextStep: text(record.nextStep, 2_000),
+			runId: text(record.runId, 300) || undefined,
+			artifacts: list(record.artifacts, 12, 1_000),
+			contentHash: hash(JSON.stringify(record)),
+			projectRuntimeSource: true,
+		});
+		evidence.validRefs.add(ref);
+		seen.add(record.id);
+	}
+	const transition = runtimeSnapshot?.activeTransition;
+	evidence.activeTransition = transition ?? null;
+	evidence.preservePreviousHypotheses = !(
+		transition
+		&& transition.revision > (runtimeSnapshot?.projectState?.revision ?? 0)
+		&& ["archived", "superseded"].includes(transition.oldDisposition)
+	);
+	return evidence;
+}
+
 export function parseResearchState(value) {
 	if (value && typeof value === "object" && !Array.isArray(value)) return value;
 	const raw = String(value ?? "").trim();
@@ -240,7 +280,11 @@ export function normalizeResearchState(candidate, evidence) {
 			evidenceRefs,
 		});
 	}
-	mergePreviousHypotheses(hypotheses, evidence.previousState, warnings, evidence.validRefs, validExperimentRefs);
+	if (evidence.preservePreviousHypotheses === false) {
+		warnings.push("Did not carry previous hypotheses into the active state because a superseding research transition was recorded.");
+	} else {
+		mergePreviousHypotheses(hypotheses, evidence.previousState, warnings, evidence.validRefs, validExperimentRefs);
+	}
 
 	const observations = [];
 	for (const item of Array.isArray(source.observations) ? source.observations : []) {
@@ -299,6 +343,7 @@ export function buildResearchCompactionPrompt({
 	experiments,
 	checkpoints,
 	sourceCatalog,
+	projectTransitions = [],
 	customInstructions,
 }) {
 	return `You maintain working state for computational AI/communications research. Produce one JSON object only.
@@ -312,6 +357,7 @@ Rules:
 4. Preserve previous hypothesis IDs. If a previous hypothesis changed, include it with the new status and evidence; do not silently omit it.
 5. Separate what was observed from how it was interpreted.
 6. Match the dominant language of the conversation.
+7. A recorded project transition with archived/superseded disposition changes the active research route. Keep the old route as retrievable history, but do not present its claim or next experiment as current. A parallel disposition does not retire it.
 
 Required schema:
 {
@@ -356,6 +402,9 @@ ${text(legacyPreviousSummary, 40_000) || "None"}
 
 Recorded experiments (authoritative for their exact fields, but interpret according to validityJudgment):
 ${JSON.stringify(experiments)}
+
+Recorded project research transitions (authoritative for active-route selection, not for experimental truth):
+${JSON.stringify(projectTransitions)}
 
 Research checkpoints:
 ${JSON.stringify(checkpoints)}
@@ -455,6 +504,7 @@ export function buildResearchCompactionDetails({
 	tokensBefore,
 	fileOps,
 	policy,
+	projectRevision,
 }) {
 	return {
 		kind: RESEARCH_COMPACTION_KIND,
@@ -464,10 +514,12 @@ export function buildResearchCompactionDetails({
 		reason,
 		tokensBefore,
 		compactionPolicy: policy,
+		projectRevision: Number.isInteger(projectRevision) ? projectRevision : 0,
 		researchState: state,
 		evidenceLedger: {
 			experiments: evidence.experiments,
 			checkpoints: evidence.checkpoints,
+			activeTransition: evidence.activeTransition ?? null,
 		},
 		provenance: {
 			previousCompactionEntryId: evidence.previousCompactionEntryId,

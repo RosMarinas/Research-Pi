@@ -111,6 +111,7 @@ async function spawnCore(argv) {
 		"tool-activity.ts",
 		"research-mode.ts",
 		"record-experiment.ts",
+		"research-transition.ts",
 		"research-checkpoint.ts",
 		"research-memory.ts",
 		"research-compaction.ts",

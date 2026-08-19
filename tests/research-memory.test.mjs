@@ -69,10 +69,26 @@ test("indexes Chinese text, short IDs, provenance, branch state, and redacts cre
 			},
 			{
 				type: "custom",
-				customType: "research-side",
-				id: "side-entry",
+				customType: "research-transition",
+				id: "transition-entry",
 				parentId: "exp-entry",
 				timestamp: "2026-01-01T00:00:05Z",
+				data: {
+					id: "transition-1",
+					from: "旧离散契约",
+					to: "参数化连续契约",
+					oldDisposition: "archived",
+					reason: "旧任务可能退化为查表记忆",
+					nextDecision: "运行连续动作 holdout",
+					authorityRefs: ["exp-1"],
+				},
+			},
+			{
+				type: "custom",
+				customType: "research-side",
+				id: "side-entry",
+				parentId: "transition-entry",
+				timestamp: "2026-01-01T00:00:06Z",
 				data: {
 					id: "side-1",
 					question: "另一条隔离思路是什么",
@@ -110,6 +126,9 @@ test("indexes Chinese text, short IDs, provenance, branch state, and redacts cre
 			const side = searchMemory(db, { ...base, query: "oracle 对照", kinds: ["side"] });
 			assert.equal(side[0].entryId, "side-entry");
 			assert.equal(side[0].reliability, "assistant-synthesis");
+			const transition = searchMemory(db, { ...base, query: "参数化连续契约", kinds: ["transition"] });
+			assert.equal(transition[0].entryId, "transition-entry");
+			assert.equal(transition[0].reliability, "recorded-state");
 
 			assert.equal(searchMemory(db, { ...base, query: "zebra" }).length, 0);
 			const abandoned = searchMemory(db, { ...base, query: "zebra", includeAbandonedBranches: true });
