@@ -193,6 +193,10 @@ Research Pi 默认处于探索与验证阶段：构造竞争假设，优先高�
 
 只在研究问题或实验路线实质换轨时记录旧路线处置、新 active track、理由、依据与下一决策。普通 next step、代码重构或 Codex completed 不触发；旧证据保留为可检索的 contract-bound 历史，不会因换轨被重写。已有 parallel 分支时，只有继续非 primary 路线才显式提供其精确 `fromTrackRef`。
 
+### `amend_project_state`
+
+当 ProjectView 只有局部字段已被用户决策、实验、run 或权威文档明确纠正时，Research Leader 可直接提交一个窄 patch，不必为了改一句 claim 或 next experiment 重新 compact 整段会话。工具必须携带最新 `Project revision`、理由和 authority refs；revision 已变化、当前 Session 不再持有 Leader attachment、目标 state 属于 retired route 或当前是 clean Session 时都会拒绝。写入是 append-only，旧 state 不被原地覆盖；省略字段保持不变，数组字段整体替换，`nextExperiment` 只合并显式提供的子字段。初始综合仍用 `/compact`，实质换轨仍用 `record_research_transition`。
+
 ### `research_checkpoint`
 
 在大步实验修改、回滚或废弃路线前，为当前已跟踪 Git 状态创建独立的研究 checkpoint，不切换分支，也不修改工作树。
@@ -270,9 +274,11 @@ Codex job、请求账本、精简 JSONL 审计事件和委派 prompt 保存在�
 - `/steer --preempt @actor <修正>`：只有继续运行存在实际代价时才中断并恢复目标 Actor。
 - `/runtime health`：查看 context、compaction、Project memory lag、active/waiting、`outcome_unknown` 与 Session rotation readiness；`/runtime recommend` 只给出建议，`/runtime view` 显示当前 ProjectView。这些命令和 `/runtime`、`/actors`、`/inbox` 都是观察操作，不会抢占另一 Session；
 - `/runtime takeover <reason>`：显式把 Research Leader attachment 移到当前 Session，即使旧 Session 正在生成；旧运行只在下一安全模型边界停止，因此仅用于确实需要接管的情形；
-- `/runtime rotate [reason]`：在显式请求后写入 durable handoff、创建空白 Session，并在新 Session 记录 ProjectView receipt。它不会复制旧 transcript，也不会自动触发。
+- `/runtime rotate [reason]`：在显式请求后写入 durable handoff、创建不复制旧 transcript 但自动继承 ProjectView/mailbox 的 Session，并记录 ProjectView receipt。它不会自动触发；
+- `/runtime new clean [reason]`：创建既不复制 transcript、也不自动注入 ProjectView/mailbox 的 clean Session。Project ledger 仍保留在磁盘；clean compact 只更新该 Session，旧 Codex mission 不自动复用；
+- `/runtime inherit [reason]`：在当前 clean Session 中显式恢复 ProjectView、未消费 mailbox 和 project-aware 工作方式。它不恢复旧 transcript；后续 compact 以 canonical Project State 为基线，clean summary 只作为需重新核对 provenance 的候选综合。
 
-Runtime message 是瞬时控制/通信，不自动成为长期科研判断。每次结构化 research compact 会把 `researchState + provenance + basedOnProjectRevision` 提交到 project ledger；如果压缩期间出现了新 transition/evidence，陈旧 compact 只保留在原 Session，不能覆盖 Project State。新 Session 得到一个限长、不可见的 ProjectView，优先展示 active research track、memory freshness、当前决策、关键约束与未结 Action；实验只显示短索引，详情按需检索。Evidence、Action、message 与 Codex job 都带 research-track 来源，旧路线信息可以保留，但不会静默当作当前介入的证据；`parallel` 路线可跨后续主路线切换继续保持并列。较新的 transition/evidence 会把旧 state 标为 stale；较新的 Action/Git 只标为 unconfirmed，不会由文件变化自动推断科研结论。下一模型边界会按 Runtime ledger 的语义事件数刷新 ProjectView，因此另一 Session 新增的 Action/mailbox 不依赖 compact 才能被看到。ProjectView 不复制完整旧 transcript，也不会把 Codex completed 自动提升为科学结论。Runtime rotation 会重投 queued 或 delivered-but-unconsumed 的 Leader 消息；已经 consumed 的消息仍被过滤。
+Runtime message 是瞬时控制/通信，不自动成为长期科研判断。每次结构化 research compact 会把 `researchState + provenance + basedOnProjectRevision` 提交到 project ledger；窄幅 `amend_project_state` 以同样的 revision CAS 和 Leader lease 追加修订来源。如果压缩或修订期间出现了新 transition/evidence，陈旧写入不能覆盖 Project State。普通新 Session 得到一个限长、不可见的 ProjectView，优先展示 active research track、memory freshness、当前决策、关键约束与未结 Action；clean Session 则明确跳过这项自动继承。实验只显示短索引，详情按需检索。Evidence、Action、message 与 Codex job 都带 research-track 来源，旧路线信息可以保留，但不会静默当作当前介入的证据；`parallel` 路线可跨后续主路线切换继续保持并列。较新的 transition/evidence 会把旧 state 标为 stale；较新的 Action/Git 只标为 unconfirmed，不会由文件变化自动推断科研结论。下一模型边界会按 Runtime ledger 的语义事件数刷新 ProjectView，因此另一 Session 新增的 Action/mailbox 不依赖 compact 才能被看到。ProjectView 不复制完整旧 transcript，也不会把 Codex completed 自动提升为科学结论。Runtime rotation 会重投 queued 或 delivered-but-unconsumed 的 Leader 消息；已经 consumed 的消息仍被过滤。
 
 Runtime Board 是既有 ledger/ProjectView 的只读投影，不进入模型上下文，也不创建另一份日志或 heartbeat。它不会后台轮询；只有打开面板和按 `r` 时读取当前状态，sessions 页会显示 attachment 与当前 agent activation，也不会为了观察而抢占另一个 Session。一次 Leader agent run 只写 start/settled 两个稀疏 activation 事件。Ledger 启动写入前只检查最后一条 JSONL；崩溃留下的末尾半条记录会在锁内截断，历史中部损坏仍明确报错而不静默跳过。需要连续观察 Codex 执行细节时使用 `/watch`。
 

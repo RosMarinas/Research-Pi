@@ -29,6 +29,7 @@ import {
 	runtimeResearchTrack,
 	runtimeMessageText,
 	runtimeActorAttachment,
+	runtimeSessionInheritancePolicy,
 	settleRuntimeMessage,
 	withRuntimeActorAttachment,
 } from "../lib/research-runtime.mjs";
@@ -212,6 +213,7 @@ async function leaderScope(ctx: ExtensionContext, options: { requireAttached?: b
 		attachmentEpoch: attachment?.epoch ?? null,
 		leaderBranchAnchorId: ctx.sessionManager.getLeafId(),
 		branchEntryIds: new Set(ctx.sessionManager.getBranch().map((entry) => entry.id)),
+		inheritancePolicy: runtimeSessionInheritancePolicy(ctx.sessionManager.getBranch(), snapshot, leaderSessionId),
 	};
 }
 
@@ -344,8 +346,15 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			deliveredEvents.add(id);
 			return;
 		}
+		const snapshot = await readRuntimeSnapshot(runtime);
+		if (runtimeSessionInheritancePolicy(ctx.sessionManager.getBranch(), snapshot, ctx.sessionManager.getSessionId()) === "clean") {
+			// The durable Runtime mailbox now owns delivery. Mark the watcher event
+			// handled so a clean Session does not repeatedly re-project the same job.
+			deliveredEvents.add(id);
+			return;
+		}
 		const attachment = runtimeActorAttachment(
-			await readRuntimeSnapshot(runtime),
+			snapshot,
 			RESEARCH_LEADER_ACTOR_ID,
 			ctx.sessionManager.getSessionId(),
 		);
@@ -613,7 +622,8 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 				switch (params.action) {
 					case "start": {
 						const task = requireText(params.task, "task");
-						const reuse = params.reuse ?? (params.mission ? "auto" : "never");
+						const requestedReuse = params.reuse ?? (params.mission ? "auto" : "never");
+						const reuse = owner.inheritancePolicy === "clean" && requestedReuse === "auto" ? "never" : requestedReuse;
 						const actorId = params.mission ? codexActorId({ mission: params.mission, mode: startMode }) : undefined;
 						const common = {
 							cwd: ctx.cwd,

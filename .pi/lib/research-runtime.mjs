@@ -3,6 +3,7 @@ import { appendFile, mkdir, open, readFile, stat, unlink } from "node:fs/promise
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveCodexWorkspaceIdentity } from "./codex-jobs.mjs";
+import { applyResearchStatePatch } from "./research-compact.mjs";
 import { researchPiStateRoot } from "./runtime-paths.mjs";
 
 const LIB_DIR = dirname(fileURLToPath(import.meta.url));
@@ -13,6 +14,7 @@ export const USER_ACTOR_ID = "user";
 export const RESEARCH_LEADER_ACTOR_ID = "research-leader";
 export const RUNTIME_MESSAGE_KIND = "research-runtime-message";
 export const RUNTIME_EVENT_ENTRY_KIND = "research-runtime-event";
+export const RUNTIME_SESSION_POLICY_ENTRY_KIND = "research-runtime-session-policy";
 export const DEFAULT_RESEARCH_RUNTIME_ROOT = join(researchPiStateRoot(HARNESS_ROOT), "runtime", "projects");
 
 export class RuntimeAttachmentChangedError extends Error {
@@ -30,12 +32,15 @@ const MESSAGE_STATES = new Set(["delivered", "consumed", "superseded"]);
 const TERMINAL_MESSAGE_STATES = new Set(["consumed", "superseded"]);
 const FINAL_ACTION_STATES = new Set(["completed", "failed", "cancelled"]);
 const ROTATION_STATES = new Set(["completed", "cancelled"]);
+const SESSION_INHERITANCE_POLICIES = new Set(["project", "clean"]);
+const SESSION_INHERITANCE_STATES = new Set(["applied", "cancelled"]);
 const MAX_MESSAGE_LENGTH = 16_000;
 const LEDGER_LOCK_STALE_MS = 30_000;
 const LEDGER_LOCK_WAIT_MS = 10;
 const LEDGER_LOCK_ATTEMPTS = 500;
 const PROJECT_REVISION_EVENT_TYPES = new Set([
 	"project.state.committed",
+	"project.state.amended",
 	"research.transition.recorded",
 	"evidence.recorded",
 ]);
@@ -257,6 +262,7 @@ export async function readRuntimeSnapshot(runtime) {
 	const evidence = new Map();
 	const transitions = [];
 	const rotations = new Map();
+	const inheritanceRequests = new Map();
 	const activations = new Map();
 	const rejectedStates = [];
 	let projectState = null;
@@ -315,7 +321,16 @@ export async function readRuntimeSnapshot(runtime) {
 				break;
 			}
 			case "project.state.committed":
-				projectState = { ...data, committedAt: event.at, revision };
+				projectState = { ...data, committedAt: event.at, updatedAt: event.at, revision };
+				break;
+			case "project.state.amended":
+				projectState = {
+					...data,
+					committedAt: projectState?.committedAt ?? event.at,
+					amendedAt: event.at,
+					updatedAt: event.at,
+					revision,
+				};
 				break;
 			case "project.state.rejected":
 				rejectedStates.push({ ...data, rejectedAt: event.at });
@@ -341,9 +356,28 @@ export async function readRuntimeSnapshot(runtime) {
 				}
 				break;
 			}
+			case "session.inheritance.requested":
+				inheritanceRequests.set(data.id, { ...data, status: "pending", requestedAt: event.at });
+				break;
+			case "session.inheritance.applied":
+			case "session.inheritance.cancelled": {
+				const current = inheritanceRequests.get(data.requestId);
+				if (current?.status === "pending") {
+					const status = event.type.slice("session.inheritance.".length);
+					inheritanceRequests.set(data.requestId, {
+						...current,
+						...data,
+						id: data.requestId,
+						status,
+						[`${status}At`]: event.at,
+					});
+				}
+				break;
+			}
 		}
 	}
 	const rotationList = [...rotations.values()];
+	const inheritanceRequestList = [...inheritanceRequests.values()];
 	const activationList = [...activations.values()];
 	return {
 		projectKey: runtime.projectKey,
@@ -359,12 +393,29 @@ export async function readRuntimeSnapshot(runtime) {
 		rejectedStates,
 		rotations: rotationList,
 		pendingRotations: rotationList.filter((rotation) => rotation.status === "pending"),
+		inheritanceRequests: inheritanceRequestList,
+		pendingInheritanceRequests: inheritanceRequestList.filter((request) => request.status === "pending"),
 		activations: activationList,
 		activeActivations: activationList.filter((activation) => activation.status === "active"),
 		projectState,
 		revision,
 		ledgerEventCount: events.length,
 	};
+}
+
+export function runtimeSessionInheritancePolicy(entries = [], snapshot = null, sessionId = null) {
+	for (const entry of [...entries].reverse()) {
+		if (entry?.type !== "custom" || entry.customType !== RUNTIME_SESSION_POLICY_ENTRY_KIND) continue;
+		const policy = String(entry.data?.policy ?? "");
+		if (SESSION_INHERITANCE_POLICIES.has(policy)) return policy;
+	}
+	if (snapshot && sessionId) {
+		const applied = [...(snapshot.inheritanceRequests ?? [])].reverse().find((request) =>
+			request.status === "applied" && request.toSessionId === String(sessionId),
+		);
+		if (SESSION_INHERITANCE_POLICIES.has(applied?.policy)) return applied.policy;
+	}
+	return "project";
 }
 
 export function runtimeResearchTrack(snapshot) {
@@ -653,6 +704,87 @@ export async function recordResearchTransition(runtime, transition) {
 	return { ...data, revision: result.revision };
 }
 
+export async function amendRuntimeProjectState(runtime, input) {
+	const sessionId = boundedRuntimeText(input.sessionId, 200);
+	if (!sessionId) throw new Error("Project State amendment requires the current Session id");
+	if (!Number.isInteger(input.basedOnRevision) || input.basedOnRevision < 0) {
+		throw new Error("Project State amendment requires a non-negative basedOnRevision copied from ProjectView");
+	}
+	const reason = boundedRuntimeText(input.reason, 3_000);
+	if (!reason) throw new Error("Project State amendment requires a reason");
+	const authorityRefs = Array.isArray(input.authorityRefs)
+		? input.authorityRefs.map((item) => boundedRuntimeText(item, 1_000)).filter(Boolean).slice(0, 16)
+		: [];
+	if (!authorityRefs.length) throw new Error("Project State amendment requires at least one authority reference");
+	const id = validateMessageId(input.id ?? createEventId("state-amendment"));
+
+	await mkdir(runtime.projectDir, { recursive: true, mode: 0o700 });
+	return await withRuntimeActorAttachment(runtime, RESEARCH_LEADER_ACTOR_ID, {
+		sessionId,
+		attachmentEpoch: input.attachmentEpoch,
+	}, async ({ snapshot, attachment }) => {
+		if (snapshot.revision !== input.basedOnRevision) {
+			throw new Error(`Project State amendment was based on Project revision ${input.basedOnRevision}, but revision ${snapshot.revision} is current; refresh ProjectView and apply the intended correction again.`);
+		}
+		if (!snapshot.projectState?.state) {
+			throw new Error("No structured Project State exists yet; use /compact to establish one before applying a narrow amendment");
+		}
+		const previousSource = snapshot.projectState.source ?? {};
+		const trackRef = previousSource.trackRef ?? "project:initial";
+		const trackStatus = runtimeTrackStatus(snapshot, trackRef);
+		if (trackStatus !== "current") {
+			throw new Error(`The stored Project State belongs to a ${trackStatus} research track; use /compact on the active track instead of amending non-current state`);
+		}
+		const state = applyResearchStatePatch(snapshot.projectState.state, input.patch);
+		const track = runtimeResearchTrack(snapshot);
+		const source = {
+			kind: "amendment",
+			sessionId,
+			entryId: id,
+			contentHash: shortHash(JSON.stringify(state), 20),
+			patchHash: shortHash(JSON.stringify(input.patch), 20),
+			basedOnRevision: input.basedOnRevision,
+			previousStateRevision: snapshot.projectState.revision ?? 0,
+			reason,
+			authorityRefs,
+			trackRef,
+			trackLabel: previousSource.trackLabel ?? (track.ref === trackRef ? track.label : runtimeTrackLabel(snapshot, trackRef)),
+			git: input.git ? {
+				root: boundedRuntimeText(input.git.root, 4_000) || null,
+				branch: boundedRuntimeText(input.git.branch, 500) || null,
+				commit: boundedRuntimeText(input.git.commit, 160) || null,
+				dirty: input.git.dirty ?? null,
+			} : previousSource.git ?? null,
+		};
+		const data = {
+			state,
+			source,
+			amendment: {
+				id,
+				reason,
+				authorityRefs,
+				patchKeys: Object.keys(input.patch),
+				previousStateRef: {
+					revision: snapshot.projectState.revision ?? 0,
+					sessionId: previousSource.sessionId ?? null,
+					entryId: previousSource.entryId ?? null,
+					contentHash: previousSource.contentHash ?? null,
+				},
+			},
+		};
+		const event = prepareRuntimeEvent(runtime, "project.state.amended", data, {
+			id: `project-state-amendment:${id}`,
+		});
+		await writeRuntimeEvent(runtime, event);
+		return {
+			...data,
+			attachmentEpoch: attachment.epoch ?? null,
+			revision: snapshot.revision + 1,
+			eventId: event.id,
+		};
+	});
+}
+
 export async function createRuntimeMessage(runtime, input) {
 	const id = validateMessageId(input.id ?? createMessageId());
 	const type = String(input.type ?? "");
@@ -778,6 +910,46 @@ export async function settleRuntimeSessionRotation(runtime, rotationId, status, 
 		id: `session-rotation:${rotationId}:${status}`,
 	});
 	return { rotationId, status, ...data };
+}
+
+export async function requestRuntimeSessionInheritance(runtime, input) {
+	const policy = String(input.policy ?? "");
+	if (!SESSION_INHERITANCE_POLICIES.has(policy)) throw new Error(`Unsupported Runtime Session inheritance policy: ${policy}`);
+	const fromSessionId = boundedRuntimeText(input.fromSessionId, 200);
+	if (!fromSessionId) throw new Error("Runtime Session inheritance request requires a source Session id");
+	const snapshot = await readRuntimeSnapshot(runtime);
+	const existing = snapshot.pendingInheritanceRequests.find((request) =>
+		request.fromSessionId === fromSessionId && request.policy === policy,
+	);
+	if (existing) return existing;
+	const id = validateMessageId(input.id ?? createEventId("inheritance"));
+	const data = {
+		id,
+		policy,
+		fromSessionId,
+		fromSessionFile: boundedRuntimeText(input.fromSessionFile, 4000) || null,
+		reason: boundedRuntimeText(input.reason, 1200) || `${policy} Session replacement`,
+		projectRevision: snapshot.revision,
+	};
+	await appendRuntimeEvent(runtime, "session.inheritance.requested", data, {
+		id: `session-inheritance:${id}:requested`,
+	});
+	return { ...data, status: "pending" };
+}
+
+export async function settleRuntimeSessionInheritance(runtime, requestId, status, details = {}) {
+	validateMessageId(requestId);
+	if (!SESSION_INHERITANCE_STATES.has(status)) throw new Error(`Unsupported Runtime Session inheritance state: ${status}`);
+	const data = {
+		requestId,
+		toSessionId: details.toSessionId ? String(details.toSessionId) : null,
+		toSessionFile: boundedRuntimeText(details.toSessionFile, 4000) || null,
+		reason: boundedRuntimeText(details.reason, 1200) || null,
+	};
+	await appendRuntimeEvent(runtime, `session.inheritance.${status}`, data, {
+		id: `session-inheritance:${requestId}:${status}`,
+	});
+	return { requestId, status, ...data };
 }
 
 export async function upsertRuntimeAction(runtime, action) {

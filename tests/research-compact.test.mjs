@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import researchCompactionExtension from "../.pi/extensions/research-compaction.ts";
 import {
+	applyResearchStatePatch,
 	buildResearchCompactionDetails,
 	collectResearchEvidence,
 	mergeProjectRuntimeEvidence,
@@ -12,6 +13,102 @@ import {
 	renderResearchSummary,
 	selectResearchCompactionPolicy,
 } from "../.pi/lib/research-compact.mjs";
+
+test("explicit Project State patches preserve omitted fields and replace arrays deliberately", () => {
+	const current = {
+		researchQuestion: "Which mechanism explains the gain?",
+		currentClaim: "No supported claim yet.",
+		hypotheses: [{ id: "H1", statement: "The gain is causal", status: "active", predictions: [], rationale: "", evidenceRefs: [] }],
+		observations: [],
+		decisions: [],
+		unresolvedConfounders: ["seed variance"],
+		openQuestions: ["Does the oracle close the gap?"],
+		nextExperiment: {
+			question: "Run the oracle",
+			intervention: "Bypass the learned module",
+			distinguishingOutcomes: ["gap closes"],
+			validityChecks: ["bypass is active"],
+		},
+		criticalContext: ["test split remains unopened"],
+	};
+	const patched = applyResearchStatePatch(current, {
+		currentClaim: "The pilot is a screen, not proof.",
+		openQuestions: [],
+		nextExperiment: { question: "Run the frozen assay" },
+	});
+	assert.equal(patched.currentClaim, "The pilot is a screen, not proof.");
+	assert.deepEqual(patched.openQuestions, []);
+	assert.deepEqual(patched.hypotheses, current.hypotheses);
+	assert.equal(patched.nextExperiment.question, "Run the frozen assay");
+	assert.equal(patched.nextExperiment.intervention, "Bypass the learned module");
+	assert.notEqual(patched, current);
+	assert.equal(current.currentClaim, "No supported claim yet.");
+	assert.throws(
+		() => applyResearchStatePatch(current, {
+			hypotheses: [{ id: "H1", statement: "The gain is causal", status: "supported", evidenceRefs: [] }],
+		}),
+		/without an evidence reference/,
+	);
+});
+
+test("Runtime Project State becomes the next compaction's prior state when it is newer", () => {
+	const evidence = {
+		experiments: [],
+		checkpoints: [],
+		previousState: { currentClaim: "older Session state" },
+		previousProjectRevision: 3,
+		previousCompactionEntryId: "compact-old",
+		validRefs: new Set(),
+		sourceCatalog: [],
+	};
+	mergeProjectRuntimeEvidence(evidence, {
+		projectState: {
+			revision: 4,
+			state: { currentClaim: "explicitly amended Project State" },
+			source: { entryId: "amendment-new" },
+		},
+		evidence: [],
+	});
+	assert.equal(evidence.previousState.currentClaim, "explicitly amended Project State");
+	assert.equal(evidence.previousProjectRevision, 4);
+	assert.equal(evidence.previousCompactionEntryId, "compact-old");
+	assert.equal(evidence.previousProjectStateEntryId, "amendment-new");
+});
+
+test("clean compaction state stays local when the Session later restores Project inheritance", () => {
+	const branch = [
+		{
+			type: "compaction",
+			id: "project-compact",
+			details: {
+				kind: "research-pi-compaction",
+				version: 1,
+				inheritancePolicy: "project",
+				projectRevision: 3,
+				researchState: { currentClaim: "canonical Project claim" },
+			},
+		},
+		{
+			type: "compaction",
+			id: "clean-compact",
+			details: {
+				kind: "research-pi-compaction",
+				version: 1,
+				inheritancePolicy: "clean",
+				projectRevision: 3,
+				researchState: { currentClaim: "independent clean-session synthesis" },
+			},
+		},
+	];
+	assert.equal(
+		collectResearchEvidence(branch, "session-clean", undefined, { inheritancePolicy: "clean" }).previousState.currentClaim,
+		"independent clean-session synthesis",
+	);
+	assert.equal(
+		collectResearchEvidence(branch, "session-clean", undefined, { inheritancePolicy: "project" }).previousState.currentClaim,
+		"canonical Project claim",
+	);
+});
 
 test("research threshold compaction waits until the agent run settles", () => {
 	const handlers = new Map();

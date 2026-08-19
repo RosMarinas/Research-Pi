@@ -46,7 +46,7 @@ function actorPriority(actor, state) {
  * Produce a bounded, presentation-neutral Project Runtime snapshot for the TUI.
  * This is a projection only: constructing it never appends Runtime events.
  */
-export function buildRuntimeBoardModel({ runtime, snapshot, view, health, sessionId }) {
+export function buildRuntimeBoardModel({ runtime, snapshot, view, health, sessionId, inheritancePolicy = "project" }) {
 	const actionByActor = latestActionsByActor(snapshot.actions);
 	const actors = snapshot.actors.map((actor) => {
 		const action = actionByActor.get(actor.id) ?? null;
@@ -150,6 +150,7 @@ export function buildRuntimeBoardModel({ runtime, snapshot, view, health, sessio
 			branchAnchorId: leaderAttachment?.branchAnchorId ?? null,
 			attachedAt: leaderAttachment?.attachedAt ?? null,
 			attachmentEpoch: leaderAttachment?.epoch ?? null,
+			inheritancePolicy,
 			activation: leaderActivation ? {
 				id: leaderActivation.id,
 				sessionId: leaderActivation.sessionId,

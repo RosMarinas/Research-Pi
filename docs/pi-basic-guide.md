@@ -141,6 +141,7 @@ Pi 现在提供这些低摩擦研究工具：
 
 - `record_experiment`：当一个运行结果真正支持、削弱或无法区分研究假设时，Pi 可调用它追加一条 `.pi/research/experiments.jsonl`。普通搜索和调试不会自动记录；延迟返回的旧路线结果可携带其精确 `trackRef`。
 - `record_research_transition`：当用户明确改变研究问题，或有效证据使旧路线成为 archived/superseded/parallel 时，记录一次 project-level 换轨。普通 next step、代码重构或 Codex completed 不触发；parallel 分支可用精确 `fromTrackRef` 指定从哪条 live route 继续。
+- `amend_project_state`：当当前 ProjectView 只有局部字段需要依据明确用户决策、实验、run 或文档进行纠正时，提交带 Project revision 的 append-only patch。初始状态用 `/compact`，换轨用 `record_research_transition`；数组字段是整组替换，省略字段保持不变。
 - `research_checkpoint`：在大步替换、回滚或废弃路线前，把当前 tracked Git 状态保存到 `refs/pi-research/checkpoints/...`。它不会切分支或清理工作树，也不会捕获 untracked 文件。
 - `research_memory_search`：在旧 session 和实验记录中进行本地全文检索；默认仅限当前 Git 项目，并排除当前 session 和废弃分支。
 - `research_memory_read`：根据搜索结果中的 session/entry ID 读取精确原文和小范围上下文。
@@ -153,7 +154,9 @@ Pi 现在提供这些低摩擦研究工具：
 - `/runtime`（或 `/runtime board`）：打开 Project 控制面；左右或 Tab 切换 overview/actors/messages/sessions，`r` 手动刷新，`v` 查看完整 ProjectView，`w` 准备切到 Codex Watch。面板不进入模型上下文，也不后台轮询。
 - `/runtime health|recommend|view`：查看 Project Runtime 健康度、只读生命周期建议或当前 ProjectView。
 - `/runtime takeover <reason>`：当另一 Session 正在占用 Research Leader 且确实需要人工接管时，显式转移 attachment；旧运行会在下一模型边界停止。
-- `/runtime rotate [reason]`：在 Project State 可恢复且没有未知副作用时，人工创建一个不复制旧 transcript 的新 Leader Session；Runtime 会记录交接和新 ProjectView receipt。不会自动触发。
+- `/runtime rotate [reason]`：在 Project State 可恢复且没有未知副作用时，人工创建一个不复制旧 transcript、但自动继承 ProjectView/mailbox 的新 Leader Session；Runtime 会记录交接和 receipt。不会自动触发。
+- `/runtime new clean [reason]`：创建不复制 transcript、也不自动继承 ProjectView/mailbox 的 clean Session；Project 数据不删除，clean compact 不回写 Project State，Codex mission 的 `reuse=auto` 会降为新 thread。
+- `/runtime inherit [reason]`：让当前 clean Session 从下一轮开始恢复 ProjectView、未消费 mailbox 与 project-aware 操作；旧 transcript 仍不会恢复。后续 compact 以 canonical Project State 为 previous state，已有 clean summary 只作为非权威候选综合。
 - `/config`：打开 Research Pi model profile 面板；`/config show|path|use <profile>` 可检查或持久切换配置。
 
 可以直接提出：
@@ -226,6 +229,9 @@ Pi 在连续处理同一研究子任务时应使用稳定、简短的 `mission` 
 | 查看最近结构化科研状态 | `/research-state` |
 | 查看 Project Runtime/ProjectView | `/runtime`、`/runtime health`、`/runtime view` |
 | 用 Project State 交接到空白 Session | `/runtime rotate [reason]` |
+| 新建不带 Project 记忆的 Session | `/runtime new clean [reason]` |
+| 让 clean Session 恢复 Project 继承 | `/runtime inherit [reason]` |
+| 窄幅纠正当前 Project State | 说明修订依据，让 Leader 调用 `amend_project_state` |
 | 查看或持久切换模型 profile | `/config`、`/config use deepseek-flash` |
 
 科研中推荐这样区分：
@@ -234,7 +240,7 @@ Pi 在连续处理同一研究子任务时应使用稳定、简短的 `mission` 
 - 已经切换成新的研究问题或正式实验阶段：使用 `/fork` 或 `/new`；
 - 会话很长但仍在解决同一问题：可手动使用 `/compact`。默认在约 272K/384K 总上下文处标记自动压缩，但会等当前 agent run 及其工具调用链完整 settled 后才执行，不会中断正在进行的任务。默认按当前分支第 1/2/3 次 compact 保留约 32K/40K/48K recent tail；这些数值统一在 `config.json` 的 `research.compaction` 调节。竞争假设、有效性、evidence refs 与下一实验写入结构化 compact，完整 JSONL 历史仍保留。
 - 新会话需要恢复旧证据：使用 memory search/read，不必先恢复整个旧 session。
-- 新 Session 会自动收到基于最近 structured compact、实验账本、Git 和 Runtime 的限长 ProjectView；它是导航信息而非证据替代。用 `/runtime view` 可检查来源，用 `/runtime recommend` 可查看是否值得 compact 或轮换。确定交接时优先使用 `/runtime rotate`：它先检查 Project State、未知副作用与 Action 恢复身份，再创建空白 Session；原生 `/new` 不做这份 readiness/audit。
+- 普通新 Session 会自动收到基于最近 structured state、实验账本、Git 和 Runtime 的限长 ProjectView；它是导航信息而非证据替代。用 `/runtime view` 可检查来源，用 `/runtime recommend` 可查看是否值得 compact 或轮换。确定交接时优先使用 `/runtime rotate`：它先检查 Project State、未知副作用与 Action 恢复身份，再创建空白 transcript 的 project-aware Session；原生 `/new` 不做这份 readiness/audit。若目的是主动排除项目记忆影响而非接手，则使用 `/runtime new clean`，之后只有显式 `/runtime inherit` 才恢复自动注入。
 - ProjectView 显示 `current/unconfirmed/stale/transitioning/missing` freshness。新 experiment 或 research transition 晚于最近 compact 时，旧 claim/next experiment 不再作为当前结论；只有较新的 Action 或 Git 变化时标为 unconfirmed，要求确认但不自动宣布换轨。
 
 方向实质变化时可以直接告诉 Pi：

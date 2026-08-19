@@ -3,6 +3,7 @@ import { Box, Text } from "@earendil-works/pi-tui";
 import { join } from "node:path";
 import { getGitSnapshot, HARNESS_ROOT } from "../lib/codex-jobs.mjs";
 import {
+	PROJECT_VIEW_KIND,
 	buildProjectView,
 	commitProjectState,
 	materializeProjectView,
@@ -20,6 +21,7 @@ import {
 	RESEARCH_LEADER_ACTOR_ID,
 	RUNTIME_EVENT_ENTRY_KIND,
 	RUNTIME_MESSAGE_KIND,
+	RUNTIME_SESSION_POLICY_ENTRY_KIND,
 	RuntimeAttachmentChangedError,
 	USER_ACTOR_ID,
 	appendRuntimeEvent,
@@ -33,13 +35,16 @@ import {
 	pendingRuntimeMessages,
 	readRuntimeSnapshot,
 	requestRuntimeSessionRotation,
+	requestRuntimeSessionInheritance,
 	resolveRuntimeActor,
 	runtimeActorAttachment,
 	runtimeActorTarget,
 	runtimeMessageText,
+	runtimeSessionInheritancePolicy,
 	settleRuntimeActorActivation,
 	settleRuntimeMessage,
 	settleRuntimeSessionRotation,
+	settleRuntimeSessionInheritance,
 	startRuntimeActorActivation,
 	unconsumedRuntimeMessages,
 } from "../lib/research-runtime.mjs";
@@ -48,6 +53,7 @@ type RuntimeContext = Awaited<ReturnType<typeof initializeResearchRuntime>>;
 type RuntimeMessage = ReturnType<typeof pendingRuntimeMessages>[number];
 type RuntimeSnapshot = Awaited<ReturnType<typeof readRuntimeSnapshot>>;
 type RuntimeActivation = RuntimeSnapshot["activations"][number];
+type SessionInheritancePolicy = "project" | "clean";
 
 class RuntimeLeaderBusyError extends Error {
 	readonly activation: RuntimeActivation;
@@ -115,7 +121,7 @@ export function runtimeRotationReadiness(snapshot: RuntimeSnapshot) {
 	};
 }
 
-export function formatRuntimeStatus(projectKey: string, snapshot: RuntimeSnapshot): string {
+export function formatRuntimeStatus(projectKey: string, snapshot: RuntimeSnapshot, inheritancePolicy: SessionInheritancePolicy = "project"): string {
 	const { active, waiting } = runtimeActorSummary(snapshot);
 	const open = unconsumedRuntimeMessages(snapshot).length;
 	const states = [
@@ -124,16 +130,25 @@ export function formatRuntimeStatus(projectKey: string, snapshot: RuntimeSnapsho
 	].filter(Boolean);
 	if (!states.length) states.push("idle");
 	if (open) states.push(`${open} open`);
+	if (inheritancePolicy === "clean") states.push("clean context");
 	return `Runtime ${projectKey.slice(-8)} · ${states.join(" · ")}`;
 }
 
-export function runtimeHealth(snapshot: RuntimeSnapshot, usage: ReturnType<ExtensionContext["getContextUsage"]>, branchEntries: any[]) {
+export function runtimeHealth(
+	snapshot: RuntimeSnapshot,
+	usage: ReturnType<ExtensionContext["getContextUsage"]>,
+	branchEntries: any[],
+	inheritancePolicy: SessionInheritancePolicy = "project",
+) {
 	const actionSummary = runtimeActorSummary(snapshot);
 	const unknown = snapshot.actions.filter((action) => action.status === "outcome_unknown").length;
 	const compactions = branchEntries.filter((entry) => entry.type === "compaction").length;
 	const memoryLag = Math.max(0, (snapshot.revision ?? 0) - (snapshot.projectState?.revision ?? 0));
 	const tokens = usage?.tokens ?? null;
-	const rotation = runtimeRotationReadiness(snapshot);
+	const baseRotation = runtimeRotationReadiness(snapshot);
+	const rotation = inheritancePolicy === "clean"
+		? { ...baseRotation, ready: false, blockers: ["current Session intentionally has clean context; use /runtime inherit before a Project-aware handoff", ...baseRotation.blockers] }
+		: baseRotation;
 	let recommendation = "continue";
 	let reason = "No Runtime recovery issue or context-pressure threshold currently requires intervention.";
 	if (unknown) {
@@ -151,7 +166,7 @@ export function runtimeHealth(snapshot: RuntimeSnapshot, usage: ReturnType<Exten
 			? "A structured project state exists, actions are settled, and context pressure is high; a fresh Session may now be cheaper than another long continuation."
 			: "Context is above the soft research threshold; compact before evidence is displaced by overflow.";
 	}
-	return { tokens, contextWindow: usage?.contextWindow ?? null, percent: usage?.percent ?? null, compactions, unknown, memoryLag, ...actionSummary, ...rotation, recommendation, reason };
+	return { tokens, contextWindow: usage?.contextWindow ?? null, percent: usage?.percent ?? null, compactions, unknown, memoryLag, inheritancePolicy, ...actionSummary, ...rotation, recommendation, reason };
 }
 
 export function formatRuntimeHealth(health: ReturnType<typeof runtimeHealth>): string {
@@ -159,7 +174,7 @@ export function formatRuntimeHealth(health: ReturnType<typeof runtimeHealth>): s
 		`Context: ${health.tokens?.toLocaleString() ?? "unknown"}/${health.contextWindow?.toLocaleString() ?? "unknown"}${health.percent === null ? "" : ` (${health.percent.toFixed(1)}%)`}`,
 		`Session: ${health.compactions} compaction(s)`,
 		`Runtime: ${health.active} active · ${health.waiting} waiting · ${health.unknown} outcome_unknown`,
-		`Project memory: ${health.memoryLag ? `${health.memoryLag} revision(s) pending synthesis` : "current"}`,
+		`Project memory: ${health.inheritancePolicy === "clean" ? "paused for this clean Session" : health.memoryLag ? `${health.memoryLag} revision(s) pending synthesis` : "current"}`,
 		`Rotation: ${health.ready ? "ready for /runtime rotate" : `blocked (${health.blockers.join("; ")})`}`,
 		`Recommendation: ${health.recommendation}`,
 		health.reason,
@@ -225,6 +240,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	let projectViewHash = "";
 	let projectViewEventCount = -1;
 	let attachmentLossNotified = false;
+	let sessionInheritancePolicy: SessionInheritancePolicy = "project";
 
 	const getRuntime = async (
 		ctx: ExtensionContext,
@@ -268,7 +284,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		if (!ctx.hasUI) return;
 		const activeRuntime = await getRuntime(ctx);
 		const snapshot = await readRuntimeSnapshot(activeRuntime);
-		ctx.ui.setStatus("research_runtime", formatRuntimeStatus(activeRuntime.projectKey, snapshot));
+		ctx.ui.setStatus("research_runtime", formatRuntimeStatus(activeRuntime.projectKey, snapshot, sessionInheritancePolicy));
 	};
 
 	const refreshProjectView = async (ctx: ExtensionContext, suppliedSnapshot?: RuntimeSnapshot) => {
@@ -302,13 +318,14 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	const runtimeBoardModel = async (ctx: ExtensionContext) => {
 		const activeRuntime = await getRuntime(ctx);
 		const { snapshot, view } = await refreshProjectView(ctx);
-		const health = runtimeHealth(snapshot, ctx.getContextUsage(), ctx.sessionManager.getBranch());
+		const health = runtimeHealth(snapshot, ctx.getContextUsage(), ctx.sessionManager.getBranch(), sessionInheritancePolicy);
 		return buildRuntimeBoardModel({
 			runtime: activeRuntime,
 			snapshot,
 			view,
 			health,
 			sessionId: ctx.sessionManager.getSessionId(),
+			inheritancePolicy: sessionInheritancePolicy,
 		});
 	};
 
@@ -464,11 +481,38 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (event, ctx) => {
 		const activeRuntime = await getRuntime(ctx);
-		const { snapshot, view } = await refreshProjectView(ctx);
+		let snapshot = await readRuntimeSnapshot(activeRuntime);
+		sessionInheritancePolicy = runtimeSessionInheritancePolicy(
+			ctx.sessionManager.getBranch(),
+			snapshot,
+			ctx.sessionManager.getSessionId(),
+		) as SessionInheritancePolicy;
+		let view: Awaited<ReturnType<typeof refreshProjectView>>["view"] | null = null;
 		consumedMessageIds.clear();
 		materializedMessages.clear();
 		if (event.reason === "new") {
 			const currentSessionId = ctx.sessionManager.getSessionId();
+			const pendingInheritance = [...(snapshot.pendingInheritanceRequests ?? [])].reverse().find((request) => {
+				if (event.previousSessionFile && request.fromSessionFile) return event.previousSessionFile === request.fromSessionFile;
+				return !event.previousSessionFile && !request.fromSessionFile && request.fromSessionId !== currentSessionId;
+			});
+			if (pendingInheritance) {
+				sessionInheritancePolicy = pendingInheritance.policy as SessionInheritancePolicy;
+				await settleRuntimeSessionInheritance(activeRuntime, pendingInheritance.id, "applied", {
+					toSessionId: currentSessionId,
+					toSessionFile: ctx.sessionManager.getSessionFile(),
+				});
+				snapshot = await readRuntimeSnapshot(activeRuntime);
+			}
+			if (sessionInheritancePolicy === "project") {
+				const refreshed = await refreshProjectView(ctx, snapshot);
+				snapshot = refreshed.snapshot;
+				view = refreshed.view;
+			} else {
+				projectViewText = "";
+				projectViewHash = "";
+				projectViewEventCount = snapshot.ledgerEventCount;
+			}
 			const pendingRotation = [...(snapshot.pendingRotations ?? [])].reverse().find((rotation) => {
 				if (rotation.fromSessionId === currentSessionId) return false;
 				if (event.previousSessionFile && rotation.fromSessionFile) {
@@ -476,7 +520,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 				}
 				return !event.previousSessionFile || !rotation.fromSessionFile;
 			});
-			if (pendingRotation) {
+			if (pendingRotation && view) {
 				await settleRuntimeSessionRotation(activeRuntime, pendingRotation.id, "completed", {
 					toSessionId: currentSessionId,
 					toSessionFile: ctx.sessionManager.getSessionFile(),
@@ -491,11 +535,23 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 					);
 				}
 			}
+		} else if (sessionInheritancePolicy === "project") {
+			const refreshed = await refreshProjectView(ctx, snapshot);
+			snapshot = refreshed.snapshot;
+			view = refreshed.view;
+		} else {
+			projectViewText = "";
+			projectViewHash = "";
+			projectViewEventCount = snapshot.ledgerEventCount;
 		}
 		for (const message of snapshot.messages) {
 			if (message.status === "consumed") consumedMessageIds.add(message.id);
 		}
-		await deliverOpenLeaderMessages(activeRuntime, snapshot, ctx, { triggerTurn: false });
+		if (sessionInheritancePolicy === "project") {
+			await deliverOpenLeaderMessages(activeRuntime, snapshot, ctx, { triggerTurn: false });
+		} else if (ctx.hasUI) {
+			ctx.ui.notify("Clean Runtime Session: ProjectView and mailbox injection are paused. Use /runtime inherit to restore them.", "info");
+		}
 		await refreshStatus(ctx);
 	});
 
@@ -512,6 +568,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		localSessionId = undefined;
 		localAttachmentEpoch = undefined;
 		projectViewEventCount = -1;
+		sessionInheritancePolicy = "project";
 	});
 
 	pi.on("input", async (event, ctx) => {
@@ -519,9 +576,11 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		try {
 			const activeRuntime = await getRuntime(ctx, { claim: true });
 			attachmentLossNotified = false;
-			const { snapshot } = await refreshProjectView(ctx);
-			if (await deliverOpenLeaderMessages(activeRuntime, snapshot, ctx, { triggerTurn: false })) {
-				await refreshProjectView(ctx);
+			if (sessionInheritancePolicy === "project") {
+				const { snapshot } = await refreshProjectView(ctx);
+				if (await deliverOpenLeaderMessages(activeRuntime, snapshot, ctx, { triggerTurn: false })) {
+					await refreshProjectView(ctx);
+				}
 			}
 		} catch (error) {
 			if (!(error instanceof RuntimeLeaderBusyError)) throw error;
@@ -573,6 +632,13 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			}
 			return { messages: event.messages };
 		}
+		if (sessionInheritancePolicy === "clean") {
+			return {
+				messages: event.messages.filter((message) =>
+					message.customType !== PROJECT_VIEW_KIND && message.customType !== RUNTIME_MESSAGE_KIND,
+				),
+			};
+		}
 		if (snapshot.ledgerEventCount !== projectViewEventCount) await refreshProjectView(ctx, snapshot);
 		const messages = event.messages.filter((message) => {
 			if (message.role !== "custom" || message.customType !== RUNTIME_MESSAGE_KIND) return true;
@@ -586,6 +652,10 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_compact", async (event, ctx) => {
+		if (sessionInheritancePolicy === "clean") {
+			if (ctx.hasUI) ctx.ui.notify("Clean Session compaction remains session-local and did not replace Project State.", "info");
+			return;
+		}
 		const activeRuntime = await getRuntime(ctx, { claim: true });
 		const result = await commitProjectState(activeRuntime, {
 			compactionEntry: event.compactionEntry,
@@ -623,11 +693,13 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("runtime", {
-		description: "Open the Project Runtime board, inspect health/View, or manually rotate the Leader Session",
+		description: "Open the Project Runtime board, manage Session inheritance, or manually rotate the Leader Session",
 		handler: async (args, ctx) => {
 			try {
 				const [mode = "board", ...rest] = args.trim().split(/\s+/).filter(Boolean);
-				if (!["board", "health", "recommend", "view", "rotate", "takeover"].includes(mode)) throw new Error("Usage: /runtime [board|health|recommend|view|rotate [reason]|takeover <reason>]");
+				if (!["board", "health", "recommend", "view", "rotate", "takeover", "new", "inherit"].includes(mode)) {
+					throw new Error("Usage: /runtime [board|health|recommend|view|rotate [reason]|takeover <reason>|new clean [reason]|inherit [reason]]");
+				}
 				if (mode === "board") {
 					await showRuntimeBoard(ctx);
 					await refreshStatus(ctx);
@@ -638,15 +710,82 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 					if (!reason) throw new Error("Usage: /runtime takeover <reason>");
 					const activeRuntime = await getRuntime(ctx, { claim: true, force: true, reason });
 					attachmentLossNotified = false;
-					const { snapshot } = await refreshProjectView(ctx);
-					if (await deliverOpenLeaderMessages(activeRuntime, snapshot, ctx, { triggerTurn: true })) {
-						await refreshProjectView(ctx);
+					if (sessionInheritancePolicy === "project") {
+						const { snapshot } = await refreshProjectView(ctx);
+						if (await deliverOpenLeaderMessages(activeRuntime, snapshot, ctx, { triggerTurn: true })) {
+							await refreshProjectView(ctx);
+						}
 					}
-					ctx.ui.notify("This Session now owns the Research Leader. A previous active Session will stop at its next model boundary.", "warning");
+					ctx.ui.notify(
+						`This ${sessionInheritancePolicy === "clean" ? "clean " : ""}Session now owns the Research Leader. A previous active Session will stop at its next model boundary.`,
+						"warning",
+					);
 					await refreshStatus(ctx);
 					return;
 				}
-				if (mode === "rotate") await ctx.waitForIdle();
+				if (mode === "new") {
+					if (rest[0] !== "clean") throw new Error("Usage: /runtime new clean [reason]");
+					await ctx.waitForIdle();
+					const activeRuntime = await getRuntime(ctx, { claim: true });
+					const reason = rest.slice(1).join(" ").trim() || "explicit clean-context Session";
+					const request = await requestRuntimeSessionInheritance(activeRuntime, {
+						policy: "clean",
+						fromSessionId: ctx.sessionManager.getSessionId(),
+						fromSessionFile: ctx.sessionManager.getSessionFile(),
+						reason,
+					});
+					let result;
+					try {
+						result = await ctx.newSession({
+							setup: async (sessionManager) => {
+								sessionManager.appendCustomEntry(RUNTIME_SESSION_POLICY_ENTRY_KIND, {
+									policy: "clean",
+									requestId: request.id,
+									reason,
+									projectKey: activeRuntime.projectKey,
+								});
+							},
+						});
+					} catch (error) {
+						await settleRuntimeSessionInheritance(activeRuntime, request.id, "cancelled", {
+							reason: `Session replacement failed: ${error instanceof Error ? error.message : String(error)}`,
+						});
+						throw error;
+					}
+					if (result.cancelled) {
+						await settleRuntimeSessionInheritance(activeRuntime, request.id, "cancelled", {
+							reason: "Pi session replacement was cancelled",
+						});
+						ctx.ui.notify("Clean Session creation was cancelled; the current Session remains project-aware.", "info");
+					}
+					return;
+				}
+				if (mode === "inherit") {
+					await ctx.waitForIdle();
+					const activeRuntime = await getRuntime(ctx, { claim: true });
+					if (sessionInheritancePolicy === "project") {
+						ctx.ui.notify("This Session already inherits ProjectView and Runtime mailbox.", "info");
+						return;
+					}
+					const reason = rest.join(" ").trim() || "explicitly restore Project inheritance";
+					pi.appendEntry(RUNTIME_SESSION_POLICY_ENTRY_KIND, {
+						policy: "project",
+						reason,
+						projectKey: activeRuntime.projectKey,
+					});
+					sessionInheritancePolicy = "project";
+					const { snapshot } = await refreshProjectView(ctx);
+					await deliverOpenLeaderMessages(activeRuntime, snapshot, ctx, { triggerTurn: false });
+					ctx.ui.notify("Project inheritance restored. ProjectView and open mailbox messages will enter subsequent turns.", "info");
+					await refreshStatus(ctx);
+					return;
+				}
+				if (mode === "rotate") {
+					if (sessionInheritancePolicy === "clean") {
+						throw new Error("/runtime rotate is a Project-aware handoff. Use /runtime inherit first, or continue the clean Session without Project inheritance.");
+					}
+					await ctx.waitForIdle();
+				}
 				const activeRuntime = await getRuntime(ctx, { claim: mode === "rotate" });
 				const { snapshot, view } = await refreshProjectView(ctx);
 				if (mode === "rotate") {
@@ -678,7 +817,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 				}
 				if (mode === "view") ctx.ui.notify(projectViewText, "info");
 				else {
-					const health = runtimeHealth(snapshot, ctx.getContextUsage(), ctx.sessionManager.getBranch());
+					const health = runtimeHealth(snapshot, ctx.getContextUsage(), ctx.sessionManager.getBranch(), sessionInheritancePolicy);
 					ctx.ui.notify(mode === "recommend" ? `${health.recommendation}: ${health.reason}\nNo lifecycle action was taken.` : formatRuntimeHealth(health), health.unknown ? "warning" : "info");
 				}
 				await refreshStatus(ctx);

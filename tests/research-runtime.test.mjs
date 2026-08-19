@@ -13,6 +13,7 @@ import researchRuntimeExtension, {
 import {
 	RESEARCH_LEADER_ACTOR_ID,
 	RUNTIME_MESSAGE_KIND,
+	RUNTIME_SESSION_POLICY_ENTRY_KIND,
 	attachRuntimeActor,
 	appendRuntimeEventAtRevision,
 	claimRuntimeActorAttachment,
@@ -26,13 +27,16 @@ import {
 	recordResearchTransition,
 	recordCodexRuntimeEvent,
 	requestRuntimeSessionRotation,
+	requestRuntimeSessionInheritance,
 	resolveResearchRuntime,
 	resolveRuntimeActor,
 	runtimeActorAttachment,
 	runtimeActorTarget,
+	runtimeSessionInheritancePolicy,
 	settleRuntimeMessage,
 	settleRuntimeActorActivation,
 	settleRuntimeSessionRotation,
+	settleRuntimeSessionInheritance,
 	startRuntimeActorActivation,
 	upsertRuntimeAction,
 	unconsumedRuntimeMessages,
@@ -98,6 +102,19 @@ test("lifecycle health exposes Project evidence that has not reached structured 
 	assert.equal(health.memoryLag, 1);
 	assert.equal(health.recommendation, "compact");
 	assert.match(health.reason, /newer than structured state/);
+});
+
+test("clean Session health does not recommend an incompatible Project rotation", () => {
+	const health = runtimeHealth({
+		projectState: { revision: 1, state: {}, source: {} },
+		revision: 1,
+		actors: [],
+		attachments: [],
+		messages: [],
+		actions: [],
+	}, { tokens: 10_000, contextWindow: 384_000, percent: 2.6 }, [], "clean");
+	assert.equal(health.ready, false);
+	assert.match(health.blockers[0], /clean context/);
 });
 
 test("Session rotation readiness requires recoverable Project and Action state", () => {
@@ -350,6 +367,29 @@ test("Runtime Session rotation is durably requested and settled", async () => {
 	}
 });
 
+test("Runtime Session inheritance receipts are durable and terminal", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-inheritance-ledger-"));
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace, { recursive: true });
+		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a" }, { runtimeRoot: join(root, "runtime") });
+		const request = await requestRuntimeSessionInheritance(runtime, {
+			id: "inheritance-clean-test",
+			policy: "clean",
+			fromSessionId: "session-a",
+			fromSessionFile: join(root, "session-a.jsonl"),
+			reason: "test clean replacement",
+		});
+		await settleRuntimeSessionInheritance(runtime, request.id, "applied", { toSessionId: "session-b" });
+		await settleRuntimeSessionInheritance(runtime, request.id, "cancelled", { reason: "late stale cancellation" });
+		const snapshot = await readRuntimeSnapshot(runtime);
+		assert.equal(snapshot.inheritanceRequests[0].status, "applied");
+		assert.equal(runtimeSessionInheritancePolicy([], snapshot, "session-b"), "clean");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("Codex mission and mode define stable Actors while job events remain idempotent", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-codex-"));
 	try {
@@ -533,6 +573,123 @@ test("/runtime rotate creates a fresh Session and records a ProjectView receipt"
 		assert.equal(sent.length, 1);
 		assert.equal(sent[0].message.details.messageId, openMessage.id);
 		assert.ok(notices.some((message) => /ProjectView r1 \(current\) is ready/.test(message)));
+	} finally {
+		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
+		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("/runtime new clean starts without transcript, ProjectView, mailbox, or Project State writes until explicit inherit", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-clean-session-"));
+	const previousRoot = process.env.RESEARCH_PI_RUNTIME_DIR;
+	process.env.RESEARCH_PI_RUNTIME_DIR = join(root, "runtime");
+	try {
+		const workspace = join(root, "workspace");
+		const oldSessionFile = join(root, "session-old.jsonl");
+		const newSessionFile = join(root, "session-clean.jsonl");
+		mkdirSync(workspace, { recursive: true });
+		const handlers = new Map();
+		const commands = new Map();
+		const notices = [];
+		const sent = [];
+		const newBranch = [];
+		let replacementOptions;
+		const pi = {
+			on(name, handler) { handlers.set(name, handler); },
+			registerCommand(name, command) { commands.set(name, command); },
+			registerMessageRenderer() {},
+			registerEntryRenderer() {},
+			sendMessage(message, options) { sent.push({ message, options }); },
+			appendEntry(customType, data) {
+				newBranch.push({ type: "custom", id: `entry-${newBranch.length}`, customType, data });
+			},
+		};
+		researchRuntimeExtension(pi);
+		const baseContext = (sessionId, sessionFile, branch, allowNewSession = false) => ({
+			cwd: workspace,
+			hasUI: true,
+			ui: { setStatus() {}, notify(message) { notices.push(message); }, setEditorText() {} },
+			sessionManager: {
+				getSessionId: () => sessionId,
+				getSessionFile: () => sessionFile,
+				getLeafId: () => `leaf-${sessionId}`,
+				getBranch: () => branch,
+			},
+			getContextUsage: () => ({ tokens: 8_000, contextWindow: 384_000, percent: 2.1 }),
+			isIdle: () => true,
+			abort() {},
+			waitForIdle: async () => {},
+			...(allowNewSession ? {
+				newSession: async (options) => {
+					replacementOptions = options;
+					return { cancelled: false };
+				},
+			} : {}),
+		});
+
+		const oldContext = baseContext("session-old", oldSessionFile, [], true);
+		await handlers.get("session_start")({ type: "session_start", reason: "startup" }, oldContext);
+		const runtime = await resolveResearchRuntime(workspace);
+		await appendRuntimeEventAtRevision(runtime, "project.state.committed", {
+			state: {
+				researchQuestion: "Project question must stay outside clean context",
+				currentClaim: "Project claim",
+				hypotheses: [], observations: [], decisions: [], unresolvedConfounders: [], openQuestions: [],
+				nextExperiment: { question: "Project experiment", intervention: "Project intervention", distinguishingOutcomes: [], validityChecks: [] },
+				criticalContext: [],
+			},
+			source: { sessionId: "session-old", entryId: "compact-old", trackRef: "project:initial" },
+		}, 0, { id: "project-state:clean-session-test" });
+
+		await commands.get("runtime").handler("new clean challenge the project framing independently", oldContext);
+		assert.equal(replacementOptions.parentSession, undefined, "clean Session must not fork the old transcript");
+		let snapshot = await readRuntimeSnapshot(runtime);
+		assert.equal(snapshot.pendingInheritanceRequests.length, 1);
+		assert.equal(snapshot.pendingInheritanceRequests[0].policy, "clean");
+
+		await handlers.get("session_shutdown")({ type: "session_shutdown" }, oldContext);
+		const mailbox = await createRuntimeMessage(runtime, {
+			id: "message-held-during-clean-session",
+			type: "notify",
+			from: "user",
+			to: RESEARCH_LEADER_ACTOR_ID,
+			body: "This must remain queued until Project inheritance returns.",
+		});
+		const cleanContext = baseContext("session-clean", newSessionFile, newBranch);
+		await handlers.get("session_start")({ type: "session_start", reason: "new", previousSessionFile: oldSessionFile }, cleanContext);
+		snapshot = await readRuntimeSnapshot(runtime);
+		assert.equal(snapshot.pendingInheritanceRequests.length, 0);
+		assert.equal(snapshot.inheritanceRequests[0].status, "applied");
+		assert.equal(runtimeSessionInheritancePolicy([], snapshot, "session-clean"), "clean");
+		assert.equal(sent.length, 0, "clean Session startup must not deliver Runtime mailbox messages");
+		assert.ok(notices.some((message) => /Clean Runtime Session/.test(message)));
+
+		const isolated = await handlers.get("context")({
+			type: "context",
+			messages: [
+				{ role: "custom", customType: "research-project-view", content: "stale ProjectView" },
+				{ role: "custom", customType: RUNTIME_MESSAGE_KIND, content: "stale Runtime message" },
+				{ role: "user", content: "independent question" },
+			],
+		}, cleanContext);
+		assert.deepEqual(isolated.messages, [{ role: "user", content: "independent question" }]);
+		await handlers.get("session_compact")({ type: "session_compact", compactionEntry: { type: "compaction", id: "clean-compact" } }, cleanContext);
+		assert.equal((await readRuntimeSnapshot(runtime)).revision, 1, "clean Session compaction must not replace Project State");
+
+		await replacementOptions.setup({
+			appendCustomEntry(customType, data) {
+				newBranch.push({ type: "custom", id: `entry-${newBranch.length}`, customType, data });
+			},
+		});
+		assert.equal(runtimeSessionInheritancePolicy(newBranch), "clean");
+		await commands.get("runtime").handler("inherit accept current project memory", cleanContext);
+		assert.equal(runtimeSessionInheritancePolicy(newBranch), "project");
+		assert.equal(sent.length, 1);
+		assert.equal(sent[0].message.details.messageId, mailbox.id);
+		assert.equal(sent[0].options.triggerTurn, false);
+		const inherited = await handlers.get("context")({ type: "context", messages: [{ role: "user", content: "continue" }] }, cleanContext);
+		assert.match(String(inherited.messages.find((message) => message.customType === "research-project-view")?.content), /Project question must stay outside clean context/);
 	} finally {
 		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
 		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;

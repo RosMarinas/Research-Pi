@@ -13,11 +13,13 @@ import {
 } from "../.pi/lib/project-view.mjs";
 import { RESEARCH_COMPACTION_KIND, RESEARCH_COMPACTION_VERSION } from "../.pi/lib/research-compact.mjs";
 import {
+	amendRuntimeProjectState,
 	appendRuntimeEvent,
 	appendRuntimeEventAtRevision,
 	initializeResearchRuntime,
 	readRuntimeSnapshot,
 	recordResearchTransition,
+	runtimeActorAttachment,
 	runtimeTrackStatus,
 } from "../.pi/lib/research-runtime.mjs";
 
@@ -123,7 +125,7 @@ test("a research transition makes the old state stale and blocks a stale compact
 		const text = renderProjectView(view);
 		assert.equal(view.freshness, "stale");
 		assert.match(text, /Active research track: CSB-Parameterized-v0 Q1/);
-		assert.match(text, /Previous compacted state \(not current\)/);
+		assert.match(text, /Previous structured state \(not current\)/);
 		assert.doesNotMatch(text, /^Next experiment:/m);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
@@ -213,7 +215,116 @@ test("a superseded state stays retired when the latest transition is parallel", 
 	const view = buildProjectView({ runtime: { projectKey: "project-routes", workspaceRoot: "/workspace" }, snapshot, git: {}, experiments: [] });
 	assert.equal(view.stateRouteStatus, "retired");
 	assert.equal(view.transitionSupersedesState, true);
-	assert.match(renderProjectView(view), /Previous compacted state \(not current\)/);
+	assert.match(renderProjectView(view), /Previous structured state \(not current\)/);
+});
+
+test("Project State amendments are partial, provenance-labelled, and revision guarded", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-project-amendment-"));
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace);
+		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a" }, { runtimeRoot: join(root, "runtime") });
+		await commitProjectState(runtime, {
+			compactionEntry: compaction("base-state"),
+			sessionId: "session-a",
+			appendRuntimeEvent,
+			appendRuntimeEventAtRevision,
+			readRuntimeSnapshot,
+		});
+		let snapshot = await readRuntimeSnapshot(runtime);
+		const attachment = runtimeActorAttachment(snapshot, "research-leader", "session-a");
+		const originalHypotheses = snapshot.projectState.state.hypotheses;
+		const amendment = await amendRuntimeProjectState(runtime, {
+			id: "correct-current-claim",
+			sessionId: "session-a",
+			attachmentEpoch: attachment.epoch,
+			basedOnRevision: 1,
+			reason: "The user corrected the accepted interpretation after reviewing the run.",
+			authorityRefs: ["user-decision:2026-08-20", "run:R2a-v2"],
+			patch: {
+				currentClaim: "R2a-v2 is only a valid screen, not a frozen qualification.",
+				openQuestions: ["Does the result survive the formal frozen assay?"],
+				nextExperiment: { question: "Run the frozen assay" },
+			},
+		});
+		assert.equal(amendment.revision, 2);
+		snapshot = await readRuntimeSnapshot(runtime);
+		assert.equal(snapshot.projectState.state.currentClaim, "R2a-v2 is only a valid screen, not a frozen qualification.");
+		assert.equal(snapshot.projectState.state.nextExperiment.question, "Run the frozen assay");
+		assert.equal(snapshot.projectState.state.nextExperiment.intervention, "bypass the learned module");
+		assert.deepEqual(snapshot.projectState.state.hypotheses, originalHypotheses);
+		assert.equal(snapshot.projectState.source.kind, "amendment");
+		assert.deepEqual(snapshot.projectState.amendment.authorityRefs, ["user-decision:2026-08-20", "run:R2a-v2"]);
+		const rendered = renderProjectView(buildProjectView({ runtime, snapshot, git: {}, experiments: [] }));
+		assert.match(rendered, /Latest state amendment:/);
+		assert.match(rendered, /user-decision:2026-08-20/);
+
+		await assert.rejects(
+			amendRuntimeProjectState(runtime, {
+				id: "stale-correction",
+				sessionId: "session-a",
+				attachmentEpoch: attachment.epoch,
+				basedOnRevision: 1,
+				reason: "stale competing correction",
+				authorityRefs: ["user-decision:stale"],
+				patch: { currentClaim: "must not win" },
+			}),
+			/refresh ProjectView/,
+		);
+		await assert.rejects(
+			amendRuntimeProjectState(runtime, {
+				id: "wrong-owner",
+				sessionId: "session-a",
+				attachmentEpoch: "stale-epoch",
+				basedOnRevision: 2,
+				reason: "must not bypass ownership",
+				authorityRefs: ["user-decision:owner"],
+				patch: { currentClaim: "must not win" },
+			}),
+			/attachment changed/,
+		);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("Project State amendment refuses to rewrite a retired research route", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-project-amendment-retired-"));
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace);
+		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a" }, { runtimeRoot: join(root, "runtime") });
+		await commitProjectState(runtime, {
+			compactionEntry: compaction("retired-state"),
+			sessionId: "session-a",
+			appendRuntimeEvent,
+			appendRuntimeEventAtRevision,
+			readRuntimeSnapshot,
+		});
+		await recordResearchTransition(runtime, {
+			id: "retire-old-state",
+			to: "replacement route",
+			reason: "accepted evidence changes the active route",
+			oldDisposition: "superseded",
+			authorityRefs: ["experiment:replacement"],
+		});
+		const snapshot = await readRuntimeSnapshot(runtime);
+		const attachment = runtimeActorAttachment(snapshot, "research-leader", "session-a");
+		await assert.rejects(
+			amendRuntimeProjectState(runtime, {
+				id: "rewrite-retired",
+				sessionId: "session-a",
+				attachmentEpoch: attachment.epoch,
+				basedOnRevision: 2,
+				reason: "attempt to patch obsolete memory",
+				authorityRefs: ["user-decision:bad-target"],
+				patch: { currentClaim: "obsolete" },
+			}),
+			/retired research track/,
+		);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });
 
 test("a transition can continue an explicit live parallel route", async () => {

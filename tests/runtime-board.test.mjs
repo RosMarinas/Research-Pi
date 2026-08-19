@@ -94,7 +94,16 @@ test("Runtime Board is a bounded projection and does not revive superseded resea
 	assert.deepEqual(model.openMessages.map((message) => message.id), ["msg-delivered", "msg-queued"]);
 	assert.equal(model.counts.openMessages, 2);
 	assert.equal(model.leader.isCurrentSessionAttached, true);
+	assert.equal(model.leader.inheritancePolicy, "project");
 	assert.deepEqual(model.rotations.map((rotation) => rotation.id), ["rotation-pending", "rotation-old"]);
+});
+
+test("Runtime Board makes clean Session isolation visible", () => {
+	const model = buildRuntimeBoardModel({ ...fixture(), inheritancePolicy: "clean" });
+	assert.equal(model.leader.inheritancePolicy, "clean");
+	const overlay = new RuntimeBoardOverlay({ requestRender() {} }, plainTheme(), () => {}, model, async () => model);
+	overlay.handleInput("4");
+	assert.match(overlay.render(78).join("\n"), /clean context/);
 });
 
 test("Runtime Board renders within terminal width and exposes keyboard sections without polling", async () => {

@@ -158,7 +158,7 @@ export function buildProjectView({ runtime, snapshot, git = {}, experiments = []
 	const transitionAfterState = snapshot.transitions?.find((transition) => transition.revision > stateRevision);
 	const evidenceAfterState = snapshot.evidence?.filter((item) => item.revision > stateRevision) ?? [];
 	const actionAfterState = snapshot.projectState
-		? actions.some((action) => Date.parse(action.updatedAt ?? action.createdAt ?? "") > Date.parse(snapshot.projectState.committedAt ?? ""))
+		? actions.some((action) => Date.parse(action.updatedAt ?? action.createdAt ?? "") > Date.parse(snapshot.projectState.updatedAt ?? snapshot.projectState.committedAt ?? ""))
 		: actions.length > 0;
 	const sourceGit = snapshot.projectState?.source?.git;
 	const gitChanged = Boolean(
@@ -196,6 +196,7 @@ export function buildProjectView({ runtime, snapshot, git = {}, experiments = []
 		git: { branch: git.branch ?? null, commit: git.commit?.slice(0, 12) ?? null, dirty: git.dirty ?? null },
 		state: snapshot.projectState?.state ?? null,
 		stateSource: snapshot.projectState?.source ?? null,
+		stateAmendment: snapshot.projectState?.amendment ?? null,
 		stateRevision,
 		projectRevision: snapshot.revision ?? 0,
 		freshness,
@@ -239,12 +240,12 @@ export function renderProjectView(view) {
 		"Deterministic project-level working view. Compaction-derived claims are fallible; validate important claims against the cited experiment/run/artifact before acting.",
 		`Project: ${view.projectKey} · ${view.workspaceRoot}`,
 		`Git: branch=${view.git.branch ?? "unknown"} commit=${view.git.commit ?? "unknown"} dirty=${view.git.dirty ?? "unknown"}`,
-		`Project revision: ${view.projectRevision} · compacted state revision: ${view.stateRevision || "none"} · memory freshness: ${view.freshness}`,
+		`Project revision: ${view.projectRevision} · structured state revision: ${view.stateRevision || "none"} · memory freshness: ${view.freshness}`,
 		`Current research track: ${view.currentTrack?.ref ?? "project:initial"} · ${compact(view.currentTrack?.label, 600) || "unnamed"}`,
 	];
 	if (view.freshness !== "current") {
 		lines.push(
-			"MEMORY FRESHNESS WARNING: do not execute the compacted nextExperiment as current until the active research direction is confirmed.",
+			"MEMORY FRESHNESS WARNING: do not execute the structured nextExperiment as current until the active research direction is confirmed.",
 			...view.freshnessReasons.map((reason) => `- ${reason}`),
 		);
 	}
@@ -259,16 +260,17 @@ export function renderProjectView(view) {
 		);
 	}
 	if (state) {
-		lines.push(`Compacted state track: ${view.stateTrackRef} [${view.stateRouteStatus}] · ${compact(view.stateTrackLabel, 600)}`);
+		lines.push(`Structured state track: ${view.stateTrackRef} [${view.stateRouteStatus}] · ${compact(view.stateTrackLabel, 600)}`);
 		if (view.transitionSupersedesState) {
 			lines.push(
-				`Previous compacted state (not current): S:${view.stateSource?.sessionId}/E:${view.stateSource?.entryId} hash=${view.stateSource?.contentHash ?? "unknown"}`,
+				`Previous structured state (not current): S:${view.stateSource?.sessionId}/E:${view.stateSource?.entryId} hash=${view.stateSource?.contentHash ?? "unknown"}`,
 				`Previous research question: ${compact(state.researchQuestion, 700) || "unknown"}`,
 				`Previous claim: ${compact(state.currentClaim, 700) || "none recorded"}`,
 				"Previous hypotheses and experiment details remain retrievable through research_memory_search/read; they are not expanded into the active context.",
 			);
 		} else lines.push(
-			`State provenance: S:${view.stateSource?.sessionId}/E:${view.stateSource?.entryId} hash=${view.stateSource?.contentHash ?? "unknown"}`,
+			`State provenance: ${view.stateSource?.kind === "amendment" ? "amendment " : "compaction "}S:${view.stateSource?.sessionId}/E:${view.stateSource?.entryId} hash=${view.stateSource?.contentHash ?? "unknown"}`,
+			view.stateAmendment ? `Latest state amendment: ${compact(view.stateAmendment.reason, 1_000)} | authority=${compact(view.stateAmendment.authorityRefs?.join(" | "), 1_800) || "missing"}` : undefined,
 			`${view.freshness === "current" ? "Research question" : "Last compacted research question"}: ${compact(state.researchQuestion, 900) || "unknown"}`,
 			`${view.freshness === "current" ? "Current claim" : "Last compacted claim (verify freshness)"}: ${compact(state.currentClaim, 900) || "no supported claim recorded"}`,
 			`${view.freshness === "current" ? "Competing hypotheses" : "Last compacted hypotheses"}:`,

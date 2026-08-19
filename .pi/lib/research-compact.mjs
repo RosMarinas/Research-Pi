@@ -24,6 +24,17 @@ export const RESEARCH_RECENT_TAIL_SCHEDULE = Object.freeze(configuredTailSchedul
 const MAX_HYPOTHESES = 24;
 const MAX_OBSERVATIONS = 32;
 const MAX_DECISIONS = 24;
+const RESEARCH_STATE_KEYS = new Set([
+	"researchQuestion",
+	"currentClaim",
+	"hypotheses",
+	"observations",
+	"decisions",
+	"unresolvedConfounders",
+	"openQuestions",
+	"nextExperiment",
+	"criticalContext",
+]);
 
 export function selectResearchCompactionPolicy(branchEntries) {
 	const previousResearchCompactions = branchEntries.filter(
@@ -112,11 +123,12 @@ function normalizeCheckpoint(data, ref, entryId) {
 	};
 }
 
-export function collectResearchEvidence(branchEntries, sessionId, firstKeptEntryId) {
+export function collectResearchEvidence(branchEntries, sessionId, firstKeptEntryId, options = {}) {
 	const experiments = [];
 	const checkpoints = [];
 	let previousState;
 	let previousCompactionEntryId;
+	let previousProjectRevision;
 
 	for (const entry of branchEntries) {
 		const ref = entry?.id ? refFor(sessionId, entry.id) : undefined;
@@ -128,10 +140,18 @@ export function collectResearchEvidence(branchEntries, sessionId, firstKeptEntry
 			entry?.type === "compaction" &&
 			entry.details?.kind === RESEARCH_COMPACTION_KIND &&
 			entry.details?.version === RESEARCH_COMPACTION_VERSION &&
-			entry.details?.researchState
+			entry.details?.researchState &&
+			(
+				options.inheritancePolicy === "clean"
+					? entry.details.inheritancePolicy === "clean"
+					: entry.details.inheritancePolicy !== "clean"
+			)
 		) {
 			previousState = entry.details.researchState;
 			previousCompactionEntryId = entry.id;
+			previousProjectRevision = Number.isInteger(entry.details.projectRevision)
+				? entry.details.projectRevision
+				: undefined;
 		}
 	}
 
@@ -158,12 +178,21 @@ export function collectResearchEvidence(branchEntries, sessionId, firstKeptEntry
 		checkpoints,
 		previousState,
 		previousCompactionEntryId,
+		previousProjectRevision,
 		sourceCatalog,
 		validRefs,
 	};
 }
 
 export function mergeProjectRuntimeEvidence(evidence, runtimeSnapshot) {
+	if (
+		runtimeSnapshot?.projectState?.state
+		&& (!evidence.previousState || (runtimeSnapshot.projectState.revision ?? 0) > (evidence.previousProjectRevision ?? -1))
+	) {
+		evidence.previousState = runtimeSnapshot.projectState.state;
+		evidence.previousProjectRevision = runtimeSnapshot.projectState.revision ?? 0;
+		evidence.previousProjectStateEntryId = runtimeSnapshot.projectState.source?.entryId ?? evidence.previousProjectStateEntryId;
+	}
 	const seen = new Set(evidence.experiments.map((item) => item.id));
 	for (const record of runtimeSnapshot?.evidence ?? []) {
 		if (!record?.id || seen.has(record.id)) continue;
@@ -233,6 +262,121 @@ function normalizeNextExperiment(value) {
 		distinguishingOutcomes: list(source.distinguishingOutcomes, 10, 1_500),
 		validityChecks: list(source.validityChecks, 12, 1_000),
 	};
+}
+
+function requireArray(value, label) {
+	if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+	return value;
+}
+
+function amendmentRefs(value, maxItems = 16) {
+	return [...new Set(list(requireArray(value ?? [], "evidenceRefs"), maxItems * 2, 1_000))].slice(0, maxItems);
+}
+
+function amendmentHypotheses(value) {
+	const allowedStatuses = new Set(["active", "supported", "weakened", "rejected", "inconclusive"]);
+	const result = [];
+	const seenIds = new Set();
+	for (const [index, item] of requireArray(value, "hypotheses").entries()) {
+		if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error(`hypotheses[${index}] must be an object`);
+		if (result.length >= MAX_HYPOTHESES) break;
+		const id = hypothesisId(item.id, index);
+		if (seenIds.has(id)) throw new Error(`Duplicate hypothesis id in Project State amendment: ${id}`);
+		const statement = text(item.statement, 3_000);
+		if (!statement) throw new Error(`hypotheses[${index}].statement is required`);
+		const status = allowedStatuses.has(item.status) ? item.status : "inconclusive";
+		const evidenceRefs = amendmentRefs(item.evidenceRefs);
+		if (["supported", "weakened", "rejected"].includes(status) && !evidenceRefs.length) {
+			throw new Error(`Hypothesis ${id} cannot be ${status} without an evidence reference`);
+		}
+		result.push({
+			id,
+			statement,
+			status,
+			predictions: list(item.predictions, 8, 1_000),
+			rationale: text(item.rationale, 2_000),
+			evidenceRefs,
+		});
+		seenIds.add(id);
+	}
+	return result;
+}
+
+function amendmentObservations(value) {
+	const allowedValidity = new Set(["valid", "invalid", "inconclusive", "unverified"]);
+	const result = [];
+	for (const [index, item] of requireArray(value, "observations").entries()) {
+		if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error(`observations[${index}] must be an object`);
+		if (result.length >= MAX_OBSERVATIONS) break;
+		const statement = text(item.statement, 3_000);
+		if (!statement) throw new Error(`observations[${index}].statement is required`);
+		const validity = allowedValidity.has(item.validity) ? item.validity : "unverified";
+		const evidenceRefs = amendmentRefs(item.evidenceRefs);
+		if (validity === "valid" && !evidenceRefs.length) {
+			throw new Error(`observations[${index}] cannot be valid without an evidence reference`);
+		}
+		result.push({
+			statement,
+			interpretation: text(item.interpretation, 3_000),
+			validity,
+			evidenceRefs,
+		});
+	}
+	return result;
+}
+
+function amendmentDecisions(value) {
+	const result = [];
+	for (const [index, item] of requireArray(value, "decisions").entries()) {
+		if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error(`decisions[${index}] must be an object`);
+		if (result.length >= MAX_DECISIONS) break;
+		const decision = text(item.decision, 3_000);
+		if (!decision) throw new Error(`decisions[${index}].decision is required`);
+		result.push({
+			decision,
+			rationale: text(item.rationale, 3_000),
+			reversible: item.reversible !== false,
+			evidenceRefs: amendmentRefs(item.evidenceRefs),
+		});
+	}
+	return result;
+}
+
+/**
+ * Apply one explicit, bounded Project State correction without re-summarizing
+ * the whole project. Omitted top-level fields are preserved. Array fields are
+ * complete replacements; nextExperiment merges only its supplied sub-fields.
+ */
+export function applyResearchStatePatch(current, patch) {
+	if (!current || typeof current !== "object" || Array.isArray(current)) {
+		throw new Error("A structured Project State is required before it can be amended");
+	}
+	if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
+		throw new Error("Project State amendment patch must be an object");
+	}
+	const keys = Object.keys(patch);
+	if (!keys.length) throw new Error("Project State amendment patch must change at least one field");
+	const unknown = keys.filter((key) => !RESEARCH_STATE_KEYS.has(key));
+	if (unknown.length) throw new Error(`Unknown Project State amendment field(s): ${unknown.join(", ")}`);
+
+	const state = JSON.parse(JSON.stringify(current));
+	if (Object.hasOwn(patch, "researchQuestion")) state.researchQuestion = text(patch.researchQuestion, 3_000);
+	if (Object.hasOwn(patch, "currentClaim")) state.currentClaim = text(patch.currentClaim, 3_000);
+	if (Object.hasOwn(patch, "hypotheses")) state.hypotheses = amendmentHypotheses(patch.hypotheses);
+	if (Object.hasOwn(patch, "observations")) state.observations = amendmentObservations(patch.observations);
+	if (Object.hasOwn(patch, "decisions")) state.decisions = amendmentDecisions(patch.decisions);
+	if (Object.hasOwn(patch, "unresolvedConfounders")) {
+		state.unresolvedConfounders = list(requireArray(patch.unresolvedConfounders, "unresolvedConfounders"), 24, 1_500);
+	}
+	if (Object.hasOwn(patch, "openQuestions")) state.openQuestions = list(requireArray(patch.openQuestions, "openQuestions"), 24, 1_500);
+	if (Object.hasOwn(patch, "criticalContext")) state.criticalContext = list(requireArray(patch.criticalContext, "criticalContext"), 24, 1_500);
+	if (Object.hasOwn(patch, "nextExperiment")) {
+		if (!patch.nextExperiment || typeof patch.nextExperiment !== "object" || Array.isArray(patch.nextExperiment)) {
+			throw new Error("nextExperiment must be an object");
+		}
+		state.nextExperiment = normalizeNextExperiment({ ...(state.nextExperiment ?? {}), ...patch.nextExperiment });
+	}
+	return state;
 }
 
 function mergePreviousHypotheses(current, previous, warnings, validRefs, validExperimentRefs) {
@@ -356,6 +500,7 @@ export function buildResearchCompactionPrompt({
 	conversationText,
 	previousState,
 	legacyPreviousSummary,
+	independentSessionSummary,
 	experiments,
 	checkpoints,
 	sourceCatalog,
@@ -375,6 +520,7 @@ Rules:
 6. Match the dominant language of the conversation.
 7. A recorded project transition with archived/superseded disposition changes the active research route. Keep the old route as retrievable history, but do not present its claim or next experiment as current. A parallel disposition does not retire it.
 8. Experiment trackRef/trackLabel identify route provenance. Evidence from a retired route may remain scientifically relevant, but do not silently use it as evidence that the current route's intervention occurred.
+9. An independent clean-Session summary is a candidate synthesis, not Project authority or experimental evidence. Retain useful hypotheses, but require normal provenance before making strong updates.
 
 Required schema:
 {
@@ -416,6 +562,9 @@ ${JSON.stringify(previousState ?? null)}
 
 Legacy Pi summary (fallible migration input; present only when no structured research state exists):
 ${text(legacyPreviousSummary, 40_000) || "None"}
+
+Independent clean-Session summary (fallible session-local input, never Project authority by itself):
+${text(independentSessionSummary, 40_000) || "None"}
 
 Recorded experiments (authoritative for their exact fields, but interpret according to validityJudgment):
 ${JSON.stringify(experiments)}
@@ -522,6 +671,7 @@ export function buildResearchCompactionDetails({
 	fileOps,
 	policy,
 	projectRevision,
+	inheritancePolicy = "project",
 }) {
 	return {
 		kind: RESEARCH_COMPACTION_KIND,
@@ -532,6 +682,7 @@ export function buildResearchCompactionDetails({
 		tokensBefore,
 		compactionPolicy: policy,
 		projectRevision: Number.isInteger(projectRevision) ? projectRevision : 0,
+		inheritancePolicy: inheritancePolicy === "clean" ? "clean" : "project",
 		researchState: state,
 		evidenceLedger: {
 			experiments: evidence.experiments,
@@ -540,6 +691,7 @@ export function buildResearchCompactionDetails({
 		},
 		provenance: {
 			previousCompactionEntryId: evidence.previousCompactionEntryId,
+			previousProjectStateEntryId: evidence.previousProjectStateEntryId,
 			sourceRefs: [...evidence.validRefs],
 			sourceCatalogTruncated: evidence.sourceCatalog.length >= 140,
 		},

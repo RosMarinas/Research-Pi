@@ -165,6 +165,12 @@ sequenceDiagram
 
 方向切换不等待 compact。`record_research_transition` 立即使旧 state 变为 stale，并说明旧路线是 archived、superseded 还是 parallel；下一次 compact 才综合形成新 state。superseded/archived 时不会机械搬运旧假设，旧证据仍可检索；parallel 路线的存活状态会跨后续主路线切换保留，并可用精确 `fromTrackRef` 从任一 live route 继续。Evidence、Action、message、Project State 与 Codex job 都携带 track provenance；延迟返回的实验可显式保留旧 `trackRef`。ProjectView 根据 compacted state 自己的 track 判断它是否 retired，而不是只看最后一次 transition。Project revision 使用 compare-and-append：压缩或换轨基于旧 revision 时不会覆盖当前状态。ProjectView 另外观察 ledger semantic event count，所以跨 Session 新增 Action/mailbox 会在下一模型边界刷新，即使它不改变科研 revision。
 
+### 4.5 Clean Session 与 Project State 修订
+
+`/runtime rotate` 是 project-aware 交接：新 Session 没有旧 transcript，但仍自动获得 ProjectView、未消费 mailbox 和可恢复 Actor。`/runtime new clean [reason]` 则是主动切断自动继承：新 Session 同时没有 transcript、ProjectView 和 mailbox 注入；clean 状态在 Session custom entry 与 Project Runtime request/receipt 两处可恢复。它不会删除磁盘上的 Project ledger，`/runtime` 和 `/runtime view` 仍可由用户只读检查；`/runtime inherit [reason]` 才从后续模型轮次恢复 project-aware 上下文。clean compact 只写 Session，不替换 Project State；恢复继承后的 compact 仍以 canonical Project State 为 prior state，clean summary 仅作为非权威候选综合。Codex `reuse=auto` 会降为新 thread，显式 job resume 仍需用户/Leader主动指定。
+
+`amend_project_state` 解决的是另一件事：已有 structured Project State 只有少数字段需要纠正时，当前 attached Leader 可提交局部 patch。操作必须复制最新 Project revision，并提供 reason 与 authority refs；写入前在同一 ledger lease 中复查 attachment epoch 和 revision。它追加 `project.state.amended`，不改旧事件。省略字段保持，数组整体替换，`nextExperiment` 合并显式子字段。没有初始 state、目标 route 已 retired、clean Session、stale revision 或 stale attachment 都会拒绝。初始综合继续使用 `/compact`，实质换轨继续使用 `record_research_transition`。
+
 ## 5. 所有权与边界
 
 新 Codex job 使用三层检查：
@@ -196,6 +202,8 @@ exact workspaceKey/root               文件与副作用边界，不可跨 workt
 /runtime view
 /runtime takeover <reason>
 /runtime rotate [reason]
+/runtime new clean [reason]
+/runtime inherit [reason]
 ```
 
 Runtime mailbox 会保存消息正文，因此不要在这些命令中输入 API key、私钥或其他凭据。
@@ -224,6 +232,7 @@ node --test tests/research-runtime.test.mjs tests/runtime-board.test.mjs
 - consumed transient message 不再进入后续 context。
 - rotation readiness 会阻止缺失/陈旧 Project State、`outcome_unknown` 和无外部身份的 active Action；
 - rotation request/completion 可从 Project ledger 重建；
+- clean Session request/receipt 可重建；启动、context、compact 与 Codex 自动复用都保持隔离，显式 inherit 后才投递 mailbox/ProjectView；
 - delivered 但尚未 consumed 的 Leader 消息可在新 Session 重投，旧 epoch 的 settled run 不能抢先 consume。
 - 另一 Session 的 transition、Action 或 mailbox 在下一模型边界刷新 ProjectView。
 - Runtime Board 不重新激活 superseded claim，只展示为 prior claim；active Actor 优先、settled mailbox 被过滤，四个分页都适配 24 行终端的 92% overlay；没有按 `r` 时不会轮询。
@@ -248,6 +257,7 @@ node --test tests/codex-jobs.test.mjs
 - 1000 个 token delta 不放大 job-state/默认 audit 写入。
 - executor 在 durable side-effect barrier 后崩溃进入 `outcome_unknown`，阻止第二 writer，显式 reconcile 后恢复；
 - compaction project state 的幂等提交、active-branch session migration 和 ProjectView 插入位置；
+- Project State amendment 的局部保留、authority provenance、revision CAS、Leader lease、retired-route 与 clean-Session 拒绝；下一次 compact 使用较新的 Runtime state 作为 prior state；
 - transition/evidence 使旧 state stale、superseding transition 停止旧假设回流，以及陈旧 compact 不覆盖新 revision；
 - 较新的 Runtime Action 在没有明确 transition 时只触发 unconfirmed 警告；
 - lifecycle health 只观察/建议，不自动 compact、rotate 或 reconcile；只有显式 `/runtime rotate` 才创建新 Session。
@@ -403,6 +413,47 @@ Action 完成后，在当前 attached Session 输入：
 
 若 Pi 的 session replacement 被其他 extension 取消，rotation 会落为 `cancelled`，当前 Session 保持 attached。若切换过程中进程退出，request 仍留在 Project ledger；从原 Session 再次执行 `/runtime rotate` 会复用该 pending request，下一次成功的新 Session 会完成它。
 
+### 8.8 G：验证 clean Session 与恢复继承
+
+在一个 ProjectView 已包含容易辨认关键词、且 mailbox 至少有一条未消费消息的测试项目中执行：
+
+```text
+/runtime new clean test independent framing without project memory
+```
+
+通过标准：
+
+- 新 TUI Session 不出现旧 transcript；Runtime Board sessions 页标为 `clean context`；
+- 第一条普通问题的模型上下文不含 `<research_project_view>`，未消费 mailbox 不触发模型 turn；
+- 对同一 mission 使用未显式指定的 `reuse=auto` 时开启新 Codex thread，而非续接旧 thread；
+- clean Session 内 `/compact` 后，`/runtime view` 中 Project State revision 不变；
+- `/runtime rotate` 明确拒绝并提示先 inherit，不会把 clean 与 project-aware 交接混用。
+
+随后执行：
+
+```text
+/runtime inherit accept the current Project working state
+```
+
+下一条普通问题应重新获得 ProjectView，之前未消费 mailbox 被投递但不会凭空启动多个 turn；旧 transcript 仍不恢复。不要用敏感内容测试 mailbox。
+
+### 8.9 H：验证窄幅 Project State 修订
+
+先运行 `/runtime view` 记录当前 Project revision，选择一个不会改变研究路线的小字段，例如用户明确纠正 `currentClaim` 的适用范围或 `nextExperiment.question`。对 Pi 说：
+
+```text
+当前 ProjectView 的 currentClaim 把 pilot 写成了证明。请依据本轮用户决策，把它改成“pilot 只是筛选器，不是结论”；只修这个字段，不换轨，并调用 amend_project_state。
+```
+
+通过标准：
+
+- 工具结果显示 Project revision 增加 1，ProjectView 显示 amendment reason 与 authority；
+- 未提供的 hypotheses、decisions、critical context 保持不变；
+- Runtime ledger 新增事件，旧 state 事件仍在；
+- 用旧 revision 再发一次修订会被拒绝并要求刷新 ProjectView；
+- 在 clean Session 中调用会提示先 `/runtime inherit`；
+- 修订后下一次正常 compact 能把 amended state 作为 prior state，而不是把旧 Session compact 静默写回来。
+
 ## 9. 真实测试判定表
 
 | 检查项 | 通过 | 失败信号 |
@@ -417,6 +468,8 @@ Action 完成后，在当前 attached Session 输入：
 | unknown outcome | 新 executor 被阻止；检查外部状态后 reconcile | 自动当作 failed 并重复执行 |
 | ProjectView | 新 Session 可见 compact provenance、有效性标签和未结 Action | 注入整段旧 transcript 或把 completed 当证据 |
 | Runtime rotation | request/completed 有审计，新 Session 有相同 ProjectView revision，旧 transcript 不复制 | 无 readiness 仍切换、pending 消息丢失或 Action 身份改变 |
+| Clean Session | 无 transcript/ProjectView/mailbox 自动注入；inherit 后恢复且旧 transcript 仍为空 | clean 启动即出现项目记忆、compact 改写 Project State 或自动续接旧 Codex mission |
+| State amendment | revision/lease/authority 均校验，局部字段改变且旧事件保留 | stale revision 覆盖、retired route 被重写、未提供字段丢失 |
 | 单次投递 | result 只由当前 attached Leader 消费 | A/B 同时触发相同 result turn |
 | Context 清理 | consumed message 后续不再注入 | 每轮重复出现旧 steer/result |
 | 科研边界 | completion 不自动宣称假设成立 | job success 被当成科学结论 |

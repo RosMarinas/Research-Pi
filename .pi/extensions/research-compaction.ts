@@ -20,7 +20,7 @@ import {
 	RESEARCH_SOFT_COMPACT_TOKENS,
 	selectResearchCompactionPolicy,
 } from "../lib/research-compact.mjs";
-import { readRuntimeSnapshot, resolveResearchRuntime } from "../lib/research-runtime.mjs";
+import { readRuntimeSnapshot, resolveResearchRuntime, runtimeSessionInheritancePolicy } from "../lib/research-runtime.mjs";
 
 function fileLists(fileOps: { read: Set<string>; written: Set<string>; edited: Set<string> }) {
 	const modified = new Set([...fileOps.written, ...fileOps.edited]);
@@ -136,14 +136,25 @@ export default function (pi: ExtensionAPI) {
 
 		const { branchEntries, customInstructions, reason, signal } = event;
 		const runtimeSnapshot = await readRuntimeSnapshot(await resolveResearchRuntime(ctx.cwd));
+		const inheritancePolicy = runtimeSessionInheritancePolicy(branchEntries, runtimeSnapshot, ctx.sessionManager.getSessionId());
 		const projectRevision = runtimeSnapshot.revision;
 		const policy = selectResearchCompactionPolicy(branchEntries);
 		const preparation = prepareWithDynamicTail(event, policy.keepRecentTokens);
 		const sessionId = ctx.sessionManager.getSessionId();
-		const evidence = mergeProjectRuntimeEvidence(
-			collectResearchEvidence(branchEntries, sessionId, preparation.firstKeptEntryId),
-			runtimeSnapshot,
+		const sessionEvidence = collectResearchEvidence(branchEntries, sessionId, preparation.firstKeptEntryId, { inheritancePolicy });
+		const evidence = inheritancePolicy === "clean"
+			? sessionEvidence
+			: mergeProjectRuntimeEvidence(sessionEvidence, runtimeSnapshot);
+		const latestResearchCompaction = [...branchEntries].reverse().find((entry) =>
+			entry.type === "compaction"
+			&& entry.details?.kind === RESEARCH_COMPACTION_KIND
+			&& entry.details?.version === RESEARCH_COMPACTION_VERSION,
 		);
+		const independentSessionSummary = inheritancePolicy === "project"
+			&& latestResearchCompaction?.type === "compaction"
+			&& latestResearchCompaction.details?.inheritancePolicy === "clean"
+				? preparation.previousSummary
+				: undefined;
 		const conversationText = serializeConversation(
 			convertToLlm([...preparation.messagesToSummarize, ...preparation.turnPrefixMessages]),
 		);
@@ -151,15 +162,16 @@ export default function (pi: ExtensionAPI) {
 			conversationText,
 			previousState: evidence.previousState,
 			legacyPreviousSummary: evidence.previousState ? undefined : preparation.previousSummary,
+			independentSessionSummary,
 			experiments: evidence.experiments,
 			checkpoints: evidence.checkpoints,
 			sourceCatalog: evidence.sourceCatalog,
-			projectTransitions: runtimeSnapshot.transitions?.slice(-4) ?? [],
+			projectTransitions: inheritancePolicy === "clean" ? [] : runtimeSnapshot.transitions?.slice(-4) ?? [],
 			customInstructions,
 		});
 
 		ctx.ui.notify(
-			`Research compaction #${policy.ordinal}: ${preparation.tokensBefore.toLocaleString()} tokens, keeping ~${policy.keepRecentTokens.toLocaleString()} recent tokens, ${evidence.experiments.length} experiment record(s).`,
+			`Research compaction #${policy.ordinal}${inheritancePolicy === "clean" ? " (clean Session, no Project inheritance)" : ""}: ${preparation.tokensBefore.toLocaleString()} tokens, keeping ~${policy.keepRecentTokens.toLocaleString()} recent tokens, ${evidence.experiments.length} experiment record(s).`,
 			"info",
 		);
 
@@ -202,6 +214,7 @@ export default function (pi: ExtensionAPI) {
 				fileOps: files,
 				policy,
 				projectRevision,
+				inheritancePolicy,
 			});
 
 			if (normalized.warnings.length) {
