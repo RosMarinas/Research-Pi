@@ -13,6 +13,8 @@ import {
 } from "../lib/project-view.mjs";
 import { RESEARCH_HARD_COMPACT_TOKENS, RESEARCH_SOFT_COMPACT_TOKENS } from "../lib/research-compact.mjs";
 import { getCodexRuntimeAdapter } from "../lib/research-runtime-adapters.mjs";
+import { buildRuntimeBoardModel } from "../lib/runtime-board.mjs";
+import { RuntimeBoardOverlay } from "../lib/runtime-board-ui.mjs";
 import { resolveResearchPiPaths } from "../lib/runtime-paths.mjs";
 import {
 	RESEARCH_LEADER_ACTOR_ID,
@@ -197,6 +199,7 @@ function inboxLines(snapshot: Awaited<ReturnType<typeof readRuntimeSnapshot>>, i
 
 export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	let runtime: RuntimeContext | undefined;
+	let runtimeInputCwd: string | undefined;
 	let attachedSessionId: string | undefined;
 	const consumedMessageIds = new Set<string>();
 	const materializedMessageIds = new Set<string>();
@@ -206,7 +209,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 
 	const getRuntime = async (ctx: ExtensionContext, options: { claim?: boolean } = {}): Promise<RuntimeContext> => {
 		const sessionId = ctx.sessionManager.getSessionId();
-		if (runtime && runtime.cwd === ctx.cwd && attachedSessionId === sessionId) {
+		if (runtime && runtimeInputCwd === ctx.cwd && attachedSessionId === sessionId) {
 			if (options.claim && !(await isRuntimeActorAttached(runtime, RESEARCH_LEADER_ACTOR_ID, sessionId))) {
 				await attachRuntimeActor(runtime, RESEARCH_LEADER_ACTOR_ID, {
 					sessionId,
@@ -219,6 +222,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			sessionId,
 			branchAnchorId: ctx.sessionManager.getLeafId(),
 		});
+		runtimeInputCwd = ctx.cwd;
 		attachedSessionId = sessionId;
 		return runtime;
 	};
@@ -255,6 +259,49 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		projectViewText = renderProjectView(view);
 		projectViewHash = projectViewFingerprint(view);
 		return { snapshot, view };
+	};
+
+	const runtimeBoardModel = async (ctx: ExtensionContext) => {
+		const activeRuntime = await getRuntime(ctx);
+		const { snapshot, view } = await refreshProjectView(ctx);
+		const health = runtimeHealth(snapshot, ctx.getContextUsage(), ctx.sessionManager.getBranch());
+		return buildRuntimeBoardModel({
+			runtime: activeRuntime,
+			snapshot,
+			view,
+			health,
+			sessionId: ctx.sessionManager.getSessionId(),
+		});
+	};
+
+	const showRuntimeBoard = async (ctx: ExtensionCommandContext) => {
+		// The board is an observe-only surface. In particular, opening it must not
+		// steal the Research Leader attachment from another Session; action
+		// commands use `claim: true` explicitly when they need ownership.
+		await getRuntime(ctx);
+		const initial = await runtimeBoardModel(ctx);
+		const result = await ctx.ui.custom<"close" | "view" | "watch">(
+			(tui, theme, _keybindings, done) => new RuntimeBoardOverlay(
+				tui,
+				theme,
+				done,
+				initial,
+				async () => {
+					const model = await runtimeBoardModel(ctx);
+					await refreshStatus(ctx);
+					return model;
+				},
+			),
+			{
+				overlay: true,
+				overlayOptions: { anchor: "center", width: "94%", maxHeight: "92%", margin: 1 },
+			},
+		);
+		if (result === "view") ctx.ui.notify(projectViewText, "info");
+		else if (result === "watch") {
+			ctx.ui.setEditorText("/watch");
+			ctx.ui.notify("Codex Watch command is ready; press Enter to open it.", "info");
+		}
 	};
 
 	const displayOperationalCard = (message: RuntimeMessage, status: string) => {
@@ -401,6 +448,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		await detachRuntimeActor(runtime, RESEARCH_LEADER_ACTOR_ID, attachedSessionId);
 		if (ctx.hasUI) ctx.ui.setStatus("research_runtime", undefined);
 		runtime = undefined;
+		runtimeInputCwd = undefined;
 		attachedSessionId = undefined;
 	});
 
@@ -456,11 +504,16 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("runtime", {
-		description: "Inspect project Runtime health/View or manually rotate the Leader Session",
+		description: "Open the Project Runtime board, inspect health/View, or manually rotate the Leader Session",
 		handler: async (args, ctx) => {
 			try {
-				const [mode = "health", ...rest] = args.trim().split(/\s+/).filter(Boolean);
-				if (!["health", "recommend", "view", "rotate"].includes(mode)) throw new Error("Usage: /runtime [health|recommend|view|rotate [reason]]");
+				const [mode = "board", ...rest] = args.trim().split(/\s+/).filter(Boolean);
+				if (!["board", "health", "recommend", "view", "rotate"].includes(mode)) throw new Error("Usage: /runtime [board|health|recommend|view|rotate [reason]]");
+				if (mode === "board") {
+					await showRuntimeBoard(ctx);
+					await refreshStatus(ctx);
+					return;
+				}
 				if (mode === "rotate") await ctx.waitForIdle();
 				const activeRuntime = await getRuntime(ctx, { claim: true });
 				const { snapshot, view } = await refreshProjectView(ctx);

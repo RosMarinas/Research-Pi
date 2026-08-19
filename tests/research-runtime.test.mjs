@@ -394,3 +394,59 @@ test("/runtime rotate creates a fresh Session and records a ProjectView receipt"
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("opening the Runtime Board does not steal the Leader attachment from another Session", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-board-observe-"));
+	const previousRoot = process.env.RESEARCH_PI_RUNTIME_DIR;
+	process.env.RESEARCH_PI_RUNTIME_DIR = join(root, "runtime");
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace, { recursive: true });
+		const handlers = new Map();
+		const commands = new Map();
+		let customCalls = 0;
+		const pi = {
+			on(name, handler) { handlers.set(name, handler); },
+			registerCommand(name, command) { commands.set(name, command); },
+			registerMessageRenderer() {},
+			registerEntryRenderer() {},
+			sendMessage() {},
+			appendEntry() {},
+		};
+		researchRuntimeExtension(pi);
+		const ctx = {
+			cwd: workspace,
+			hasUI: true,
+			ui: {
+				setStatus() {},
+				notify() {},
+				setEditorText() {},
+				async custom() {
+					customCalls += 1;
+					return "close";
+				},
+			},
+			sessionManager: {
+				getSessionId: () => "session-a",
+				getLeafId: () => "leaf-a",
+				getBranch: () => [],
+			},
+			getContextUsage: () => ({ tokens: 0, contextWindow: 384_000, percent: 0 }),
+			isIdle: () => true,
+			abort() {},
+		};
+
+		await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
+		const runtime = await resolveResearchRuntime(workspace);
+		await attachRuntimeActor(runtime, RESEARCH_LEADER_ACTOR_ID, { sessionId: "session-b", branchAnchorId: "leaf-b" });
+		assert.equal((await readRuntimeSnapshot(runtime)).attachments.find((item) => item.actorId === RESEARCH_LEADER_ACTOR_ID)?.sessionId, "session-b");
+
+		await commands.get("runtime").handler("", ctx);
+		assert.equal(customCalls, 1);
+		assert.equal((await readRuntimeSnapshot(runtime)).attachments.find((item) => item.actorId === RESEARCH_LEADER_ACTOR_ID)?.sessionId, "session-b");
+	} finally {
+		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
+		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;
+		rmSync(root, { recursive: true, force: true });
+	}
+});

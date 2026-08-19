@@ -150,6 +150,7 @@ Pi 现在提供这些低摩擦研究工具：
 - `/watch`：按需打开 Codex 客观执行面板；左右切换 Action，Tab 或上下切换 overview/activity/agents，`q`/`Esc` 关闭。观察内容不进入模型上下文。
 - `/actors`（等同 `/actors active`）、`/inbox`：查看当前 active/waiting 的 project Runtime Actors 与 durable mailbox；`/actors all` 查看历史注册和 suspended Actors。
 - `/message`、`/steer`：面向 Actor 通信；steer 默认等待下一安全模型边界，只有 `--preempt` 才主动中断。
+- `/runtime`（或 `/runtime board`）：打开 Project 控制面；左右或 Tab 切换 overview/actors/messages/sessions，`r` 手动刷新，`v` 查看完整 ProjectView，`w` 准备切到 Codex Watch。面板不进入模型上下文，也不后台轮询。
 - `/runtime health|recommend|view`：查看 Project Runtime 健康度、只读生命周期建议或当前 ProjectView。
 - `/runtime rotate [reason]`：在 Project State 可恢复且没有未知副作用时，人工创建一个不复制旧 transcript 的新 Leader Session；Runtime 会记录交接和新 ProjectView receipt。不会自动触发。
 - `/config`：打开 Research Pi model profile 面板；`/config show|path|use <profile>` 可检查或持久切换配置。
@@ -222,7 +223,7 @@ Pi 在连续处理同一研究子任务时应使用稳定、简短的 `mission` 
 | 隔离追问并持久保存 | `/side 问题` |
 | 查看/提升 side 内容 | `/side show <id>`、`/side use <id>` |
 | 查看最近结构化科研状态 | `/research-state` |
-| 查看 Project Runtime/ProjectView | `/runtime health`、`/runtime view` |
+| 查看 Project Runtime/ProjectView | `/runtime`、`/runtime health`、`/runtime view` |
 | 用 Project State 交接到空白 Session | `/runtime rotate [reason]` |
 | 查看或持久切换模型 profile | `/config`、`/config use deepseek-flash` |
 

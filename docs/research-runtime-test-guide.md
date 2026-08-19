@@ -185,6 +185,7 @@ exact workspaceKey/root               文件与副作用边界，不可跨 workt
 /steer --preempt @codex:<Actor短码> <紧急纠偏>
 /codex missions
 /watch [job后缀|mission|@codex:<Actor短码>]
+/runtime
 /runtime health
 /runtime recommend
 /runtime view
@@ -193,12 +194,14 @@ exact workspaceKey/root               文件与副作用边界，不可跨 workt
 
 Runtime mailbox 会保存消息正文，因此不要在这些命令中输入 API key、私钥或其他凭据。
 
+`/runtime` 默认打开只读 Project Board。四个分页分别显示研究/记忆概览、稳定 Actor 与最新 Action、未消费 mailbox、当前 Leader attachment 与显式 handoff。面板只在打开和按 `r` 时读取既有投影，不写 heartbeat、不把展示内容加入模型上下文，也不把 Research Leader 从另一 Session attach 回当前窗口；持续执行细节仍由 `/watch` 展示。
+
 ## 7. 自动测试
 
 ### Layer 1：无模型 Runtime 测试
 
 ```sh
-node --test tests/research-runtime.test.mjs
+node --test tests/research-runtime.test.mjs tests/runtime-board.test.mjs
 ```
 
 覆盖：
@@ -214,6 +217,8 @@ node --test tests/research-runtime.test.mjs
 - rotation readiness 会阻止缺失/陈旧 Project State、`outcome_unknown` 和无外部身份的 active Action；
 - rotation request/completion 可从 Project ledger 重建；
 - delivered 但尚未 consumed 的 Leader 消息可在新 Session 重投。
+- Runtime Board 不重新激活 superseded claim，只展示为 prior claim；active Actor 优先、settled mailbox 被过滤，窄终端输出不越界；没有按 `r` 时不会轮询。
+- 从旧 Session 打开 Board 不会抢占当前 attached Research Leader，即使 cwd 经过 macOS `/var` 等规范路径别名。
 
 ### Layer 2：Fake Codex App Server
 
