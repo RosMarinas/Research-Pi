@@ -21,8 +21,10 @@ import {
 
 type RuntimeContext = Awaited<ReturnType<typeof initializeResearchRuntime>>;
 type RuntimeMessage = ReturnType<typeof pendingRuntimeMessages>[number];
+type RuntimeSnapshot = Awaited<ReturnType<typeof readRuntimeSnapshot>>;
 
 const MESSAGE_TYPES = new Set(["ask", "reply", "notify", "result"]);
+const ACTIVE_ACTION_STATUSES = new Set(["starting", "running", "cancelling"]);
 
 function compact(text: string, limit = 160): string {
 	const value = String(text ?? "").replace(/\s+/g, " ").trim();
@@ -35,27 +37,67 @@ function splitTargetAndBody(input: string): { target: string; body: string } {
 	return { target: match[1], body: match[2].trim() };
 }
 
-function actorLines(snapshot: Awaited<ReturnType<typeof readRuntimeSnapshot>>): string {
+function latestActionsByActor(snapshot: RuntimeSnapshot) {
+	const latest = new Map<string, RuntimeSnapshot["actions"][number]>();
+	for (const action of snapshot.actions) latest.set(action.actorId, action);
+	return latest;
+}
+
+export function runtimeActorSummary(snapshot: RuntimeSnapshot) {
+	const latest = latestActionsByActor(snapshot);
+	let active = 0;
+	let waiting = 0;
+	for (const actor of snapshot.actors) {
+		const status = latest.get(actor.id)?.status;
+		if (status === "input_required") waiting += 1;
+		else if (ACTIVE_ACTION_STATUSES.has(status)) active += 1;
+	}
+	return { active, waiting, registered: snapshot.actors.length };
+}
+
+export function formatRuntimeStatus(projectKey: string, snapshot: RuntimeSnapshot): string {
+	const { active, waiting } = runtimeActorSummary(snapshot);
+	const queued = pendingRuntimeMessages(snapshot).length;
+	const states = [
+		active ? `${active} active` : "",
+		waiting ? `${waiting} waiting` : "",
+	].filter(Boolean);
+	if (!states.length) states.push("idle");
+	if (queued) states.push(`${queued} queued`);
+	return `Runtime ${projectKey.slice(-8)} · ${states.join(" · ")}`;
+}
+
+export function actorLines(snapshot: RuntimeSnapshot, activeOnly = true): string {
 	if (!snapshot.actors.length) return "No Runtime Actors are registered for this project.";
+	const latest = latestActionsByActor(snapshot);
+	const summary = runtimeActorSummary(snapshot);
+	const visibleActors = activeOnly
+		? snapshot.actors.filter((actor) => {
+			const status = latest.get(actor.id)?.status;
+			return status === "input_required" || ACTIVE_ACTION_STATUSES.has(status);
+		})
+		: snapshot.actors;
+	const stateSummary = [
+		summary.active ? `${summary.active} active` : "",
+		summary.waiting ? `${summary.waiting} waiting` : "",
+	].filter(Boolean).join(" · ") || "idle";
 	return [
-		`Project ${snapshot.projectKey}`,
-		...snapshot.actors.map((actor) => {
+		`Project ${snapshot.projectKey} · ${stateSummary} · ${summary.registered} registered`,
+		...(visibleActors.length ? visibleActors.map((actor) => {
 			const attachment = snapshot.attachments.find((candidate) => candidate.actorId === actor.id);
-			const latestAction = snapshot.actions.filter((action) => action.actorId === actor.id).at(-1);
+			const latestAction = latest.get(actor.id);
 			const target = `@${runtimeActorTarget(actor)}`;
 			let state;
 			if (actor.kind === "user") state = "present";
+			else if (latestAction?.status === "input_required") state = "waiting for input";
+			else if (ACTIVE_ACTION_STATUSES.has(latestAction?.status)) state = `active (${latestAction.status})`;
 			else if (actor.kind === "codex") {
-				state = latestAction?.status === "input_required"
-					? "waiting for input"
-					: ["starting", "running", "cancelling"].includes(latestAction?.status)
-						? `active (${latestAction.status})`
-						: actor.metadata?.threadId
-							? `suspended (${latestAction?.status ?? "resumable"})`
-							: latestAction?.status ?? "registered";
+				state = actor.metadata?.threadId
+					? `suspended (${latestAction?.status ?? "resumable"})`
+					: latestAction?.status ?? "registered";
 			} else state = attachment ? `attached ${String(attachment.sessionId).slice(-8)}` : "detached";
 			return `- ${target} · ${actor.label} · ${actor.kind} · ${state}`;
-		}),
+		}) : ["No active Runtime Actor. Use /actors all to inspect registered and suspended Actors."]),
 	].join("\n");
 }
 
@@ -99,8 +141,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		if (!ctx.hasUI) return;
 		const activeRuntime = await getRuntime(ctx);
 		const snapshot = await readRuntimeSnapshot(activeRuntime);
-		const queued = pendingRuntimeMessages(snapshot).length;
-		ctx.ui.setStatus("research_runtime", `Runtime ${activeRuntime.projectKey.slice(-8)} · ${snapshot.actors.length} actors${queued ? ` · ${queued} queued` : ""}`);
+		ctx.ui.setStatus("research_runtime", formatRuntimeStatus(activeRuntime.projectKey, snapshot));
 	};
 
 	const displayOperationalCard = (message: RuntimeMessage, status: string) => {
@@ -254,11 +295,13 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("actors", {
-		description: "List project Runtime Actors and their current activation state",
-		handler: async (_args, ctx) => {
+		description: "List active project Runtime Actors (/actors all includes suspended history)",
+		handler: async (args, ctx) => {
 			try {
+				const mode = args.trim() || "active";
+				if (mode !== "active" && mode !== "all") throw new Error("Usage: /actors [active|all]");
 				const activeRuntime = await getRuntime(ctx, { claim: true });
-				ctx.ui.notify(actorLines(await readRuntimeSnapshot(activeRuntime)), "info");
+				ctx.ui.notify(actorLines(await readRuntimeSnapshot(activeRuntime), mode !== "all"), "info");
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 			}

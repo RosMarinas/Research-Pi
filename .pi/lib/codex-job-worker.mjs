@@ -102,6 +102,8 @@ async function main() {
 	let lastError = "";
 	let threadId = request.continuationThreadId ?? null;
 	let activeTurnId = null;
+	const ownedThreadIds = new Set(threadId ? [threadId] : []);
+	const activeTurnsByThread = new Map();
 	let cancellationRequested = false;
 	let timedOut = false;
 	let timeout;
@@ -122,6 +124,7 @@ async function main() {
 		deltaNotificationsSeen: 0,
 		auditRecordsWritten: 0,
 		progressUpdatesPersisted: 0,
+		foreignMessagesIgnored: 0,
 		// startCodexJob created job.json once before this worker started.
 		jobStateWrites: 1,
 	};
@@ -132,6 +135,34 @@ async function main() {
 	// A process can fail during initialization before main() reaches the turn await.
 	// Keep the deferred rejection observed until the normal control flow awaits it.
 	void turnDone.catch(() => undefined);
+
+	const messageIdentity = (message) => {
+		const params = message?.params ?? {};
+		return {
+			thread: params.threadId ?? params.thread?.id ?? null,
+			turn: params.turnId ?? params.turn?.id ?? null,
+		};
+	};
+
+	const registerRootThread = (id) => {
+		if (!id) return;
+		threadId = id;
+		ownedThreadIds.add(id);
+	};
+
+	const registerRootTurn = (id) => {
+		if (!id || !threadId) return;
+		activeTurnId = id;
+		activeTurnsByThread.set(threadId, id);
+	};
+
+	const isOwnedServerRequest = (message) => {
+		const identity = messageIdentity(message);
+		if (!identity.thread || !ownedThreadIds.has(identity.thread) || !identity.turn) return false;
+		if (identity.thread === threadId) return identity.turn === activeTurnId;
+		const expectedTurn = activeTurnsByThread.get(identity.thread);
+		return expectedTurn ? identity.turn === expectedTurn : true;
+	};
 
 	const writeJobUpdate = async (update) => {
 		const nextWriteCount = workerIo.jobStateWrites + 1;
@@ -374,6 +405,15 @@ async function main() {
 		if (message?.method === "item/agentMessage/delta") workerIo.deltaNotificationsSeen += 1;
 		writeAuditEvent(message);
 		if (message?.method && message.id !== undefined) {
+			if (!isOwnedServerRequest(message)) {
+				workerIo.foreignMessagesIgnored += 1;
+				try {
+					send({ id: message.id, error: { code: -32001, message: "Research Pi rejected a server request from an unrelated Codex thread or turn" } });
+				} catch {
+					// The unrelated requester may already have stopped.
+				}
+				return;
+			}
 			void handleServerRequest(message);
 			return;
 		}
@@ -382,31 +422,65 @@ async function main() {
 			if (!pending) return;
 			clearTimeout(pending.timer);
 			pendingRpc.delete(message.id);
-			if (message.error) pending.reject(new Error(`${pending.method}: ${message.error.message ?? JSON.stringify(message.error)}`));
-			else pending.resolve(message.result);
+			if (message.error) {
+				pending.reject(new Error(`${pending.method}: ${message.error.message ?? JSON.stringify(message.error)}`));
+			} else {
+				if (pending.method === "thread/start" || pending.method === "thread/resume") {
+					registerRootThread(message.result?.thread?.id ?? request.continuationThreadId);
+				}
+				if (pending.method === "turn/start") registerRootTurn(message.result?.turn?.id);
+				pending.resolve(message.result);
+			}
 			return;
 		}
 		const method = message?.method;
 		const params = message?.params ?? {};
-		const previousThreadId = threadId;
-		const previousTurnId = activeTurnId;
-		if (method === "thread/started") threadId = params.thread?.id ?? threadId;
-		if (method === "turn/started") activeTurnId = params.turn?.id ?? params.turnId ?? activeTurnId;
-		if (method === "item/completed" && params.item?.type === "agentMessage" && typeof params.item.text === "string") {
+		const identity = messageIdentity(message);
+		if (!identity.thread || !ownedThreadIds.has(identity.thread)) {
+			workerIo.foreignMessagesIgnored += 1;
+			return;
+		}
+		if (method === "turn/started" && identity.turn) {
+			const expectedTurn = activeTurnsByThread.get(identity.thread);
+			if (expectedTurn && expectedTurn !== identity.turn) {
+				workerIo.foreignMessagesIgnored += 1;
+				return;
+			}
+			activeTurnsByThread.set(identity.thread, identity.turn);
+		}
+		const expectedTurn = activeTurnsByThread.get(identity.thread);
+		if (identity.turn && expectedTurn && identity.turn !== expectedTurn) {
+			workerIo.foreignMessagesIgnored += 1;
+			return;
+		}
+		if (
+			(method === "item/started" || method === "item/completed") &&
+			params.item?.type === "collabAgentToolCall" &&
+			Array.isArray(params.item.receiverThreadIds)
+		) {
+			for (const childThreadId of params.item.receiverThreadIds) {
+				if (typeof childThreadId === "string" && childThreadId) ownedThreadIds.add(childThreadId);
+			}
+		}
+		if (
+			identity.thread === threadId &&
+			identity.turn === activeTurnId &&
+			method === "item/completed" &&
+			params.item?.type === "agentMessage" &&
+			typeof params.item.text === "string"
+		) {
 			lastAgentText = params.item.text;
 		}
 		if (method === "error") lastError = truncate(params.error?.message ?? params.message ?? JSON.stringify(params), 4000);
 		const progress = describeCodexNotification(message);
-		const identityChanged = threadId !== previousThreadId || activeTurnId !== previousTurnId;
 		const progressChanged = progress && progress !== lastNotificationProgress;
 		if (progressChanged) lastNotificationProgress = progress;
-		if (identityChanged || progressChanged) {
-			queueNotificationUpdate({
-				...(identityChanged ? { threadId, activeTurnId } : {}),
-				...(progressChanged ? { progress } : {}),
-			});
-		}
-		if (method === "turn/completed" && (!activeTurnId || params.turn?.id === activeTurnId)) {
+		if (progressChanged) queueNotificationUpdate({ progress });
+		if (
+			method === "turn/completed" &&
+			identity.thread === threadId &&
+			identity.turn === activeTurnId
+		) {
 			resolveTurn(params.turn ?? { status: "completed" });
 		}
 	};
@@ -644,7 +718,7 @@ async function main() {
 		const threadResponse = request.continuationThreadId
 			? await rpcRequest("thread/resume", { ...threadParams, threadId: request.continuationThreadId }, 60_000)
 			: await rpcRequest("thread/start", threadParams, 60_000);
-		threadId = threadResponse?.thread?.id ?? request.continuationThreadId;
+		registerRootThread(threadResponse?.thread?.id ?? request.continuationThreadId);
 		if (!threadId) throw new Error("Codex app-server did not return a thread id");
 		const turnResponse = await rpcRequest(
 			"turn/start",
@@ -660,7 +734,7 @@ async function main() {
 			},
 			60_000,
 		);
-		activeTurnId = turnResponse?.turn?.id;
+		registerRootTurn(turnResponse?.turn?.id);
 		if (!activeTurnId) throw new Error("Codex app-server did not return a turn id");
 		await enqueueJobUpdate({ threadId, activeTurnId, progress: "Codex turn running" });
 

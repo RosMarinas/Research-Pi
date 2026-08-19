@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { homedir } from "node:os";
-import { delimiter, isAbsolute, parse, relative, resolve, sep } from "node:path";
+import { delimiter, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -53,10 +53,25 @@ async function configuredRuntimeRoots(environment) {
 	return roots;
 }
 
+async function trustedInstructionRoots(environment, homeDirectory) {
+	const home = await canonicalDirectory(homeDirectory) ?? resolve(homeDirectory);
+	const codexHome = resolve(environment.CODEX_HOME ?? join(home, ".codex"));
+	const candidates = [join(codexHome, "skills"), join(home, ".agents", "skills")];
+	const roots = [];
+	for (const candidate of candidates) {
+		const root = await canonicalDirectory(candidate);
+		if (!root || root === home || root === parse(root).root || !isWithin(home, root)) continue;
+		roots.push(root);
+	}
+	return [...new Set(roots)];
+}
+
 export async function resolveSystemRuntimePolicy(options = {}) {
 	const platform = options.platform ?? process.platform;
 	const environment = options.environment ?? process.env;
+	const homeDirectory = options.homeDirectory ?? homedir();
 	const readRoots = new Set();
+	const instructionRoots = new Set();
 	const injectedEnvironment = {};
 	const diagnostics = [];
 
@@ -84,11 +99,16 @@ export async function resolveSystemRuntimePolicy(options = {}) {
 		readRoots.add(root);
 		diagnostics.push(`configured runtime root: ${root}`);
 	}
+	for (const root of await trustedInstructionRoots(environment, homeDirectory)) {
+		instructionRoots.add(root);
+		diagnostics.push(`trusted instruction root: ${root}`);
+	}
 
 	return {
 		version: 1,
 		platform,
 		readRoots: [...readRoots],
+		instructionRoots: [...instructionRoots],
 		environment: injectedEnvironment,
 		diagnostics,
 	};
@@ -99,6 +119,7 @@ export function normalizeSystemRuntimePolicy(policy) {
 		version: 1,
 		platform: policy?.platform ?? process.platform,
 		readRoots: [...new Set((policy?.readRoots ?? []).map((path) => resolve(path)))],
+		instructionRoots: [...new Set((policy?.instructionRoots ?? []).map((path) => resolve(path)))],
 		environment: { ...(policy?.environment ?? {}) },
 		diagnostics: [...(policy?.diagnostics ?? [])],
 	};

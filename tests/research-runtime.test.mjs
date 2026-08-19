@@ -3,7 +3,11 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import researchRuntimeExtension from "../.pi/extensions/research-runtime.ts";
+import researchRuntimeExtension, {
+	actorLines,
+	formatRuntimeStatus,
+	runtimeActorSummary,
+} from "../.pi/extensions/research-runtime.ts";
 import {
 	RESEARCH_LEADER_ACTOR_ID,
 	RUNTIME_MESSAGE_KIND,
@@ -19,6 +23,38 @@ import {
 	runtimeActorTarget,
 	settleRuntimeMessage,
 } from "../.pi/lib/research-runtime.mjs";
+
+test("Runtime status reports live activation instead of historical Actor count", () => {
+	const codexActors = Array.from({ length: 16 }, (_, index) => ({
+		id: `codex:mission-${String(index).padStart(2, "0")}:executor`,
+		kind: "codex",
+		label: `mission-${index}`,
+		metadata: { threadId: `thread-${index}` },
+	}));
+	const snapshot = {
+		projectKey: "project-42beebda",
+		actors: [
+			{ id: "user", kind: "user", label: "User", metadata: {} },
+			{ id: "research-leader", kind: "leader", label: "Research Leader", metadata: {} },
+			...codexActors,
+		],
+		attachments: [],
+		messages: [],
+		actions: codexActors.map((actor, index) => ({
+			id: `action-${index}`,
+			actorId: actor.id,
+			status: index === 0 ? "running" : "completed",
+		})),
+	};
+
+	assert.deepEqual(runtimeActorSummary(snapshot), { active: 1, waiting: 0, registered: 18 });
+	assert.equal(formatRuntimeStatus(snapshot.projectKey, snapshot), "Runtime 42beebda · 1 active");
+	assert.doesNotMatch(formatRuntimeStatus(snapshot.projectKey, snapshot), /18 actors/);
+	assert.match(actorLines(snapshot), /mission-0 · codex · active \(running\)/);
+	assert.doesNotMatch(actorLines(snapshot), /mission-1/);
+	assert.match(actorLines(snapshot, false), /18 registered/);
+	assert.match(actorLines(snapshot, false), /mission-1 · codex · suspended \(completed\)/);
+});
 
 test("Project Runtime keeps Actor identity across session attachment and message settlement", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-"));

@@ -136,6 +136,15 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         send({ method: "item/agentMessage/delta", params: { threadId: "thread-fake-123", turnId: activeTurn, itemId: "message-1", delta: "x" } });
       }
     }
+    if (prompt.includes("foreign thread completion")) {
+      const foreignThread = "thread-memory-unrelated";
+      const foreignTurn = "turn-memory-unrelated";
+      const foreignResult = JSON.stringify({ status: "inconclusive", goal_satisfied: false, summary: "foreign memory inventory" });
+      send({ method: "thread/started", params: { thread: { id: foreignThread, turns: [] } } });
+      send({ method: "turn/started", params: { threadId: foreignThread, turn: { id: foreignTurn, status: "inProgress", items: [], error: null } } });
+      send({ method: "item/completed", params: { threadId: foreignThread, turnId: foreignTurn, item: { id: "foreign-message", type: "agentMessage", phase: "final_answer", text: foreignResult } } });
+      send({ method: "turn/completed", params: { threadId: foreignThread, turn: { id: foreignTurn, status: "completed", items: [], error: null } } });
+    }
     if (prompt.includes("objective activity")) {
       send({ method: "item/started", params: { threadId: "thread-fake-123", turnId: activeTurn, item: { id: "command-observed", type: "commandExecution", status: "inProgress", command: "python3 probe.py", commandActions: [], cwd: process.cwd(), durationMs: null, exitCode: null, aggregatedOutput: null } } });
       send({ method: "item/completed", params: { threadId: "thread-fake-123", turnId: activeTurn, item: { id: "command-observed", type: "commandExecution", status: "completed", command: "python3 probe.py", commandActions: [], cwd: process.cwd(), durationMs: 12, exitCode: 0, aggregatedOutput: "probe-ok" } } });
@@ -286,6 +295,31 @@ test("advisor, executor, and explicit resume produce durable structured jobs", a
 		assert.equal(resumed.status, "completed");
 		assert.equal(resumed.continuationOf, executor.id);
 		assert.equal(resumed.result.summary, "resumed");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("unrelated app-server threads cannot replace or complete the owned Codex turn", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-thread-scope-"));
+	try {
+		const workspace = join(root, "workspace");
+		const jobRoot = join(root, "codex", "jobs");
+		mkdirSync(workspace, { recursive: true });
+		const codexBin = makeFakeCodex(root, 40);
+		const started = await startCodexJob({
+			cwd: workspace,
+			jobRoot,
+			codexBin,
+			mode: "advisor",
+			task: "foreign thread completion protocol smoke",
+		});
+		const completed = await waitForCodexJob(started.id, { jobRoot });
+		assert.equal(completed.status, "completed");
+		assert.equal(completed.threadId, "thread-fake-123");
+		assert.equal(completed.result.goal_satisfied, true);
+		assert.equal(completed.result.summary, "finished");
+		assert.ok(completed.workerIo.foreignMessagesIgnored >= 4, JSON.stringify(completed.workerIo));
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

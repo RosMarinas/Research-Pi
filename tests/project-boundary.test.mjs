@@ -139,11 +139,14 @@ test("shared system runtime policy is read-only in both Pi and Codex sandboxes",
 		const runtimePolicy = {
 			platform: "darwin",
 			readRoots: ["/Library/Developer/CommandLineTools"],
+			instructionRoots: ["/Users/example/.codex/skills"],
 			environment: { DEVELOPER_DIR: "/Library/Developer/CommandLineTools" },
 		};
 		const profile = permissionProfileDefinition({ access: "write", workspaceRoot: root, runtimePolicy });
 		assert.ok(profile.includes('"/Library/Developer/CommandLineTools" = "read"'));
 		assert.ok(!profile.includes('"/Library/Developer/CommandLineTools" = "write"'));
+		assert.ok(profile.includes('"/Users/example/.codex/skills" = "read"'));
+		assert.ok(!profile.includes('"/Users/example/.codex/skills" = "write"'));
 
 		const args = codexPermissionConfigArguments("executor", root, join(root, ".git", "research-pi", "tmp"), null, runtimePolicy);
 		assert.ok(args.some((arg) => arg.includes("DEVELOPER_DIR")));
@@ -151,7 +154,9 @@ test("shared system runtime policy is read-only in both Pi and Codex sandboxes",
 
 		const config = buildSandboxRuntimeConfig(root, {}, runtimePolicy);
 		assert.ok(config.filesystem.allowRead.includes("/Library/Developer/CommandLineTools"));
+		assert.ok(config.filesystem.allowRead.includes("/Users/example/.codex/skills"));
 		assert.ok(!config.filesystem.allowWrite.includes("/Library/Developer/CommandLineTools"));
+		assert.ok(!config.filesystem.allowWrite.includes("/Users/example/.codex/skills"));
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

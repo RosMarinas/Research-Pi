@@ -163,7 +163,7 @@ pi doctor --workspace /path/to/research-project
 
 所有模型工具调用都会在 Pi 底部状态栏显示工具名、安全截断后的目标摘要、运行时间和成功/失败终态；并行调用显示当前数量与最近启动的工具。普通工具终态保留 5 秒，`codex_delegate` 的后台 job 另有持久状态，不会因委派工具返回而消失。
 
-运行 `/watch` 可按需打开紧凑的 Codex 执行 overlay；它不会长期占据编辑区。`←/→` 切换当前项目可见的 Codex Action，`Tab` 或 `↑/↓` 在 overview、activity、agents 三个视图间切换，`q`/`Esc` 关闭。面板直接读取脱敏的 App Server 客观事件，展示命令、退出码与限长输出尾部、文件修改、MCP/动态工具、搜索以及 Codex 内部 subagent 状态；不会经过 Research Leader 转述，也不会进入 DeepSeek 上下文。
+运行 `/watch` 可按需打开紧凑的 Codex 执行 overlay；它不会长期占据编辑区。`←/→` 切换当前项目可见的 Codex Action，`Tab` 或 `↑/↓` 在 overview、activity、agents 三个视图间切换，`r` 刷新，`q`/`Esc` 关闭。agents 视图展示当前 Action 内部 subagent 的 thread、路径、状态、模型和最近消息。面板直接读取脱敏的 App Server 客观事件，展示命令、退出码与限长输出尾部、文件修改、MCP/动态工具、搜索以及 Codex 内部 subagent 状态；不会经过 Research Leader 转述，也不会进入 DeepSeek 上下文。
 
 ### Research Mode
 
@@ -240,7 +240,7 @@ Codex job、请求账本、精简 JSONL 审计事件和委派 prompt 保存在�
 
 当前只注册 `user`、`research-leader` 和 Codex mission Actors，不引入自动 Scheduler 或固定科研流程：
 
-- `/actors`：查看当前项目 Actors、可用的 `@target` 和 attached/suspended 状态；
+- `/actors` 或 `/actors active`：只查看当前 running/starting/cancelling/waiting 的 project Actors；`/actors all` 才显示历史注册和 suspended Actors。底部 Runtime 状态同样只显示 active/waiting/idle，不再把历史注册总数冒充活跃数；
 - `/inbox`：查看尚未投递的 durable 消息；`/inbox all` 查看最近状态；
 - `/message <ask|reply|notify|result> @actor <内容>`：向 Actor 发送有语义类型的消息；
 - `/steer @actor <修正>`：默认不 abort，投递到下一安全模型边界；

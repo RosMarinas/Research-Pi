@@ -180,7 +180,8 @@ function gitRules(workspaceRoot, access) {
 }
 
 function filesystemBaseRules(workspaceRoot, access, runtimePolicy) {
-	const runtimeRules = normalizeSystemRuntimePolicy(runtimePolicy).readRoots.map(
+	const normalizedRuntime = normalizeSystemRuntimePolicy(runtimePolicy);
+	const runtimeRules = [...new Set([...normalizedRuntime.readRoots, ...normalizedRuntime.instructionRoots])].map(
 		(path) => `${JSON.stringify(path)} = "read"`,
 	);
 	return [
@@ -375,6 +376,7 @@ function discoverSensitiveProjectPaths(root, maxDepth = 4) {
 
 export function buildSandboxRuntimeConfig(root, environment = process.env, runtimePolicy) {
 	const normalizedRuntime = normalizeSystemRuntimePolicy(runtimePolicy);
+	const trustedReadRoots = [...new Set([...normalizedRuntime.readRoots, ...normalizedRuntime.instructionRoots])];
 	const userParent = dirname(homedir());
 	const deniedRegions = new Set([userParent, ...canonicalTemporaryPaths()]);
 	if (process.platform === "darwin") deniedRegions.add("/Volumes");
@@ -405,7 +407,7 @@ export function buildSandboxRuntimeConfig(root, environment = process.env, runti
 		},
 		filesystem: {
 			denyRead: [...deniedRegions, ...sensitive],
-			allowRead: [root, ...normalizedRuntime.readRoots, ...macOSXcrunCachePaths()],
+			allowRead: [root, ...trustedReadRoots, ...macOSXcrunCachePaths()],
 			allowWrite: [root, ...macOSXcrunCachePaths()],
 			denyWrite: [...externalDefaultWrites, ...sensitive],
 			allowGitConfig: true,

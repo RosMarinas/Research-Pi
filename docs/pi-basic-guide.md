@@ -134,7 +134,7 @@ Pi 现在提供这些低摩擦研究工具：
 - `web_search`：通过 DeepSeek 原生搜索做简单、直接、带来源的网页查找。
 - `codex_delegate`：把工具密集或长程执行交给独立 Codex 上下文，或请求一个只读第二意见。Pi 仍负责研究规划与证据判断。
 - `/watch`：按需打开 Codex 客观执行面板；左右切换 Action，Tab 或上下切换 overview/activity/agents，`q`/`Esc` 关闭。观察内容不进入模型上下文。
-- `/actors`、`/inbox`：查看当前 project Runtime 的 Actors 与 durable mailbox。
+- `/actors`（等同 `/actors active`）、`/inbox`：查看当前 active/waiting 的 project Runtime Actors 与 durable mailbox；`/actors all` 查看历史注册和 suspended Actors。
 - `/message`、`/steer`：面向 Actor 通信；steer 默认等待下一安全模型边界，只有 `--preempt` 才主动中断。
 
 可以直接提出：
@@ -173,9 +173,9 @@ side 问答会以卡片保存在 session 中。`Ctrl+O` 展开完整内容，`/s
 
 Pi 会获得一个 `codex-...` job ID。底部状态栏会持续显示 job 后八位、advisor/executor 模式、`starting/running/completed/failed/cancelled` 状态和最近进度；即使后台工具调用已返回也会继续更新。后台任务未结束时，应查询同一 job 的 status/result，或续接同一 Codex Actor，而不是重复启动任务。状态、阻塞问题和完成事件先进入项目 Runtime mailbox，再交给最近 attached 的 Research Leader session。默认 executor 是 project-write + public-network，advisor 是 project-read + public-network；两者默认都是 `gpt-5.6-sol/max`，也可以在具体委派时指定其他 Codex model。
 
-用户可随时运行 `/watch` 查看最近的 active Action，也可用 `/watch <job后缀>`、`/watch <mission>` 或 `/watch @codex:<Actor短码>` 定位。面板直接投影命令、退出码和限长输出尾部、文件修改、搜索、MCP/动态工具及 Codex 内部 subagent 状态；内部 subagent 只是本次 Action 的临时子节点，不会污染 Project Actor 列表。
+用户可随时运行 `/watch` 查看最近的 active Action，也可用 `/watch <job后缀>`、`/watch <mission>` 或 `/watch @codex:<Actor短码>` 定位。`←/→` 切换 Action；`Tab` 或 `↑/↓` 切换 overview/activity/agents；`r` 刷新；`q`/`Esc` 关闭。agents 视图显示 Codex 内部 subagent 的 thread、路径、状态、模型和最近消息。内部 subagent 只是本次 Action 的临时子节点，不会污染 Project Actor 列表。
 
-Pi 在连续处理同一研究子任务时应使用稳定、简短的 `mission` 标签。带 mission 的新派遣默认 `reuse=auto`：运行中的同 mission/mode job 会直接重新挂接，已完成的会通过 App Server `thread/resume` 续接历史；同一精确 workspace、mode 和 mission 可跨 Pi session 复用。续接时 Runtime 会比较 Git snapshot，工作区变化则要求 Codex 重新检查当前文件。使用 `/codex missions` 查看项目任务链，使用 `/actors` 找到稳定的 `@codex:<Actor短码>`；若要独立第二意见、另一研究路线或主动清除旧假设，使用新的 mission。
+Pi 在连续处理同一研究子任务时应使用稳定、简短的 `mission` 标签。带 mission 的新派遣默认 `reuse=auto`：运行中的同 mission/mode job 会直接重新挂接，已完成的会通过 App Server `thread/resume` 续接历史；同一精确 workspace、mode 和 mission 可跨 Pi session 复用。续接时 Runtime 会比较 Git snapshot，工作区变化则要求 Codex 重新检查当前文件。使用 `/codex missions` 查看项目任务链，使用 `/actors` 找当前活跃 Actor，或用 `/actors all` 找 suspended Actor 的稳定 `@codex:<Actor短码>`；若要独立第二意见、另一研究路线或主动清除旧假设，使用新的 mission。
 
 用户发现某个 Actor 跑偏时可以直接输入：
 
