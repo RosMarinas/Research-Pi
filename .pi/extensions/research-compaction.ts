@@ -82,35 +82,45 @@ function prepareWithDynamicTail(event: SessionBeforeCompactEvent, keepRecentToke
 }
 
 export default function (pi: ExtensionAPI) {
-	let compactionPending = false;
+	let compactionRunning = false;
+	let scheduledCompaction: { trigger: "soft" | "hard"; tokens: number } | undefined;
 
 	pi.on("session_start", () => {
-		compactionPending = false;
+		compactionRunning = false;
+		scheduledCompaction = undefined;
 	});
 
 	pi.on("session_compact", () => {
-		compactionPending = false;
+		compactionRunning = false;
+		scheduledCompaction = undefined;
 	});
 
 	pi.on("turn_end", (_event, ctx) => {
 		const usage = ctx.getContextUsage();
-		if (!usage || usage.tokens < RESEARCH_SOFT_COMPACT_TOKENS || compactionPending) return;
+		if (!usage || usage.tokens < RESEARCH_SOFT_COMPACT_TOKENS || compactionRunning || scheduledCompaction) return;
 
-		compactionPending = true;
 		const trigger = usage.tokens >= RESEARCH_HARD_COMPACT_TOKENS ? "hard" : "soft";
+		scheduledCompaction = { trigger, tokens: usage.tokens };
 		if (ctx.hasUI) {
 			ctx.ui.notify(
-				`Research ${trigger} compaction trigger: ${usage.tokens.toLocaleString()} context tokens.`,
+				`Research ${trigger} compaction scheduled after the current run settles: ${usage.tokens.toLocaleString()} context tokens.`,
 				trigger === "hard" ? "warning" : "info",
 			);
 		}
+	});
+
+	pi.on("agent_settled", (_event, ctx) => {
+		const scheduled = scheduledCompaction;
+		if (!scheduled || compactionRunning) return;
+		scheduledCompaction = undefined;
+		compactionRunning = true;
 		ctx.compact({
-			customInstructions: `Automatic research ${trigger} compaction at ${usage.tokens} context tokens.`,
+			customInstructions: `Automatic research ${scheduled.trigger} compaction at ${scheduled.tokens} context tokens.`,
 			onComplete: () => {
-				compactionPending = false;
+				compactionRunning = false;
 			},
 			onError: (error) => {
-				compactionPending = false;
+				compactionRunning = false;
 				if (ctx.hasUI) ctx.ui.notify(`Research compaction failed: ${error.message}`, "warning");
 			},
 		});

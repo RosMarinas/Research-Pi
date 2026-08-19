@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import researchCompactionExtension from "../.pi/extensions/research-compaction.ts";
 import {
 	buildResearchCompactionDetails,
 	collectResearchEvidence,
@@ -10,6 +11,45 @@ import {
 	renderResearchSummary,
 	selectResearchCompactionPolicy,
 } from "../.pi/lib/research-compact.mjs";
+
+test("research threshold compaction waits until the agent run settles", () => {
+	const handlers = new Map();
+	const notices = [];
+	let compactOptions;
+	const pi = {
+		on(name, handler) {
+			handlers.set(name, handler);
+		},
+		registerCommand() {},
+	};
+	researchCompactionExtension(pi);
+	const ctx = {
+		hasUI: true,
+		ui: {
+			notify(message, level) {
+				notices.push({ message, level });
+			},
+		},
+		getContextUsage() {
+			return { tokens: RESEARCH_SOFT_COMPACT_TOKENS + 1 };
+		},
+		compact(options) {
+			compactOptions = options;
+		},
+	};
+
+	handlers.get("turn_end")({ type: "turn_end" }, ctx);
+	assert.equal(compactOptions, undefined, "turn_end may still be an intermediate tool-call turn and must not abort it");
+	assert.match(notices[0].message, /scheduled after the current run settles/);
+
+	handlers.get("agent_settled")({ type: "agent_settled" }, ctx);
+	assert.match(compactOptions.customInstructions, /Automatic research soft compaction/);
+
+	const firstOptions = compactOptions;
+	handlers.get("turn_end")({ type: "turn_end" }, ctx);
+	handlers.get("agent_settled")({ type: "agent_settled" }, ctx);
+	assert.equal(compactOptions, firstOptions, "a running compaction must not be duplicated");
+});
 
 function experimentEntry(id, parentId, validityJudgment) {
 	return {

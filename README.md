@@ -207,7 +207,7 @@ Pi 可直接完成有界的小型调研；当用户指定，或任务确实需�
 
 ### Research Compaction
 
-DeepSeek V4 Flash 使用 Max reasoning，但不把 1M 容量等同于等质量注意力。Research Pi 在约 272K 总上下文时发起软 compact，384K 作为硬触发线；压缩后的原始 recent tail 按当前分支第 1/2/3 次 compact 取约 32K/40K/48K，之后固定在 48K。结构化研究状态和可检索历史负责承接更早证据。
+DeepSeek V4 Flash 使用 Max reasoning，但不把 1M 容量等同于等质量注意力。Research Pi 在约 272K 总上下文时标记软 compact，384K 作为硬触发线；真正压缩只在当前 agent run（包括工具调用链）完整 settled 后开始，不会为压缩 abort 尚未完成的科研任务。压缩后的原始 recent tail 按当前分支第 1/2/3 次 compact 取约 32K/40K/48K，之后固定在 48K。结构化研究状态和可检索历史负责承接更早证据。
 
 `/compact` 或自动 compact 时，扩展同时生成：
 

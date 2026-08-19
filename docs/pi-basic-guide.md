@@ -208,7 +208,7 @@ Pi 在连续处理同一研究子任务时应使用稳定、简短的 `mission` 
 
 - 竞争假设 A/B 仍属于同一问题：使用 `/tree`，保留在同一会话树中；
 - 已经切换成新的研究问题或正式实验阶段：使用 `/fork` 或 `/new`；
-- 会话很长但仍在解决同一问题：可手动使用 `/compact`。Research Pi 也会在约 272K/384K 总上下文处自动触发，并按当前分支第 1/2/3 次 compact 保留约 32K/40K/48K recent tail；竞争假设、有效性、evidence refs 与下一实验写入结构化 compact，完整 JSONL 历史仍保留。
+- 会话很长但仍在解决同一问题：可手动使用 `/compact`。Research Pi 也会在约 272K/384K 总上下文处标记自动压缩，但会等当前 agent run 及其工具调用链完整 settled 后才执行，不会中断正在进行的任务。压缩按当前分支第 1/2/3 次 compact 保留约 32K/40K/48K recent tail；竞争假设、有效性、evidence refs 与下一实验写入结构化 compact，完整 JSONL 历史仍保留。
 - 新会话需要恢复旧证据：使用 memory search/read，不必先恢复整个旧 session。
 
 从终端恢复最近会话：
@@ -304,6 +304,6 @@ Pi 在连续处理同一研究子任务时应使用稳定、简短的 `mission` 
 - 项目持久 `trust-ssh` 绑定精确 target，`trust-command` 绑定界面显示的 argv 前缀；代码字符串默认绑定完整 argv。它们可被 Pi 与 Codex executor 自动复用，也可用 `/boundary revoke` 撤销；
 - `!` / `!!` 与人工批准的直接文件工具仍是最终越界通道，但 broker 能表达的操作应由 agent 申请授权后继续执行，不应常态化退回用户手动运行；
 - memory SQLite 是派生缓存，不进入 Git；它会脱敏常见凭证形式，但原始 session、实验账本和不常见秘密格式仍是敏感数据；
-- Research Pi 在约 272K 总上下文时主动 compact，384K 作为硬触发线；压缩后原始 recent tail 按当前分支第 1/2/3 次 compact 取约 32K/40K/48K，之后固定在 48K；
+- Research Pi 在约 272K 总上下文时标记 compact，384K 作为硬触发线；当前 agent run settled 后再执行，避免压缩 abort 尚未完成的工具链；压缩后原始 recent tail 按当前分支第 1/2/3 次 compact 取约 32K/40K/48K，之后固定在 48K；
 - 当前适合科研探索；极限上下文、长期多分支召回和 Codex 无人值守远程执行仍需在真实任务中继续验证；
 - 先让真实任务暴露摩擦，再加入 extension 或工作流，不预先安装全家桶。
