@@ -224,7 +224,7 @@ DeepSeek V4 Flash 使用 Max reasoning，但不把 1M 容量等同于等质量�
 - `executor`：完整执行任务，默认 `gpt-5.6-sol`、reasoning `max`、自动使用 project-write permission profile；
 - 每次调用都可覆盖 Codex model 和 reasoning effort；
 - executor 可在项目内修改或删除文件、安装项目依赖、自由提交，以及启动或取消昂贵实验；经过用户授权后，它还可通过 `research_pi_host` 使用精确外部只读、SSH target 和固定脚本，不需要复制凭据或重开 delegation；
-- Codex 通过本地 stdio App Server 运行，保存稳定的 thread/turn ID；长任务默认后台运行，通过同一个工具的 `status`、`result`、`respond`、`steer`、`resume` 和 `cancel` action 管理；
+- Codex 通过本地 stdio App Server 运行，保存稳定的 thread/turn ID；长任务默认后台运行，通过同一个工具的 `status`、`result`、`respond`、`steer`、`resume`、`cancel` 和 `reconcile` action 管理；
 - 连续处理同一研究子任务时，Pi 会给它稳定的 `mission` 标签并使用 `reuse=auto`：mission 对应一个 project Codex Actor，同一精确 workspace、mission 和 advisor/executor mode 可跨 Pi session 续接原 thread。独立批判、新研究路线或另一 worktree 会创建新 Actor/thread；不能仅因属于同一仓库就混用上下文；
 - `/codex missions` 查看当前 project workspace 的 mission/thread 链。新 job 由 `projectKey + research-leader Actor` 所有，不再绑定一个 conversation branch；文件操作仍强制绑定原精确 workspace。续接前会比较上次终态与当前 Git snapshot，变化时要求 Codex 重新检查；
 - `respond` 回答 Codex 在运行中提出的显式问题；`steer` 将修正或新证据注入仍在运行的 turn，不需要终止并重开任务；
@@ -233,10 +233,11 @@ DeepSeek V4 Flash 使用 Max reasoning，但不把 1M 容量等同于等质量�
 - `/watch [job后缀|mission|@codex:<Actor短码>]` 直接查看 executor 或 advisor 当前 Action 的客观执行；Codex 内部临时 subagent 作为 Action 子节点展示，不自动注册成长期 Project Actor；
 - 新开或恢复 Pi session 会 attach 到同一 project Research Leader Actor；最近收到用户输入的 session 成为当前接收者。消息先 durable queue，再进入一次模型上下文，settled 后不在后续 turn 反复注入。输入框中已有草稿时事件排到下一轮；
 - 不默认建立 worktree，同一目标工作区同时只允许一个写入型 Codex job。
+- executor 在发送执行 turn 前先耐久记录 side-effect intent/start；如果此后 worker 消失或被强杀，job 进入 `outcome_unknown`，不会伪装成普通 failed/cancelled。同一 workspace 的新 executor 会被阻止，直到人或 advisor 检查 Git、远程 run 等外部状态，再用 `reconcile` 带证据说明显式结案。
 
 Codex job、请求账本、精简 JSONL 审计事件和委派 prompt 保存在状态目录的 `codex/`（源码模式即 `.pi/codex/`）；Actor、Action 与 mailbox 的稀疏语义事件保存在 `runtime/projects/<projectKey>/events.jsonl`（源码模式即 `.pi/runtime/`），两者都不会进入 Git。Runtime 不记录 token delta、heartbeat 或完整 conversation，并在物理追加前按确定性 event ID 去重。Codex `job.json` 仅在可见进度或语义状态变化时更新，并在 `workerIo` 中记录实际写入计数。`/watch` 增量读取已有审计流，不额外记录 token delta 或创建另一份高频 trace。审计事件和 stderr 每个 job 分别限制为 2 MiB；命令输出只保留限长尾部并对常见凭据模式整体遮蔽。Research Pi 默认抑制 Codex App Server 写入 `logs_*.sqlite` 的内部 TRACE/DEBUG 反馈日志，但保留 `state_*.sqlite` 的 thread/runtime 状态；只有排查 Codex 上游问题时才应显式设置 `PI_CODEX_SQLITE_LOGS=1` 恢复内部日志，用完立即关闭。该设置不会删除此前已经积累的日志。只有显式设置 `PI_CODEX_TRACE=1` 才记录上限 32 MiB 的原始 App Server event，用完也应立即关闭。已经处理的普通响应只保留长度和 SHA-256，不长期保留正文；但响应首先会进入 Pi 模型上下文，因此绝不能通过该通道传递 API key 等秘密。普通 Codex 工具子进程不继承 DeepSeek key，也不能直接访问 SSH agent；只有 `research_pi_host` broker 在匹配用户 grant 后才把 `SSH_AUTH_SOCK` 不透明地交给系统 SSH 进程。Codex CLI 自身仍使用本机 Codex 登录完成模型调用，但该认证不会授予其工具访问用户目录。
 
-### Project Runtime（第一阶段）
+### Project Runtime
 
 当前只注册 `user`、`research-leader` 和 Codex mission Actors，不引入自动 Scheduler 或固定科研流程：
 
@@ -245,8 +246,9 @@ Codex job、请求账本、精简 JSONL 审计事件和委派 prompt 保存在�
 - `/message <ask|reply|notify|result> @actor <内容>`：向 Actor 发送有语义类型的消息；
 - `/steer @actor <修正>`：默认不 abort，投递到下一安全模型边界；
 - `/steer --preempt @actor <修正>`：只有继续运行存在实际代价时才中断并恢复目标 Actor。
+- `/runtime health`：查看 context、compaction、active/waiting 与 `outcome_unknown`；`/runtime recommend` 只给出 continue/compact/consider-rotation/reconcile 建议，不自动轮换；`/runtime view` 显示当前注入的 ProjectView。
 
-Runtime message 是瞬时控制/通信，不自动成为长期科研判断。实验结论仍由 `record_experiment` 与后续 ProjectView 承接。旧版本已经创建的 Codex job 保留原 session/branch 所有权；新 job 才使用 project Actor 所有权。
+Runtime message 是瞬时控制/通信，不自动成为长期科研判断。每次结构化 research compact 会把 `researchState + provenance` 提交到 project ledger；新 Session 会得到一个限长、不可见的 ProjectView，包含当前研究问题/竞争假设/决策/混淆因素、最近实验记录、Git 摘要、未结 Action 与 mailbox ID。ProjectView 是确定性投影，不复制完整旧 transcript，也不会把 Codex completed 自动提升为科学结论。旧版本已经创建的 Codex job 保留原 session/branch 所有权；新 job 才使用 project Actor 所有权。
 
 职责、状态机、通信路径以及双 Session 真实项目 smoke 的逐项判定见 [Research Runtime 测试指南](docs/research-runtime-test-guide.md)。
 

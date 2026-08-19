@@ -14,6 +14,7 @@ import {
 	listCodexJobs,
 	listCodexMissions,
 	readCodexJob,
+	reconcileCodexJobOutcome,
 	respondToCodexJob,
 	resumeCodexJob,
 	sanitizeCodexEnvironment,
@@ -131,6 +132,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     const prompt = message.params.input[0].text;
     send({ id: message.id, result: { turn: { id: activeTurn, status: "inProgress", items: [], error: null } } });
     send({ method: "turn/started", params: { threadId: "thread-fake-123", turn: { id: activeTurn, status: "inProgress", items: [], error: null } } });
+	if (prompt.includes("crash after side effect barrier")) {
+		setTimeout(() => process.exit(23), 10);
+		return;
+	}
     if (prompt.includes("delta storm")) {
       for (let index = 0; index < 1000; index += 1) {
         send({ method: "item/agentMessage/delta", params: { threadId: "thread-fake-123", turnId: activeTurn, itemId: "message-1", delta: "x" } });
@@ -295,6 +300,59 @@ test("advisor, executor, and explicit resume produce durable structured jobs", a
 		assert.equal(resumed.status, "completed");
 		assert.equal(resumed.continuationOf, executor.id);
 		assert.equal(resumed.result.summary, "resumed");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("executor crash after the durable side-effect barrier requires explicit reconciliation", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-unknown-"));
+	try {
+		const workspace = join(root, "workspace");
+		const jobRoot = join(root, "codex", "jobs");
+		mkdirSync(workspace, { recursive: true });
+		const codexBin = makeFakeCodex(root);
+		const started = await startCodexJob({
+			cwd: workspace,
+			jobRoot,
+			codexBin,
+			mode: "executor",
+			task: "crash after side effect barrier",
+		});
+		const unknown = await waitForCodexJob(started.id, { jobRoot, pollMs: 20 });
+		assert.equal(unknown.status, "outcome_unknown");
+		assert.equal(unknown.sideEffect.state, "unknown");
+		await assert.rejects(
+			startCodexJob({ cwd: workspace, jobRoot, codexBin, mode: "executor", task: "must not overlap an unknown writer" }),
+			/outcome is unknown/,
+		);
+
+		const advisor = await waitForCodexJob((await startCodexJob({
+			cwd: workspace,
+			jobRoot,
+			codexBin,
+			mode: "advisor",
+			task: "inspect the ambiguous executor state",
+		})).id, { jobRoot });
+		assert.equal(advisor.status, "completed");
+
+		const reconciled = await reconcileCodexJobOutcome(started.id, {
+			jobRoot,
+			outcome: "failed",
+			note: "Inspected Git status and the expected output marker; no intended change was completed.",
+		});
+		assert.equal(reconciled.status, "failed");
+		assert.equal(reconciled.sideEffect.state, "settled");
+		assert.match(reconciled.sideEffect.reconciliationNote, /Inspected Git status/);
+
+		const retry = await waitForCodexJob((await startCodexJob({
+			cwd: workspace,
+			jobRoot,
+			codexBin,
+			mode: "executor",
+			task: "retry after evidence-based reconciliation",
+		})).id, { jobRoot });
+		assert.equal(retry.status, "completed");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -839,7 +897,7 @@ test("Codex executor reuses a project-trusted host-command prefix", async () => 
 	}
 });
 
-test("a workspace has one writer lease and cancellation stops its durable job", async () => {
+test("a workspace has one writer lease and cancellation before execution settles cleanly", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-lock-"));
 	try {
 		const workspace = join(root, "workspace");
@@ -854,6 +912,7 @@ test("a workspace has one writer lease and cancellation stops its durable job", 
 		);
 		const cancelled = await cancelCodexJob(first.id, { jobRoot });
 		assert.equal(cancelled.status, "cancelled");
+		assert.equal(cancelled.sideEffect.state, "intent_recorded");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

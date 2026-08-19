@@ -58,6 +58,7 @@ function eventTime(value: unknown): string {
 
 function statusIcon(status: unknown): string {
 	if (["completed", "success"].includes(String(status))) return "✓";
+	if (status === "outcome_unknown") return "!";
 	if (["failed", "errored", "declined"].includes(String(status))) return "✗";
 	if (["cancelled", "interrupted", "cancelling"].includes(String(status))) return "■";
 	if (status === "input_required") return "?";
@@ -311,7 +312,7 @@ class CodexWatchOverlay {
 		const events = this.eventsByJob.get(job.id) ?? [];
 		const mode: ViewMode = VIEW_MODES[this.modeIndex]!;
 		const selectedMode = VIEW_MODES.map((candidate) => candidate === mode ? th.fg("accent", `[${candidate}]`) : th.fg("dim", candidate)).join("  ");
-		const stateColor = ["failed", "cancelled"].includes(job.status) ? "error" : job.status === "completed" ? "success" : job.status === "input_required" ? "warning" : "accent";
+		const stateColor = ["failed", "cancelled"].includes(job.status) ? "error" : job.status === "completed" ? "success" : ["input_required", "outcome_unknown"].includes(job.status) ? "warning" : "accent";
 		const title = `Codex Watch ${this.selected + 1}/${this.jobs.length}`;
 		const mission = compact(job.mission ?? "unlabelled", 90);
 		const header = [

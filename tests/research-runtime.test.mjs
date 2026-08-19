@@ -6,6 +6,7 @@ import test from "node:test";
 import researchRuntimeExtension, {
 	actorLines,
 	formatRuntimeStatus,
+	runtimeHealth,
 	runtimeActorSummary,
 } from "../.pi/extensions/research-runtime.ts";
 import {
@@ -54,6 +55,20 @@ test("Runtime status reports live activation instead of historical Actor count",
 	assert.doesNotMatch(actorLines(snapshot), /mission-1/);
 	assert.match(actorLines(snapshot, false), /18 registered/);
 	assert.match(actorLines(snapshot, false), /mission-1 · codex · suspended \(completed\)/);
+});
+
+test("lifecycle health is observe-only and prioritizes ambiguous side effects", () => {
+	const snapshot = {
+		projectState: { state: {}, source: {} },
+		actors: [],
+		attachments: [],
+		messages: [],
+		actions: [{ id: "unknown", actorId: "codex:fixture", status: "outcome_unknown" }],
+	};
+	const health = runtimeHealth(snapshot, { tokens: 300_000, contextWindow: 1_000_000, percent: 30 }, [{ type: "compaction" }]);
+	assert.equal(health.recommendation, "reconcile");
+	assert.match(health.reason, /unknown/);
+	assert.equal(snapshot.actions[0].status, "outcome_unknown");
 });
 
 test("Project Runtime keeps Actor identity across session attachment and message settlement", async () => {
@@ -165,7 +180,9 @@ test("Runtime steer is non-preemptive by default and leaves context after one se
 			sessionManager: {
 				getSessionId: () => "session-extension",
 				getLeafId: () => "leaf-extension",
+				getBranch: () => [],
 			},
+			getContextUsage: () => null,
 			isIdle: () => idle,
 			abort: () => {
 				aborts += 1;
@@ -181,10 +198,10 @@ test("Runtime steer is non-preemptive by default and leaves context after one se
 
 		const agentMessage = { role: "custom", ...sent[0].message, timestamp: Date.now() };
 		const firstContext = await handlers.get("context")({ type: "context", messages: [agentMessage] }, ctx);
-		assert.equal(firstContext.messages.length, 1);
+		assert.equal(firstContext.messages.filter((message) => message.customType === RUNTIME_MESSAGE_KIND).length, 1);
 		await handlers.get("agent_settled")({ type: "agent_settled" }, ctx);
 		const laterContext = await handlers.get("context")({ type: "context", messages: [agentMessage] }, ctx);
-		assert.equal(laterContext.messages.length, 0);
+		assert.equal(laterContext.messages.filter((message) => message.customType === RUNTIME_MESSAGE_KIND).length, 0);
 
 		await commands.get("steer").handler("--preempt @research-leader urgent correction", ctx);
 		assert.equal(aborts, 1);

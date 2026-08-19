@@ -136,6 +136,7 @@ Pi 现在提供这些低摩擦研究工具：
 - `/watch`：按需打开 Codex 客观执行面板；左右切换 Action，Tab 或上下切换 overview/activity/agents，`q`/`Esc` 关闭。观察内容不进入模型上下文。
 - `/actors`（等同 `/actors active`）、`/inbox`：查看当前 active/waiting 的 project Runtime Actors 与 durable mailbox；`/actors all` 查看历史注册和 suspended Actors。
 - `/message`、`/steer`：面向 Actor 通信；steer 默认等待下一安全模型边界，只有 `--preempt` 才主动中断。
+- `/runtime health|recommend|view`：查看 Project Runtime 健康度、只读生命周期建议或当前 ProjectView；不会自动创建新 Session。
 
 可以直接提出：
 
@@ -171,7 +172,9 @@ side 问答会以卡片保存在 session 中。`Ctrl+O` 展开完整内容，`/s
 把数据加载重构和完整回归测试交给 Codex executor。目标是消除当前内存峰值，允许它在项目内修改、删除、提交和运行实验。Codex 使用 gpt-5.6-sol/max；你负责给出成功标准，并在它返回后审查证据。若远程运行需要项目外 SSH 凭据，让它返回准确命令给我批准或直接执行。
 ```
 
-Pi 会获得一个 `codex-...` job ID。底部状态栏会持续显示 job 后八位、advisor/executor 模式、`starting/running/completed/failed/cancelled` 状态和最近进度；即使后台工具调用已返回也会继续更新。后台任务未结束时，应查询同一 job 的 status/result，或续接同一 Codex Actor，而不是重复启动任务。状态、阻塞问题和完成事件先进入项目 Runtime mailbox，再交给最近 attached 的 Research Leader session。默认 executor 是 project-write + public-network，advisor 是 project-read + public-network；两者默认都是 `gpt-5.6-sol/max`，也可以在具体委派时指定其他 Codex model。
+Pi 会获得一个 `codex-...` job ID。底部状态栏会持续显示 job 后八位、advisor/executor 模式、`starting/running/completed/failed/cancelled/outcome_unknown` 状态和最近进度；即使后台工具调用已返回也会继续更新。后台任务未结束时，应查询同一 job 的 status/result，或续接同一 Codex Actor，而不是重复启动任务。状态、阻塞问题和完成事件先进入项目 Runtime mailbox，再交给最近 attached 的 Research Leader session。默认 executor 是 project-write + public-network，advisor 是 project-read + public-network；两者默认都是 `gpt-5.6-sol/max`，也可以在具体委派时指定其他 Codex model。
+
+`outcome_unknown` 表示 executor 可能已产生文件、Git、远程 run 等副作用，但 worker 没有留下可靠终态。此时不要重跑或猜测：先检查相关外部状态，再让 Pi 调用 `codex_delegate action=reconcile`，提供 `completed|failed|cancelled` 和简短证据说明。同一 workspace 在结案前不会启动另一写入型 Codex；advisor 仍可用于只读排查。
 
 用户可随时运行 `/watch` 查看最近的 active Action，也可用 `/watch <job后缀>`、`/watch <mission>` 或 `/watch @codex:<Actor短码>` 定位。`←/→` 切换 Action；`Tab` 或 `↑/↓` 切换 overview/activity/agents；`r` 刷新；`q`/`Esc` 关闭。agents 视图显示 Codex 内部 subagent 的 thread、路径、状态、模型和最近消息。内部 subagent 只是本次 Action 的临时子节点，不会污染 Project Actor 列表。
 
@@ -203,6 +206,7 @@ Pi 在连续处理同一研究子任务时应使用稳定、简短的 `mission` 
 | 隔离追问并持久保存 | `/side 问题` |
 | 查看/提升 side 内容 | `/side show <id>`、`/side use <id>` |
 | 查看最近结构化科研状态 | `/research-state` |
+| 查看 Project Runtime/ProjectView | `/runtime health`、`/runtime view` |
 
 科研中推荐这样区分：
 
@@ -210,6 +214,7 @@ Pi 在连续处理同一研究子任务时应使用稳定、简短的 `mission` 
 - 已经切换成新的研究问题或正式实验阶段：使用 `/fork` 或 `/new`；
 - 会话很长但仍在解决同一问题：可手动使用 `/compact`。Research Pi 也会在约 272K/384K 总上下文处标记自动压缩，但会等当前 agent run 及其工具调用链完整 settled 后才执行，不会中断正在进行的任务。压缩按当前分支第 1/2/3 次 compact 保留约 32K/40K/48K recent tail；竞争假设、有效性、evidence refs 与下一实验写入结构化 compact，完整 JSONL 历史仍保留。
 - 新会话需要恢复旧证据：使用 memory search/read，不必先恢复整个旧 session。
+- 新 Session 会自动收到基于最近 structured compact、实验账本、Git 和 Runtime 的限长 ProjectView；它是导航信息而非证据替代。用 `/runtime view` 可检查来源，用 `/runtime recommend` 可查看是否值得 compact 或轮换，但轮换仍由用户/Leader 决定。
 
 从终端恢复最近会话：
 

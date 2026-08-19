@@ -22,7 +22,8 @@ export const CODEX_JOB_WORKER_PATH = join(LIB_DIR, "codex-job-worker.mjs");
 export const DEFAULT_CODEX_MODEL = "gpt-5.6-sol";
 export const DEFAULT_CODEX_REASONING_EFFORT = "max";
 
-const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
+const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled", "outcome_unknown"]);
+const RECONCILABLE_OUTCOMES = new Set(["completed", "failed", "cancelled"]);
 const JOB_ID_PATTERN = /^codex-[0-9TZ-]+-[a-f0-9]{8}$/;
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/;
 const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
@@ -259,6 +260,31 @@ async function acquireWriterLock(jobRoot, cwd, jobId) {
 	throw new Error(`Could not acquire Codex writer lock for ${cwd}`);
 }
 
+async function assertNoUnknownWriterOutcome(jobRoot, writerRoot) {
+	let entries;
+	try {
+		entries = await readdir(jobRoot, { withFileTypes: true });
+	} catch (error) {
+		if (error?.code === "ENOENT") return;
+		throw error;
+	}
+	for (const entry of entries) {
+		if (!entry.isDirectory() || !JOB_ID_PATTERN.test(entry.name)) continue;
+		let job;
+		try {
+			job = await readJson(join(jobRoot, entry.name, "job.json"));
+		} catch {
+			continue;
+		}
+		if (job.status !== "outcome_unknown") continue;
+		const candidateRoot = resolve(job.writerRoot ?? job.workspaceRoot ?? job.cwd);
+		if (candidateRoot !== resolve(writerRoot)) continue;
+		throw new Error(
+			`Codex executor ${job.id} may have changed ${writerRoot}, but its outcome is unknown. Inspect Git and external run state, then use codex_delegate action=reconcile with an evidence note before starting another executor.`,
+		);
+	}
+}
+
 export async function releaseWriterLock(lockPath, jobId) {
 	if (!lockPath) return;
 	try {
@@ -360,7 +386,10 @@ export async function startCodexJob(options) {
 	let worker;
 	try {
 		const writerRoot = boundaryRoot;
-		if (mode === "executor") lockPath = await acquireWriterLock(jobRoot, writerRoot, jobId);
+		if (mode === "executor") {
+			await assertNoUnknownWriterOutcome(jobRoot, writerRoot);
+			lockPath = await acquireWriterLock(jobRoot, writerRoot, jobId);
+		}
 		await mkdir(jobDir, { recursive: false, mode: 0o700 });
 		const createdAt = now();
 		const sandbox = mode === "advisor" ? CODEX_ADVISOR_PROFILE : CODEX_EXECUTOR_PROFILE;
@@ -442,6 +471,9 @@ export async function startCodexJob(options) {
 			resultPath: null,
 			error: null,
 			hostCapabilityCount: hostCapabilities.length,
+			sideEffect: mode === "executor"
+				? { class: "project_write", state: "intent_recorded", intentAt: createdAt, startedAt: null, settledAt: null, outcome: null }
+				: { class: "read_only", state: "not_applicable", intentAt: createdAt, startedAt: null, settledAt: null, outcome: null },
 		};
 		await writeJsonAtomic(join(jobDir, "request.json"), request);
 		await writeJsonAtomic(join(jobDir, "job.json"), job);
@@ -678,12 +710,16 @@ export async function readCodexJob(jobId, options = {}) {
 	if (options.reconcile !== false && !isTerminalStatus(job.status)) {
 		const createdAge = Date.now() - Date.parse(job.createdAt);
 		if (job.workerPid && !processIsAlive(job.workerPid)) {
+			const unknownOutcome = job.mode === "executor" && job.sideEffect?.state === "started";
 			job = await updateJobFile(jobDir, (current) => ({
 				...current,
-				status: current.status === "cancelling" ? "cancelled" : "failed",
+				status: unknownOutcome ? "outcome_unknown" : current.status === "cancelling" ? "cancelled" : "failed",
 				finishedAt: now(),
-				progress: "worker exited without a terminal record",
-				error: current.error ?? "Codex job worker disappeared before recording completion",
+				progress: unknownOutcome ? "worker exited after side effects may have started" : "worker exited without a terminal record",
+				error: current.error ?? (unknownOutcome
+					? "Codex worker disappeared after the execution turn was durably marked started; external effects must be reconciled"
+					: "Codex job worker disappeared before recording completion"),
+				sideEffect: unknownOutcome ? { ...current.sideEffect, state: "unknown", unknownAt: now() } : current.sideEffect,
 			}));
 		} else if (!job.workerPid && createdAge > 15000) {
 			job = await updateJobFile(jobDir, (current) => ({
@@ -703,6 +739,37 @@ export async function readCodexJob(jobId, options = {}) {
 		}
 	}
 	return job;
+}
+
+export async function reconcileCodexJobOutcome(jobId, options = {}) {
+	validateJobId(jobId);
+	const outcome = String(options.outcome ?? "");
+	if (!RECONCILABLE_OUTCOMES.has(outcome)) throw new Error("Reconciled outcome must be completed, failed, or cancelled");
+	const note = String(options.note ?? "").trim();
+	if (!note) throw new Error("Reconciliation requires a non-empty evidence note from external-state inspection");
+	if (note.length > 8000) throw new Error("Reconciliation note must be at most 8000 characters");
+	const jobRoot = resolve(options.jobRoot ?? DEFAULT_CODEX_JOB_ROOT);
+	const jobDir = join(jobRoot, jobId);
+	const current = await readCodexJob(jobId, { ...options, jobRoot, reconcile: false });
+	if (current.status !== "outcome_unknown") throw new Error(`Codex job ${jobId} is ${current.status}, not outcome_unknown`);
+	const reconciled = await updateJobFile(jobDir, (job) => ({
+		...job,
+		status: outcome,
+		finishedAt: job.finishedAt ?? now(),
+		progress: `outcome reconciled as ${outcome}`,
+		error: outcome === "completed" ? null : job.error,
+		sideEffect: {
+			...job.sideEffect,
+			state: "settled",
+			outcome,
+			settledAt: now(),
+			reconciledAt: now(),
+			reconciliationNote: note,
+		},
+		lastActivityAt: now(),
+	}));
+	await releaseWriterLock(writerLockPath(jobRoot, current.writerRoot ?? current.cwd), jobId).catch(() => undefined);
+	return reconciled;
 }
 
 export async function waitForCodexJob(jobId, options = {}) {
@@ -770,11 +837,14 @@ export async function cancelCodexJob(jobId, options = {}) {
 			// The exact job process group may already have exited.
 		}
 	}
+	const unknownOutcome = job.mode === "executor" && job.sideEffect?.state === "started";
 	job = await updateJobFile(jobDir, (current) => ({
 		...current,
-		status: "cancelled",
+		status: unknownOutcome ? "outcome_unknown" : "cancelled",
 		finishedAt: now(),
-		progress: "cancelled",
+		progress: unknownOutcome ? "forced stop after side effects may have started" : "cancelled",
+		error: unknownOutcome ? "Codex was force-stopped after execution began; inspect external state before continuing" : current.error,
+		sideEffect: unknownOutcome ? { ...current.sideEffect, state: "unknown", unknownAt: now() } : current.sideEffect,
 		lastActivityAt: now(),
 	}));
 	await releaseWriterLock(writerLockPath(jobRoot, job.writerRoot ?? job.cwd), jobId).catch(() => undefined);
@@ -860,5 +930,6 @@ export function publicJobView(job) {
 		gitAfter: summarizeGit(job.gitAfter),
 		result: job.result ?? null,
 		error: job.error,
+		sideEffect: job.sideEffect ?? null,
 	};
 }

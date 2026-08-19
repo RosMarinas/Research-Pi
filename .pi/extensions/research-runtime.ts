@@ -1,12 +1,26 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
+import { join } from "node:path";
+import { getGitSnapshot, HARNESS_ROOT } from "../lib/codex-jobs.mjs";
+import {
+	buildProjectView,
+	commitProjectState,
+	materializeProjectView,
+	migrateLatestProjectState,
+	projectViewFingerprint,
+	readRecentExperiments,
+	renderProjectView,
+} from "../lib/project-view.mjs";
+import { RESEARCH_HARD_COMPACT_TOKENS, RESEARCH_SOFT_COMPACT_TOKENS } from "../lib/research-compact.mjs";
 import { getCodexRuntimeAdapter } from "../lib/research-runtime-adapters.mjs";
+import { resolveResearchPiPaths } from "../lib/runtime-paths.mjs";
 import {
 	RESEARCH_LEADER_ACTOR_ID,
 	RUNTIME_EVENT_ENTRY_KIND,
 	RUNTIME_MESSAGE_KIND,
 	USER_ACTOR_ID,
 	attachRuntimeActor,
+	appendRuntimeEvent,
 	createRuntimeMessage,
 	detachRuntimeActor,
 	initializeResearchRuntime,
@@ -67,6 +81,39 @@ export function formatRuntimeStatus(projectKey: string, snapshot: RuntimeSnapsho
 	return `Runtime ${projectKey.slice(-8)} · ${states.join(" · ")}`;
 }
 
+export function runtimeHealth(snapshot: RuntimeSnapshot, usage: ReturnType<ExtensionContext["getContextUsage"]>, branchEntries: any[]) {
+	const actionSummary = runtimeActorSummary(snapshot);
+	const unknown = snapshot.actions.filter((action) => action.status === "outcome_unknown").length;
+	const compactions = branchEntries.filter((entry) => entry.type === "compaction").length;
+	const tokens = usage?.tokens ?? null;
+	let recommendation = "continue";
+	let reason = "No Runtime recovery issue or context-pressure threshold currently requires intervention.";
+	if (unknown) {
+		recommendation = "reconcile";
+		reason = `${unknown} executor outcome(s) are unknown; inspect external state before further writes.`;
+	} else if (tokens !== null && tokens >= RESEARCH_HARD_COMPACT_TOKENS) {
+		recommendation = "compact";
+		reason = `Context is at or above the ${RESEARCH_HARD_COMPACT_TOKENS.toLocaleString()} hard research threshold.`;
+	} else if (tokens !== null && tokens >= RESEARCH_SOFT_COMPACT_TOKENS) {
+		recommendation = snapshot.projectState && compactions >= 2 && !actionSummary.active && !actionSummary.waiting ? "consider-rotation" : "compact";
+		reason = recommendation === "consider-rotation"
+			? "A structured project state exists, actions are settled, and context pressure is high; a fresh Session may now be cheaper than another long continuation."
+			: "Context is above the soft research threshold; compact before evidence is displaced by overflow.";
+	}
+	return { tokens, contextWindow: usage?.contextWindow ?? null, percent: usage?.percent ?? null, compactions, unknown, ...actionSummary, recommendation, reason };
+}
+
+export function formatRuntimeHealth(health: ReturnType<typeof runtimeHealth>): string {
+	return [
+		`Context: ${health.tokens?.toLocaleString() ?? "unknown"}/${health.contextWindow?.toLocaleString() ?? "unknown"}${health.percent === null ? "" : ` (${health.percent.toFixed(1)}%)`}`,
+		`Session: ${health.compactions} compaction(s)`,
+		`Runtime: ${health.active} active · ${health.waiting} waiting · ${health.unknown} outcome_unknown`,
+		`Recommendation: ${health.recommendation}`,
+		health.reason,
+		"Observe-only: Research Pi does not rotate or reconcile automatically.",
+	].join("\n");
+}
+
 export function actorLines(snapshot: RuntimeSnapshot, activeOnly = true): string {
 	if (!snapshot.actors.length) return "No Runtime Actors are registered for this project.";
 	const latest = latestActionsByActor(snapshot);
@@ -117,6 +164,9 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	let attachedSessionId: string | undefined;
 	const consumedMessageIds = new Set<string>();
 	const materializedMessageIds = new Set<string>();
+	const migrationAttemptedProjects = new Set<string>();
+	let projectViewText = "";
+	let projectViewHash = "";
 
 	const getRuntime = async (ctx: ExtensionContext, options: { claim?: boolean } = {}): Promise<RuntimeContext> => {
 		const sessionId = ctx.sessionManager.getSessionId();
@@ -142,6 +192,29 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		const activeRuntime = await getRuntime(ctx);
 		const snapshot = await readRuntimeSnapshot(activeRuntime);
 		ctx.ui.setStatus("research_runtime", formatRuntimeStatus(activeRuntime.projectKey, snapshot));
+	};
+
+	const refreshProjectView = async (ctx: ExtensionContext) => {
+		const activeRuntime = await getRuntime(ctx);
+		let snapshot = await readRuntimeSnapshot(activeRuntime);
+		if (!snapshot.projectState && !migrationAttemptedProjects.has(activeRuntime.projectKey)) {
+			migrationAttemptedProjects.add(activeRuntime.projectKey);
+			await migrateLatestProjectState({
+				runtime: activeRuntime,
+				sessionDir: resolveResearchPiPaths({ harnessRoot: HARNESS_ROOT }).sessionDir,
+				cwd: ctx.cwd,
+				appendRuntimeEvent,
+			});
+			snapshot = await readRuntimeSnapshot(activeRuntime);
+		}
+		const [git, experiments] = await Promise.all([
+			getGitSnapshot(ctx.cwd),
+			readRecentExperiments(join(ctx.cwd, ".pi", "research", "experiments.jsonl")),
+		]);
+		const view = buildProjectView({ runtime: activeRuntime, snapshot, git, experiments });
+		projectViewText = renderProjectView(view);
+		projectViewHash = projectViewFingerprint(view);
+		return { snapshot, view };
 	};
 
 	const displayOperationalCard = (message: RuntimeMessage, status: string) => {
@@ -239,7 +312,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		const activeRuntime = await getRuntime(ctx);
-		const snapshot = await readRuntimeSnapshot(activeRuntime);
+		const { snapshot } = await refreshProjectView(ctx);
 		consumedMessageIds.clear();
 		materializedMessageIds.clear();
 		for (const message of snapshot.messages) {
@@ -268,6 +341,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	pi.on("input", async (event, ctx) => {
 		if (event.source === "extension") return;
 		await getRuntime(ctx, { claim: true });
+		await refreshProjectView(ctx);
 	});
 
 	pi.on("context", (event) => {
@@ -279,7 +353,18 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			materializedMessageIds.add(messageId);
 			return true;
 		});
-		return { messages };
+		return { messages: materializeProjectView(messages, projectViewText, { fingerprint: projectViewHash }) };
+	});
+
+	pi.on("session_compact", async (event, ctx) => {
+		const activeRuntime = await getRuntime(ctx, { claim: true });
+		await commitProjectState(activeRuntime, {
+			compactionEntry: event.compactionEntry,
+			sessionId: ctx.sessionManager.getSessionId(),
+			appendRuntimeEvent,
+		});
+		await refreshProjectView(ctx);
+		await refreshStatus(ctx);
 	});
 
 	pi.on("agent_settled", async (_event, ctx) => {
@@ -291,7 +376,28 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			consumedMessageIds.add(messageId);
 		}
 		materializedMessageIds.clear();
+		await refreshProjectView(ctx);
 		await refreshStatus(ctx);
+	});
+
+	pi.registerCommand("runtime", {
+		description: "Inspect project Runtime health, recommendation, or injected ProjectView",
+		handler: async (args, ctx) => {
+			try {
+				const mode = args.trim() || "health";
+				if (!["health", "recommend", "view"].includes(mode)) throw new Error("Usage: /runtime [health|recommend|view]");
+				const activeRuntime = await getRuntime(ctx, { claim: true });
+				const { snapshot } = await refreshProjectView(ctx);
+				if (mode === "view") ctx.ui.notify(projectViewText, "info");
+				else {
+					const health = runtimeHealth(snapshot, ctx.getContextUsage(), ctx.sessionManager.getBranch());
+					ctx.ui.notify(mode === "recommend" ? `${health.recommendation}: ${health.reason}\nNo lifecycle action was taken.` : formatRuntimeHealth(health), health.unknown ? "warning" : "info");
+				}
+				await refreshStatus(ctx);
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			}
+		},
 	});
 
 	pi.registerCommand("actors", {

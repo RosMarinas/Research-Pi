@@ -1,7 +1,7 @@
 # Research Runtime：Codex 职责、状态与真实项目测试指南
 
-状态：Milestone 1 implementation guide
-更新：2026-08-15
+状态：Milestone 2 已实测；ProjectView v0、outcome recovery 与 lifecycle observe-only 已实现
+更新：2026-08-19
 适用版本：包含 `research-runtime.ts` 的 Research Pi 开发版
 
 ## 1. 先把几个对象分开
@@ -61,6 +61,7 @@ Actor 本身不会因为一个 job 完成就“completed”。它是可再次激
 | `suspended (completed)` | 最近 Action 完成，thread 可恢复 |
 | `suspended (failed)` | 最近 Action 失败，但已有 thread 时仍可显式续接 |
 | `suspended (cancelled)` | 最近 Action 被取消，Actor 身份和可用 thread 保留 |
+| `suspended (outcome_unknown)` | executor 可能已产生副作用，必须检查外部状态并显式 reconcile |
 
 `/actors` 的 active/waiting/suspended 来自 Actor 最新 Action，而不是 Pi Session attachment。只有 Research Leader Actor 才显示 attached/detached Pi Session。
 
@@ -72,6 +73,7 @@ Actor 本身不会因为一个 job 完成就“completed”。它是可再次激
 starting -> running -> input_required -> running -> completed
                    \-> failed
                    \-> cancelling -> cancelled
+                   \-> outcome_unknown -> reconcile -> completed|failed|cancelled
 ```
 
 一次 suspended Actor 的新指令会通过原 thread 创建一个新 Action/job，而不是把旧终态 job 改回 running。
@@ -90,9 +92,9 @@ queued -> delivered -> consumed
 
 投递采用 at-least-once 的恢复思路：如果进程在模型看到消息后、`agent_settled` 前崩溃，消息可能在恢复时再出现一次；不会为了追求 exactly-once 而增加高频事务写入。
 
-### 3.4 当前尚未实现的状态
+### 3.4 副作用恢复边界
 
-设计中的 `outcome_unknown` 尚未接入 Runtime。当前 Codex worker 异常消失仍由既有 job reconciliation 标记为 `failed`。因此第一阶段不能声称已经解决“外部副作用已发生但终态没有落盘”的自动恢复；真实项目测试不要用带非幂等外部副作用的任务验证 crash recovery。
+executor 的 job 先记录 `intent_recorded`，在 App Server `turn/start` 前把 `started` 耐久落盘。若 worker 在 started 后消失或被强杀，恢复只能知道“副作用可能发生”，因此标为 `outcome_unknown`。Runtime 会阻止同一精确 workspace 的新 executor，避免重复提交、重复远程运行或在未知状态上继续写；advisor 不写项目，仍可用于检查。只有在检查 Git、文件、远程 run/job 等实际状态后，才可用 `codex_delegate action=reconcile` 提交 terminal outcome 与证据 note。Harness 不自动猜测。
 
 ## 4. 通信如何发生
 
@@ -150,7 +152,7 @@ sequenceDiagram
 5. B 可以管理 Actor-owned job 或恢复 thread；
 6. 已 consumed 的消息不会因 A 再次获得 attachment 而重复注入。
 
-这里没有把 A 的完整 transcript 注入 B。Milestone 1 只迁移 Actor、Action 和 mailbox；更完整的 ProjectView bootstrap 属于后续阶段。
+这里没有把 A 的完整 transcript 注入 B。最近一次结构化 research compact 会提交 project state；B 在模型调用前得到确定性的限长 ProjectView，合并 state provenance、最近 experiment records、Git 摘要、未结 Action 和 mailbox ID。它不包含完整旧 transcript，重要证据仍须通过引用或 memory read 精确读取。
 
 ## 5. 所有权与边界
 
@@ -176,6 +178,9 @@ exact workspaceKey/root               文件与副作用边界，不可跨 workt
 /steer --preempt @codex:<Actor短码> <紧急纠偏>
 /codex missions
 /watch [job后缀|mission|@codex:<Actor短码>]
+/runtime health
+/runtime recommend
+/runtime view
 ```
 
 Runtime mailbox 会保存消息正文，因此不要在这些命令中输入 API key、私钥或其他凭据。
@@ -214,8 +219,11 @@ node --test tests/codex-jobs.test.mjs
 - 旧 branch-owned job 继续隔离；
 - blocking request/reply、host capability、writer lease 和取消；
 - 1000 个 token delta 不放大 job-state/默认 audit 写入。
+- executor 在 durable side-effect barrier 后崩溃进入 `outcome_unknown`，阻止第二 writer，显式 reconcile 后恢复；
+- compaction project state 的幂等提交、active-branch session migration 和 ProjectView 插入位置；
+- lifecycle health 只观察/建议，不自动 compact、rotate 或 reconcile。
 
-2026-08-15 当前结果：两文件合计 18/18 通过，无真实模型/API 调用。
+当前自动测试使用 Fake App Server 和本地 ledger，不调用真实模型/API；实际科研判断质量仍需要在真实 Project 中持续测试。
 
 ## 8. Layer 3：真实科研项目手动测试
 
@@ -330,7 +338,7 @@ Action 完成后，在当前 attached Session 输入：
 /steer --preempt @codex:<Actor短码> 立即停止当前审查；只总结已看到的协议事实，不再读取更多文件。
 ```
 
-通过标准：旧 Action cancelled，新 Action 使用同一 Actor/thread 继续。不要在真实远程实验、删除、提交或其他非幂等操作中做这个 smoke；当前 Runtime 尚无 `outcome_unknown` 恢复。
+通过标准：若 interrupt 在可靠 turn 终态前完成，旧 Action cancelled，新 Action 使用同一 Actor/thread 继续；若 worker 被强杀且外部效果无法确认，应出现 `outcome_unknown`，不得自动重跑。真实测试只在你愿意检查并 reconcile 外部状态的任务上制造 crash。
 
 ## 9. 真实测试判定表
 
@@ -342,6 +350,8 @@ Action 完成后，在当前 attached Session 输入：
 | ask/reply | 原 turn 在 reply 后继续 | 新建无关 delegation 或 request 丢失 |
 | default steer | 原 Action 继续、无 cancel | 普通 steer 导致 cancelled |
 | preempt | 旧 Action cancelled，新 Action 续接 thread | 旧 job 被改回 running 或 thread 丢失 |
+| unknown outcome | 新 executor 被阻止；检查外部状态后 reconcile | 自动当作 failed 并重复执行 |
+| ProjectView | 新 Session 可见 compact provenance、有效性标签和未结 Action | 注入整段旧 transcript 或把 completed 当证据 |
 | 单次投递 | result 只由当前 attached Leader 消费 | A/B 同时触发相同 result turn |
 | Context 清理 | consumed message 后续不再注入 | 每轮重复出现旧 steer/result |
 | 科研边界 | completion 不自动宣称假设成立 | job success 被当成科学结论 |

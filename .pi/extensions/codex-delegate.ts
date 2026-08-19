@@ -10,6 +10,7 @@ import {
 	listCodexMissions,
 	publicJobView,
 	readCodexJob,
+	reconcileCodexJobOutcome,
 	respondToCodexJob,
 	resumeCodexJob,
 	startCodexJob,
@@ -39,6 +40,7 @@ const ActionSchema = Type.Union(
 		Type.Literal("resume"),
 		Type.Literal("respond"),
 		Type.Literal("steer"),
+		Type.Literal("reconcile"),
 		Type.Literal("missions"),
 	],
 	{ description: "Start or manage one Codex delegation job" },
@@ -61,7 +63,7 @@ const EffortSchema = Type.Union(
 );
 
 const ReuseSchema = Type.Union([Type.Literal("auto"), Type.Literal("never")], {
-	description: "auto resumes the latest thread with the same explicit mission and mode on this Pi session branch; never always starts a fresh thread",
+	description: "auto resumes the latest Actor thread with the same explicit mission and mode in this exact project workspace; never always starts a fresh thread",
 });
 
 const ParamsSchema = Type.Object({
@@ -85,7 +87,7 @@ const ParamsSchema = Type.Object({
 	),
 	mission: Type.Optional(
 		Type.String({
-			description: "Stable research subtask label used for deterministic thread reuse within this workspace and Pi session branch",
+			description: "Stable research subtask label used for deterministic Actor/thread reuse across Pi sessions in this exact workspace",
 			minLength: 1,
 			maxLength: 160,
 		}),
@@ -110,7 +112,7 @@ const ParamsSchema = Type.Object({
 	),
 	jobId: Type.Optional(
 		Type.String({
-			description: "Existing job id for status, result, cancel, or resume",
+			description: "Existing job id for status, result, cancel, resume, respond, steer, or reconcile",
 		}),
 	),
 	followUp: Type.Optional(
@@ -133,6 +135,14 @@ const ParamsSchema = Type.Object({
 	message: Type.Optional(
 		Type.String({ description: "Instruction to inject into the active Codex turn for action=steer", minLength: 1 }),
 	),
+	outcome: Type.Optional(
+		Type.Union([Type.Literal("completed"), Type.Literal("failed"), Type.Literal("cancelled")], {
+			description: "Observed terminal outcome for action=reconcile",
+		}),
+	),
+	note: Type.Optional(
+		Type.String({ description: "Evidence from inspecting Git and external run state; required for action=reconcile", minLength: 1, maxLength: 8000 }),
+	),
 });
 
 function requireText(value: string | undefined, label: string): string {
@@ -146,6 +156,9 @@ function formatJob(job: ReturnType<typeof publicJobView>): string {
 	}
 	if (job.status === "failed" || job.status === "cancelled") {
 		return `Codex job ${job.id} ${job.status}: ${job.error ?? job.progress}`;
+	}
+	if (job.status === "outcome_unknown") {
+		return `Codex job ${job.id} has outcome_unknown: side effects may have occurred. Inspect Git and external run state, then use action=reconcile with outcome and an evidence note before starting another executor in this workspace.`;
 	}
 	if (job.status === "input_required" && job.pendingRequest) {
 		return `Codex job ${job.id} needs input (${job.pendingRequest.id}): ${job.pendingRequest.question}`;
@@ -166,7 +179,7 @@ function formatMissions(missions: Awaited<ReturnType<typeof listCodexMissions>>)
 
 type CodexJobView = ReturnType<typeof publicJobView>;
 
-const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled"]);
+const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled", "outcome_unknown"]);
 
 function shortJobId(jobId: string): string {
 	return jobId.slice(-8);
@@ -227,7 +240,7 @@ async function listOwnedCodexMissions(ctx: ExtensionContext) {
 }
 
 export function formatCodexStatus(job: CodexJobView, activeCount = 1): string {
-	const icon = job.status === "completed" ? "✓" : job.status === "failed" || job.status === "cancelled" ? "✗" : job.status === "input_required" ? "?" : "⚙";
+	const icon = job.status === "completed" ? "✓" : job.status === "outcome_unknown" ? "!" : job.status === "failed" || job.status === "cancelled" ? "✗" : job.status === "input_required" ? "?" : "⚙";
 	const count = activeCount > 1 && !TERMINAL_JOB_STATUSES.has(job.status) ? `${activeCount} running · ` : "";
 	const mission = job.mission ? ` · ${boundedProgress(job.mission).slice(0, 36)}` : "";
 	return `${icon} Codex ${count}${job.mode} ${shortJobId(job.id)}${mission} · ${job.status} · ${boundedProgress(job.progress)}`;
@@ -283,6 +296,15 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			]
 				.filter(Boolean)
 				.join("\n");
+		}
+		if (job.status === "outcome_unknown") {
+			return [
+				`Codex delegation ${job.id} lost its worker after executor side effects may have started.`,
+				"Do not infer success or failure from the missing terminal record.",
+				"Inspect Git, files, remote jobs, and other external effects relevant to this delegation.",
+				`Then use codex_delegate action=reconcile, jobId=${job.id}, outcome=<completed|failed|cancelled>, note=<inspection evidence>.`,
+				"Another Codex executor in this workspace is blocked until reconciliation; advisor mode remains available.",
+			].join("\n");
 		}
 		const result = job.result ?? {};
 		return [
@@ -516,6 +538,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			"Pi remains responsible for framing the research question, judging evidence, and choosing the next research action.",
 			"Give related work a stable mission label and use reuse=auto to continue its exact Codex Actor thread across Pi sessions in this project workspace; use action=missions to inspect project mission threads.",
 			"Use action=status/result/cancel/resume/respond/steer with the returned job id; Actor-owned jobs remain bound to the exact project workspace but are not owned by one Pi conversation.",
+			"If an executor loses its worker after execution started, it stops at outcome_unknown. Inspect Git and external run state, then use action=reconcile; the harness blocks another writer until this is resolved.",
 			"Background completion and blocking requests enter the project Runtime mailbox and are delivered to the currently attached Research Leader session. respond answers an explicit request; steer corrects an active turn without restarting it.",
 		].join(" "),
 		promptSnippet: "Delegate long operational work or a bounded second opinion to local Codex",
@@ -527,6 +550,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			"If Codex needs an unapproved outside path, SSH target, or host script, review the exact request and ask the user for the returned /boundary grant. After approval, respond so Codex can retry the same turn. Do not disguise the operation as a new delegation.",
 			"Use mode=advisor only for a genuinely useful independent proposal or critique. Advisor is read-only but still uses max reasoning by default.",
 			"After retrieving a result, inspect its evidence and validity limitations. Codex completion does not by itself establish a scientific conclusion.",
+			"Never guess an outcome_unknown resolution. Reconcile only after inspecting the relevant Git state, files, remote runs, or other external effects, and record that evidence in note.",
 			"When a Codex request arrives, answer it promptly with action=respond if Pi can decide. Ask the user only for user-owned choices or direct credential setup. Never place secrets in a response.",
 		],
 		parameters: ParamsSchema,
@@ -649,6 +673,17 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 						const jobId = requireText(params.jobId, "jobId");
 						ownerCheck = await jobManagementScope(ctx, jobId);
 						job = await cancelCodexJob(jobId, ownerCheck);
+						break;
+					}
+					case "reconcile": {
+						const jobId = requireText(params.jobId, "jobId");
+						ownerCheck = await jobManagementScope(ctx, jobId);
+						job = await reconcileCodexJobOutcome(jobId, {
+							outcome: params.outcome,
+							note: requireText(params.note, "note"),
+							...ownerCheck,
+						});
+						commandReceipt = `Reconciled Codex job ${job.id} as ${job.status}.`;
 						break;
 					}
 					case "missions": {

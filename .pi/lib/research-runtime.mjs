@@ -163,6 +163,7 @@ export async function readRuntimeSnapshot(runtime) {
 	const attachments = new Map();
 	const messages = new Map();
 	const actions = new Map();
+	let projectState = null;
 	for (const event of await readRuntimeEvents(runtime)) {
 		const data = event.data ?? {};
 		switch (event.type) {
@@ -198,6 +199,9 @@ export async function readRuntimeSnapshot(runtime) {
 				actions.set(data.id, { ...current, ...data, createdAt: current.createdAt ?? data.createdAt ?? event.at, updatedAt: event.at });
 				break;
 			}
+			case "project.state.committed":
+				projectState = { ...data, committedAt: event.at };
+				break;
 		}
 	}
 	return {
@@ -208,6 +212,7 @@ export async function readRuntimeSnapshot(runtime) {
 		attachments: [...attachments.values()],
 		messages: [...messages.values()],
 		actions: [...actions.values()],
+		projectState,
 	};
 }
 
@@ -390,7 +395,7 @@ export async function recordCodexRuntimeEvent(runtime, job, content) {
 	const actorId = await registerCodexRuntimeJob(runtime, job);
 	const eventKey = job.status === "input_required" && job.pendingRequest?.id
 		? `request:${job.pendingRequest.id}`
-		: ["completed", "failed", "cancelled"].includes(job.status)
+		: ["completed", "failed", "cancelled", "outcome_unknown"].includes(job.status)
 			? `terminal:${job.status}`
 			: null;
 	if (!eventKey) return null;

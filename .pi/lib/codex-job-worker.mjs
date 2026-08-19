@@ -106,6 +106,7 @@ async function main() {
 	const activeTurnsByThread = new Map();
 	let cancellationRequested = false;
 	let timedOut = false;
+	let sideEffectStarted = false;
 	let timeout;
 	let commandTimer;
 	let notificationUpdateTimer;
@@ -557,14 +558,29 @@ async function main() {
 	});
 
 	try {
-		await writeJobUpdate((current) => ({
-			...current,
-			status: "running",
-			workerPid: process.pid,
-			startedAt: now(),
-			progress: request.continuationThreadId ? "connecting to Codex app-server and resuming thread" : "connecting to Codex app-server",
-			lastActivityAt: now(),
-		}));
+		let cancelledBeforeStart = false;
+		await writeJobUpdate((current) => {
+			if (current.status === "cancelling") {
+				cancelledBeforeStart = true;
+				return {
+					...current,
+					status: "cancelled",
+					workerPid: process.pid,
+					finishedAt: now(),
+					progress: "cancelled before execution started",
+					lastActivityAt: now(),
+				};
+			}
+			return {
+				...current,
+				status: "running",
+				workerPid: process.pid,
+				startedAt: now(),
+				progress: request.continuationThreadId ? "connecting to Codex app-server and resuming thread" : "connecting to Codex app-server",
+				lastActivityAt: now(),
+			};
+		});
+		if (cancelledBeforeStart) return;
 
 		const systemRuntime = await resolveSystemRuntimePolicy();
 		const permissionArgs = codexPermissionConfigArguments(
@@ -720,6 +736,16 @@ async function main() {
 			: await rpcRequest("thread/start", threadParams, 60_000);
 		registerRootThread(threadResponse?.thread?.id ?? request.continuationThreadId);
 		if (!threadId) throw new Error("Codex app-server did not return a thread id");
+		if (request.mode === "executor") {
+			const startedAt = now();
+			await writeJobUpdate((current) => ({
+				...current,
+				progress: "execution intent durably recorded; starting Codex turn",
+				sideEffect: { ...current.sideEffect, state: "started", startedAt },
+				lastActivityAt: startedAt,
+			}));
+			sideEffectStarted = true;
+		}
 		const turnResponse = await rpcRequest(
 			"turn/start",
 			{
@@ -762,11 +788,12 @@ async function main() {
 		const resultPath = join(jobDir, "result.json");
 		await writeJsonAtomic(resultPath, result);
 		const status = cancellationRequested ? "cancelled" : !turnFailed && !timedOut ? "completed" : "failed";
+		const settledAt = now();
 		const gitAfter = await getGitSnapshot(request.cwd);
 		await writeJobUpdate((current) => ({
 			...current,
 			status,
-			finishedAt: now(),
+			finishedAt: settledAt,
 			threadId,
 			activeTurnId: null,
 			pendingRequest: null,
@@ -775,6 +802,9 @@ async function main() {
 			gitAfter,
 			resultPath,
 			error: status === "failed" ? lastError || "Codex turn failed" : null,
+			sideEffect: request.mode === "executor"
+				? { ...current.sideEffect, state: "settled", outcome: status, settledAt }
+				: current.sideEffect,
 			logCapped: { events: eventLogCapped, stderr: stderrLogCapped },
 			lastActivityAt: now(),
 		}));
@@ -784,15 +814,20 @@ async function main() {
 		lastError = truncate(error?.stack ?? String(error), 12000);
 		const resultPath = join(jobDir, "result.json");
 		await writeJsonAtomic(resultPath, parseStructuredResult(lastAgentText, lastError)).catch(() => undefined);
+		const unknownOutcome = request.mode === "executor" && sideEffectStarted;
+		const finishedAt = now();
 		await writeJobUpdate((current) => ({
 			...current,
-			status: cancellationRequested ? "cancelled" : "failed",
-			finishedAt: now(),
+			status: unknownOutcome ? "outcome_unknown" : cancellationRequested ? "cancelled" : "failed",
+			finishedAt,
 			activeTurnId: null,
 			pendingRequest: null,
-			progress: cancellationRequested ? "cancelled" : "worker failed",
+			progress: unknownOutcome ? "worker lost after side effects may have started" : cancellationRequested ? "cancelled" : "worker failed",
 			resultPath,
 			error: lastError,
+			sideEffect: unknownOutcome
+				? { ...current.sideEffect, state: "unknown", unknownAt: finishedAt }
+				: current.sideEffect,
 			logCapped: { events: eventLogCapped, stderr: stderrLogCapped },
 			lastActivityAt: now(),
 		})).catch(() => undefined);
