@@ -151,7 +151,7 @@ Pi 现在提供这些低摩擦研究工具：
 - `/watch`：按需打开 Codex 客观执行面板；左右切换 Action，Tab 或上下切换 overview/activity/agents，`q`/`Esc` 关闭。观察内容不进入模型上下文。
 - `/actors`（等同 `/actors active`）、`/inbox`：查看当前 active/waiting 的 project Runtime Actors 与 durable mailbox；`/actors all` 查看历史注册和 suspended Actors。
 - `/message`、`/steer`：面向 Actor 通信；steer 默认等待下一安全模型边界，只有 `--preempt` 才主动中断。
-- `/runtime`（或 `/runtime board`）：打开 Project 控制面；左右或 Tab 切换 overview/actors/messages/sessions，`r` 手动刷新，`v` 查看完整 ProjectView，`w` 准备切到 Codex Watch。面板不进入模型上下文，也不后台轮询。
+- `/runtime`（或 `/runtime board`）：打开 Project 控制面；左右或 Tab 切换 overview/actors/messages/sessions，`r` 手动刷新，`v` 查看完整 ProjectView。Actors 页用上下键选择，Enter 或 `w` 直接打开对应 Codex Watch。面板不进入模型上下文，也不后台轮询。需要注意的 Runtime 状态会通过 editor 上方的自折叠 Dock 显示。
 - `/runtime health|recommend|view`：查看 Project Runtime 健康度、只读生命周期建议或当前 ProjectView。
 - `/runtime takeover <reason>`：当另一 Session 正在占用 Research Leader 且确实需要人工接管时，显式转移 attachment；旧运行会在下一模型边界停止。
 - `/runtime rotate [reason]`：在 Project State 可恢复且没有未知副作用时，人工创建一个不复制旧 transcript、但自动继承 ProjectView/mailbox 的新 Leader Session；Runtime 会记录交接和 receipt。不会自动触发。
@@ -183,7 +183,7 @@ Pi 现在提供这些低摩擦研究工具：
 /side 如果当前异常其实来自评价协议，而不是模型结构，会出现哪些可区分现象？
 ```
 
-side 问答会以卡片保存在 session 中。`Ctrl+O` 展开完整内容，`/side show <id>` 单独查看，`/side use <id>` 才把它提升到主上下文。之后也能通过 Research Memory 找回，但它仍属于 assistant synthesis，不是实验事实。
+side 问答会以卡片保存在 session 中。`Ctrl+O` 在展开/收起之间切换；如果终端状态异常，也可用 `/side collapse` 强制恢复紧凑视图。`/side show <id>` 打开可滚动 overlay，使用方向键/PgUp/PgDn 浏览并以 `q` 或 Esc 返回；`/side use <id>` 才把它提升到主上下文。之后也能通过 Research Memory 找回，但它仍属于 assistant synthesis，不是实验事实。
 
 需要当天信息、一个官方页面或一份有界小调研时，可以让 Pi 调用 `web_search`。它复用 Research Pi 配置中的 DeepSeek key。用户明确指定，或任务确实需要大量搜索、交叉核验和中间材料整理时，再交给 Codex 隔离过程。
 

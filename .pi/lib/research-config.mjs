@@ -6,6 +6,13 @@ const LIB_DIR = dirname(fileURLToPath(import.meta.url));
 export const RESEARCH_PI_DEFAULT_CONFIG_PATH = resolve(LIB_DIR, "../config.defaults.json");
 export const RESEARCH_PI_CONFIG_SCHEMA_PATH = resolve(LIB_DIR, "../schemas/research-pi-config.schema.json");
 export const RESEARCH_PI_CONFIG_VERSION = 1;
+export const RESEARCH_PI_THEME_CHOICES = Object.freeze([
+	{ name: "research-pi", label: "Ocean", description: "Cool cyan, indigo, and violet for long research sessions." },
+	{ name: "research-graphite", label: "Graphite", description: "Low-saturation graphite with restrained aqua accents." },
+	{ name: "research-ember", label: "Ember", description: "Warm copper and amber balanced by scientific teal." },
+	{ name: "dark", label: "Pi Dark", description: "Pi Core built-in dark palette." },
+	{ name: "light", label: "Pi Light", description: "Pi Core built-in light palette for light terminals." },
+]);
 
 const TOP_LEVEL_KEYS = new Set([
 	"$schema",
@@ -23,6 +30,8 @@ const TOP_LEVEL_KEYS = new Set([
 const PROFILE_KEYS = new Set(["label", "description", "provider", "model", "thinking"]);
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const CODEX_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max", "ultra"]);
+const UI_DENSITIES = new Set(["compact", "balanced"]);
+const RUNTIME_STRIP_MODES = new Set(["auto", "always", "off"]);
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,191}$/;
 
 function plainObject(value) {
@@ -114,6 +123,8 @@ export function validateResearchPiConfig(config) {
 		throw new Error("resources.skills must be an array of non-empty paths");
 	}
 	if (!plainObject(config.pi?.settings)) throw new Error("pi.settings must be an object");
+	if (!UI_DENSITIES.has(config.ui?.density)) throw new Error("ui.density must be compact or balanced");
+	if (!RUNTIME_STRIP_MODES.has(config.ui?.runtimeStrip)) throw new Error("ui.runtimeStrip must be auto, always, or off");
 	if (typeof config.ui?.showProfileStatus !== "boolean") throw new Error("ui.showProfileStatus must be boolean");
 	if (!Number.isInteger(config.ui?.configPanelRows) || config.ui.configPanelRows < 3 || config.ui.configPanelRows > 20) {
 		throw new Error("ui.configPanelRows must be between 3 and 20");
@@ -224,6 +235,8 @@ export function researchPiEnvironment(config) {
 		RESEARCH_PI_SEARCH_THINKING_BUDGET_TOKENS: String(search.thinkingBudgetTokens),
 		RESEARCH_PI_SEARCH_MAX_SOURCES: String(search.maxSources),
 		RESEARCH_PI_SEARCH_DEFAULT_MAX_USES: String(search.defaultMaxUses),
+		RESEARCH_PI_UI_DENSITY: config.ui.density,
+		RESEARCH_PI_UI_RUNTIME_STRIP: config.ui.runtimeStrip,
 		RESEARCH_PI_UI_SHOW_PROFILE_STATUS: config.ui.showProfileStatus ? "1" : "0",
 		RESEARCH_PI_UI_CONFIG_PANEL_ROWS: String(config.ui.configPanelRows),
 		RESEARCH_PI_TRACE: config.diagnostics.trace ? "1" : "0",
@@ -241,6 +254,7 @@ export function researchPiConfigSummary(config, path) {
 		`Codex executor: ${config.codex.executor.model}/${config.codex.executor.reasoningEffort}`,
 		`Research compact: ${config.research.compaction.softTokens}/${config.research.compaction.hardTokens} tokens`,
 		`Search: ${config.research.search.model} · max ${config.research.search.maxSources} sources`,
+		`UI: theme ${config.pi.settings.theme ?? "research-pi"} · ${config.ui.density} · runtime strip ${config.ui.runtimeStrip}`,
 		`Profiles: ${Object.keys(config.profiles).join(", ")}`,
 	].join("\n");
 }

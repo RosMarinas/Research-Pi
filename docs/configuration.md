@@ -71,7 +71,7 @@ Explicit Pi CLI `--provider`, `--model`, and `--thinking` arguments are appended
 {
   "pi": {
     "settings": {
-      "theme": "dark",
+      "theme": "research-pi",
       "tuiMode": "regular",
       "showCacheMissNotices": true,
       "retry": {
@@ -130,7 +130,30 @@ These values configure Research Pi's structured compaction and bounded native We
 
 `resources.skills` is the complete default skill allowlist used with Pi's `--no-skills`. Missing paths are skipped. A one-off `--skill` argument remains possible.
 
-`ui.showProfileStatus` controls the compact `◇ profile` status item. `ui.configPanelRows` controls the native profile overlay height.
+Research Pi explicitly loads its bundled theme set, so all three palettes are available in both source and packaged installs. `pi.settings.theme` may still select `dark`, `light`, or another explicitly loaded Pi theme.
+
+Three Research Pi palettes are bundled:
+
+- `research-pi` (`Ocean`): cyan/indigo/violet;
+- `research-graphite` (`Graphite`): restrained low-saturation aqua;
+- `research-ember` (`Ember`): warm copper/amber with teal.
+
+Pi Core's `dark` and `light` remain available. Persist a selection with `/config theme <name>` in the TUI or `pi config theme <name>` in the shell. `/config themes` and `pi config themes` list choices; pressing `t` in the `/config` profile panel opens the theme selector. Pi's native theme setting remains a session-local alternative, while Research Pi config is the next-launch authority.
+
+The UI policy is intentionally semantic rather than pixel-based:
+
+```json
+{
+  "ui": {
+    "density": "balanced",
+    "runtimeStrip": "auto",
+    "showProfileStatus": false,
+    "configPanelRows": 8
+  }
+}
+```
+
+`runtimeStrip=auto` shows the compact Project/Actor dock only while work is active or Runtime state needs attention; `always` keeps the single-line idle view and `off` removes it. `density` is `compact` or `balanced`. `showProfileStatus` controls the optional `◇ profile` footer item; it defaults off because Pi already renders the effective model and thinking level. Terminal breakpoints and Board columns adapt automatically and are not user-configured pixels. `configPanelRows` controls the profile overlay height.
 
 `diagnostics.trace` enables the sensitive Pi trace extension for ordinary `pi` startup; `pi-traced` remains the explicit one-shot override. `diagnostics.codexSqliteLogs` restores Codex App Server internal TRACE/DEBUG SQLite logging. Both defaults are false and should be returned to false after diagnosis.
 

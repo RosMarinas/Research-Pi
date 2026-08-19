@@ -1,10 +1,10 @@
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import {
 	convertToLlm,
 	getMarkdownTheme,
 	sessionEntryToContextMessages,
 } from "@earendil-works/pi-coding-agent";
-import { Box, Container, Markdown, matchesKey, Text } from "@earendil-works/pi-tui";
+import { Box, Markdown, matchesKey, ScrollView, Text, type TUI, VStack } from "@earendil-works/pi-tui";
 import {
 	buildSidePromotion,
 	createSideRecord,
@@ -50,26 +50,77 @@ async function showSide(record: SideRecord, ctx: ExtensionCommandContext): Promi
 		ctx.ui.notify(`${record.id}\n${record.question}\n\n${record.answer}`, "info");
 		return;
 	}
-	await ctx.ui.custom((_tui, theme, _kb, done) => {
-		const container = new Container();
+	await ctx.ui.custom(
+		(tui, theme, _kb, done) => new SideOverlay(tui, theme, done, record),
+		{
+			overlay: true,
+			overlayOptions: { anchor: "center", width: "90%", maxHeight: "88%", margin: 1 },
+		},
+	);
+}
+
+export class SideOverlay extends VStack {
+	private readonly tui: TUI;
+	private readonly done: () => void;
+	private readonly scroll: ScrollView;
+
+	constructor(tui: TUI, theme: Theme, done: () => void, record: SideRecord) {
+		const header = new Box(1, 0, (text) => theme.bg("customMessageBg", text));
+		header.addChild(
+			new Text(
+				`${theme.fg("customMessageLabel", theme.bold(` SIDE / ${record.id} `))}${theme.fg("dim", `  ${record.model.provider}/${record.model.id} · ${record.completedAt}`)}`,
+				0,
+				0,
+			),
+		);
+
 		const body = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
-		body.addChild(new Text(theme.fg("accent", theme.bold(`[side ${record.id}]`)), 0, 0));
-		body.addChild(new Text(theme.fg("dim", `${record.model.provider}/${record.model.id} · ${record.completedAt}`), 0, 0));
-		body.addChild(new Text(theme.fg("muted", "Question"), 0, 0));
+		body.addChild(new Text(theme.fg("muted", theme.bold("QUESTION")), 0, 0));
 		body.addChild(new Markdown(record.question, 0, 0, getMarkdownTheme()));
-		body.addChild(new Text(theme.fg("muted", "Answer"), 0, 0));
+		body.addChild(new Text("", 0, 0));
+		body.addChild(new Text(theme.fg("muted", theme.bold("ANSWER")), 0, 0));
 		body.addChild(new Markdown(record.answer, 0, 0, getMarkdownTheme()));
-		body.addChild(new Text(theme.fg("dim", `${sideUsageLine(record)} · ${(record.latencyMs / 1000).toFixed(1)}s`), 0, 0));
-		container.addChild(body);
-		container.addChild(new Text(theme.fg("dim", "Press Enter or Esc to close"), 1, 0));
-		return {
-			render: (width: number) => container.render(width),
-			invalidate: () => container.invalidate(),
-			handleInput: (data: string) => {
-				if (matchesKey(data, "enter") || matchesKey(data, "escape")) done(undefined);
-			},
-		};
-	});
+		body.addChild(new Text("", 0, 0));
+		body.addChild(new Text(theme.fg("dim", `${sideUsageLine(record)} · ${(record.latencyMs / 1000).toFixed(1)}s · /side use ${record.id}`), 0, 0));
+
+		const scroll = new ScrollView(body, {
+			primary: true,
+			overscroll: "contain",
+			scrollbar: "auto",
+			scrollbarStyle: (text) => theme.fg("borderAccent", text),
+		});
+		const footer = new Text(
+			theme.fg("dim", " ↑↓ scroll · PgUp/PgDn page · Home/End jump · q/Esc close "),
+			0,
+			0,
+		);
+		super(
+			[
+				{ component: header, shrink: 0 },
+				{ component: scroll, grow: 1, minSize: 5 },
+				{ component: footer, shrink: 0 },
+			],
+			{ gap: 1 },
+		);
+		this.tui = tui;
+		this.done = done;
+		this.scroll = scroll;
+	}
+
+	handleInput(data: string): void {
+		if (data === "q" || matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
+			this.done();
+			return;
+		}
+		if (matchesKey(data, "up")) this.scroll.scrollBy(-1);
+		else if (matchesKey(data, "down")) this.scroll.scrollBy(1);
+		else if (matchesKey(data, "pageUp")) this.scroll.scrollBy(-Math.max(1, this.scroll.viewportHeight - 2));
+		else if (matchesKey(data, "pageDown")) this.scroll.scrollBy(Math.max(1, this.scroll.viewportHeight - 2));
+		else if (matchesKey(data, "home")) this.scroll.scrollToStart();
+		else if (matchesKey(data, "end")) this.scroll.scrollToEnd();
+		else return;
+		this.tui.requestRender();
+	}
 }
 
 function listText(records: SideRecord[]): string {
@@ -88,7 +139,7 @@ export default function (pi: ExtensionAPI) {
 		const card = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
 		card.addChild(
 			new Text(
-				`${theme.fg("accent", theme.bold(`[side ${record.id}]`))} ${theme.fg("dim", "isolated · persisted")}`,
+				`${theme.fg("customMessageLabel", theme.bold(` SIDE / ${record.id} `))} ${theme.fg("dim", "isolated · persisted")}`,
 				0,
 				0,
 			),
@@ -97,11 +148,11 @@ export default function (pi: ExtensionAPI) {
 		card.addChild(new Markdown(expanded ? record.answer : previewText(record.answer), 0, 0, getMarkdownTheme()));
 		card.addChild(
 			new Text(
-				theme.fg(
-					"dim",
-					expanded
-						? `${record.model.provider}/${record.model.id} · ${record.completedAt} · ${sideUsageLine(record)} · /side use ${record.id}`
-						: `Ctrl+O expands · /side show ${record.id} · /side use ${record.id}`,
+					theme.fg(
+						"dim",
+						expanded
+							? `Ctrl+O collapses · ${record.model.provider}/${record.model.id} · ${sideUsageLine(record)} · /side show ${record.id}`
+							: `Ctrl+O expands · /side show ${record.id} · /side use ${record.id}`,
 				),
 				0,
 				0,
@@ -120,7 +171,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("side", {
 		description: "Ask an isolated persisted side question; list/show/use saved side answers",
 		getArgumentCompletions: (prefix) => {
-			const commands = ["list", "show ", "use "];
+			const commands = ["list", "show ", "use ", "collapse"];
 			return commands.filter((value) => value.startsWith(prefix)).map((value) => ({ value, label: value.trim() }));
 		},
 		handler: async (args, ctx) => {
@@ -129,7 +180,13 @@ export default function (pi: ExtensionAPI) {
 			const branch = ctx.sessionManager.getBranch();
 
 			if (!input) {
-				ctx.ui.notify("Usage: /side <question> | /side list | /side show <id> | /side use <id>", "warning");
+				ctx.ui.notify("Usage: /side <question> | /side list | /side show <id> | /side use <id> | /side collapse", "warning");
+				return;
+			}
+			if (input === "collapse") {
+				const expanded = ctx.ui.getToolsExpanded();
+				ctx.ui.setToolsExpanded(false);
+				ctx.ui.notify(expanded ? "Collapsed expanded side and tool cards." : "Side and tool cards are already collapsed.", "info");
 				return;
 			}
 			if (input === "list") {

@@ -37,7 +37,17 @@
     "codex": { "type": "object" },
     "research": { "type": "object" },
     "resources": { "type": "object" },
-    "ui": { "type": "object" },
+    "ui": {
+      "type": "object",
+      "required": ["density", "runtimeStrip", "showProfileStatus", "configPanelRows"],
+      "properties": {
+        "density": { "enum": ["compact", "balanced"] },
+        "runtimeStrip": { "enum": ["auto", "always", "off"] },
+        "showProfileStatus": { "type": "boolean" },
+        "configPanelRows": { "type": "integer", "minimum": 3, "maximum": 20 }
+      },
+      "additionalProperties": false
+    },
     "diagnostics": { "type": "object" },
     "providerCompat": { "type": "object" }
   },

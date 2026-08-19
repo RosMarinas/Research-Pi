@@ -13,9 +13,14 @@ import {
 	renderProjectView,
 } from "../lib/project-view.mjs";
 import { RESEARCH_HARD_COMPACT_TOKENS, RESEARCH_SOFT_COMPACT_TOKENS } from "../lib/research-compact.mjs";
-import { getCodexRuntimeAdapter } from "../lib/research-runtime-adapters.mjs";
+import {
+	getCodexRuntimeAdapter,
+	getCodexWatchAdapter,
+	registerRuntimeUiAdapter,
+} from "../lib/research-runtime-adapters.mjs";
 import { buildRuntimeBoardModel } from "../lib/runtime-board.mjs";
 import { RuntimeBoardOverlay } from "../lib/runtime-board-ui.mjs";
+import { RuntimeDockComponent, runtimeDockVisible } from "../lib/runtime-dock-ui.mjs";
 import { resolveResearchPiPaths } from "../lib/runtime-paths.mjs";
 import {
 	RESEARCH_LEADER_ACTOR_ID,
@@ -67,6 +72,11 @@ class RuntimeLeaderBusyError extends Error {
 const MESSAGE_TYPES = new Set(["ask", "reply", "notify", "result"]);
 const ACTIVE_ACTION_STATUSES = new Set(["starting", "running", "cancelling"]);
 const RECOVERABLE_ACTION_STATUSES = new Set([...ACTIVE_ACTION_STATUSES, "input_required"]);
+const RUNTIME_DOCK_KEY = "research_runtime_dock";
+const UI_DENSITY = process.env.RESEARCH_PI_UI_DENSITY === "compact" ? "compact" : "balanced";
+const UI_RUNTIME_STRIP = ["auto", "always", "off"].includes(process.env.RESEARCH_PI_UI_RUNTIME_STRIP ?? "")
+	? process.env.RESEARCH_PI_UI_RUNTIME_STRIP as "auto" | "always" | "off"
+	: "auto";
 
 function compact(text: string, limit = 160): string {
 	const value = String(text ?? "").replace(/\s+/g, " ").trim();
@@ -166,7 +176,20 @@ export function runtimeHealth(
 			? "A structured project state exists, actions are settled, and context pressure is high; a fresh Session may now be cheaper than another long continuation."
 			: "Context is above the soft research threshold; compact before evidence is displaced by overflow.";
 	}
-	return { tokens, contextWindow: usage?.contextWindow ?? null, percent: usage?.percent ?? null, compactions, unknown, memoryLag, inheritancePolicy, ...actionSummary, ...rotation, recommendation, reason };
+	return {
+		tokens,
+		contextWindow: usage?.contextWindow ?? null,
+		percent: usage?.percent ?? null,
+		compactions,
+		unknown,
+		memoryLag,
+		memoryStatus: inheritancePolicy === "clean" ? "paused" : snapshot.projectState ? (memoryLag ? "stale" : "current") : "missing",
+		inheritancePolicy,
+		...actionSummary,
+		...rotation,
+		recommendation,
+		reason,
+	};
 }
 
 export function formatRuntimeHealth(health: ReturnType<typeof runtimeHealth>): string {
@@ -174,7 +197,7 @@ export function formatRuntimeHealth(health: ReturnType<typeof runtimeHealth>): s
 		`Context: ${health.tokens?.toLocaleString() ?? "unknown"}/${health.contextWindow?.toLocaleString() ?? "unknown"}${health.percent === null ? "" : ` (${health.percent.toFixed(1)}%)`}`,
 		`Session: ${health.compactions} compaction(s)`,
 		`Runtime: ${health.active} active · ${health.waiting} waiting · ${health.unknown} outcome_unknown`,
-		`Project memory: ${health.inheritancePolicy === "clean" ? "paused for this clean Session" : health.memoryLag ? `${health.memoryLag} revision(s) pending synthesis` : "current"}`,
+		`Project memory: ${health.memoryStatus === "paused" ? "paused for this clean Session" : health.memoryStatus === "missing" ? "missing (no structured Project State)" : health.memoryLag ? `${health.memoryLag} revision(s) pending synthesis` : "current"}`,
 		`Rotation: ${health.ready ? "ready for /runtime rotate" : `blocked (${health.blockers.join("; ")})`}`,
 		`Recommendation: ${health.recommendation}`,
 		health.reason,
@@ -239,6 +262,8 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	let projectViewText = "";
 	let projectViewHash = "";
 	let projectViewEventCount = -1;
+	let latestProjectView: Awaited<ReturnType<typeof buildProjectView>> | undefined;
+	let latestCodexJobs: any[] = [];
 	let attachmentLossNotified = false;
 	let sessionInheritancePolicy: SessionInheritancePolicy = "project";
 
@@ -280,13 +305,6 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		return runtime;
 	};
 
-	const refreshStatus = async (ctx: ExtensionContext) => {
-		if (!ctx.hasUI) return;
-		const activeRuntime = await getRuntime(ctx);
-		const snapshot = await readRuntimeSnapshot(activeRuntime);
-		ctx.ui.setStatus("research_runtime", formatRuntimeStatus(activeRuntime.projectKey, snapshot, sessionInheritancePolicy));
-	};
-
 	const refreshProjectView = async (ctx: ExtensionContext, suppliedSnapshot?: RuntimeSnapshot) => {
 		const activeRuntime = await getRuntime(ctx);
 		let snapshot = suppliedSnapshot ?? await readRuntimeSnapshot(activeRuntime);
@@ -309,10 +327,25 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			readRecentExperiments(join(ctx.cwd, ".pi", "research", "experiments.jsonl")),
 		]);
 		const view = buildProjectView({ runtime: activeRuntime, snapshot, git, experiments });
+		latestProjectView = view;
 		projectViewText = renderProjectView(view);
 		projectViewHash = projectViewFingerprint(view);
 		projectViewEventCount = snapshot.ledgerEventCount;
 		return { snapshot, view };
+	};
+
+	const runtimeModelFromSnapshot = async (ctx: ExtensionContext, activeRuntime: RuntimeContext, snapshot: RuntimeSnapshot) => {
+		let view = latestProjectView;
+		if (!view) view = (await refreshProjectView(ctx, snapshot)).view;
+		const health = runtimeHealth(snapshot, ctx.getContextUsage(), ctx.sessionManager.getBranch(), sessionInheritancePolicy);
+		return buildRuntimeBoardModel({
+			runtime: activeRuntime,
+			snapshot,
+			view,
+			health,
+			sessionId: ctx.sessionManager.getSessionId(),
+			inheritancePolicy: sessionInheritancePolicy,
+		});
 	};
 
 	const runtimeBoardModel = async (ctx: ExtensionContext) => {
@@ -329,13 +362,52 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		});
 	};
 
+	const refreshDock = async (ctx: ExtensionContext, options: { snapshot?: RuntimeSnapshot; codexJobs?: any[] } = {}) => {
+		if (!ctx.hasUI || typeof ctx.ui.setWidget !== "function") return;
+		if (options.codexJobs) latestCodexJobs = options.codexJobs;
+		if (UI_RUNTIME_STRIP === "off") {
+			ctx.ui.setWidget(RUNTIME_DOCK_KEY, undefined);
+			return;
+		}
+		const activeRuntime = await getRuntime(ctx);
+		const snapshot = options.snapshot ?? await readRuntimeSnapshot(activeRuntime);
+		const model = await runtimeModelFromSnapshot(ctx, activeRuntime, snapshot);
+		if (!runtimeDockVisible(model, UI_RUNTIME_STRIP)) {
+			ctx.ui.setWidget(RUNTIME_DOCK_KEY, undefined);
+			return;
+		}
+		ctx.ui.setWidget(
+			RUNTIME_DOCK_KEY,
+			(_tui, theme) => new RuntimeDockComponent(model, latestCodexJobs, theme, { density: UI_DENSITY }),
+			{ placement: "aboveEditor" },
+		);
+	};
+
+	const refreshStatus = async (ctx: ExtensionContext) => {
+		if (!ctx.hasUI) return;
+		const activeRuntime = await getRuntime(ctx);
+		const snapshot = await readRuntimeSnapshot(activeRuntime);
+		const summary = runtimeActorSummary(snapshot);
+		const open = unconsumedRuntimeMessages(snapshot).length;
+		const showFooterStatus = summary.active > 0 || summary.waiting > 0 || open > 0 || sessionInheritancePolicy === "clean" || UI_RUNTIME_STRIP === "off";
+		ctx.ui.setStatus(
+			"research_runtime",
+			showFooterStatus ? formatRuntimeStatus(activeRuntime.projectKey, snapshot, sessionInheritancePolicy) : undefined,
+		);
+		await refreshDock(ctx, { snapshot });
+	};
+
+	registerRuntimeUiAdapter({
+		refresh: async (ctx: ExtensionContext, options: { codexJobs?: any[] } = {}) => refreshDock(ctx, options),
+	});
+
 	const showRuntimeBoard = async (ctx: ExtensionCommandContext) => {
 		// The board is an observe-only surface. In particular, opening it must not
 		// steal the Research Leader attachment from another Session; action
 		// commands use `claim: true` explicitly when they need ownership.
 		await getRuntime(ctx);
 		const initial = await runtimeBoardModel(ctx);
-		const result = await ctx.ui.custom<"close" | "view" | "watch">(
+		const result = await ctx.ui.custom<"close" | "view" | { action: "watch"; selector: string }>(
 			(tui, theme, _keybindings, done) => new RuntimeBoardOverlay(
 				tui,
 				theme,
@@ -353,9 +425,10 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			},
 		);
 		if (result === "view") ctx.ui.notify(projectViewText, "info");
-		else if (result === "watch") {
-			ctx.ui.setEditorText("/watch");
-			ctx.ui.notify("Codex Watch command is ready; press Enter to open it.", "info");
+		else if (result && typeof result === "object" && result.action === "watch") {
+			const watch = getCodexWatchAdapter();
+			if (watch) await watch.open(ctx, result.selector);
+			else ctx.ui.notify("Codex Watch adapter is not loaded.", "warning");
 		}
 	};
 
@@ -455,9 +528,10 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			? message.content
 			: message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
 		const card = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
-		card.addChild(new Text(theme.fg("accent", theme.bold(`[Runtime ${details.type ?? "message"}]`)), 0, 0));
-		card.addChild(new Text(theme.fg("dim", `${details.from ?? "unknown"} · ${details.messageId ?? "unknown"}`), 0, 0));
-		card.addChild(new Text(compact(content, options.expanded ? 4000 : 600), 0, 0));
+		card.addChild(new Text(theme.fg("customMessageLabel", theme.bold(` RUNTIME / ${String(details.type ?? "message").toUpperCase()} `)), 0, 0));
+		card.addChild(new Text(`${theme.fg("accent", compact(details.from ?? "unknown", 54))} ${theme.fg("dim", `· ${details.messageId ?? "unknown"}`)}`, 0, 0));
+		card.addChild(new Text(compact(content, options.expanded ? 4000 : 280), 0, 0));
+		if (!options.expanded) card.addChild(new Text(theme.fg("dim", "Ctrl+O expands Runtime details"), 0, 0));
 		return card;
 	});
 
@@ -472,10 +546,10 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		const data = entry.data;
 		if (!data?.messageId) return undefined;
 		const card = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
-		card.addChild(new Text(theme.fg("accent", theme.bold(`[Runtime ${data.type}] ${data.status}`)), 0, 0));
-		card.addChild(new Text(`${data.from} -> ${data.to}`, 0, 0));
-		card.addChild(new Text(compact(data.body, expanded ? 4000 : 240), 0, 0));
-		card.addChild(new Text(theme.fg("dim", data.messageId), 0, 0));
+		card.addChild(new Text(theme.fg("customMessageLabel", theme.bold(` RUNTIME / ${String(data.type).toUpperCase()} `)) + ` ${theme.fg(data.status === "delivered" ? "success" : "warning", data.status)}`, 0, 0));
+		card.addChild(new Text(`${theme.fg("accent", compact(data.from, 36))} ${theme.fg("dim", "→")} ${compact(data.to, 36)}`, 0, 0));
+		card.addChild(new Text(compact(data.body, expanded ? 4000 : 180), 0, 0));
+		card.addChild(new Text(theme.fg("dim", `${expanded ? "Ctrl+O collapses" : "Ctrl+O expands"} · ${data.messageId}`), 0, 0));
 		return card;
 	});
 
@@ -562,12 +636,17 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			activeActivationId = undefined;
 		}
 		await detachRuntimeActor(runtime, RESEARCH_LEADER_ACTOR_ID, localSessionId, localAttachmentEpoch);
-		if (ctx.hasUI) ctx.ui.setStatus("research_runtime", undefined);
+		if (ctx.hasUI) {
+			ctx.ui.setStatus("research_runtime", undefined);
+			if (typeof ctx.ui.setWidget === "function") ctx.ui.setWidget(RUNTIME_DOCK_KEY, undefined);
+		}
 		runtime = undefined;
 		runtimeInputCwd = undefined;
 		localSessionId = undefined;
 		localAttachmentEpoch = undefined;
 		projectViewEventCount = -1;
+		latestProjectView = undefined;
+		latestCodexJobs = [];
 		sessionInheritancePolicy = "project";
 	});
 

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import researchRuntimeExtension, {
 	actorLines,
+	formatRuntimeHealth,
 	formatRuntimeStatus,
 	runtimeHealth,
 	runtimeActorSummary,
@@ -100,8 +101,16 @@ test("lifecycle health exposes Project evidence that has not reached structured 
 	};
 	const health = runtimeHealth(snapshot, { tokens: 10_000, contextWindow: 1_000_000, percent: 1 }, []);
 	assert.equal(health.memoryLag, 1);
+	assert.equal(health.memoryStatus, "stale");
 	assert.equal(health.recommendation, "compact");
 	assert.match(health.reason, /newer than structured state/);
+});
+
+test("lifecycle health never labels absent Project State as current memory", () => {
+	const snapshot = { revision: 0, actors: [], attachments: [], messages: [], actions: [] };
+	const health = runtimeHealth(snapshot, { tokens: 10_000, contextWindow: 1_000_000, percent: 1 }, []);
+	assert.equal(health.memoryStatus, "missing");
+	assert.match(formatRuntimeHealth(health), /Project memory: missing/);
 });
 
 test("clean Session health does not recommend an incompatible Project rotation", () => {

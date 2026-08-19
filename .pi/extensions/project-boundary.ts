@@ -246,7 +246,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 	const refreshBoundaryStatus = async (ctx: any) => {
 		if (!ctx.hasUI) return;
 		const count = capabilityContext ? (await listCapabilityGrants(capabilityContext)).length : 0;
-		const label = runtime ? `🔒 project-only · grants ${count} · web proxy · git write` : "🔒 boundary failed closed";
+		const label = runtime ? `🔒 project${count ? ` · ${count} grant${count === 1 ? "" : "s"}` : ""}` : "🔒 boundary failed closed";
 		ctx.ui.setStatus("boundary", ctx.ui.theme.fg(runtime ? "accent" : "error", label));
 	};
 

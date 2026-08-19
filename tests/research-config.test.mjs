@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import researchConfigExtension, { compactConfigPath, formatProfileStatus, profileSelectItems } from "../.pi/extensions/research-config.ts";
+import researchConfigExtension, { compactConfigPath, formatProfileStatus, profileSelectItems, themeSelectItems } from "../.pi/extensions/research-config.ts";
 import {
 	defaultResearchPiConfig,
 	ensureResearchPiConfig,
@@ -23,7 +23,10 @@ test("one Research Pi config resolves leader, Codex, compact, search, and UI def
 	assert.equal(config.codex.executor.model, "gpt-5.6-sol");
 	assert.equal(config.research.compaction.hardTokens, 384 * 1024);
 	assert.equal(config.research.search.model, "deepseek-v4-flash");
-	assert.equal(config.ui.showProfileStatus, true);
+	assert.equal(config.ui.density, "balanced");
+	assert.equal(config.ui.runtimeStrip, "auto");
+	assert.equal(config.ui.showProfileStatus, false);
+	assert.equal(config.pi.settings.theme, "research-pi");
 });
 
 test("partial user config merges over defaults and rejects dangerous ambiguity", () => {
@@ -69,7 +72,9 @@ test("config exports one deterministic environment for runtime consumers", () =>
 	assert.equal(environment.RESEARCH_PI_CODEX_ADVISOR_MODEL, "gpt-5.6-sol");
 	assert.equal(environment.RESEARCH_PI_COMPACT_HARD_TOKENS, String(384 * 1024));
 	assert.equal(environment.RESEARCH_PI_SEARCH_MODEL, "deepseek-v4-flash");
-	assert.equal(environment.RESEARCH_PI_UI_SHOW_PROFILE_STATUS, "1");
+	assert.equal(environment.RESEARCH_PI_UI_DENSITY, "balanced");
+	assert.equal(environment.RESEARCH_PI_UI_RUNTIME_STRIP, "auto");
+	assert.equal(environment.RESEARCH_PI_UI_SHOW_PROFILE_STATUS, "0");
 });
 
 test("Codex, compact, and search modules consume the configured environment", () => {
@@ -122,6 +127,14 @@ test("model profile UI is concise, descriptive, and reflects live session overri
 		thinkingLevel: "max",
 	});
 	assert.equal(status, "◇ deepseek-flash");
+	const themes = themeSelectItems(config);
+	assert.match(themes[0].label, /^● Ocean/);
+	assert.ok(themes.some((item) => item.value === "research-graphite"));
+	assert.ok(themes.some((item) => item.value === "research-ember"));
+	assert.deepEqual(
+		themeSelectItems(config, [{ name: "light" }, { name: "research-ember" }, { name: "research-pi" }, { name: "dark" }, { name: "research-graphite" }]).map((item) => item.value),
+		["research-pi", "research-graphite", "research-ember", "dark", "light"],
+	);
 });
 
 test("/config renders a bordered native overlay with current-model context and keyboard hints", async () => {
@@ -136,6 +149,7 @@ test("/config renders a bordered native overlay with current-model context and k
 		let overlayOptions;
 		let selectedModel;
 		let selectedThinking;
+		let selectedTheme;
 		const pi = {
 			on() {},
 			registerCommand(name, command) { commands.set(name, command); },
@@ -155,6 +169,8 @@ test("/config renders a bordered native overlay with current-model context and k
 			modelRegistry: { find: (provider, model) => ({ provider, id: model }) },
 			ui: {
 				theme,
+				getAllThemes: () => ["research-pi", "research-graphite", "research-ember", "dark", "light"].map((name) => ({ name })),
+				setTheme(name) { selectedTheme = name; return { success: true }; },
 				setStatus() {},
 				notify() {},
 				custom: async (factory, options) => {
@@ -170,7 +186,7 @@ test("/config renders a bordered native overlay with current-model context and k
 		assert.equal(overlayOptions.overlay, true);
 		assert.equal(overlayOptions.overlayOptions.anchor, "center");
 		assert.equal(overlayOptions.overlayOptions.width, "88%");
-		assert.match(text, /Research Pi · Model Profiles/);
+		assert.match(text, /Research Pi \/ Model Profiles/);
 		assert.match(text, /current deepseek-v4-pro/);
 		assert.match(text, /enter apply \+ persist/);
 		assert.match(text, /[─╭╮]/);
@@ -178,6 +194,9 @@ test("/config renders a bordered native overlay with current-model context and k
 		assert.equal(selectedModel.id, "deepseek-v4-flash");
 		assert.equal(selectedThinking, "max");
 		assert.equal(readResearchPiConfig(configPath).activeProfile, "deepseek-flash");
+		await commands.get("config").handler("theme research-graphite", ctx);
+		assert.equal(selectedTheme, "research-graphite");
+		assert.equal(readResearchPiConfig(configPath).pi.settings.theme, "research-graphite");
 	} finally {
 		if (previousPath === undefined) delete process.env.RESEARCH_PI_CONFIG_FILE;
 		else process.env.RESEARCH_PI_CONFIG_FILE = previousPath;

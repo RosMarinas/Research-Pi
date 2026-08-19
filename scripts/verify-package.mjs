@@ -28,6 +28,7 @@ for (const required of [
 	".pi/APPEND_SYSTEM.md",
 	".pi/config.defaults.json",
 	".pi/schemas/research-pi-config.schema.json",
+	".pi/themes/research-pi.json",
 	".pi/extensions/research-config.ts",
 	".pi/lib/research-config.mjs",
 	"docs/configuration.md",

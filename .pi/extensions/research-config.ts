@@ -12,6 +12,7 @@ import {
 	researchPiConfigSummary,
 	researchPiProfile,
 	researchPiProfileForModel,
+	RESEARCH_PI_THEME_CHOICES,
 	writeResearchPiConfig,
 } from "../lib/research-config.mjs";
 import { resolveResearchPiPaths } from "../lib/runtime-paths.mjs";
@@ -33,6 +34,27 @@ export function profileSelectItems(config: ResearchConfig): SelectItem[] {
 			value: name,
 			label: name === config.activeProfile ? `● ${profile.label ?? name}` : `  ${profile.label ?? name}`,
 			description: `${profile.model} · ${profile.thinking}${profile.description ? ` · ${profile.description}` : ""}`,
+		};
+	});
+}
+
+export function themeSelectItems(config: ResearchConfig, available: Array<{ name: string; path?: string }> = []): SelectItem[] {
+	const active = String(config.pi.settings.theme ?? "research-pi");
+	const metadata = new Map(RESEARCH_PI_THEME_CHOICES.map((theme) => [theme.name, theme]));
+	const availableNames = available.length ? new Set(available.map((theme) => theme.name)) : null;
+	const canonicalNames = RESEARCH_PI_THEME_CHOICES
+		.map((theme) => theme.name)
+		.filter((name) => !availableNames || availableNames.has(name));
+	const additionalNames = availableNames
+		? [...availableNames].filter((name) => !metadata.has(name)).sort()
+		: [];
+	const names = [...canonicalNames, ...additionalNames];
+	return [...new Set(names)].map((name) => {
+		const theme = metadata.get(name);
+		return {
+			value: name,
+			label: name === active ? `● ${theme?.label ?? name}` : `  ${theme?.label ?? name}`,
+			description: `${name}${theme?.description ? ` · ${theme.description}` : ""}`,
 		};
 	});
 }
@@ -81,16 +103,27 @@ export default function researchConfigExtension(pi: ExtensionAPI) {
 		return next;
 	};
 
-	const showProfileSelector = async (ctx: ExtensionContext) => {
+	const activateTheme = async (name: string, ctx: ExtensionContext) => {
+		const available = ctx.ui.getAllThemes().map((theme) => theme.name);
+		if (!available.includes(name)) throw new Error(`Theme is not loaded: ${name}`);
+		const result = ctx.ui.setTheme(name);
+		if (!result.success) throw new Error(result.error || `Could not activate theme ${name}`);
 		const config = loadConfig();
-		const items = profileSelectItems(config);
-		const currentModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "unresolved";
+		writeResearchPiConfig(configPath, {
+			...config,
+			pi: { ...config.pi, settings: { ...config.pi.settings, theme: name } },
+		});
+		ctx.ui.notify(`Theme ${name} is active and persisted.`, "info");
+	};
+
+	const showThemeSelector = async (ctx: ExtensionContext) => {
+		const config = loadConfig();
+		const items = themeSelectItems(config, ctx.ui.getAllThemes());
 		const selected = await ctx.ui.custom<string | null>((tui, theme, _keybindings, done) => {
 			const container = new Container();
-			container.addChild(new DynamicBorder((text) => theme.fg("accent", text)));
-			container.addChild(new Text(theme.fg("accent", theme.bold(" Research Pi · Model Profiles ")), 0, 0));
-			container.addChild(new Text(theme.fg("muted", ` current ${ctx.model?.id ?? currentModel} · ${pi.getThinkingLevel()} thinking`), 0, 0));
-			container.addChild(new Text(theme.fg("dim", ` config ${compactConfigPath(configPath)}`), 0, 0));
+			container.addChild(new DynamicBorder((text) => theme.fg("borderAccent", text)));
+			container.addChild(new Text(theme.fg("customMessageLabel", theme.bold(" Research Pi / Themes ")), 0, 0));
+			container.addChild(new Text(theme.fg("muted", ` current ${config.pi.settings.theme ?? "research-pi"}`), 0, 0));
 			container.addChild(new Text("", 0, 0));
 			const list = new SelectList(items, Math.min(items.length, config.ui.configPanelRows), {
 				selectedPrefix: (text) => theme.fg("accent", text),
@@ -99,12 +132,13 @@ export default function researchConfigExtension(pi: ExtensionAPI) {
 				scrollInfo: (text) => theme.fg("dim", text),
 				noMatch: (text) => theme.fg("warning", text),
 			}, { minPrimaryColumnWidth: 18, maxPrimaryColumnWidth: 24 });
+			list.setSelectedIndex(Math.max(0, items.findIndex((item) => item.value === config.pi.settings.theme)));
 			list.onSelect = (item) => done(item.value);
 			list.onCancel = () => done(null);
 			container.addChild(list);
 			container.addChild(new Text("", 0, 0));
 			container.addChild(new Text(theme.fg("dim", " ↑↓ navigate   enter apply + persist   esc close"), 0, 0));
-			container.addChild(new DynamicBorder((text) => theme.fg("accent", text)));
+			container.addChild(new DynamicBorder((text) => theme.fg("borderAccent", text)));
 			return {
 				render(width: number) { return container.render(width); },
 				invalidate() { container.invalidate(); },
@@ -117,7 +151,52 @@ export default function researchConfigExtension(pi: ExtensionAPI) {
 			overlay: true,
 			overlayOptions: { anchor: "center", width: "88%", maxHeight: "72%", margin: 1 },
 		});
-		if (selected) await activateProfile(selected, ctx);
+		if (selected) await activateTheme(selected, ctx);
+	};
+
+	const showProfileSelector = async (ctx: ExtensionContext) => {
+		const config = loadConfig();
+		const items = profileSelectItems(config);
+		const currentModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "unresolved";
+		const selected = await ctx.ui.custom<string | null>((tui, theme, _keybindings, done) => {
+			const container = new Container();
+			container.addChild(new DynamicBorder((text) => theme.fg("borderAccent", text)));
+			container.addChild(new Text(theme.fg("customMessageLabel", theme.bold(" Research Pi / Model Profiles ")), 0, 0));
+			container.addChild(new Text(theme.fg("muted", ` current ${ctx.model?.id ?? currentModel} · ${pi.getThinkingLevel()} thinking`), 0, 0));
+			container.addChild(new Text(theme.fg("dim", ` config ${compactConfigPath(configPath)}`), 0, 0));
+			container.addChild(new Text("", 0, 0));
+			const list = new SelectList(items, Math.min(items.length, config.ui.configPanelRows), {
+				selectedPrefix: (text) => theme.fg("accent", text),
+				selectedText: (text) => theme.fg("accent", theme.bold(text)),
+				description: (text) => theme.fg("muted", text),
+				scrollInfo: (text) => theme.fg("dim", text),
+				noMatch: (text) => theme.fg("warning", text),
+			}, { minPrimaryColumnWidth: 18, maxPrimaryColumnWidth: 24 });
+			list.setSelectedIndex(Math.max(0, items.findIndex((item) => item.value === config.activeProfile)));
+			list.onSelect = (item) => done(item.value);
+			list.onCancel = () => done(null);
+			container.addChild(list);
+			container.addChild(new Text("", 0, 0));
+			container.addChild(new Text(theme.fg("dim", " ↑↓ navigate   enter apply + persist   t themes   esc close"), 0, 0));
+			container.addChild(new DynamicBorder((text) => theme.fg("borderAccent", text)));
+			return {
+				render(width: number) { return container.render(width); },
+				invalidate() { container.invalidate(); },
+				handleInput(data: string) {
+					if (data === "t") {
+						done("__themes__");
+						return;
+					}
+					list.handleInput(data);
+					tui.requestRender();
+				},
+			};
+		}, {
+			overlay: true,
+			overlayOptions: { anchor: "center", width: "88%", maxHeight: "72%", margin: 1 },
+		});
+		if (selected === "__themes__") await showThemeSelector(ctx);
+		else if (selected) await activateProfile(selected, ctx);
 	};
 
 	pi.on("session_start", async (_event, ctx) => updateStatus(ctx));
@@ -142,11 +221,19 @@ export default function researchConfigExtension(pi: ExtensionAPI) {
 					ctx.ui.notify(configPath, "info");
 					return;
 				}
+				if (action === "themes") {
+					ctx.ui.notify(themeSelectItems(loadConfig(), ctx.ui.getAllThemes()).map((item) => `${item.label} · ${item.description}`).join("\n"), "info");
+					return;
+				}
+				if (action === "theme" && name) {
+					await activateTheme(name, ctx);
+					return;
+				}
 				if (action === "use" && name) {
 					await activateProfile(name, ctx);
 					return;
 				}
-				throw new Error("Usage: /config [show|path|use <profile>]");
+				throw new Error("Usage: /config [show|path|use <profile>|themes|theme <name>]");
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 			}

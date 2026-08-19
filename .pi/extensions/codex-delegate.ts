@@ -17,7 +17,7 @@ import {
 	steerCodexJob,
 	waitForCodexJob,
 } from "../lib/codex-jobs.mjs";
-import { registerCodexRuntimeAdapter } from "../lib/research-runtime-adapters.mjs";
+import { getRuntimeUiAdapter, registerCodexRuntimeAdapter } from "../lib/research-runtime-adapters.mjs";
 import {
 	RESEARCH_LEADER_ACTOR_ID,
 	RUNTIME_MESSAGE_KIND,
@@ -285,6 +285,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			activeJobs.set(job.id, job);
 		}
 		refreshFooter(ctx);
+		void getRuntimeUiAdapter()?.refresh(ctx, { codexJobs: [...activeJobs.values()] }).catch(() => undefined);
 	};
 
 	const eventId = (job: CodexJobView): string | undefined => {
@@ -449,6 +450,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		activeJobs.clear();
 		latestTerminal = undefined;
 		if (ctx.hasUI) ctx.ui.setStatus("codex_delegate", undefined);
+		void getRuntimeUiAdapter()?.refresh(ctx, { codexJobs: [] }).catch(() => undefined);
 	};
 
 	const reattachBranchJobs = async (ctx: ExtensionContext) => {

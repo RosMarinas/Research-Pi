@@ -103,7 +103,7 @@ pi config use deepseek-flash      # 持久切换默认 profile
 pi --profile deepseek-pro         # 只覆盖本次启动
 ```
 
-交互界面输入 `/config` 会打开居中的原生 TUI profile 面板；选择后立即切换当前 Session 的模型与 thinking，并持久保存。`/config show` 和 `/config path` 可在 TUI 内检查来源。底部只显示紧凑的 `◇ profile`；实际 model/thinking 继续由 Pi 原生 footer 展示，避免重复占用 TUI。
+交互界面输入 `/config` 会打开居中的原生 TUI profile 面板；选择后立即切换当前 Session 的模型与 thinking，并持久保存。面板中按 `t` 可切到 Theme 选择器；也可用 `/config theme research-pi|research-graphite|research-ember|dark|light`。默认不重复显示 `◇ profile`，实际 model/thinking 继续由 Pi 原生 footer 展示。
 
 Research Pi 会从 config 生成内部 Pi `settings.json/models.json` adapter；这些文件位于状态目录，用户不再手工维护。源码模式沿用 Git 忽略的 `.pi/agent/`，已有 trust、trace 等本地状态不需要迁移。`.pi/APPEND_SYSTEM.md` 和 `.pi/extensions/` 仍分别承载稳定 Research Contract 与受审查扩展代码。
 
@@ -266,7 +266,8 @@ Codex job、请求账本、精简 JSONL 审计事件和委派 prompt 保存在�
 
 当前只注册 `user`、`research-leader` 和 Codex mission Actors，不引入自动 Scheduler 或固定科研流程：
 
-- `/runtime` 或 `/runtime board`：打开 project-level 控制面，在 overview、actors、messages、sessions 四个视图中统一查看当前研究方向、Project memory freshness、Leader attachment、Codex Actions、durable mailbox 和显式 Session handoff。`←/→` 或 `Tab` 切换，`r` 手动刷新，`v` 查看完整 ProjectView，`w` 准备打开 Codex Watch，`q`/`Esc` 关闭；
+- `/runtime` 或 `/runtime board`：打开 project-level 控制面，在 overview、actors、messages、sessions 四个视图中统一查看当前研究方向、Project memory freshness、Leader attachment、Codex Actions、durable mailbox 和显式 Session handoff。`←/→` 或 `Tab` 切换，`r` 手动刷新，`v` 查看完整 ProjectView，`w` 直接打开 Codex Watch，`q`/`Esc` 关闭；
+- Runtime Dock：当 Project memory、Leader ownership、mailbox 或 Codex Action 需要注意时，在 editor 上方自动显示；健康空闲时自动折叠。`ui.runtimeStrip` 可设为 `auto|always|off`；Board 的 Actors 页可用 `↑/↓` 选择并按 Enter 直接进入对应 Watch；
 - `/actors` 或 `/actors active`：只查看当前 running/starting/cancelling/waiting 的 project Actors；`/actors all` 才显示历史注册和 suspended Actors。底部 Runtime 状态同样只显示 active/waiting/idle，不再把历史注册总数冒充活跃数；
 - `/inbox`：查看 queued 或 delivered-but-unconsumed 的 durable 消息；`/inbox all` 查看最近 settled 状态；
 - `/message <ask|reply|notify|result> @actor <内容>`：向 Actor 发送有语义类型的消息；

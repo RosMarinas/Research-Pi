@@ -34,6 +34,19 @@ function stateIcon(status) {
 	return "●";
 }
 
+function joinColumns(left, right, width, gap = 3) {
+	const leftWidth = Math.max(28, Math.floor((width - gap) * 0.54));
+	const rightWidth = Math.max(24, width - gap - leftWidth);
+	const count = Math.max(left.length, right.length);
+	const rows = [];
+	for (let index = 0; index < count; index += 1) {
+		const leftLine = truncateToWidth(left[index] ?? "", leftWidth, "…", true);
+		const rightLine = truncateToWidth(right[index] ?? "", rightWidth, "…", true);
+		rows.push(`${leftLine}${" ".repeat(Math.max(0, leftWidth - visibleWidth(leftLine)))}${" ".repeat(gap)}${rightLine}`);
+	}
+	return rows;
+}
+
 export class RuntimeBoardOverlay {
 	constructor(tui, theme, done, initialModel, reload) {
 		this.tui = tui;
@@ -42,6 +55,7 @@ export class RuntimeBoardOverlay {
 		this.model = initialModel;
 		this.reload = reload;
 		this.sectionIndex = 0;
+		this.actorIndex = 0;
 		this.refreshing = false;
 		this.closed = false;
 		this.error = undefined;
@@ -56,6 +70,22 @@ export class RuntimeBoardOverlay {
 	changeSection(delta) {
 		this.sectionIndex = (this.sectionIndex + delta + RUNTIME_BOARD_SECTIONS.length) % RUNTIME_BOARD_SECTIONS.length;
 		this.tui.requestRender();
+	}
+
+	changeActor(delta) {
+		const visibleCount = Math.min(5, this.model.actors.length);
+		if (!visibleCount) return;
+		this.actorIndex = (this.actorIndex + delta + visibleCount) % visibleCount;
+		this.tui.requestRender();
+	}
+
+	watchTarget() {
+		const selected = RUNTIME_BOARD_SECTIONS[this.sectionIndex] === "actors" ? this.model.actors[this.actorIndex] : null;
+		const actor = selected?.kind === "codex"
+			? selected
+			: this.model.actors.find((candidate) => candidate.kind === "codex" && ["starting", "running", "waiting for input", "cancelling"].includes(candidate.state))
+				?? this.model.actors.find((candidate) => candidate.kind === "codex");
+		return actor?.target ?? "";
 	}
 
 	async refresh() {
@@ -75,11 +105,16 @@ export class RuntimeBoardOverlay {
 
 	handleInput(data) {
 		if (data === "q" || matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) this.close();
+		else if (RUNTIME_BOARD_SECTIONS[this.sectionIndex] === "actors" && matchesKey(data, "down")) this.changeActor(1);
+		else if (RUNTIME_BOARD_SECTIONS[this.sectionIndex] === "actors" && matchesKey(data, "up")) this.changeActor(-1);
 		else if (matchesKey(data, "tab") || matchesKey(data, "right")) this.changeSection(1);
 		else if (matchesKey(data, "shift+tab") || matchesKey(data, "left")) this.changeSection(-1);
 		else if (data === "r") void this.refresh();
 		else if (data === "v") this.close("view");
-		else if (data === "w") this.close("watch");
+		else if (data === "w" || (RUNTIME_BOARD_SECTIONS[this.sectionIndex] === "actors" && matchesKey(data, "enter"))) {
+			const selector = this.watchTarget();
+			if (selector) this.close({ action: "watch", selector });
+		}
 		else if (/^[1-4]$/.test(data)) {
 			this.sectionIndex = Number(data) - 1;
 			this.tui.requestRender();
@@ -98,45 +133,50 @@ export class RuntimeBoardOverlay {
 			return clipped + " ".repeat(Math.max(0, inner - visibleWidth(clipped)));
 		};
 		return [
-			th.fg("border", `╭${"─".repeat(leftWidth)}`) + th.fg("accent", cleanTitle) + th.fg("border", `${"─".repeat(rightWidth)}╮`),
-			...lines.map((line) => th.fg("border", "│") + pad(line) + th.fg("border", "│")),
-			th.fg("border", `╰${"─".repeat(inner)}╯`),
+			th.fg("borderMuted", `╭${"─".repeat(leftWidth)}`) + th.fg("customMessageLabel", th.bold(cleanTitle)) + th.fg("borderMuted", `${"─".repeat(rightWidth)}╮`),
+			...lines.map((line) => th.fg("borderMuted", "│") + pad(line) + th.fg("borderMuted", "│")),
+			th.fg("borderMuted", `╰${"─".repeat(inner)}╯`),
 		];
 	}
 
 	field(label, value, color = "text") {
 		const th = this.theme;
-		return ` ${th.fg("dim", label.padEnd(11))}${th.fg(color, value || "not recorded")}`;
+		return ` ${th.fg("dim", `${label.padEnd(12)} `)}${th.fg(color, value || "not recorded")}`;
 	}
 
-	overviewLines() {
+	overviewLines(width = 80) {
 		const th = this.theme;
 		const { project, research, counts, health } = this.model;
 		const context = health.tokens === null || health.tokens === undefined
 			? "context unknown"
 			: `${tokenCount(health.tokens)}/${tokenCount(health.contextWindow)}${health.percent === null ? "" : ` · ${health.percent.toFixed(1)}%`}`;
-		const result = [
+		const operational = [
 			` ${th.fg("dim", "Control")}  ${counts.active} active · ${counts.waiting} waiting · ${counts.openMessages} open · ${counts.unknown} unknown`,
 			` ${th.fg("dim", "Context")}  ${context} · ${health.compactions} compact${health.compactions === 1 ? "" : "s"}`,
-			"",
+		];
+		const researchRows = [
 			this.field(research.activeTrack ? "Active track" : "Question", research.activeTrack || research.question, "accent"),
 		];
-		if (research.activeTrack && research.question && research.question !== research.activeTrack) result.push(this.field("Question", research.question));
-		if (research.claim) result.push(this.field("Claim", research.claim, "success"));
-		if (research.previousClaim) result.push(this.field("Prior claim", research.previousClaim, "muted"));
-		result.push(this.field("Next", research.nextStep, "accent"));
+		if (research.activeTrack && research.question && research.question !== research.activeTrack) researchRows.push(this.field("Question", research.question));
+		if (research.claim) researchRows.push(this.field("Claim", research.claim, "success"));
+		if (research.previousClaim) researchRows.push(this.field("Prior claim", research.previousClaim, "muted"));
+		researchRows.push(this.field("Next", research.nextStep, "accent"));
 		if (project.freshness !== "current") {
-			result.push(
-				"",
+			researchRows.push(
 				` ${th.fg(stateColor(project.freshness), `${stateIcon(project.freshness)} memory ${project.freshness}`)} · ${project.freshnessReasons[0] || "structured state needs attention"}`,
 			);
 		}
-		result.push(
-			"",
+		operational.push(
 			` ${th.fg(stateColor(health.recommendation === "reconcile" ? "outcome_unknown" : "running"), `→ ${health.recommendation}`)} · ${health.reason}`,
 			` ${health.ready ? th.fg("success", "✓ rotation ready") : th.fg("warning", `■ rotation blocked · ${health.blockers[0] || "Project state is not recoverable"}`)}`,
 		);
-		return result;
+		if (width >= 108) {
+			return [
+				` ${th.fg("dim", "PROJECT / MEMORY")}${" ".repeat(Math.max(1, Math.floor(width * 0.54) - 18))}${th.fg("dim", "RUNTIME / CONTROL")}`,
+				...joinColumns(researchRows, operational, width),
+			];
+		}
+		return [...operational.slice(0, 2), "", ...researchRows, "", ...operational.slice(2)];
 	}
 
 	actorLines() {
@@ -144,9 +184,10 @@ export class RuntimeBoardOverlay {
 		const rows = [` ${th.fg("dim", "Stable Project Actors · active work first")}`, ""];
 		// Keep the dashboard usable in the common 24-row terminal. `/actors all`
 		// remains the detailed, unbounded history view.
-		for (const actor of this.model.actors.slice(0, 5)) {
+		for (const [index, actor] of this.model.actors.slice(0, 5).entries()) {
 			const color = stateColor(actor.action?.status || actor.state);
-			rows.push(` ${th.fg(color, `${stateIcon(actor.action?.status || actor.state)} ${actor.target}`)} · ${actor.label} · ${actor.state}`);
+			const cursor = index === this.actorIndex ? th.fg("accent", "›") : " ";
+			rows.push(`${cursor} ${th.fg(color, `${stateIcon(actor.action?.status || actor.state)} ${actor.target}`)} · ${actor.label} · ${actor.state}`);
 			if (actor.action) rows.push(`   ${th.fg("dim", `${shortId(actor.action.id, 12)} · ${actor.action.label}${actor.action.externalId ? ` · external ${shortId(actor.action.externalId, 12)}` : ""}`)}`);
 		}
 		if (!this.model.actors.length) rows.push(` ${th.fg("dim", "No Actor is registered.")}`);
@@ -200,7 +241,7 @@ export class RuntimeBoardOverlay {
 			: project.git.dirty ? th.fg("warning", "dirty") : th.fg("success", "clean");
 		const memory = th.fg(stateColor(project.freshness), project.freshness);
 		const header = [
-			` ${th.fg("accent", th.bold(project.name))} · project ${project.shortKey}`,
+			` ${th.fg("customMessageLabel", th.bold("◈ RESEARCH RUNTIME"))}  ${th.fg("accent", th.bold(project.name))} · project ${project.shortKey}`,
 			` ${memory} · r${project.revision}/state ${project.stateRevision || "—"} · leader ${leader.sessionSuffix || "detached"}${leader.inheritancePolicy === "clean" ? " · clean" : ""}`,
 			` ${th.fg("dim", `${project.git.branch ?? "no branch"} @ ${project.git.commit ?? "unknown"}`)} · ${dirty}`,
 			` ${tabs}`,
@@ -210,12 +251,12 @@ export class RuntimeBoardOverlay {
 		if (section === "actors") body = this.actorLines();
 		else if (section === "messages") body = this.messageLines();
 		else if (section === "sessions") body = this.sessionLines();
-		else body = this.overviewLines();
+		else body = this.overviewLines(Math.max(1, width - 2));
 		const updated = clock(this.model.generatedAt);
 		const footer = [
 			"",
 			...(this.error ? [` ${th.fg("error", this.error)}`] : []),
-			` ${th.fg("dim", `${this.refreshing ? "refreshing…" : `snapshot ${updated}`} · ←/→/Tab · r refresh · v view · w watch · q/Esc close`)}`,
+			` ${th.fg("dim", `${this.refreshing ? "refreshing…" : `snapshot ${updated}`} · ←/→ tabs${section === "actors" ? " · ↑/↓ select · Enter watch" : ""} · r refresh · v view · w watch · q close`)}`,
 		];
 		// This is a dashboard, not a transcript: one logical row stays one
 		// terminal row so the overlay does not push its footer below maxHeight.
@@ -225,7 +266,7 @@ export class RuntimeBoardOverlay {
 		const rows = [...header, ...body, ...footer].map((line) =>
 			line ? truncateToWidth(line, innerWidth, "...", true) : "",
 		);
-		return this.box(rows, width, "Research Runtime · Project Board");
+		return this.box(rows, width, "Research Runtime / Project Board");
 	}
 
 	invalidate() {}

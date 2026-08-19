@@ -10,6 +10,7 @@ import {
 	researchPiConfigSummary,
 	researchPiEnvironment,
 	researchPiProfile,
+	RESEARCH_PI_THEME_CHOICES,
 	resolveResearchPiConfig,
 	writeResearchPiAgentConfig,
 	writeResearchPiConfig,
@@ -126,6 +127,26 @@ function configCommand(argv) {
 		}
 		return;
 	}
+	if (action === "themes") {
+		const active = config.pi.settings.theme;
+		for (const theme of RESEARCH_PI_THEME_CHOICES) {
+			process.stdout.write(`${theme.name === active ? "*" : " "} ${theme.name}\t${theme.label}\t${theme.description}\n`);
+		}
+		return;
+	}
+	if (action === "theme") {
+		const name = argv[1];
+		if (!name || !RESEARCH_PI_THEME_CHOICES.some((theme) => theme.name === name)) {
+			throw new Error(`Usage: pi config theme <${RESEARCH_PI_THEME_CHOICES.map((theme) => theme.name).join("|")}>`);
+		}
+		const next = writeResearchPiConfig(paths.configPath, {
+			...config,
+			pi: { ...config.pi, settings: { ...config.pi.settings, theme: name } },
+		});
+		writeResearchPiAgentConfig(paths.agentDir, next, { coreVersion });
+		process.stdout.write(`${researchPiConfigSummary(next, paths.configPath)}\n`);
+		return;
+	}
 	if (action === "use") {
 		const name = argv[1];
 		if (!name || !config.profiles[name]) throw new Error(`Usage: pi config use <${Object.keys(config.profiles).join("|")}>`);
@@ -134,7 +155,7 @@ function configCommand(argv) {
 		process.stdout.write(`${researchPiConfigSummary(next, paths.configPath)}\n`);
 		return;
 	}
-	throw new Error("Usage: pi config [show|path|list|use <profile>]");
+	throw new Error("Usage: pi config [show|path|list|use <profile>|themes|theme <name>]");
 }
 
 async function spawnCore(argv) {
@@ -156,7 +177,7 @@ async function spawnCore(argv) {
 
 	const coreCli = join(packageRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
 	if (!existsSync(coreCli)) throw new Error(`Pinned Pi core is missing: ${coreCli}`);
-	const args = ["--no-skills", "--no-extensions"];
+	const args = ["--no-skills", "--no-extensions", "--no-themes"];
 	for (const configuredPath of config.resources.skills) {
 		const skill = expandUserPath(configuredPath);
 		if (existsSync(join(skill, "SKILL.md"))) args.push("--skill", skill);
@@ -166,6 +187,7 @@ async function spawnCore(argv) {
 		"--provider", profile.provider,
 		"--model", profile.model,
 		"--thinking", profile.thinking,
+		"--theme", join(packageRoot, ".pi", "themes"),
 		"--session-dir", paths.sessionDir,
 		"--append-system-prompt", join(packageRoot, ".pi", "APPEND_SYSTEM.md"),
 	);

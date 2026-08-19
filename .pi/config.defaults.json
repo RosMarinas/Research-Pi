@@ -20,7 +20,7 @@
   },
   "pi": {
     "settings": {
-      "theme": "dark",
+      "theme": "research-pi",
       "tuiMode": "regular",
       "retry": {
         "enabled": true,
@@ -67,7 +67,9 @@
     ]
   },
   "ui": {
-    "showProfileStatus": true,
+    "density": "balanced",
+    "runtimeStrip": "auto",
+    "showProfileStatus": false,
     "configPanelRows": 8
   },
   "diagnostics": {

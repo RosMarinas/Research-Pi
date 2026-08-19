@@ -14,10 +14,11 @@ import {
 	resolveResearchRuntime,
 	runtimeActorTarget,
 } from "../lib/research-runtime.mjs";
+import { registerCodexWatchAdapter } from "../lib/research-runtime-adapters.mjs";
 
 const ACTIVE_STATUSES = new Set(["starting", "running", "input_required", "cancelling"]);
 const VIEW_MODES = ["overview", "activity", "agents"] as const;
-const REFRESH_MS = 750;
+const REFRESH_MS = 1000;
 
 type CodexJobView = ReturnType<typeof publicJobView>;
 type ViewMode = (typeof VIEW_MODES)[number];
@@ -166,6 +167,7 @@ class CodexWatchOverlay {
 	private refreshing = false;
 	private closed = false;
 	private error: string | undefined;
+	private renderFingerprint = "";
 
 	constructor(
 		tui: TUI,
@@ -209,14 +211,34 @@ class CodexWatchOverlay {
 			const current = publicJobView(await readCodexJob(existing.id, jobOwnerCheck(this.ctx, this.runtime, existing)));
 			const currentIndex = this.jobs.findIndex((job) => job.id === existing.id);
 			if (currentIndex >= 0) this.jobs[currentIndex] = current;
-			this.eventsByJob.set(current.id, await this.cursor(current.id).poll());
+			const events = await this.cursor(current.id).poll();
+			this.eventsByJob.set(current.id, events);
+			const last = events.at(-1);
+			const fingerprint = JSON.stringify([
+				current.id,
+				current.status,
+				current.progress,
+				current.lastActivityAt,
+				current.pendingRequest?.id ?? null,
+				events.length,
+				last?.timestamp ?? null,
+				last?.summary ?? null,
+			]);
+			const changed = fingerprint !== this.renderFingerprint || this.error !== undefined;
+			this.renderFingerprint = fingerprint;
 			this.error = undefined;
+			if (changed) this.tui.requestRender();
 		} catch (error) {
 			if (isCodexJobOwnerError(error)) this.close();
-			else this.error = error instanceof Error ? error.message : String(error);
+			else {
+				const message = error instanceof Error ? error.message : String(error);
+				if (message !== this.error) {
+					this.error = message;
+					this.tui.requestRender();
+				}
+			}
 		} finally {
 			this.refreshing = false;
-			this.tui.requestRender();
 		}
 	}
 
@@ -261,9 +283,9 @@ class CodexWatchOverlay {
 			return clipped + " ".repeat(Math.max(0, inner - visibleWidth(clipped)));
 		};
 		return [
-			th.fg("border", `╭${left}`) + th.fg("accent", cleanTitle) + th.fg("border", `${right}╮`),
-			...lines.map((line) => th.fg("border", "│") + pad(line) + th.fg("border", "│")),
-			th.fg("border", `╰${"─".repeat(inner)}╯`),
+			th.fg("borderMuted", `╭${left}`) + th.fg("customMessageLabel", th.bold(cleanTitle)) + th.fg("borderMuted", `${right}╮`),
+			...lines.map((line) => th.fg("borderMuted", "│") + pad(line) + th.fg("borderMuted", "│")),
+			th.fg("borderMuted", `╰${"─".repeat(inner)}╯`),
 		];
 	}
 
@@ -311,9 +333,9 @@ class CodexWatchOverlay {
 		const job = this.currentJob();
 		const events = this.eventsByJob.get(job.id) ?? [];
 		const mode: ViewMode = VIEW_MODES[this.modeIndex]!;
-		const selectedMode = VIEW_MODES.map((candidate) => candidate === mode ? th.fg("accent", `[${candidate}]`) : th.fg("dim", candidate)).join("  ");
+		const selectedMode = VIEW_MODES.map((candidate) => candidate === mode ? th.fg("accent", th.bold(`[${candidate}]`)) : th.fg("dim", candidate)).join("  ");
 		const stateColor = ["failed", "cancelled"].includes(job.status) ? "error" : job.status === "completed" ? "success" : ["input_required", "outcome_unknown"].includes(job.status) ? "warning" : "accent";
-		const title = `Codex Watch ${this.selected + 1}/${this.jobs.length}`;
+		const title = `◈ CODEX WATCH ${this.selected + 1}/${this.jobs.length}`;
 		const mission = compact(job.mission ?? "unlabelled", 90);
 		const header = [
 			` ${th.fg(stateColor as any, `${statusIcon(job.status)} ${job.status}`)} · ${th.fg("accent", mission)} · ${job.mode} · ${elapsed(job)}`,
@@ -339,28 +361,31 @@ class CodexWatchOverlay {
 	}
 }
 
+export async function openCodexWatch(ctx: ExtensionCommandContext, selector = ""): Promise<void> {
+	try {
+		const jobs = await visibleCodexJobs(ctx);
+		if (!jobs.length) {
+			ctx.ui.notify("No Codex Action exists in this project workspace.", "info");
+			return;
+		}
+		const runtime = await resolveResearchRuntime(ctx.cwd);
+		const selected = findInitialJobIndex(jobs, selector);
+		await ctx.ui.custom<void>(
+			(tui, theme, _keybindings, done) => new CodexWatchOverlay(tui, theme, done, ctx, runtime, jobs, selected),
+			{
+				overlay: true,
+				overlayOptions: { anchor: "center", width: "94%", maxHeight: "92%", margin: 1 },
+			},
+		);
+	} catch (error) {
+		ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+	}
+}
+
 export default function codexWatchExtension(pi: ExtensionAPI) {
+	registerCodexWatchAdapter({ open: openCodexWatch });
 	pi.registerCommand("watch", {
 		description: "Watch objective Codex execution; switch Actions with arrows and views with Tab",
-		handler: async (args, ctx) => {
-			try {
-				const jobs = await visibleCodexJobs(ctx);
-				if (!jobs.length) {
-					ctx.ui.notify("No Codex Action exists in this project workspace.", "info");
-					return;
-				}
-				const runtime = await resolveResearchRuntime(ctx.cwd);
-				const selected = findInitialJobIndex(jobs, args);
-				await ctx.ui.custom<void>(
-					(tui, theme, _keybindings, done) => new CodexWatchOverlay(tui, theme, done, ctx, runtime, jobs, selected),
-					{
-						overlay: true,
-						overlayOptions: { anchor: "center", width: "94%", maxHeight: "94%", margin: 1 },
-					},
-				);
-			} catch (error) {
-				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
-			}
-		},
+		handler: async (args, ctx) => openCodexWatch(ctx, args),
 	});
 }

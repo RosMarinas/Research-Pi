@@ -119,7 +119,7 @@ test("Runtime Board renders within terminal width and exposes keyboard sections 
 
 	const overview = overlay.render(78);
 	assert.ok(overview.every((line) => visibleWidth(line) <= 78));
-	assert.match(overview.join("\n"), /Research Runtime · Project Board/);
+	assert.match(overview.join("\n"), /Research Runtime \/ Project Board/);
 	assert.match(overview.join("\n"), /new mechanism surface/);
 	assert.equal(reloads, 0);
 	const narrow = overlay.render(40);
@@ -135,11 +135,16 @@ test("Runtime Board renders within terminal width and exposes keyboard sections 
 	assert.match(actors, /Stable Project Actors/);
 	assert.match(actors, /qualification executor/);
 	assert.ok(renders > 0);
-
 	await overlay.refresh();
 	assert.equal(reloads, 1);
 	overlay.handleInput("v");
 	assert.equal(result, "view");
+
+	let watchResult;
+	const watchOverlay = new RuntimeBoardOverlay(tui, plainTheme(), (value) => { watchResult = value; }, model, async () => model);
+	watchOverlay.handleInput("2");
+	watchOverlay.handleInput("\r");
+	assert.deepEqual(watchResult, { action: "watch", selector: model.actors[0].target });
 });
 
 test("Runtime Board keeps mailbox counts exact while bounding visible rows", () => {
