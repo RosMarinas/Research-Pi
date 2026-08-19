@@ -1,69 +1,151 @@
 # Research Pi
 
-Research Pi 是一个面向 AI、通信等计算实验的个人 Research Runtime。它使用锁定版本的 Pi Core 和可切换的 DeepSeek V4 Pro/Flash profiles，并加入科研优先的身份与工作约定、项目级 Actor/mailbox、项目命令边界、持久化 side 对话、DeepSeek 原生网页检索、实验记录、研究 checkpoint、非向量历史检索、结构化科研 compact、Codex 长程执行委派与按需 trace。
+> **让 Session 可以丢弃，让科研认知留下。**
+>
+> A project-centric cognitive runtime for computational research.
 
-## 开发仓库与稳定安装
+`Pi Core 0.84.1` · `DeepSeek V4 Pro / Flash` · `Codex App Server` · `macOS / Linux / WSL2`
 
-本仓库本身是 Research Pi 的快速开发 checkout：修改 extension、policy 或 prompt 后，`./run-pi.sh` 会立即使用新代码，适合持续迭代。`./install-user.sh` 创建的 `~/.local/bin/pi` 只是指向该 checkout 的开发软链接，不属于稳定发布。
+Research Pi 面向 AI、机器人、通信、优化与仿真等计算实验科研。它不是给普通 coding agent 换一段“科研提示词”，而是把长期研究状态、Agent 协作、Session 交接、证据记忆与执行权限从单个模型的有限上下文中移出来，放到 **Project 级 Runtime** 中管理。
 
-稳定版本按 npm CLI 打包，程序代码、用户配置和运行状态彼此分离：
+代码在这里首先是检验假设的实验仪器。系统优先回答：**这个想法是否成立、证据是否可信、下一步哪个实验最有信息量？** 等到方向值得保留后，再进入工程化和稳定交付。
 
-```text
-npm 全局目录                  Research Pi 程序与锁定依赖
-~/.config/research-pi/        config.json、schema 与 credentials.env
-~/.local/state/research-pi/   sessions、project Runtime、memory、Codex jobs、grants、trace
-<research-project>/.pi/       该项目自己的实验记录与 checkpoint
+[5 分钟上手](#5-分钟上手) · [核心思路](#核心思路) · [配置](#默认配置) · [Project Runtime](#project-runtime) · [安全边界](#project-boundary) · [完整指南](docs/pi-basic-guide.md)
+
+## 为什么做 Research Pi
+
+长程科研任务常常不是被模型能力本身卡住，而是被 Harness 的组织方式拖垮：
+
+| 常见问题 | 直接后果 | Research Pi 的处理 |
+|---|---|---|
+| 一个 Session 同时规划、写代码、跑实验、读日志 | 工具输出淹没研究主线 | 主线由 Pi/DeepSeek 保持，工具密集任务可交给可续接的 Codex Actor |
+| Agent 需要自己记住何时委派、何时压缩 | 上下文越差，越难做出正确的元决策 | Runtime 外置 Action/Session 状态并给出生命周期建议；自动路由仍是后续阶段 |
+| 新 Session 必须重读 README、Git diff 和旧聊天 | 每次换模型或清理上下文都要重建项目认知 | Project State 被编译成限长 ProjectView，自动交给新的 Project-aware Session |
+| Compact 只是把聊天记录重新摘要 | 失败路线、证据边界和有效性判断容易被压平 | Compact 同时提交结构化科研状态与 provenance；历史仍可精确检索 |
+| “命令成功”被模型误当作“假设成立” | 操作事实与科学结论混淆 | Runtime 记录操作事实；研究结论仍由用户与 Research Leader 判断 |
+
+## 核心思路
+
+```mermaid
+flowchart LR
+    U["User"] <--> R["Research Runtime"]
+    R --> S["Project State<br/>hypotheses · evidence · decisions"]
+    R --> M["Durable Mailbox<br/>ask · reply · steer · result"]
+    R --> A["Action / Actor Registry"]
+    S --> V["ProjectView"]
+    M --> V
+    V --> P["Pi / DeepSeek<br/>Research Leader"]
+    A --> C["Codex<br/>Advisor / Executor"]
+    P <--> C
+    C --> X["Code · Runs · Artifacts"]
 ```
 
-发布稳定 tag/package 后，安装方式为：
+三个原则贯穿当前设计：
+
+1. **Project ≠ Session**：Project 保存长期认知；Session 只是一个 Actor 的临时工作集。
+2. **Message ≠ State ≠ Context**：发生过的事件、当前科研状态和某次模型调用需要看到的内容分别管理。
+3. **执行完成 ≠ 科学结论成立**：退出码、patch 和 run ID 可以自动记录；实验是否有效、假设是否被支持不能自动推断。
+
+> [!NOTE]
+> 当前版本已经是可日常使用的 Project Runtime，但不是自动 AI Scientist。它支持 Project State、跨 Session Codex 协作、手动 Session rotation、clean Session 和 observe-only lifecycle recommendation；尚不自动拆任务、选择模型或启动科研路线。
+
+## 5 分钟上手
+
+### 1. 安装
+
+要求 Node.js `>=22.19`。当前最直接的全局安装方式是从 GitHub `main` 获取已打包的 CLI：
 
 ```sh
-./install-user.sh --remove-dev-links  # 若此前安装过 checkout 开发软链接
-npm install -g @rosmarinas/research-pi
+npm install -g 'git+https://github.com/RosMarinas/Research-Pi.git#main'
+```
+
+如果已经通过本仓库的开发软链接安装过 `pi`，先在旧 checkout 中运行：
+
+```sh
+./install-user.sh --remove-dev-links
+```
+
+### 2. 配置 DeepSeek API key
+
+```sh
 pi setup
 pi paths
 ```
 
-也可从明确的 Git tag 安装而不依赖 npm registry：
-
-```sh
-npm install -g 'git+ssh://git@github.com/RosMarinas/Research-Pi.git#v0.2.0'
-pi setup
-```
-
-`pi setup` 创建权限为 `0600` 的 `config.json` 与凭据模板，不生成或提交密钥。填入 `~/.config/research-pi/credentials.env` 后即可在任意项目运行 `pi`。使用 `pi paths` 可检查当前程序、配置和状态目录；使用 `pi doctor` 可在不调用模型的情况下验证宿主 Git/Python 与 Codex sandbox。
-
-## 从源码快速开发
-
-要求 Node.js `>=22.19`。
-
-```sh
-git clone git@github.com:RosMarinas/Research-Pi.git
-cd Research-Pi
-npm install --ignore-scripts
-cp .env.example .env
-```
-
-编辑 `.env`，填入 DeepSeek 官方 API key：
+`pi setup` 会创建权限为 `0600` 的配置和凭据模板。根据 `pi paths` 输出找到 `credentialsPath`，只在本机填写：
 
 ```dotenv
 DEEPSEEK_API_KEY=你的_API_key
 ```
 
-可选：安装指向当前 checkout 的开发命令入口：
+API key、Session、Runtime ledger、Codex 状态和 trace 都不会打包或提交到科研仓库。
 
-```sh
-./install-user.sh
-```
-
-随后可在任意科研项目中直接启动：
+### 3. 在科研项目中启动
 
 ```sh
 cd /path/to/research-project
 pi
 ```
 
-更完整的命令说明见 [`docs/pi-basic-guide.md`](docs/pi-basic-guide.md)，配置字段与优先级见 [`docs/configuration.md`](docs/configuration.md)。
+首次进入目录时，Pi 会要求确认项目信任。启动后建议先使用：
+
+```text
+/config            选择 DeepSeek profile 与 TUI 主题
+/boundary doctor   检查 Git、Python、sandbox 与 Codex 执行环境
+/runtime            打开 Project Runtime 控制面
+```
+
+随后可以直接给出研究任务。一个适合首次接入现有项目的输入是：
+
+```text
+先只读取当前项目状态，识别研究目标、竞争假设、已有证据、失效路线和最关键的未决问题。
+不要启动新实验；先告诉我 ProjectView 中缺了什么，以及下一步最有信息量的动作。
+```
+
+当当前对话已经形成可信的科研状态后，可执行一次 `/compact`，让结构化 Project State 成为后续 Session 的接手基线。
+
+### 4. 记住这几个入口
+
+| 入口 | 用途 |
+|---|---|
+| `/runtime` | 查看研究路线、Project memory、Actors、Actions、mailbox 与 Session 状态 |
+| `/side <问题>` | 隔离追问，不污染主线；有价值时再 `/side use <id>` |
+| `/memory <query>` | 搜索当前 Project 的历史 Session 与实验记录，不使用向量数据库 |
+| `/watch` | 直接观察 Codex executor/advisor 的客观执行过程 |
+| `/config` | 切换 DeepSeek Pro/Flash、thinking 与 Ocean/Graphite/Ember 主题 |
+| `/runtime new clean` | 新建不继承 ProjectView 的纯净 Session；需要时用 `/runtime inherit` 恢复 |
+
+完整命令见 [Pi 基础使用指南](docs/pi-basic-guide.md)，所有配置字段见 [统一配置说明](docs/configuration.md)，Runtime 跨 Session 验收见 [Research Runtime 测试指南](docs/research-runtime-test-guide.md)。
+
+## 安装方式与目录
+
+### 日常使用：全局 CLI
+
+全局安装后，程序、用户配置与运行状态彼此分离：
+
+```text
+npm 全局目录                  Research Pi 程序与锁定依赖
+~/.config/research-pi/        config.json、schema 与 credentials.env
+~/.local/state/research-pi/   sessions、Project Runtime、memory、Codex jobs、grants、trace
+<research-project>/.pi/       该项目自己的实验记录与 checkpoint
+```
+
+XDG 路径或平台不同时，以 `pi paths` 的实际输出为准。发布稳定 tag 后，也可以把安装命令中的 `#main` 替换为明确版本，例如 `#v0.2.0`。
+
+### Harness 开发：源码 checkout
+
+本仓库同时是 Research Pi 的快速开发 checkout。修改 extension、policy、prompt 或 TUI 后，`./run-pi.sh` 会立即使用新代码：
+
+```sh
+git clone git@github.com:RosMarinas/Research-Pi.git
+cd Research-Pi
+npm install --ignore-scripts
+cp .env.example .env
+# 编辑 .env，填入 DEEPSEEK_API_KEY
+./install-user.sh
+```
+
+`./install-user.sh` 创建的是指向当前 checkout 的开发软链接。移动或删除 checkout 会使它失效；准备回到全局包时，先运行 `./install-user.sh --remove-dev-links`。
 
 ## 命令入口
 
@@ -289,7 +371,7 @@ Runtime Board 是既有 ledger/ProjectView 的只读投影，不进入模型上�
 
 `pi-traced` 将 trace 写入状态目录的 `agent/traces/`（源码模式即 `.pi/agent/traces/`）。其中可能包含完整 prompt、工具参数和输出；源码状态目录已被 Git 忽略，稳定包状态目录位于 checkout 之外。
 
-## 不安装全局入口
+## 临时运行（无需全局安装）
 
 也可以显式指定目标科研项目：
 
