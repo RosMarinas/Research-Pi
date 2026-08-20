@@ -81,6 +81,7 @@ test("Pi sandbox runtime is project-write, host-region-read-denied, and network-
 	const config = buildSandboxRuntimeConfig(root, {
 		PATH: "/bin",
 		DEEPSEEK_API_KEY: "secret",
+		OPENCODE_API_KEY: "go-secret",
 		HF_TOKEN: "secret-too",
 	});
 	assert.deepEqual(config.network.allowedDomains, []);
@@ -91,7 +92,7 @@ test("Pi sandbox runtime is project-write, host-region-read-denied, and network-
 	assert.equal(config.filesystem.allowGitConfig, true);
 	assert.deepEqual(
 		config.credentials.envVars.map((item) => item.name).sort(),
-		["DEEPSEEK_API_KEY", "HF_TOKEN"],
+		["DEEPSEEK_API_KEY", "HF_TOKEN", "OPENCODE_API_KEY"],
 	);
 });
 

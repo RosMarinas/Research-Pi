@@ -284,14 +284,16 @@ test("continuation notice detects stale Git state without copying filenames", ()
 	assert.doesNotMatch(notice, /secret-looking-filename/);
 });
 
-test("Codex environment removes the DeepSeek credential without dropping execution access", () => {
+test("Codex environment removes provider credentials without dropping execution access", () => {
 	const env = sanitizeCodexEnvironment({
 		PATH: "/bin",
 		HOME: "/tmp/example-home",
 		SSH_AUTH_SOCK: "/tmp/ssh.sock",
 		DEEPSEEK_API_KEY: "secret",
+		OPENCODE_API_KEY: "secret-too",
 	});
 	assert.equal(env.DEEPSEEK_API_KEY, undefined);
+	assert.equal(env.OPENCODE_API_KEY, undefined);
 	assert.equal(env.PATH, "/bin");
 	assert.equal(env.HOME, "/tmp/example-home");
 	assert.equal(env.SSH_AUTH_SOCK, "/tmp/ssh.sock");

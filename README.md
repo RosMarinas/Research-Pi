@@ -65,18 +65,21 @@ npm install -g 'git+https://github.com/RosMarinas/Research-Pi.git#main'
 ./install-user.sh --remove-dev-links
 ```
 
-### 2. 配置 DeepSeek API key
+### 2. 配置模型供应商
 
 ```sh
 pi setup
 pi paths
 ```
 
-`pi setup` 会创建权限为 `0600` 的配置和凭据模板。根据 `pi paths` 输出找到 `credentialsPath`，只在本机填写：
+`pi setup` 会创建权限为 `0600` 的配置和凭据模板。根据 `pi paths` 输出找到 `credentialsPath`，填写一个或两个供应商；不使用的条目可留空：
 
 ```dotenv
-DEEPSEEK_API_KEY=你的_API_key
+DEEPSEEK_API_KEY=DeepSeek_官方_API_key
+OPENCODE_API_KEY=OpenCode_Go_API_key
 ```
+
+Research Leader 可直接在官方 DeepSeek 与 OpenCode Go 订阅模型间切换。只配置 OpenCode Go 也能启动；官方 DeepSeek key 还负责可选的原生小型 Web Search。
 
 API key、Session、Runtime ledger、Codex 状态和 trace 都不会打包或提交到科研仓库。
 
@@ -90,7 +93,7 @@ pi
 首次进入目录时，Pi 会要求确认项目信任。启动后建议先使用：
 
 ```text
-/config            选择 DeepSeek profile 与 TUI 主题
+/config            选择供应商、Leader profile 与 TUI 主题
 /boundary doctor   检查 Git、Python、sandbox 与 Codex 执行环境
 /runtime            打开 Project Runtime 控制面
 ```
@@ -112,7 +115,7 @@ pi
 | `/side <问题>` | 隔离追问，不污染主线；有价值时再 `/side use <id>` |
 | `/memory <query>` | 搜索当前 Project 的历史 Session 与实验记录，不使用向量数据库 |
 | `/watch` | 直接观察 Codex executor/advisor 的客观执行过程 |
-| `/config` | 切换 DeepSeek Pro/Flash、thinking 与 Ocean/Graphite/Ember 主题 |
+| `/config` | 切换官方 DeepSeek/OpenCode Go Leader、thinking 与 Ocean/Graphite/Ember 主题 |
 | `/runtime new clean` | 新建不继承 ProjectView 的纯净 Session；需要时用 `/runtime inherit` 恢复 |
 
 完整命令见 [Pi 基础使用指南](docs/pi-basic-guide.md)，所有配置字段见 [统一配置说明](docs/configuration.md)，Runtime 跨 Session 验收见 [Research Runtime 测试指南](docs/research-runtime-test-guide.md)。
@@ -141,7 +144,7 @@ git clone git@github.com:RosMarinas/Research-Pi.git
 cd Research-Pi
 npm install --ignore-scripts
 cp .env.example .env
-# 编辑 .env，填入 DEEPSEEK_API_KEY
+# 编辑 .env，填入 DEEPSEEK_API_KEY 和/或 OPENCODE_API_KEY
 ./install-user.sh
 ```
 
@@ -158,10 +161,10 @@ cp .env.example .env
 ## 默认配置
 
 - Pi Core：`0.84.1`
-- Provider：`deepseek`
+- Provider：官方 `deepseek` 与订阅 `opencode-go`
 - Active profile：`deepseek-pro`
-- Model：`deepseek-v4-pro`（可持久切换到 `deepseek-flash`）
-- Endpoint：`https://api.deepseek.com`
+- Curated profiles：官方 DeepSeek Pro/Flash，以及 OpenCode Go 的 DeepSeek V4 Flash、GPT 5.6 Luna、Qwen3.7 Plus
+- Endpoint：由 Pi Core 的内置 provider catalog 管理，不需要手写 URL
 - Thinking level：`max`（通过官方 `reasoning_effort: "max"` 启用；384K 是最大输出上限，不是输入上下文或压缩阈值）
 
 ### 单一配置入口
@@ -181,8 +184,8 @@ cp .env.example .env
 pi config show                    # 查看完整生效配置
 pi config path                    # 找到配置文件
 pi config list                    # 列出模型 profiles
-pi config use deepseek-flash      # 持久切换默认 profile
-pi --profile deepseek-pro         # 只覆盖本次启动
+pi config use opencode-go-flash   # 持久切到推荐的 Go 日常 Leader
+pi --profile deepseek-pro         # 本次启动使用官方高质量 Leader
 ```
 
 交互界面输入 `/config` 会打开居中的原生 TUI profile 面板；选择后立即切换当前 Session 的模型与 thinking，并持久保存。面板中按 `t` 可切到 Theme 选择器；也可用 `/config theme research-pi|research-graphite|research-ember|dark|light`。默认不重复显示 `◇ profile`，实际 model/thinking 继续由 Pi 原生 footer 展示。
@@ -307,7 +310,7 @@ Research Pi 默认处于探索与验证阶段：构造竞争假设，优先高�
 
 ### Web Search
 
-`web_search` 通过 DeepSeek Anthropic-compatible API 的原生 Web Search 做简单、直接、带结构化来源的当前信息检索，复用同一个 `DEEPSEEK_API_KEY`，无需额外搜索服务密钥。搜索模型、thinking budget、默认搜索次数与来源上限来自 `config.json` 的 `research.search`。若 API 没有返回结构化来源，工具会明确标为未核验模型综合。
+`web_search` 通过 DeepSeek Anthropic-compatible API 的原生 Web Search 做简单、直接、带结构化来源的当前信息检索。它与 Research Leader 的供应商解耦：默认 `research.search.enabled=auto`，存在 `DEEPSEEK_API_KEY` 时加载，不存在时不向模型暴露该工具；`on` 强制要求官方 key，`off` 始终关闭。OpenCode Go 只承担 Leader 推理，不被误当成 DeepSeek 原生搜索端点。搜索模型、thinking budget、默认搜索次数与来源上限来自 `config.json`。
 
 Pi 可直接完成有界的小型调研；当用户指定，或任务确实需要大量搜索、交叉核验和中间材料整理时，再交给 Codex 隔离过程。
 

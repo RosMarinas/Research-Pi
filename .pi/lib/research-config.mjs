@@ -6,6 +6,10 @@ const LIB_DIR = dirname(fileURLToPath(import.meta.url));
 export const RESEARCH_PI_DEFAULT_CONFIG_PATH = resolve(LIB_DIR, "../config.defaults.json");
 export const RESEARCH_PI_CONFIG_SCHEMA_PATH = resolve(LIB_DIR, "../schemas/research-pi-config.schema.json");
 export const RESEARCH_PI_CONFIG_VERSION = 1;
+export const RESEARCH_PI_PROVIDER_CREDENTIALS = Object.freeze({
+	deepseek: "DEEPSEEK_API_KEY",
+	"opencode-go": "OPENCODE_API_KEY",
+});
 export const RESEARCH_PI_THEME_CHOICES = Object.freeze([
 	{ name: "research-pi", label: "Ocean", description: "Cool cyan, indigo, and violet for long research sessions." },
 	{ name: "research-graphite", label: "Graphite", description: "Low-saturation graphite with restrained aqua accents." },
@@ -32,6 +36,7 @@ const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhi
 const CODEX_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max", "ultra"]);
 const UI_DENSITIES = new Set(["compact", "balanced"]);
 const RUNTIME_STRIP_MODES = new Set(["auto", "always", "off"]);
+const SEARCH_MODES = new Set(["auto", "on", "off"]);
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,191}$/;
 
 function plainObject(value) {
@@ -114,6 +119,7 @@ export function validateResearchPiConfig(config) {
 	compact.recentTailTokens.forEach((value, index) => positiveInteger(value, `research.compaction.recentTailTokens[${index}]`));
 	const search = config.research?.search;
 	if (!plainObject(search) || !SAFE_ID.test(String(search.model ?? ""))) throw new Error("research.search.model is invalid");
+	if (!SEARCH_MODES.has(search.enabled)) throw new Error("research.search.enabled must be auto, on, or off");
 	positiveInteger(search.thinkingBudgetTokens, "research.search.thinkingBudgetTokens");
 	positiveInteger(search.maxSources, "research.search.maxSources");
 	positiveInteger(search.defaultMaxUses, "research.search.defaultMaxUses");
@@ -183,9 +189,42 @@ export function researchPiProfileForModel(config, provider, model) {
 	return matches.length === 1 ? researchPiProfile(config, matches[0][0]) : null;
 }
 
-export function researchPiCoreSettings(config, coreVersion) {
+export function researchPiProfileCredential(config, name = config.activeProfile) {
+	const profile = researchPiProfile(config, name);
+	const environmentVariable = RESEARCH_PI_PROVIDER_CREDENTIALS[profile.provider];
+	return environmentVariable ? { profile, environmentVariable } : { profile, environmentVariable: undefined };
+}
+
+export function researchPiCredentialEnvironmentNames(config) {
+	const names = new Set();
+	for (const profile of Object.values(config.profiles)) {
+		const name = RESEARCH_PI_PROVIDER_CREDENTIALS[profile.provider];
+		if (name) names.add(name);
+	}
+	if (config.research.search.enabled !== "off") names.add("DEEPSEEK_API_KEY");
+	return [...names];
+}
+
+export function researchPiDeepSeekSearchEnabled(config, environment = process.env) {
+	const mode = config.research.search.enabled;
+	if (mode === "off") return false;
+	const available = Boolean(environment.DEEPSEEK_API_KEY?.trim());
+	if (mode === "on" && !available) {
+		throw new Error("DEEPSEEK_API_KEY is missing while research.search.enabled is on");
+	}
+	return available;
+}
+
+export function researchPiCoreSettings(config, coreVersion, environment) {
 	const profile = researchPiProfile(config);
-	const enabledModels = [...new Set(Object.values(config.profiles).map((item) => `${item.provider}/${item.model}:${item.thinking}`))];
+	const configuredProfiles = environment
+		? Object.entries(config.profiles).filter(([name, item]) => {
+			if (name === config.activeProfile) return true;
+			const credentialName = RESEARCH_PI_PROVIDER_CREDENTIALS[item.provider];
+			return !credentialName || Boolean(environment[credentialName]?.trim());
+		})
+		: Object.entries(config.profiles);
+	const enabledModels = [...new Set(configuredProfiles.map(([, item]) => `${item.provider}/${item.model}:${item.thinking}`))];
 	return {
 		...clone(config.pi.settings),
 		...(coreVersion ? { lastChangelogVersion: coreVersion } : {}),
@@ -210,7 +249,7 @@ export function researchPiModels(config) {
 export function writeResearchPiAgentConfig(agentDir, config, options = {}) {
 	mkdirSync(agentDir, { recursive: true, mode: 0o700 });
 	for (const [name, value] of [
-		["settings.json", researchPiCoreSettings(config, options.coreVersion)],
+		["settings.json", researchPiCoreSettings(config, options.coreVersion, options.environment)],
 		["models.json", researchPiModels(config)],
 	]) {
 		const path = join(agentDir, name);
@@ -232,6 +271,7 @@ export function researchPiEnvironment(config) {
 		RESEARCH_PI_COMPACT_HARD_TOKENS: String(compact.hardTokens),
 		RESEARCH_PI_COMPACT_RECENT_TAIL_TOKENS: compact.recentTailTokens.join(","),
 		RESEARCH_PI_SEARCH_MODEL: search.model,
+		RESEARCH_PI_SEARCH_ENABLED: search.enabled,
 		RESEARCH_PI_SEARCH_THINKING_BUDGET_TOKENS: String(search.thinkingBudgetTokens),
 		RESEARCH_PI_SEARCH_MAX_SOURCES: String(search.maxSources),
 		RESEARCH_PI_SEARCH_DEFAULT_MAX_USES: String(search.defaultMaxUses),
@@ -253,7 +293,7 @@ export function researchPiConfigSummary(config, path) {
 		`Codex advisor: ${config.codex.advisor.model}/${config.codex.advisor.reasoningEffort}`,
 		`Codex executor: ${config.codex.executor.model}/${config.codex.executor.reasoningEffort}`,
 		`Research compact: ${config.research.compaction.softTokens}/${config.research.compaction.hardTokens} tokens`,
-		`Search: ${config.research.search.model} · max ${config.research.search.maxSources} sources`,
+		`Search: ${config.research.search.enabled} · deepseek/${config.research.search.model} · max ${config.research.search.maxSources} sources`,
 		`UI: theme ${config.pi.settings.theme ?? "research-pi"} · ${config.ui.density} · runtime strip ${config.ui.runtimeStrip}`,
 		`Profiles: ${Object.keys(config.profiles).join(", ")}`,
 	].join("\n");

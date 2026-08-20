@@ -16,6 +16,27 @@
       "provider": "deepseek",
       "model": "deepseek-v4-flash",
       "thinking": "max"
+    },
+    "opencode-go-flash": {
+      "label": "OpenCode Go · DeepSeek V4 Flash",
+      "description": "Recommended subscription route for routine research leadership.",
+      "provider": "opencode-go",
+      "model": "deepseek-v4-flash",
+      "thinking": "max"
+    },
+    "opencode-go-luna": {
+      "label": "OpenCode Go · GPT 5.6 Luna",
+      "description": "Fast general project coordination with lower reasoning cost.",
+      "provider": "opencode-go",
+      "model": "gpt-5.6-luna",
+      "thinking": "high"
+    },
+    "opencode-go-qwen": {
+      "label": "OpenCode Go · Qwen3.7 Plus",
+      "description": "Long-context alternative for routine coordination and handoffs.",
+      "provider": "opencode-go",
+      "model": "qwen3.7-plus",
+      "thinking": "high"
     }
   },
   "pi": {
@@ -54,6 +75,7 @@
       "recentTailTokens": [32768, 40960, 49152]
     },
     "search": {
+      "enabled": "auto",
       "model": "deepseek-v4-flash",
       "thinkingBudgetTokens": 1024,
       "maxSources": 12,

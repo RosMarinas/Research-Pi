@@ -33,7 +33,7 @@ export function profileSelectItems(config: ResearchConfig): SelectItem[] {
 		return {
 			value: name,
 			label: name === config.activeProfile ? `● ${profile.label ?? name}` : `  ${profile.label ?? name}`,
-			description: `${profile.model} · ${profile.thinking}${profile.description ? ` · ${profile.description}` : ""}`,
+			description: `${profile.provider}/${profile.model} · ${profile.thinking}${profile.description ? ` · ${profile.description}` : ""}`,
 		};
 	});
 }
@@ -162,7 +162,7 @@ export default function researchConfigExtension(pi: ExtensionAPI) {
 			const container = new Container();
 			container.addChild(new DynamicBorder((text) => theme.fg("borderAccent", text)));
 			container.addChild(new Text(theme.fg("customMessageLabel", theme.bold(" Research Pi / Model Profiles ")), 0, 0));
-			container.addChild(new Text(theme.fg("muted", ` current ${ctx.model?.id ?? currentModel} · ${pi.getThinkingLevel()} thinking`), 0, 0));
+			container.addChild(new Text(theme.fg("muted", ` current ${currentModel} · ${pi.getThinkingLevel()} thinking`), 0, 0));
 			container.addChild(new Text(theme.fg("dim", ` config ${compactConfigPath(configPath)}`), 0, 0));
 			container.addChild(new Text("", 0, 0));
 			const list = new SelectList(items, Math.min(items.length, config.ui.configPanelRows), {

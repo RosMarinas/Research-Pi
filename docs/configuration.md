@@ -18,7 +18,7 @@ pi config path
 pi config show
 ```
 
-API keys, passwords, private keys and other credentials do not belong in this file. Credential-like field names are rejected. Safety boundaries and recovery invariants are code policy rather than convenience toggles.
+API keys, passwords, private keys and other credentials do not belong in this file. Credential-like field names are rejected. `pi setup` creates placeholders for `DEEPSEEK_API_KEY` and `OPENCODE_API_KEY` in the separate credentials file and preserves existing values when a later update adds another provider. Safety boundaries and recovery invariants are code policy rather than convenience toggles.
 
 ## Model profiles
 
@@ -41,6 +41,27 @@ API keys, passwords, private keys and other credentials do not belong in this fi
       "provider": "deepseek",
       "model": "deepseek-v4-flash",
       "thinking": "max"
+    },
+    "opencode-go-flash": {
+      "label": "OpenCode Go · DeepSeek V4 Flash",
+      "description": "Recommended subscription route for routine research leadership.",
+      "provider": "opencode-go",
+      "model": "deepseek-v4-flash",
+      "thinking": "max"
+    },
+    "opencode-go-luna": {
+      "label": "OpenCode Go · GPT 5.6 Luna",
+      "description": "Fast general project coordination with lower reasoning cost.",
+      "provider": "opencode-go",
+      "model": "gpt-5.6-luna",
+      "thinking": "high"
+    },
+    "opencode-go-qwen": {
+      "label": "OpenCode Go · Qwen3.7 Plus",
+      "description": "Long-context alternative for routine coordination and handoffs.",
+      "provider": "opencode-go",
+      "model": "qwen3.7-plus",
+      "thinking": "high"
     }
   }
 }
@@ -50,18 +71,27 @@ Persistent switching:
 
 ```sh
 pi config list
-pi config use deepseek-flash
+pi config use opencode-go-flash
 ```
 
 One-launch override:
 
 ```sh
-pi --profile deepseek-pro
+pi --profile opencode-go-luna
 ```
 
 Inside the TUI, `/config` opens the profile overlay and persists the selected profile. `/config use <name>` does the same without the picker. Pi's native `Ctrl+L` and `/model` remain session-local overrides.
 
 Explicit Pi CLI `--provider`, `--model`, and `--thinking` arguments are appended after the selected profile and therefore win for that invocation.
+
+The profile list is intentionally curated instead of mirroring every model in OpenCode Go. Research Pi's Leader mainly frames work, maintains Project State, interprets evidence and delegates execution; the default menu therefore favors long-context, economical coordination models. Pi Core owns the changing endpoint/model metadata. To add another built-in Go model, copy a profile and change only `label`, `provider`, `model`, and `thinking`; use `provider: "opencode-go"` and a model ID supported by the pinned Pi Core.
+
+Credentials remain provider-specific:
+
+```dotenv
+DEEPSEEK_API_KEY=...  # official DeepSeek leader and/or native Web Search
+OPENCODE_API_KEY=...  # all OpenCode Go profiles
+```
 
 ## Pi Core settings
 
@@ -115,6 +145,7 @@ An individual `codex_delegate` call can still override model or effort. Existing
       "recentTailTokens": [32768, 40960, 49152]
     },
     "search": {
+      "enabled": "auto",
       "model": "deepseek-v4-flash",
       "thinkingBudgetTokens": 1024,
       "maxSources": 12,
@@ -124,7 +155,19 @@ An individual `codex_delegate` call can still override model or effort. Existing
 }
 ```
 
-These values configure Research Pi's structured compaction and bounded native Web Search. `pi.settings.compaction` remains the Pi Core fallback policy; it is not the research-state schema or dynamic tail schedule.
+These values configure Research Pi's structured compaction and bounded native Web Search. Search is independent of the active Leader profile: `auto` loads the tool only when `DEEPSEEK_API_KEY` exists, `on` fails early when that key is absent, and `off` never loads it. OpenCode Go is not assumed to implement DeepSeek's native search extension. `pi.settings.compaction` remains the Pi Core fallback policy; it is not the research-state schema or dynamic tail schedule.
+
+## Provider smoke test
+
+After an update, run:
+
+```sh
+pi setup
+pi config list
+pi --profile opencode-go-flash
+```
+
+In the TUI, ask for a one-sentence response without tools, then open `/config` and switch once to `opencode-go-luna` or `opencode-go-qwen`. Confirm the footer shows the intended provider/model and the next response succeeds. If `DEEPSEEK_API_KEY` is also configured, ask for one current fact that requires `web_search`; if it is intentionally absent, confirm `web_search` is not listed among the tools. This is sufficient for ordinary route validation. Tool calls, long-context continuation, compaction and cache behavior should be judged during real project use rather than by an expensive synthetic matrix.
 
 ## Skills, UI and diagnostics
 

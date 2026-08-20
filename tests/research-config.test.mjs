@@ -10,7 +10,10 @@ import {
 	defaultResearchPiConfig,
 	ensureResearchPiConfig,
 	readResearchPiConfig,
+	researchPiCredentialEnvironmentNames,
+	researchPiDeepSeekSearchEnabled,
 	researchPiEnvironment,
+	researchPiProfileCredential,
 	resolveResearchPiConfig,
 	writeResearchPiAgentConfig,
 	writeResearchPiConfig,
@@ -23,6 +26,10 @@ test("one Research Pi config resolves leader, Codex, compact, search, and UI def
 	assert.equal(config.codex.executor.model, "gpt-5.6-sol");
 	assert.equal(config.research.compaction.hardTokens, 384 * 1024);
 	assert.equal(config.research.search.model, "deepseek-v4-flash");
+	assert.equal(config.research.search.enabled, "auto");
+	assert.equal(config.profiles["opencode-go-flash"].provider, "opencode-go");
+	assert.equal(config.profiles["opencode-go-luna"].model, "gpt-5.6-luna");
+	assert.equal(config.profiles["opencode-go-qwen"].model, "qwen3.7-plus");
 	assert.equal(config.ui.density, "balanced");
 	assert.equal(config.ui.runtimeStrip, "auto");
 	assert.equal(config.ui.showProfileStatus, false);
@@ -40,6 +47,7 @@ test("partial user config merges over defaults and rejects dangerous ambiguity",
 	assert.throws(() => resolveResearchPiConfig({ activeProfile: "missing" }), /does not exist/);
 	assert.throws(() => resolveResearchPiConfig({ typoSetting: true }), /Unknown Research Pi config key/);
 	assert.throws(() => resolveResearchPiConfig({ research: { compaction: { softTokens: 500_000 } } }), /below hardTokens/);
+	assert.throws(() => resolveResearchPiConfig({ research: { search: { enabled: "sometimes" } } }), /auto, on, or off/);
 	assert.throws(() => resolveResearchPiConfig({ pi: { settings: { api_key: "do-not-store-here" } } }), /credential-like/);
 });
 
@@ -58,8 +66,25 @@ test("config persistence creates a private file, schema, and generated Pi adapte
 		const models = JSON.parse(readFileSync(join(agentDir, "models.json"), "utf8"));
 		assert.equal(settings.defaultModel, "deepseek-v4-flash");
 		assert.equal(settings.defaultThinkingLevel, "max");
-		assert.deepEqual(settings.enabledModels.sort(), ["deepseek/deepseek-v4-flash:max", "deepseek/deepseek-v4-pro:max"]);
+		assert.deepEqual(settings.enabledModels.sort(), [
+			"deepseek/deepseek-v4-flash:max",
+			"deepseek/deepseek-v4-pro:max",
+			"opencode-go/deepseek-v4-flash:max",
+			"opencode-go/gpt-5.6-luna:high",
+			"opencode-go/qwen3.7-plus:high",
+		]);
 		assert.equal(models.providers.deepseek.modelOverrides["deepseek-v4-flash"].compat.maxTokensField, "max_tokens");
+
+		writeResearchPiAgentConfig(agentDir, resolveResearchPiConfig({ activeProfile: "opencode-go-flash" }), {
+			coreVersion: "0.84.1",
+			environment: { OPENCODE_API_KEY: "configured" },
+		});
+		const goOnlySettings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"));
+		assert.deepEqual(goOnlySettings.enabledModels.sort(), [
+			"opencode-go/deepseek-v4-flash:max",
+			"opencode-go/gpt-5.6-luna:high",
+			"opencode-go/qwen3.7-plus:high",
+		]);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -72,9 +97,25 @@ test("config exports one deterministic environment for runtime consumers", () =>
 	assert.equal(environment.RESEARCH_PI_CODEX_ADVISOR_MODEL, "gpt-5.6-sol");
 	assert.equal(environment.RESEARCH_PI_COMPACT_HARD_TOKENS, String(384 * 1024));
 	assert.equal(environment.RESEARCH_PI_SEARCH_MODEL, "deepseek-v4-flash");
+	assert.equal(environment.RESEARCH_PI_SEARCH_ENABLED, "auto");
 	assert.equal(environment.RESEARCH_PI_UI_DENSITY, "balanced");
 	assert.equal(environment.RESEARCH_PI_UI_RUNTIME_STRIP, "auto");
 	assert.equal(environment.RESEARCH_PI_UI_SHOW_PROFILE_STATUS, "0");
+});
+
+test("provider credentials and native search are independent", () => {
+	const official = resolveResearchPiConfig({ activeProfile: "deepseek-flash" });
+	const go = resolveResearchPiConfig({ activeProfile: "opencode-go-flash" });
+	assert.equal(researchPiProfileCredential(official).environmentVariable, "DEEPSEEK_API_KEY");
+	assert.equal(researchPiProfileCredential(go).environmentVariable, "OPENCODE_API_KEY");
+	assert.deepEqual(researchPiCredentialEnvironmentNames(go).sort(), ["DEEPSEEK_API_KEY", "OPENCODE_API_KEY"]);
+	assert.equal(researchPiDeepSeekSearchEnabled(go, { OPENCODE_API_KEY: "go-key" }), false);
+	assert.equal(researchPiDeepSeekSearchEnabled(go, { OPENCODE_API_KEY: "go-key", DEEPSEEK_API_KEY: "ds-key" }), true);
+	assert.equal(researchPiDeepSeekSearchEnabled(resolveResearchPiConfig({ research: { search: { enabled: "off" } } }), {}), false);
+	assert.throws(
+		() => researchPiDeepSeekSearchEnabled(resolveResearchPiConfig({ research: { search: { enabled: "on" } } }), {}),
+		/DEEPSEEK_API_KEY is missing/,
+	);
 });
 
 test("Codex, compact, and search modules consume the configured environment", () => {
@@ -117,10 +158,11 @@ test("Codex, compact, and search modules consume the configured environment", ()
 test("model profile UI is concise, descriptive, and reflects live session overrides", () => {
 	const config = defaultResearchPiConfig();
 	const items = profileSelectItems(config);
-	assert.equal(items.length, 2);
+	assert.equal(items.length, 5);
 	assert.match(items[0].label, /^● /);
-	assert.match(items[0].description, /deepseek-v4-pro/);
+	assert.match(items[0].description, /deepseek\/deepseek-v4-pro/);
 	assert.match(items[1].description, /Lower latency/);
+	assert.match(items[2].description, /opencode-go\/deepseek-v4-flash/);
 	assert.equal(compactConfigPath("/Users/polaris/Documents/Utils/Pi/.worktrees/runtime-next/.pi/config.json"), "…/.worktrees/runtime-next/.pi/config.json");
 	const status = formatProfileStatus(config, {
 		model: { provider: "deepseek", id: "deepseek-v4-flash" },
@@ -187,7 +229,7 @@ test("/config renders a bordered native overlay with current-model context and k
 		assert.equal(overlayOptions.overlayOptions.anchor, "center");
 		assert.equal(overlayOptions.overlayOptions.width, "88%");
 		assert.match(text, /Research Pi \/ Model Profiles/);
-		assert.match(text, /current deepseek-v4-pro/);
+		assert.match(text, /current deepseek\/deepseek-v4-pro/);
 		assert.match(text, /enter apply \+ persist/);
 		assert.match(text, /[─╭╮]/);
 		await commands.get("config").handler("use deepseek-flash", ctx);

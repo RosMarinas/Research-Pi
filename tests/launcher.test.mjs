@@ -24,6 +24,7 @@ test("packaged launcher creates external config/state and runs the pinned core",
 		assert.equal(setup.status, 0, setup.stderr);
 		const credentials = join(config, "credentials.env");
 		assert.match(readFileSync(credentials, "utf8"), /DEEPSEEK_API_KEY=/);
+		assert.match(readFileSync(credentials, "utf8"), /OPENCODE_API_KEY=/);
 		assert.equal(statSync(credentials).mode & 0o777, 0o600);
 		const configPath = join(config, "config.json");
 		assert.equal(JSON.parse(readFileSync(configPath, "utf8")).activeProfile, "deepseek-pro");
@@ -42,6 +43,12 @@ test("packaged launcher creates external config/state and runs the pinned core",
 		assert.match(switchProfile.stdout, /deepseek-flash/);
 		assert.equal(JSON.parse(readFileSync(configPath, "utf8")).activeProfile, "deepseek-flash");
 		assert.equal(JSON.parse(readFileSync(join(state, "agent", "settings.json"), "utf8")).defaultModel, "deepseek-v4-flash");
+
+		const switchGo = spawnSync(process.execPath, [launcher, "config", "use", "opencode-go-flash"], { encoding: "utf8", env: environment });
+		assert.equal(switchGo.status, 0, switchGo.stderr);
+		assert.match(switchGo.stdout, /opencode-go\/deepseek-v4-flash/);
+		assert.equal(JSON.parse(readFileSync(configPath, "utf8")).activeProfile, "opencode-go-flash");
+		assert.equal(JSON.parse(readFileSync(join(state, "agent", "settings.json"), "utf8")).defaultProvider, "opencode-go");
 
 		const version = spawnSync(process.execPath, [launcher, "--version"], { encoding: "utf8", env: environment });
 		assert.equal(version.status, 0, version.stderr);
