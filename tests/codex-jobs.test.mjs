@@ -60,7 +60,16 @@ test("Codex delegation exposes bounded running and terminal footer states", () =
 		status: "running",
 		progress: "item.completed: command execution",
 	});
-	assert.equal(running, "⚙ Codex executor 12345678 · running · item.completed: command execution");
+	assert.equal(running, "⚙ Codex executor 12345678 · running · phase: item.completed: command execution");
+
+	const runningAfterTool = formatCodexStatus({
+		id: "codex-2026-08-11-9e62a4b5",
+		mode: "executor",
+		status: "running",
+		progress: "Codex turn running",
+		lastActivity: { summary: "research_pi_host · completed" },
+	});
+	assert.equal(runningAfterTool, "⚙ Codex executor 9e62a4b5 · running · last: research_pi_host · completed");
 
 	const completed = formatCodexStatus({
 		id: "codex-2026-08-11-abcdef12",
@@ -68,7 +77,7 @@ test("Codex delegation exposes bounded running and terminal footer states", () =
 		status: "completed",
 		progress: "completed",
 	});
-	assert.equal(completed, "✓ Codex advisor abcdef12 · completed · completed");
+	assert.equal(completed, "✓ Codex advisor abcdef12 · completed · phase: completed");
 });
 
 test("a stale Pi Session cannot start new Codex work after Leader ownership moves", async () => {
@@ -204,7 +213,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       send({ id: "server-host-read-1", method: "item/tool/call", params: { threadId: "thread-fake-123", turnId: activeTurn, callId: "host-call-1", tool: "research_pi_host", arguments: { action: "read", path } } });
     } else if (prompt.includes("HOST_COMMAND_PATH=")) {
       const path = prompt.match(/HOST_COMMAND_PATH=([^\\n<]+)/)?.[1]?.trim();
-      send({ id: "server-host-command-1", method: "item/tool/call", params: { threadId: "thread-fake-123", turnId: activeTurn, callId: "host-command-1", tool: "research_pi_host", arguments: { action: "command", argv: [process.execPath, path, "from-codex"], cwd: process.cwd() } } });
+      const grantId = prompt.match(/HOST_COMMAND_GRANT=(grant-[A-Za-z0-9]{8})/)?.[1];
+      send({ id: "server-host-command-1", method: "item/tool/call", params: { threadId: "thread-fake-123", turnId: activeTurn, callId: "host-command-1", tool: "research_pi_host", arguments: { action: "command", argv: [process.execPath, path, "from-codex"], ...(grantId ? { grantId } : { cwd: process.cwd() }) } } });
     } else {
       completionTimer = setTimeout(() => complete(prompt), ${delayMs});
     }
@@ -904,7 +914,7 @@ test("App Server objective command and subagent events reach the bounded audit p
 		const workspace = join(root, "workspace");
 		const jobRoot = join(root, "codex", "jobs");
 		mkdirSync(workspace, { recursive: true });
-		const codexBin = makeFakeCodex(root);
+		const codexBin = makeFakeCodex(root, 500);
 		const started = await startCodexJob({
 			cwd: workspace,
 			jobRoot,
@@ -912,6 +922,19 @@ test("App Server objective command and subagent events reach the bounded audit p
 			mode: "advisor",
 			task: "emit objective activity for the TUI",
 		});
+		let active;
+		for (let attempt = 0; attempt < 100; attempt++) {
+			const current = await readCodexJob(started.id, { jobRoot });
+			if (current.lastActivity?.category === "subagent") {
+				active = current;
+				break;
+			}
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		assert.equal(active?.status, "running", JSON.stringify(active));
+		assert.equal(active?.progress, "Codex turn running");
+		assert.equal(active?.currentActivity, null);
+		assert.equal(active?.lastActivity?.status, "completed");
 		const completed = await waitForCodexJob(started.id, { jobRoot });
 		assert.equal(completed.status, "completed");
 		const events = readFileSync(join(jobRoot, started.id, "events.jsonl"), "utf8")
@@ -970,30 +993,33 @@ test("Codex executor reuses a project-trusted host-command prefix", async () => 
 		const workspace = join(root, "workspace");
 		const jobRoot = join(root, "codex", "jobs");
 		mkdirSync(join(workspace, ".git"), { recursive: true });
+		const worktree = join(workspace, ".worktrees", "experiment-a");
+		mkdirSync(worktree, { recursive: true });
 		const commandScript = join(workspace, "host-command.mjs");
-		writeFileSync(commandScript, "process.stdout.write(`host-command:${process.argv[2]}`);\n", { mode: 0o600 });
+		writeFileSync(commandScript, "process.stdout.write(`host-command:${process.argv[2]}:cwd=${process.cwd()}`);\n", { mode: 0o600 });
 		const hostCapabilityContext = await resolveCapabilityContext(workspace, "pi-session-host-command", {
 			stateRoot: join(root, "capabilities"),
 		});
 		const request = await prepareCapabilityRequest(hostCapabilityContext, {
 			kind: "host-command",
-			cwd: workspace,
+			cwd: worktree,
 			argv: [process.execPath, commandScript, "seed"],
 		});
-		await createCapabilityGrant(hostCapabilityContext, request, "project");
+		const grant = await createCapabilityGrant(hostCapabilityContext, request, "project");
 		const codexBin = makeFakeCodex(root);
 		const started = await startCodexJob({
 			cwd: workspace,
 			jobRoot,
 			codexBin,
 			mode: "executor",
-			task: `Execute the trusted project command. HOST_COMMAND_PATH=${commandScript}`,
+			task: `Execute the trusted project command. HOST_COMMAND_PATH=${commandScript}\nHOST_COMMAND_GRANT=${grant.id}`,
 			leaderSessionId: "pi-session-host-command",
 			hostCapabilityContext,
 		});
 		const completed = await waitForCodexJob(started.id, { jobRoot });
 		assert.equal(completed.status, "completed");
 		assert.match(completed.result.evidence.join("\n"), /host-command:from-codex/);
+		assert.match(completed.result.evidence.join("\n"), new RegExp(`cwd=${grant.cwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

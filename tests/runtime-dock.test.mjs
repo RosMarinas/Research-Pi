@@ -36,6 +36,29 @@ test("Runtime Dock is responsive and renders objective Codex progress", () => {
 		if (width >= 48) {
 			assert.match(lines.join("\n"), /EmbeddingWorld/);
 			assert.match(lines.join("\n"), /advisor/);
+			assert.match(lines.join("\n"), /RUNNING/);
 		}
 	}
+});
+
+test("Runtime Dock never presents a completed leaf tool as a completed executor", () => {
+	const active = model({ counts: { active: 1 } });
+	const jobs = [{
+		id: "codex-demo-9e62a4b5",
+		status: "running",
+		mode: "executor",
+		progress: "research_pi_host · completed",
+		lastActivity: {
+			id: "tool-1",
+			category: "tool",
+			status: "completed",
+			summary: "research_pi_host · completed",
+			at: new Date().toISOString(),
+		},
+		startedAt: new Date(Date.now() - 90 * 60_000).toISOString(),
+	}];
+	const lines = new RuntimeDockComponent(active, jobs, theme(), { density: "balanced" }).render(160).join("\n");
+	assert.match(lines, /executor 9e62a4b5 · RUNNING/);
+	assert.match(lines, /last: research_pi_host · completed/);
+	assert.doesNotMatch(lines, /executor 9e62a4b5 · COMPLETED/);
 });

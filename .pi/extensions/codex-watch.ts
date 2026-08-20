@@ -218,6 +218,8 @@ class CodexWatchOverlay {
 				current.id,
 				current.status,
 				current.progress,
+				current.currentActivity,
+				current.lastActivity,
 				current.lastActivityAt,
 				current.pendingRequest?.id ?? null,
 				events.length,
@@ -295,7 +297,14 @@ class CodexWatchOverlay {
 		const counts = new Map<string, number>();
 		for (const event of events) counts.set(event.category, (counts.get(event.category) ?? 0) + 1);
 		return [
-			` ${th.fg("dim", "Progress")}  ${compact(job.progress, 500) || "waiting for the first App Server event"}`,
+			` ${th.fg("dim", "Job state")}  ${job.status}`,
+			` ${th.fg("dim", "Phase")}      ${compact(job.progress, 500) || "waiting for the first App Server event"}`,
+			...(job.currentActivity?.summary
+				? [` ${th.fg("dim", "Current")}    ${compact(job.currentActivity.summary, 500)}`]
+				: []),
+			...(job.lastActivity?.summary
+				? [` ${th.fg("dim", "Last")}       ${compact(job.lastActivity.summary, 500)}`]
+				: []),
 			` ${th.fg("dim", "Observed")}  ${events.length} events · ${counts.get("command") ?? 0} commands · ${counts.get("file") ?? 0} file changes · ${agents.length} subagents`,
 			"",
 			` ${th.fg("dim", "Recent objective activity")}`,

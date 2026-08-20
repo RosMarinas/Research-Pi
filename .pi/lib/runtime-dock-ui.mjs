@@ -32,6 +32,22 @@ function latestLiveJob(jobs = []) {
 		.sort((left, right) => Date.parse(right.lastActivityAt ?? right.startedAt ?? right.createdAt ?? "") - Date.parse(left.lastActivityAt ?? left.startedAt ?? left.createdAt ?? ""))[0] ?? null;
 }
 
+function jobStateLabel(status) {
+	return String(status ?? "unknown").replaceAll("_", " ").toUpperCase();
+}
+
+function jobActivityLabel(job) {
+	if (job.currentActivity?.summary) return `now: ${inline(job.currentActivity.summary, 92)}`;
+	if (job.lastActivity?.summary) return `last: ${inline(job.lastActivity.summary, 92)}`;
+	const progress = inline(job.progress || job.mission, 92);
+	if (!progress) return "";
+	const looksLikeCompletedLeaf = ACTIVE.has(job.status) && (
+		/\s·\s(?:completed|failed)$/i.test(progress)
+		|| /^(?:command|file changes)\s+(?:completed|failed):/i.test(progress)
+	);
+	return `${looksLikeCompletedLeaf ? "last" : "phase"}: ${progress}`;
+}
+
 export function runtimeDockVisible(model, mode = "auto") {
 	if (mode === "off") return false;
 	if (mode === "always") return true;
@@ -78,8 +94,10 @@ export class RuntimeDockComponent {
 			open ? `${open} open` : "",
 		].filter(Boolean).join(" · ") || "idle";
 		const state = `${leader} · ${th.fg(stateColor, `memory ${freshness}`)} · ${counters}`;
+		const jobElapsed = job ? elapsed(job.startedAt ?? job.createdAt) : "";
+		const jobDetail = job ? jobActivityLabel(job) : "";
 		const jobLine = job
-			? `${th.fg(job.status === "input_required" ? "warning" : "accent", job.status === "input_required" ? "?" : "●")} ${job.mode ?? "codex"} ${shortId(job.id)}${elapsed(job.startedAt ?? job.createdAt) ? ` · ${elapsed(job.startedAt ?? job.createdAt)}` : ""} · ${inline(job.progress || job.mission || job.status, 110)}`
+			? `${th.fg(job.status === "input_required" ? "warning" : "accent", job.status === "input_required" ? "?" : "●")} ${job.mode ?? "codex"} ${shortId(job.id)} · ${jobStateLabel(job.status)}${jobElapsed ? ` ${jobElapsed}` : ""}${jobDetail ? ` · ${jobDetail}` : ""}`
 			: "";
 
 		if (usable < 64 || this.density === "compact") {

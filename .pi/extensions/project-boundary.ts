@@ -10,7 +10,7 @@ import {
 	capabilityGrantSummary,
 	createCapabilityGrant,
 	executeGrantedCapability,
-	findCapabilityGrant,
+	inspectCapabilityAuthorization,
 	isForbiddenCredentialRead,
 	listCapabilityGrants,
 	prepareCapabilityRequest,
@@ -93,6 +93,7 @@ function capabilityInput(params: any) {
 	if (params.action === "command") {
 		return {
 			kind: "host-command",
+			grantId: params.grantId,
 			argv: params.argv ?? [],
 			cwd: params.cwd,
 			timeoutSeconds: params.timeoutSeconds,
@@ -292,8 +293,9 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 		promptSnippet: "Use project-trusted SSH or host-command capabilities instead of handing executable commands back to the user",
 		promptGuidelines: [
 			"Run arbitrary uv, Python, shell, Node, Git, and test commands normally inside the project sandbox. Command syntax such as sh -c or python -c is not itself a reason to refuse.",
-			"When a justified command needs host SSH access or another host-user capability, call host_capability command with an exact argv. If a project trust rule already matches, execution is automatic.",
+			"When a justified command needs host SSH access or another host-user capability, call host_capability command with an exact argv. Reuse a listed grantId when possible; its approved cwd is then restored automatically.",
 			"Direct SSH uses opaque credentials. Host-command has broader user authority and must match an approved exact command or project prefix; never request, read, print, copy, or transmit private keys or tokens.",
+			"If a command grant reports a cwd mismatch, retry the same command action with that grantId. Do not switch to script or wrap it in a new shell command merely to obtain another grant.",
 			"A missing capability is a user authorization boundary. Do not route around it with bash, symlinks, proxy commands, copied credentials, or another agent.",
 		],
 		parameters: Type.Object({
@@ -302,6 +304,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			target: Type.Optional(Type.String({ description: "Exact SSH alias or [user@]host[:port]" })),
 			port: Type.Optional(Type.Integer({ minimum: 1, maximum: 65535 })),
 			remoteCommand: Type.Optional(Type.String({ description: "Exact remote shell command for ssh" })),
+			grantId: Type.Optional(Type.String({ description: "Exact existing grant-XXXXXXXX id; restores its approved cwd without broadening authority" })),
 			argv: Type.Optional(Type.Array(Type.String(), { maxItems: 128, description: "Exact host command argv, for example [\"uv\",\"run\",\"remote_run.py\",\"bash\",\"experiment.sh\"]" })),
 			cwd: Type.Optional(Type.String({ description: "Working directory inside the current project; defaults to the project root" })),
 			args: Type.Optional(Type.Array(Type.String(), { maxItems: 64, description: "Legacy exact argv for project-script" })),
@@ -316,8 +319,9 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 					return { content: [{ type: "text", text: grants.length ? grants.map(capabilityGrantSummary).join("\n") : "No active host capabilities." }] };
 				}
 				const input = capabilityInput(params);
-				const request = await prepareCapabilityRequest(context, input);
-				if (!(await findCapabilityGrant(context, request))) {
+				const inspected = await inspectCapabilityAuthorization(context, input);
+				const request = inspected.request;
+				if (!inspected.grant) {
 					const grant = await requestInteractiveGrant(request, ctx, input);
 					if (!grant) throw new Error("Host capability was not approved by the user");
 				}

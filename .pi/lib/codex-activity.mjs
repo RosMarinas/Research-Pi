@@ -73,7 +73,7 @@ export function describeCodexNotification(message) {
 	const params = message?.params ?? {};
 	const item = params.item ?? {};
 	if (method === "thread/started") return "Codex thread started";
-	if (method === "turn/started") return "Codex turn started";
+	if (method === "turn/started") return "Codex turn running";
 	if (method === "turn/completed") return `Codex turn ${sanitizeCodexActivityText(params.turn?.status ?? "completed", 80)}`;
 	if (method === "error") return sanitizeCodexActivityText(params.error?.message ?? params.message ?? "Codex error", 1000);
 	if (method !== "item/started" && method !== "item/completed") return null;
@@ -255,6 +255,28 @@ export function compactCodexAuditEvent(message, options = {}) {
 		default:
 			return null;
 	}
+}
+
+/**
+ * Project one objective leaf event into bounded job-state activity. Job
+ * lifecycle remains separate: an item/completed notification never means the
+ * Codex turn or job completed.
+ */
+export function projectCodexActivityUpdate(message, options = {}) {
+	if (message?.method !== "item/started" && message?.method !== "item/completed") return null;
+	const record = compactCodexAuditEvent(message, options);
+	if (!record?.summary || !record?.category) return null;
+	const at = record.timestamp ?? options.timestamp ?? now();
+	return {
+		phase: record.phase,
+		activity: {
+			id: record.itemId ?? null,
+			category: record.category,
+			summary: record.summary,
+			status: record.status ?? record.phase,
+			at,
+		},
+	};
 }
 
 export function normalizeCodexActivityRecord(record) {

@@ -4,7 +4,7 @@ import { createWriteStream } from "node:fs";
 import { appendFile, mkdir, readdir } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { executeGrantedCapability } from "./host-capabilities.mjs";
-import { compactCodexAuditEvent, describeCodexNotification } from "./codex-activity.mjs";
+import { compactCodexAuditEvent, describeCodexNotification, projectCodexActivityUpdate } from "./codex-activity.mjs";
 import { configureCodexSqliteLogs } from "./codex-sqlite-logs.mjs";
 import {
 	getGitSnapshot,
@@ -112,6 +112,8 @@ async function main() {
 	let notificationUpdateTimer;
 	let pendingNotificationUpdate = null;
 	let lastNotificationProgress = null;
+	let currentObjectiveActivity = null;
+	const activeObjectiveActivities = new Map();
 	let rpcSequence = 1;
 	let updateQueue = Promise.resolve();
 	let resolveTurn;
@@ -309,6 +311,7 @@ async function main() {
 						: args.action === "command"
 							? {
 								kind: "host-command",
+								grantId: args.grantId,
 								argv: args.argv ?? [],
 								cwd: args.cwd,
 								timeoutSeconds: args.timeoutSeconds,
@@ -319,12 +322,10 @@ async function main() {
 							args: args.args ?? [],
 							timeoutSeconds: args.timeoutSeconds,
 						};
-				await enqueueJobUpdate({ progress: `host capability ${args.action ?? "unknown"} running` });
 				const result = await executeGrantedCapability(request.hostCapabilityContext, input, {
 					signal: hostCapabilityAbort.signal,
 					env: process.env,
 				});
-				await enqueueJobUpdate({ progress: `host capability ${args.action} finished with exit ${result.exitCode}` });
 				const content = truncate([
 					`Grant ${result.grantId} executed (${result.kind}: ${result.target}).`,
 					`Exit: ${result.exitCode}${result.timedOut ? " · timed out" : ""}${result.outputTruncated ? " · output truncated" : ""}`,
@@ -473,10 +474,26 @@ async function main() {
 			lastAgentText = params.item.text;
 		}
 		if (method === "error") lastError = truncate(params.error?.message ?? params.message ?? JSON.stringify(params), 4000);
-		const progress = describeCodexNotification(message);
-		const progressChanged = progress && progress !== lastNotificationProgress;
-		if (progressChanged) lastNotificationProgress = progress;
-		if (progressChanged) queueNotificationUpdate({ progress });
+		const activityUpdate = projectCodexActivityUpdate(message);
+		if (activityUpdate?.phase === "started") {
+			const key = activityUpdate.activity.id ?? `${activityUpdate.activity.category}:${activityUpdate.activity.summary}`;
+			activeObjectiveActivities.delete(key);
+			activeObjectiveActivities.set(key, activityUpdate.activity);
+			while (activeObjectiveActivities.size > 32) activeObjectiveActivities.delete(activeObjectiveActivities.keys().next().value);
+			currentObjectiveActivity = [...activeObjectiveActivities.values()].at(-1) ?? null;
+			queueNotificationUpdate({ currentActivity: currentObjectiveActivity });
+		} else if (activityUpdate?.phase === "completed") {
+			const completed = activityUpdate.activity;
+			const key = completed.id ?? `${completed.category}:${completed.summary}`;
+			activeObjectiveActivities.delete(key);
+			currentObjectiveActivity = [...activeObjectiveActivities.values()].at(-1) ?? null;
+			queueNotificationUpdate({ currentActivity: currentObjectiveActivity, lastActivity: completed });
+		} else if (method === "error") {
+			const progress = describeCodexNotification(message);
+			const progressChanged = progress && progress !== lastNotificationProgress;
+			if (progressChanged) lastNotificationProgress = progress;
+			if (progressChanged) queueNotificationUpdate({ progress });
+		}
 		if (
 			method === "turn/completed" &&
 			identity.thread === threadId &&
@@ -688,7 +705,7 @@ async function main() {
 			{
 				name: "research_pi_host",
 				description:
-					"Use Research Pi host capabilities for justified SSH or host-user operations. Project-trusted SSH targets and command prefixes run automatically; otherwise ask Research Pi for approval through consult_research_pi. Normal uv/Python/shell commands stay in the project sandbox. Advisor mode may use read only.",
+					"Use Research Pi host capabilities for justified SSH or host-user operations. Project-trusted SSH targets and command prefixes run automatically. For a listed command grant, pass grantId so its approved cwd is restored; do not switch capability kind or create a shell wrapper after a cwd mismatch. Otherwise ask Research Pi for approval through consult_research_pi. Normal uv/Python/shell commands stay in the project sandbox. Advisor mode may use read only.",
 				inputSchema: {
 					type: "object",
 					additionalProperties: false,
@@ -699,6 +716,7 @@ async function main() {
 						target: { type: "string", maxLength: 255 },
 						port: { type: "integer", minimum: 1, maximum: 65535 },
 						remoteCommand: { type: "string", maxLength: 32768 },
+						grantId: { type: "string", pattern: "^grant-[A-Za-z0-9]{8}$" },
 						argv: { type: "array", maxItems: 128, items: { type: "string", maxLength: 4096 } },
 						cwd: { type: "string", maxLength: 4096 },
 						args: { type: "array", maxItems: 64, items: { type: "string", maxLength: 4096 } },
@@ -780,7 +798,7 @@ async function main() {
 		const turn = await turnDone;
 		if (timeout) clearTimeout(timeout);
 		if (commandTimer) clearInterval(commandTimer);
-		cancelNotificationUpdate();
+		await flushNotificationUpdate();
 		await updateQueue;
 		const turnFailed = turn?.status === "failed";
 		if (turnFailed) lastError = truncate(turn.error?.message ?? (lastError || "Codex turn failed"), 4000);
@@ -797,6 +815,7 @@ async function main() {
 			threadId,
 			activeTurnId: null,
 			pendingRequest: null,
+			currentActivity: null,
 			exitCode: status === "completed" ? 0 : 1,
 			progress: cancellationRequested ? "cancelled" : timedOut ? "timed out" : status,
 			gitAfter,
@@ -809,7 +828,7 @@ async function main() {
 			lastActivityAt: now(),
 		}));
 	} catch (error) {
-		cancelNotificationUpdate();
+		await flushNotificationUpdate();
 		await updateQueue;
 		lastError = truncate(error?.stack ?? String(error), 12000);
 		const resultPath = join(jobDir, "result.json");
@@ -822,6 +841,7 @@ async function main() {
 			finishedAt,
 			activeTurnId: null,
 			pendingRequest: null,
+			currentActivity: null,
 			progress: unknownOutcome ? "worker lost after side effects may have started" : cancellationRequested ? "cancelled" : "worker failed",
 			resultPath,
 			error: lastError,

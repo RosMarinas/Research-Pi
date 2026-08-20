@@ -34,6 +34,7 @@ test("project boundary exposes one opaque host-capability tool", () => {
 	assert.match(hostTool.description, /command runs an argv/);
 	assert.match(JSON.stringify(hostTool.parameters), /host command argv/);
 	assert.match(JSON.stringify(hostTool.parameters), /"command"/);
+	assert.match(JSON.stringify(hostTool.parameters), /grantId/);
 	assert.deepEqual(commands, ["boundary"]);
 });
 

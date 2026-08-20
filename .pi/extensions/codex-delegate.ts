@@ -153,6 +153,19 @@ function requireText(value: string | undefined, label: string): string {
 	return value.trim();
 }
 
+const ACTIVE_JOB_STATUSES = new Set(["starting", "running", "cancelling"]);
+
+function jobActivityText(job: any): string {
+	if (job.currentActivity?.summary) return `now: ${boundedProgress(job.currentActivity.summary)}`;
+	if (job.lastActivity?.summary) return `last: ${boundedProgress(job.lastActivity.summary)}`;
+	const progress = boundedProgress(job.progress);
+	const completedLeaf = ACTIVE_JOB_STATUSES.has(job.status) && (
+		/\s·\s(?:completed|failed)$/i.test(progress)
+		|| /^(?:command|file changes)\s+(?:completed|failed):/i.test(progress)
+	);
+	return `${completedLeaf ? "last" : "phase"}: ${progress}`;
+}
+
 function formatJob(job: ReturnType<typeof publicJobView>): string {
 	if (job.status === "completed" && job.result) {
 		return `Codex job ${job.id} completed.\n${JSON.stringify(job.result, null, 2)}`;
@@ -166,7 +179,7 @@ function formatJob(job: ReturnType<typeof publicJobView>): string {
 	if (job.status === "input_required" && job.pendingRequest) {
 		return `Codex job ${job.id} needs input (${job.pendingRequest.id}): ${job.pendingRequest.question}`;
 	}
-	return `Codex job ${job.id} is ${job.status}: ${job.progress}. Use action=result later to retrieve its structured result.`;
+	return `Codex job ${job.id} is ${job.status}; ${jobActivityText(job)}. Use action=result later to retrieve its structured result.`;
 }
 
 function formatMissions(missions: Awaited<ReturnType<typeof listCodexMissions>>): string {
@@ -258,7 +271,7 @@ export function formatCodexStatus(job: CodexJobView, activeCount = 1): string {
 	const icon = job.status === "completed" ? "✓" : job.status === "outcome_unknown" ? "!" : job.status === "failed" || job.status === "cancelled" ? "✗" : job.status === "input_required" ? "?" : "⚙";
 	const count = activeCount > 1 && !TERMINAL_JOB_STATUSES.has(job.status) ? `${activeCount} running · ` : "";
 	const mission = job.mission ? ` · ${boundedProgress(job.mission).slice(0, 36)}` : "";
-	return `${icon} Codex ${count}${job.mode} ${shortJobId(job.id)}${mission} · ${job.status} · ${boundedProgress(job.progress)}`;
+	return `${icon} Codex ${count}${job.mode} ${shortJobId(job.id)}${mission} · ${job.status} · ${jobActivityText(job)}`;
 }
 
 export default function codexDelegateExtension(pi: ExtensionAPI) {
