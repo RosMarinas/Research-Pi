@@ -83,6 +83,18 @@ function prepareWithDynamicTail(event: SessionBeforeCompactEvent, keepRecentToke
 	};
 }
 
+export function researchCompactionThresholds(model?: { contextWindow?: number } | null) {
+	const contextWindow = Number(model?.contextWindow);
+	if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
+		return { softTokens: RESEARCH_SOFT_COMPACT_TOKENS, hardTokens: RESEARCH_HARD_COMPACT_TOKENS };
+	}
+	const reserved = Math.max(32 * 1024, Math.floor(contextWindow * 0.1));
+	const modelSafeHard = Math.max(64 * 1024, contextWindow - reserved);
+	const hardTokens = Math.min(RESEARCH_HARD_COMPACT_TOKENS, modelSafeHard);
+	const softTokens = Math.min(RESEARCH_SOFT_COMPACT_TOKENS, Math.floor(hardTokens * 0.75));
+	return { softTokens, hardTokens };
+}
+
 export default function (pi: ExtensionAPI) {
 	let compactionRunning = false;
 	let scheduledCompaction: { trigger: "soft" | "hard"; tokens: number } | undefined;
@@ -99,9 +111,10 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("turn_end", (_event, ctx) => {
 		const usage = ctx.getContextUsage();
-		if (!usage || usage.tokens < RESEARCH_SOFT_COMPACT_TOKENS || compactionRunning || scheduledCompaction) return;
+		const thresholds = researchCompactionThresholds(ctx.model);
+		if (!usage || usage.tokens < thresholds.softTokens || compactionRunning || scheduledCompaction) return;
 
-		const trigger = usage.tokens >= RESEARCH_HARD_COMPACT_TOKENS ? "hard" : "soft";
+		const trigger = usage.tokens >= thresholds.hardTokens ? "hard" : "soft";
 		scheduledCompaction = { trigger, tokens: usage.tokens };
 		if (ctx.hasUI) {
 			ctx.ui.notify(

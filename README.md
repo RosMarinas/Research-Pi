@@ -4,7 +4,7 @@
 >
 > A project-centric cognitive runtime for computational research.
 
-`Pi Core 0.84.1` · `DeepSeek V4 Pro / Flash` · `Codex App Server` · `macOS / Linux / WSL2`
+`Pi Core 0.84.2` · `DeepSeek / OpenCode Go` · `Codex App Server` · `macOS / Linux / WSL2`
 
 Research Pi 面向 AI、机器人、通信、优化与仿真等计算实验科研。它不是给普通 coding agent 换一段“科研提示词”，而是把长期研究状态、Agent 协作、Session 交接、证据记忆与执行权限从单个模型的有限上下文中移出来，放到 **Project 级 Runtime** 中管理。
 
@@ -93,7 +93,8 @@ pi
 首次进入目录时，Pi 会要求确认项目信任。启动后建议先使用：
 
 ```text
-/config            选择供应商、Leader profile 与 TUI 主题
+/model             选择并持久保存 Research Leader 模型
+/config            查看 Harness 配置或切换 TUI 主题
 /boundary doctor   检查 Git、Python、sandbox 与 Codex 执行环境
 /runtime            打开 Project Runtime 控制面
 ```
@@ -115,7 +116,8 @@ pi
 | `/side <问题>` | 隔离追问，不污染主线；有价值时再 `/side use <id>` |
 | `/memory <query>` | 搜索当前 Project 的历史 Session 与实验记录，不使用向量数据库 |
 | `/watch` | 直接观察 Codex executor/advisor 的客观执行过程 |
-| `/config` | 切换官方 DeepSeek/OpenCode Go Leader、thinking 与 Ocean/Graphite/Ember 主题 |
+| `/model` | 从 Research Pi 精选目录切换官方 DeepSeek/OpenCode Go Leader，并持久保存 |
+| `/config` | 查看 Harness 配置，切换 Ocean/Graphite/Ember 主题 |
 | `/runtime new clean` | 新建不继承 ProjectView 的纯净 Session；需要时用 `/runtime inherit` 恢复 |
 
 完整命令见 [Pi 基础使用指南](docs/pi-basic-guide.md)，所有配置字段见 [统一配置说明](docs/configuration.md)，Runtime 跨 Session 验收见 [Research Runtime 测试指南](docs/research-runtime-test-guide.md)。
@@ -160,10 +162,10 @@ cp .env.example .env
 
 ## 默认配置
 
-- Pi Core：`0.84.1`
+- Pi Core：`0.84.2`
 - Provider：官方 `deepseek` 与订阅 `opencode-go`
 - Active profile：`deepseek-pro`
-- Curated profiles：官方 DeepSeek Pro/Flash，以及 OpenCode Go 的 DeepSeek V4 Flash、GPT 5.6 Luna、Qwen3.7 Plus
+- Curated profiles：官方 DeepSeek Pro/Flash；OpenCode Go 的 MiMo V2.5、DeepSeek V4 Flash/Pro、Qwen3.7 Plus/Qwen3.8 Max、MiniMax M3、GPT 5.6 Luna、GLM-5.2、Grok 4.5、Kimi K3、Hy3
 - Endpoint：由 Pi Core 的内置 provider catalog 管理，不需要手写 URL
 - Thinking level：`max`（通过官方 `reasoning_effort: "max"` 启用；384K 是最大输出上限，不是输入上下文或压缩阈值）
 
@@ -188,7 +190,7 @@ pi config use opencode-go-flash   # 持久切到推荐的 Go 日常 Leader
 pi --profile deepseek-pro         # 本次启动使用官方高质量 Leader
 ```
 
-交互界面输入 `/config` 会打开居中的原生 TUI profile 面板；选择后立即切换当前 Session 的模型与 thinking，并持久保存。面板中按 `t` 可切到 Theme 选择器；也可用 `/config theme research-pi|research-graphite|research-ember|dark|light`。默认不重复显示 `◇ profile`，实际 model/thinking 继续由 Pi 原生 footer 展示。
+交互界面输入 `/model`（或 `Ctrl+L`）会打开 Pi 原生模型选择器，默认只显示 Research Pi 从 `profiles` 生成的 scoped 目录；选择或 Ctrl+P 循环后会同步持久化匹配的 profile 和默认 thinking。恢复旧 Session 不会改写全局默认。低层 `/scoped-models` 已从命令补全隐藏，直接调用仍由 Pi Core 支持，但其改动会在下次启动时被 Research Pi 配置重建。`/config` 只负责配置摘要和主题；主题可用 `/config theme research-pi|research-graphite|research-ember|dark|light` 切换。默认不重复显示 `◇ profile`，实际 model/thinking 继续由 Pi 原生 footer 展示。
 
 Research Pi 会从 config 生成内部 Pi `settings.json/models.json` adapter；这些文件位于状态目录，用户不再手工维护。源码模式沿用 Git 忽略的 `.pi/agent/`，已有 trust、trace 等本地状态不需要迁移。`.pi/APPEND_SYSTEM.md` 和 `.pi/extensions/` 仍分别承载稳定 Research Contract 与受审查扩展代码。
 

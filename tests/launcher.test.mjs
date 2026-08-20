@@ -52,7 +52,7 @@ test("packaged launcher creates external config/state and runs the pinned core",
 
 		const version = spawnSync(process.execPath, [launcher, "--version"], { encoding: "utf8", env: environment });
 		assert.equal(version.status, 0, version.stderr);
-		assert.match(version.stdout, /0\.84\.1/);
+		assert.match(version.stdout, /0\.84\.2/);
 		assert.ok(statSync(join(state, "agent", "models.json")).isFile());
 	} finally {
 		rmSync(temp, { recursive: true, force: true });

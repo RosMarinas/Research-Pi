@@ -1,4 +1,5 @@
 import {
+	type AutocompleteProviderFactory,
 	DynamicBorder,
 	type ExtensionAPI,
 	type ExtensionContext,
@@ -27,17 +28,6 @@ function loadConfig(): ResearchConfig {
 	return ensureResearchPiConfig(process.env.RESEARCH_PI_CONFIG_FILE ?? paths.configPath);
 }
 
-export function profileSelectItems(config: ResearchConfig): SelectItem[] {
-	return Object.keys(config.profiles).map((name) => {
-		const profile = researchPiProfile(config, name);
-		return {
-			value: name,
-			label: name === config.activeProfile ? `● ${profile.label ?? name}` : `  ${profile.label ?? name}`,
-			description: `${profile.provider}/${profile.model} · ${profile.thinking}${profile.description ? ` · ${profile.description}` : ""}`,
-		};
-	});
-}
-
 export function themeSelectItems(config: ResearchConfig, available: Array<{ name: string; path?: string }> = []): SelectItem[] {
 	const active = String(config.pi.settings.theme ?? "research-pi");
 	const metadata = new Map(RESEARCH_PI_THEME_CHOICES.map((theme) => [theme.name, theme]));
@@ -59,6 +49,24 @@ export function themeSelectItems(config: ResearchConfig, available: Array<{ name
 	});
 }
 
+export const hideLowLevelModelCommands: AutocompleteProviderFactory = (current) => ({
+	triggerCharacters: current.triggerCharacters,
+	async getSuggestions(lines, line, col, options) {
+		const suggestions = await current.getSuggestions(lines, line, col, options);
+		if (!suggestions) return null;
+		const beforeCursor = (lines[line] ?? "").slice(0, col);
+		if (!beforeCursor.startsWith("/")) return suggestions;
+		const items = suggestions.items.filter((item) => item.value !== "scoped-models" && item.value !== "/scoped-models");
+		return items.length ? { ...suggestions, items } : null;
+	},
+	applyCompletion(lines, line, col, item, prefix) {
+		return current.applyCompletion(lines, line, col, item, prefix);
+	},
+	shouldTriggerFileCompletion(lines, line, col) {
+		return current.shouldTriggerFileCompletion?.(lines, line, col) ?? true;
+	},
+});
+
 export function compactConfigPath(path: string): string {
 	const parts = path.split(/[\\/]/).filter(Boolean);
 	return parts.length <= 4 ? path : `…/${parts.slice(-4).join("/")}`;
@@ -72,6 +80,7 @@ export function formatProfileStatus(config: ResearchConfig, ctx: ExtensionContex
 
 export default function researchConfigExtension(pi: ExtensionAPI) {
 	const configPath = process.env.RESEARCH_PI_CONFIG_FILE ?? paths.configPath;
+	let sessionReady = false;
 
 	const updateStatus = (ctx: ExtensionContext) => {
 		if (!ctx.hasUI) return;
@@ -154,64 +163,51 @@ export default function researchConfigExtension(pi: ExtensionAPI) {
 		if (selected) await activateTheme(selected, ctx);
 	};
 
-	const showProfileSelector = async (ctx: ExtensionContext) => {
+	pi.on("session_start", async (_event, ctx) => {
+		sessionReady = true;
+		if (ctx.hasUI) ctx.ui.addAutocompleteProvider(hideLowLevelModelCommands);
+		updateStatus(ctx);
+	});
+	pi.on("model_select", async (event, ctx) => {
+		updateStatus(ctx);
+		if (!sessionReady || event.source === "restore") return;
 		const config = loadConfig();
-		const items = profileSelectItems(config);
-		const currentModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "unresolved";
-		const selected = await ctx.ui.custom<string | null>((tui, theme, _keybindings, done) => {
-			const container = new Container();
-			container.addChild(new DynamicBorder((text) => theme.fg("borderAccent", text)));
-			container.addChild(new Text(theme.fg("customMessageLabel", theme.bold(" Research Pi / Model Profiles ")), 0, 0));
-			container.addChild(new Text(theme.fg("muted", ` current ${currentModel} · ${pi.getThinkingLevel()} thinking`), 0, 0));
-			container.addChild(new Text(theme.fg("dim", ` config ${compactConfigPath(configPath)}`), 0, 0));
-			container.addChild(new Text("", 0, 0));
-			const list = new SelectList(items, Math.min(items.length, config.ui.configPanelRows), {
-				selectedPrefix: (text) => theme.fg("accent", text),
-				selectedText: (text) => theme.fg("accent", theme.bold(text)),
-				description: (text) => theme.fg("muted", text),
-				scrollInfo: (text) => theme.fg("dim", text),
-				noMatch: (text) => theme.fg("warning", text),
-			}, { minPrimaryColumnWidth: 18, maxPrimaryColumnWidth: 24 });
-			list.setSelectedIndex(Math.max(0, items.findIndex((item) => item.value === config.activeProfile)));
-			list.onSelect = (item) => done(item.value);
-			list.onCancel = () => done(null);
-			container.addChild(list);
-			container.addChild(new Text("", 0, 0));
-			container.addChild(new Text(theme.fg("dim", " ↑↓ navigate   enter apply + persist   t themes   esc close"), 0, 0));
-			container.addChild(new DynamicBorder((text) => theme.fg("borderAccent", text)));
-			return {
-				render(width: number) { return container.render(width); },
-				invalidate() { container.invalidate(); },
-				handleInput(data: string) {
-					if (data === "t") {
-						done("__themes__");
-						return;
-					}
-					list.handleInput(data);
-					tui.requestRender();
-				},
-			};
-		}, {
-			overlay: true,
-			overlayOptions: { anchor: "center", width: "88%", maxHeight: "72%", margin: 1 },
+		const selected = researchPiProfileForModel(config, event.model.provider, event.model.id);
+		if (!selected) return;
+		if (config.activeProfile !== selected.name) {
+			writeResearchPiConfig(configPath, { ...config, activeProfile: selected.name });
+			process.env.RESEARCH_PI_ACTIVE_PROFILE = selected.name;
+		}
+		if (pi.getThinkingLevel() !== selected.thinking) pi.setThinkingLevel(selected.thinking);
+	});
+	pi.on("thinking_level_select", async (event, ctx) => {
+		updateStatus(ctx);
+		if (!sessionReady || !ctx.model) return;
+		const config = loadConfig();
+		const selected = researchPiProfileForModel(config, ctx.model.provider, ctx.model.id);
+		if (!selected || config.activeProfile !== selected.name || selected.thinking === event.level) return;
+		writeResearchPiConfig(configPath, {
+			...config,
+			profiles: {
+				...config.profiles,
+				[selected.name]: { ...config.profiles[selected.name], thinking: event.level },
+			},
 		});
-		if (selected === "__themes__") await showThemeSelector(ctx);
-		else if (selected) await activateProfile(selected, ctx);
-	};
-
-	pi.on("session_start", async (_event, ctx) => updateStatus(ctx));
-	pi.on("model_select", async (_event, ctx) => updateStatus(ctx));
-	pi.on("thinking_level_select", async (_event, ctx) => updateStatus(ctx));
+	});
 	pi.on("session_shutdown", async (_event, ctx) => {
+		sessionReady = false;
 		if (ctx.hasUI) ctx.ui.setStatus("research_profile", undefined);
 	});
 
 	pi.registerCommand("config", {
-		description: "Open Research Pi configuration or switch a persistent model profile",
+		description: "Inspect Research Pi configuration and choose a theme; use /model for models",
 		handler: async (args, ctx) => {
 			try {
 				const input = args.trim();
-				if (!input) return await showProfileSelector(ctx);
+				if (!input) {
+					ctx.ui.notify(`${researchPiConfigSummary(loadConfig(), configPath)}\n\nUse /model for the persistent Leader model; use /config themes for palettes.`, "info");
+					return;
+				}
 				const [action, name] = input.split(/\s+/, 2);
 				if (action === "show") {
 					ctx.ui.notify(researchPiConfigSummary(loadConfig(), configPath), "info");

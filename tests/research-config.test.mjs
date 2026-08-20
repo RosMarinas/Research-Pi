@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import researchConfigExtension, { compactConfigPath, formatProfileStatus, profileSelectItems, themeSelectItems } from "../.pi/extensions/research-config.ts";
+import researchConfigExtension, { compactConfigPath, formatProfileStatus, hideLowLevelModelCommands, themeSelectItems } from "../.pi/extensions/research-config.ts";
 import {
 	defaultResearchPiConfig,
 	ensureResearchPiConfig,
@@ -30,6 +30,9 @@ test("one Research Pi config resolves leader, Codex, compact, search, and UI def
 	assert.equal(config.profiles["opencode-go-flash"].provider, "opencode-go");
 	assert.equal(config.profiles["opencode-go-luna"].model, "gpt-5.6-luna");
 	assert.equal(config.profiles["opencode-go-qwen"].model, "qwen3.7-plus");
+	assert.equal(config.profiles["opencode-go-mimo"].model, "mimo-v2.5");
+	assert.equal(config.profiles["opencode-go-kimi"].thinking, "max");
+	assert.equal(Object.values(config.profiles).filter((profile) => profile.provider === "opencode-go").length, 11);
 	assert.equal(config.ui.density, "balanced");
 	assert.equal(config.ui.runtimeStrip, "auto");
 	assert.equal(config.ui.showProfileStatus, false);
@@ -61,7 +64,7 @@ test("config persistence creates a private file, schema, and generated Pi adapte
 		const changed = writeResearchPiConfig(path, { ...config, activeProfile: "deepseek-flash" });
 		assert.equal(readResearchPiConfig(path).activeProfile, "deepseek-flash");
 		const agentDir = join(root, "generated-agent");
-		writeResearchPiAgentConfig(agentDir, changed, { coreVersion: "0.84.1" });
+		writeResearchPiAgentConfig(agentDir, changed, { coreVersion: "0.84.2" });
 		const settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"));
 		const models = JSON.parse(readFileSync(join(agentDir, "models.json"), "utf8"));
 		assert.equal(settings.defaultModel, "deepseek-v4-flash");
@@ -70,20 +73,36 @@ test("config persistence creates a private file, schema, and generated Pi adapte
 			"deepseek/deepseek-v4-flash:max",
 			"deepseek/deepseek-v4-pro:max",
 			"opencode-go/deepseek-v4-flash:max",
+			"opencode-go/deepseek-v4-pro:max",
+			"opencode-go/glm-5.2:high",
 			"opencode-go/gpt-5.6-luna:high",
+			"opencode-go/grok-4.5:high",
+			"opencode-go/hy3:high",
+			"opencode-go/kimi-k3:max",
+			"opencode-go/mimo-v2.5:high",
+			"opencode-go/minimax-m3:high",
 			"opencode-go/qwen3.7-plus:high",
+			"opencode-go/qwen3.8-max:high",
 		]);
 		assert.equal(models.providers.deepseek.modelOverrides["deepseek-v4-flash"].compat.maxTokensField, "max_tokens");
 
 		writeResearchPiAgentConfig(agentDir, resolveResearchPiConfig({ activeProfile: "opencode-go-flash" }), {
-			coreVersion: "0.84.1",
+			coreVersion: "0.84.2",
 			environment: { OPENCODE_API_KEY: "configured" },
 		});
 		const goOnlySettings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"));
 		assert.deepEqual(goOnlySettings.enabledModels.sort(), [
 			"opencode-go/deepseek-v4-flash:max",
+			"opencode-go/deepseek-v4-pro:max",
+			"opencode-go/glm-5.2:high",
 			"opencode-go/gpt-5.6-luna:high",
+			"opencode-go/grok-4.5:high",
+			"opencode-go/hy3:high",
+			"opencode-go/kimi-k3:max",
+			"opencode-go/mimo-v2.5:high",
+			"opencode-go/minimax-m3:high",
 			"opencode-go/qwen3.7-plus:high",
+			"opencode-go/qwen3.8-max:high",
 		]);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
@@ -155,20 +174,26 @@ test("Codex, compact, and search modules consume the configured environment", ()
 	});
 });
 
-test("model profile UI is concise, descriptive, and reflects live session overrides", () => {
+test("model scope and status come from the single Research Pi profile catalog", async () => {
 	const config = defaultResearchPiConfig();
-	const items = profileSelectItems(config);
-	assert.equal(items.length, 5);
-	assert.match(items[0].label, /^● /);
-	assert.match(items[0].description, /deepseek\/deepseek-v4-pro/);
-	assert.match(items[1].description, /Lower latency/);
-	assert.match(items[2].description, /opencode-go\/deepseek-v4-flash/);
+	assert.equal(Object.keys(config.profiles).length, 13);
 	assert.equal(compactConfigPath("/Users/polaris/Documents/Utils/Pi/.worktrees/runtime-next/.pi/config.json"), "…/.worktrees/runtime-next/.pi/config.json");
 	const status = formatProfileStatus(config, {
 		model: { provider: "deepseek", id: "deepseek-v4-flash" },
 		thinkingLevel: "max",
 	});
 	assert.equal(status, "◇ deepseek-flash");
+	const base = {
+		async getSuggestions() {
+			return { prefix: "/", items: [
+				{ value: "model", label: "model" },
+				{ value: "scoped-models", label: "scoped-models" },
+			] };
+		},
+		applyCompletion() { return { lines: ["/model"], cursorLine: 0, cursorCol: 6 }; },
+	};
+	const filtered = await hideLowLevelModelCommands(base).getSuggestions(["/"], 0, 1, { signal: new AbortController().signal });
+	assert.deepEqual(filtered.items.map((item) => item.value), ["model"]);
 	const themes = themeSelectItems(config);
 	assert.match(themes[0].label, /^● Ocean/);
 	assert.ok(themes.some((item) => item.value === "research-graphite"));
@@ -179,7 +204,7 @@ test("model profile UI is concise, descriptive, and reflects live session overri
 	);
 });
 
-test("/config renders a bordered native overlay with current-model context and keyboard hints", async () => {
+test("/model selections persist profiles while /config remains the non-model settings entry", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-config-ui-"));
 	const previousPath = process.env.RESEARCH_PI_CONFIG_FILE;
 	try {
@@ -187,15 +212,16 @@ test("/config renders a bordered native overlay with current-model context and k
 		process.env.RESEARCH_PI_CONFIG_FILE = configPath;
 		ensureResearchPiConfig(configPath);
 		const commands = new Map();
-		let rendered = [];
-		let overlayOptions;
+		const handlers = new Map();
+		const notices = [];
 		let selectedModel;
 		let selectedThinking;
 		let selectedTheme;
+		let autocompleteFactory;
 		const pi = {
-			on() {},
+			on(name, handler) { handlers.set(name, handler); },
 			registerCommand(name, command) { commands.set(name, command); },
-			getThinkingLevel: () => "max",
+			getThinkingLevel: () => selectedThinking ?? "max",
 			setThinkingLevel(value) { selectedThinking = value; },
 			setModel: async (model) => { selectedModel = model; return true; },
 		};
@@ -214,24 +240,27 @@ test("/config renders a bordered native overlay with current-model context and k
 				getAllThemes: () => ["research-pi", "research-graphite", "research-ember", "dark", "light"].map((name) => ({ name })),
 				setTheme(name) { selectedTheme = name; return { success: true }; },
 				setStatus() {},
-				notify() {},
-				custom: async (factory, options) => {
-					overlayOptions = options;
-					const component = factory({ requestRender() {} }, theme, {}, () => {});
-					rendered = component.render(80);
-					return null;
-				},
+				notify(message) { notices.push(message); },
+				addAutocompleteProvider(factory) { autocompleteFactory = factory; },
 			},
 		};
+		await handlers.get("session_start")({ reason: "startup" }, ctx);
+		assert.equal(autocompleteFactory, hideLowLevelModelCommands);
 		await commands.get("config").handler("", ctx);
-		const text = rendered.join("\n");
-		assert.equal(overlayOptions.overlay, true);
-		assert.equal(overlayOptions.overlayOptions.anchor, "center");
-		assert.equal(overlayOptions.overlayOptions.width, "88%");
-		assert.match(text, /Research Pi \/ Model Profiles/);
-		assert.match(text, /current deepseek\/deepseek-v4-pro/);
-		assert.match(text, /enter apply \+ persist/);
-		assert.match(text, /[─╭╮]/);
+		assert.match(notices.at(-1), /Use \/model for the persistent Leader model/);
+
+		ctx.model = { provider: "opencode-go", id: "gpt-5.6-luna" };
+		await handlers.get("model_select")({ model: ctx.model, previousModel: null, source: "set" }, ctx);
+		assert.equal(readResearchPiConfig(configPath).activeProfile, "opencode-go-luna");
+		assert.equal(selectedThinking, "high");
+		await handlers.get("thinking_level_select")({ level: "max", previousLevel: "high" }, ctx);
+		assert.equal(readResearchPiConfig(configPath).profiles["opencode-go-luna"].thinking, "max");
+
+		ctx.model = { provider: "opencode-go", id: "qwen3.7-plus" };
+		await handlers.get("model_select")({ model: ctx.model, previousModel: null, source: "restore" }, ctx);
+		assert.equal(readResearchPiConfig(configPath).activeProfile, "opencode-go-luna", "session restore must not rewrite the default profile");
+
+		ctx.model = { provider: "deepseek", id: "deepseek-v4-pro" };
 		await commands.get("config").handler("use deepseek-flash", ctx);
 		assert.equal(selectedModel.id, "deepseek-v4-flash");
 		assert.equal(selectedThinking, "max");

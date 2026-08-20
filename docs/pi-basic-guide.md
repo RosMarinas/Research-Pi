@@ -1,6 +1,6 @@
 # Research Pi 基本使用指南
 
-这份指南面向 Research Pi：Pi 0.84.1、DeepSeek V4 Pro/Flash profiles、thinking `max`。源码 checkout 用于快速开发；稳定版本作为 npm CLI 全局安装。两种形态的日常入口都是 `pi`。
+这份指南面向 Research Pi：Pi 0.84.2、官方 DeepSeek 与精选 OpenCode Go profiles。源码 checkout 用于快速开发；稳定版本作为 npm CLI 全局安装。两种形态的日常入口都是 `pi`。
 
 ## 1. 启动
 
@@ -38,7 +38,7 @@ pi config use opencode-go-flash
 pi --profile deepseek-pro   # 只覆盖本次启动
 ```
 
-进入 TUI 后输入 `/config` 会打开居中的 model profile 面板。选择 profile 会立即切换当前模型和 thinking，并持久保存为后续 Session 的默认值。`Ctrl+L` 或原生 `/model` 仍可做当前 Session 的临时模型切换。API key 不在 `config.json` 中，始终单独保存在凭据文件。
+进入 TUI 后输入 `/model` 或按 `Ctrl+L`，从 Research Pi 自动生成的 scoped 目录选择模型。模型、对应默认 thinking 和 `activeProfile` 会一起持久保存；恢复旧 Session 不会覆盖默认值。`/scoped-models` 是 Pi Core 低层入口，Research Pi 已从补全隐藏，日常不需要使用。API key 不在 `config.json` 中，始终单独保存在凭据文件。
 
 所有字段、示例和覆盖优先级见 [Research Pi Configuration](configuration.md)。
 
@@ -157,7 +157,8 @@ Pi 现在提供这些低摩擦研究工具：
 - `/runtime rotate [reason]`：在 Project State 可恢复且没有未知副作用时，人工创建一个不复制旧 transcript、但自动继承 ProjectView/mailbox 的新 Leader Session；Runtime 会记录交接和 receipt。不会自动触发。
 - `/runtime new clean [reason]`：创建不复制 transcript、也不自动继承 ProjectView/mailbox 的 clean Session；Project 数据不删除，clean compact 不回写 Project State，Codex mission 的 `reuse=auto` 会降为新 thread。
 - `/runtime inherit [reason]`：让当前 clean Session 从下一轮开始恢复 ProjectView、未消费 mailbox 与 project-aware 操作；旧 transcript 仍不会恢复。后续 compact 以 canonical Project State 为 previous state，已有 clean summary 只作为非权威候选综合。
-- `/config`：打开 Research Pi model profile 面板；`/config show|path|use <profile>` 可检查或持久切换配置。
+- `/model`：唯一的日常 Leader 模型选择器；选择后持久化匹配 profile 和默认 thinking。
+- `/config`：显示 Research Pi 配置摘要；`/config show|path|themes|theme <name>` 管理非模型设置，`use <profile>` 仅保留兼容。
 
 可以直接提出：
 
@@ -232,7 +233,7 @@ Pi 在连续处理同一研究子任务时应使用稳定、简短的 `mission` 
 | 新建不带 Project 记忆的 Session | `/runtime new clean [reason]` |
 | 让 clean Session 恢复 Project 继承 | `/runtime inherit [reason]` |
 | 窄幅纠正当前 Project State | 说明修订依据，让 Leader 调用 `amend_project_state` |
-| 查看或持久切换模型 profile | `/config`、`/config use opencode-go-flash` |
+| 查看或持久切换模型 profile | `/model`、`Ctrl+L`；CLI 可用 `pi config use opencode-go-flash` |
 
 科研中推荐这样区分：
 
@@ -265,7 +266,7 @@ Transition 会立即影响后续 Session 的 ProjectView，不必等待 `/compac
 
 ## 5. 常用界面操作
 
-输入 `/` 会打开全部 slash command 补全；Pi 0.84.1 没有单独的 `/help` 命令。
+输入 `/` 会打开 slash command 补全；Pi 0.84.2 没有单独的 `/help` 命令。Research Pi 隐藏了不再需要的低层 `/scoped-models` 补全项。
 
 | 按键 | 作用 |
 |---|---|
@@ -279,7 +280,7 @@ Transition 会立即影响后续 Session 的 ProjectView，不必等待 `/compac
 | `Ctrl+X` | 复制上一条模型回复 |
 | `/hotkeys` | 查看完整快捷键 |
 
-注意：单次 `Ctrl+C` 是清空编辑器；连续两次才退出。中止运行应使用 `Escape`。`Ctrl+L` 是当前 Session 的原生临时选择；希望下次启动仍生效时使用 `/config`。
+注意：单次 `Ctrl+C` 是清空编辑器；连续两次才退出。中止运行应使用 `Escape`。`Ctrl+L` 与 `/model` 的已知 profile 选择会持久保存；Shift+Tab 修改的 thinking 也会写回当前 profile。
 
 ## 6. 一次性任务和自动化入口
 

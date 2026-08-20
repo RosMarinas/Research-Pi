@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import researchCompactionExtension from "../.pi/extensions/research-compaction.ts";
+import researchCompactionExtension, { researchCompactionThresholds } from "../.pi/extensions/research-compaction.ts";
 import {
 	applyResearchStatePatch,
 	buildResearchCompactionDetails,
@@ -147,6 +147,17 @@ test("research threshold compaction waits until the agent run settles", () => {
 	handlers.get("turn_end")({ type: "turn_end" }, ctx);
 	handlers.get("agent_settled")({ type: "agent_settled" }, ctx);
 	assert.equal(compactOptions, firstOptions, "a running compaction must not be duplicated");
+});
+
+test("short-context Leader models compact before their model window", () => {
+	assert.deepEqual(researchCompactionThresholds({ contextWindow: 1_000_000 }), {
+		softTokens: RESEARCH_SOFT_COMPACT_TOKENS,
+		hardTokens: RESEARCH_HARD_COMPACT_TOKENS,
+	});
+	const hy3 = researchCompactionThresholds({ contextWindow: 256_000 });
+	assert.equal(hy3.hardTokens, 256_000 - 32 * 1024);
+	assert.equal(hy3.softTokens, Math.floor(hy3.hardTokens * 0.75));
+	assert.ok(hy3.softTokens < hy3.hardTokens);
 });
 
 function experimentEntry(id, parentId, validityJudgment) {

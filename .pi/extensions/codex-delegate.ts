@@ -283,6 +283,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 	let shuttingDown = false;
 
 	const refreshFooter = (ctx: ExtensionContext) => {
+		if (shuttingDown) return;
 		if (!ctx.hasUI) return;
 		const active = [...activeJobs.values()];
 		const latest = active.at(-1);
@@ -290,6 +291,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 	};
 
 	const rememberJob = (job: CodexJobView, ctx: ExtensionContext) => {
+		if (shuttingDown) return;
 		if (TERMINAL_JOB_STATUSES.has(job.status)) {
 			activeJobs.delete(job.id);
 			latestTerminal = job;
@@ -352,15 +354,19 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 	};
 
 	const deliverJobEvent = async (job: CodexJobView, ctx: ExtensionContext) => {
+		if (shuttingDown) return;
 		const id = eventId(job);
 		if (!id || deliveredEvents.has(id)) return;
 		const runtime = await resolveResearchRuntime(ctx.cwd);
+		if (shuttingDown) return;
 		const message = await recordCodexRuntimeEvent(runtime, job, eventContent(job));
+		if (shuttingDown) return;
 		if (!message || message.status !== "queued") {
 			deliveredEvents.add(id);
 			return;
 		}
 		const snapshot = await readRuntimeSnapshot(runtime);
+		if (shuttingDown) return;
 		if (runtimeSessionInheritancePolicy(ctx.sessionManager.getBranch(), snapshot, ctx.sessionManager.getSessionId()) === "clean") {
 			// The durable Runtime mailbox now owns delivery. Mark the watcher event
 			// handled so a clean Session does not repeatedly re-project the same job.
@@ -399,7 +405,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 				},
 			);
 		} catch (error) {
-			if (ctx.hasUI) ctx.ui.notify(`Could not deliver Codex event: ${error instanceof Error ? error.message : String(error)}`, "warning");
+			if (!shuttingDown && ctx.hasUI) ctx.ui.notify(`Could not deliver Codex event: ${error instanceof Error ? error.message : String(error)}`, "warning");
 			return;
 		}
 		await settleRuntimeMessage(runtime, message.id, "delivered", {
@@ -407,6 +413,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			actorId: RESEARCH_LEADER_ACTOR_ID,
 			attachmentEpoch: attachment.epoch ?? null,
 		});
+		if (shuttingDown) return;
 		deliveredEvents.add(id);
 		if (editorHasDraft && ctx.hasUI) {
 			ctx.ui.notify(`Codex ${shortJobId(job.id)} ${job.status}; the event is queued behind your editor draft.`, "info");
@@ -414,9 +421,10 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 	};
 
 	const monitorJob = (initial: CodexJobView, ctx: ExtensionContext) => {
+		if (shuttingDown) return;
 		rememberJob(initial, ctx);
 		void deliverJobEvent(initial, ctx).catch((error) => {
-			if (ctx.hasUI) ctx.ui.notify(`Could not persist Codex Runtime event: ${error instanceof Error ? error.message : String(error)}`, "warning");
+			if (!shuttingDown && ctx.hasUI) ctx.ui.notify(`Could not persist Codex Runtime event: ${error instanceof Error ? error.message : String(error)}`, "warning");
 		});
 		if (TERMINAL_JOB_STATUSES.has(initial.status) || monitorTimers.has(initial.id)) return;
 
@@ -424,13 +432,25 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			if (shuttingDown) return;
 			try {
 				const current = publicJobView(await readCodexJob(initial.id, await jobManagementScope(ctx, initial.id)));
+				if (shuttingDown) {
+					monitorTimers.delete(initial.id);
+					return;
+				}
 				rememberJob(current, ctx);
 				await deliverJobEvent(current, ctx);
+				if (shuttingDown) {
+					monitorTimers.delete(initial.id);
+					return;
+				}
 				if (TERMINAL_JOB_STATUSES.has(current.status)) {
 					monitorTimers.delete(current.id);
 					return;
 				}
 			} catch (error) {
+				if (shuttingDown) {
+					monitorTimers.delete(initial.id);
+					return;
+				}
 				if (isCodexJobOwnerError(error)) {
 					monitorTimers.delete(initial.id);
 					activeJobs.delete(initial.id);
@@ -447,6 +467,10 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 				);
 			}
 
+			if (shuttingDown) {
+				monitorTimers.delete(initial.id);
+				return;
+			}
 			const timer = setTimeout(poll, 750);
 			timer.unref();
 			monitorTimers.set(initial.id, timer);
@@ -457,13 +481,15 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		monitorTimers.set(initial.id, timer);
 	};
 
-	const resetMonitors = (ctx: ExtensionContext) => {
+	const resetMonitors = (ctx: ExtensionContext, options: { refreshRuntime?: boolean } = {}) => {
 		for (const timer of monitorTimers.values()) clearTimeout(timer);
 		monitorTimers.clear();
 		activeJobs.clear();
 		latestTerminal = undefined;
 		if (ctx.hasUI) ctx.ui.setStatus("codex_delegate", undefined);
-		void getRuntimeUiAdapter()?.refresh(ctx, { codexJobs: [] }).catch(() => undefined);
+		if (options.refreshRuntime !== false) {
+			void getRuntimeUiAdapter()?.refresh(ctx, { codexJobs: [] }).catch(() => undefined);
+		}
 	};
 
 	const reattachBranchJobs = async (ctx: ExtensionContext) => {
@@ -484,7 +510,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 				monitorJob(publicJobView(job), ctx);
 			}
 		} catch (error) {
-			if (ctx.hasUI) ctx.ui.notify(`Could not reattach Codex jobs: ${error instanceof Error ? error.message : String(error)}`, "warning");
+			if (!shuttingDown && ctx.hasUI) ctx.ui.notify(`Could not reattach Codex jobs: ${error instanceof Error ? error.message : String(error)}`, "warning");
 		}
 	};
 
@@ -565,7 +591,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", (_event, ctx) => {
 		shuttingDown = true;
-		resetMonitors(ctx);
+		resetMonitors(ctx, { refreshRuntime: false });
 	});
 
 	pi.registerCommand("codex", {
