@@ -242,6 +242,11 @@ async function main() {
 		}
 	};
 
+	const activeActivityProjection = () => ({
+		activeActivities: [...activeObjectiveActivities.values()].slice(0, 8),
+		activeActivityCount: activeObjectiveActivities.size,
+	});
+
 	const send = (message) => {
 		if (!child?.stdin?.writable) throw new Error("Codex app-server stdin is not writable");
 		child.stdin.write(`${JSON.stringify(message)}\n`);
@@ -481,13 +486,13 @@ async function main() {
 			activeObjectiveActivities.set(key, activityUpdate.activity);
 			while (activeObjectiveActivities.size > 32) activeObjectiveActivities.delete(activeObjectiveActivities.keys().next().value);
 			currentObjectiveActivity = [...activeObjectiveActivities.values()].at(-1) ?? null;
-			queueNotificationUpdate({ currentActivity: currentObjectiveActivity });
+			queueNotificationUpdate({ currentActivity: currentObjectiveActivity, ...activeActivityProjection() });
 		} else if (activityUpdate?.phase === "completed") {
 			const completed = activityUpdate.activity;
 			const key = completed.id ?? `${completed.category}:${completed.summary}`;
 			activeObjectiveActivities.delete(key);
 			currentObjectiveActivity = [...activeObjectiveActivities.values()].at(-1) ?? null;
-			queueNotificationUpdate({ currentActivity: currentObjectiveActivity, lastActivity: completed });
+			queueNotificationUpdate({ currentActivity: currentObjectiveActivity, lastActivity: completed, ...activeActivityProjection() });
 		} else if (method === "error") {
 			const progress = describeCodexNotification(message);
 			const progressChanged = progress && progress !== lastNotificationProgress;
@@ -816,6 +821,8 @@ async function main() {
 			activeTurnId: null,
 			pendingRequest: null,
 			currentActivity: null,
+			activeActivities: [],
+			activeActivityCount: 0,
 			exitCode: status === "completed" ? 0 : 1,
 			progress: cancellationRequested ? "cancelled" : timedOut ? "timed out" : status,
 			gitAfter,
@@ -842,6 +849,8 @@ async function main() {
 			activeTurnId: null,
 			pendingRequest: null,
 			currentActivity: null,
+			activeActivities: [],
+			activeActivityCount: 0,
 			progress: unknownOutcome ? "worker lost after side effects may have started" : cancellationRequested ? "cancelled" : "worker failed",
 			resultPath,
 			error: lastError,

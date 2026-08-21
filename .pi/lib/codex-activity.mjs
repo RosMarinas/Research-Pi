@@ -271,6 +271,7 @@ export function projectCodexActivityUpdate(message, options = {}) {
 		phase: record.phase,
 		activity: {
 			id: record.itemId ?? null,
+			threadId: record.threadId ?? null,
 			category: record.category,
 			summary: record.summary,
 			status: record.status ?? record.phase,

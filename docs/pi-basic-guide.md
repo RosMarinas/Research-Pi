@@ -135,7 +135,7 @@ Pi 会自行选择工具。若想明确控制，可以直接说：
 
 `trust-*` 按项目持久保存，`grant-*` 只在当前 Pi session 生效。持久规则保存在用户状态目录而不是仓库中；源码开发模式下位于 Git 忽略的 `.pi/capabilities/`。`host-command` 会在授权界面显示 cwd、完整 argv 和建议前缀，授权后的 `/boundary grants` 会显示 grant ID；它以宿主用户权限运行，所以只信任你认可的项目入口。Pi/Codex 后续使用 grant ID 时自动恢复原 cwd；不带 cwd 的调用只有在唯一匹配时才自动恢复，多个 worktree 同时匹配会要求明确选择，不会创建 `bash -lc "cd ..."` 的重复授权。不透明 `ssh-target` 的凭据内容不会进入模型。
 
-所有模型工具调用都会在底部状态栏显示工具名、经过截断和凭据遮蔽的目标摘要以及已运行时间；成功或失败终态保留 5 秒。多个工具并行时显示数量和最近启动的工具。Codex 后台 job 使用独立的持久状态，不受这个 5 秒终态影响。
+所有模型工具调用都会在底部状态栏显示工具名、经过截断和凭据遮蔽的目标摘要以及已运行时间；成功或失败终态保留 5 秒。多个工具并行时显示数量和稳定摘要。Codex 后台 job 使用独立的持久状态，不受这个 5 秒终态影响；多个 Codex Action 或一个 Action 内的并发活动在单行 footer 中聚合，在 editor 上方 Runtime Dock 中按稳定顺序逐行展示。
 
 Pi 现在提供这些低摩擦研究工具：
 
@@ -194,7 +194,7 @@ side 问答会以卡片保存在 session 中。`Ctrl+O` 在展开/收起之间�
 把数据加载重构和完整回归测试交给 Codex executor。目标是消除当前内存峰值，允许它在项目内修改、删除、提交和运行实验。Codex 使用 gpt-5.6-sol/max；你负责给出成功标准，并在它返回后审查证据。若远程运行需要项目外 SSH 凭据，让它返回准确命令给我批准或直接执行。
 ```
 
-Pi 会获得一个 `codex-...` job ID。底部状态栏会持续显示 job 后八位、advisor/executor 模式和明确的 `starting/running/completed/failed/cancelled/outcome_unknown` lifecycle；`now:` 表示当前叶子活动，`last:` 表示最近结束的命令或工具。即使看到 `last: research_pi_host · completed`，只要 lifecycle 仍是 `RUNNING`，executor 就尚未完成。后台任务未结束时，应查询同一 job 的 status/result，或续接同一 Codex Actor，而不是重复启动任务。状态、阻塞问题和完成事件先进入项目 Runtime mailbox，再交给最近 attached 的 Research Leader session。默认 executor 是 project-write + public-network，advisor 是 project-read + public-network；各自的默认 model/effort 位于 `config.json` 的 `codex.executor` 与 `codex.advisor`，也可以在具体委派时覆盖。
+Pi 会获得一个 `codex-...` job ID。单个 job 时，底部状态栏持续显示 job 后八位、advisor/executor 模式和明确的 `starting/running/completed/failed/cancelled/outcome_unknown` lifecycle；`now:` 表示当前叶子活动，`last:` 表示最近结束的命令或工具。两个以上 Action 或并发叶子活动出现时，footer 只显示不会跳动的聚合计数，Runtime Dock 为每个 Action/活动保留固定多行；超过可见上限时使用 `/watch`。即使看到 `last: research_pi_host · completed`，只要 lifecycle 仍是 `RUNNING`，executor 就尚未完成。后台任务未结束时，应查询同一 job 的 status/result，或续接同一 Codex Actor，而不是重复启动任务。状态、阻塞问题和完成事件先进入项目 Runtime mailbox，再交给最近 attached 的 Research Leader session。默认 executor 是 project-write + public-network，advisor 是 project-read + public-network；各自的默认 model/effort 位于 `config.json` 的 `codex.executor` 与 `codex.advisor`，也可以在具体委派时覆盖。
 
 `outcome_unknown` 表示 executor 可能已产生文件、Git、远程 run 等副作用，但 worker 没有留下可靠终态。此时不要重跑或猜测：先检查相关外部状态，再让 Pi 调用 `codex_delegate action=reconcile`，提供 `completed|failed|cancelled` 和简短证据说明。同一 workspace 在结案前不会启动另一写入型 Codex；advisor 仍可用于只读排查。
 

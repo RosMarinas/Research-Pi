@@ -271,7 +271,46 @@ export function formatCodexStatus(job: CodexJobView, activeCount = 1): string {
 	const icon = job.status === "completed" ? "✓" : job.status === "outcome_unknown" ? "!" : job.status === "failed" || job.status === "cancelled" ? "✗" : job.status === "input_required" ? "?" : "⚙";
 	const count = activeCount > 1 && !TERMINAL_JOB_STATUSES.has(job.status) ? `${activeCount} running · ` : "";
 	const mission = job.mission ? ` · ${boundedProgress(job.mission).slice(0, 36)}` : "";
-	return `${icon} Codex ${count}${job.mode} ${shortJobId(job.id)}${mission} · ${job.status} · ${jobActivityText(job)}`;
+	const parallel = Number(job.activeActivityCount ?? job.activeActivities?.length ?? 0);
+	const activity = parallel > 1 ? `${parallel} parallel activities · /watch` : jobActivityText(job);
+	return `${icon} Codex ${count}${job.mode} ${shortJobId(job.id)}${mission} · ${job.status} · ${activity}`;
+}
+
+function stableCodexJobs(jobs: CodexJobView[]): CodexJobView[] {
+	return [...jobs].sort((left, right) => {
+		const leftStarted = String(left.startedAt ?? left.createdAt ?? "");
+		const rightStarted = String(right.startedAt ?? right.createdAt ?? "");
+		return leftStarted.localeCompare(rightStarted) || String(left.id).localeCompare(String(right.id));
+	});
+}
+
+export function formatCodexJobsStatus(jobs: CodexJobView[]): string | undefined {
+	const active = stableCodexJobs(jobs.filter((job) => !TERMINAL_JOB_STATUSES.has(job.status)));
+	if (!active.length) return undefined;
+	if (active.length === 1) return formatCodexStatus(active[0]);
+	const waiting = active.filter((job) => job.status === "input_required").length;
+	const cancelling = active.filter((job) => job.status === "cancelling").length;
+	const detail = [waiting ? `${waiting} waiting` : "", cancelling ? `${cancelling} cancelling` : ""].filter(Boolean).join(" · ");
+	return `${waiting ? "?" : "⚙"} Codex ${active.length} active${detail ? ` · ${detail}` : ""} · details above editor`;
+}
+
+function codexUiProjection(jobs: CodexJobView[]): string {
+	return JSON.stringify({
+		// Preserve useful elapsed-time movement without redrawing on every 750 ms poll.
+		elapsedBucket: jobs.length ? Math.floor(Date.now() / 30_000) : null,
+		jobs: stableCodexJobs(jobs).map((job) => ({
+			id: job.id,
+			status: job.status,
+			mode: job.mode,
+			mission: job.mission,
+			progress: job.progress,
+			currentActivity: job.currentActivity,
+			activeActivities: job.activeActivities,
+			activeActivityCount: job.activeActivityCount,
+			lastActivity: job.lastActivity,
+			pendingRequest: job.pendingRequest?.id ?? null,
+		})),
+	});
 }
 
 export default function codexDelegateExtension(pi: ExtensionAPI) {
@@ -281,13 +320,26 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 	const deliveredEvents = new Set<string>();
 	let latestTerminal: CodexJobView | undefined;
 	let shuttingDown = false;
+	let lastFooterText: string | undefined;
+	let lastDockProjection: string | undefined;
 
 	const refreshFooter = (ctx: ExtensionContext) => {
 		if (shuttingDown) return;
 		if (!ctx.hasUI) return;
-		const active = [...activeJobs.values()];
-		const latest = active.at(-1);
-		ctx.ui.setStatus("codex_delegate", latest ? formatCodexStatus(latest, active.length) : latestTerminal ? formatCodexStatus(latestTerminal) : undefined);
+		const active = stableCodexJobs([...activeJobs.values()]);
+		const text = formatCodexJobsStatus(active) ?? (latestTerminal ? formatCodexStatus(latestTerminal) : undefined);
+		if (text === lastFooterText) return;
+		lastFooterText = text;
+		ctx.ui.setStatus("codex_delegate", text);
+	};
+
+	const refreshDock = (ctx: ExtensionContext, force = false) => {
+		if (shuttingDown) return;
+		const jobs = stableCodexJobs([...activeJobs.values()]);
+		const projection = codexUiProjection(jobs);
+		if (!force && projection === lastDockProjection) return;
+		lastDockProjection = projection;
+		void getRuntimeUiAdapter()?.refresh(ctx, { codexJobs: jobs }).catch(() => undefined);
 	};
 
 	const rememberJob = (job: CodexJobView, ctx: ExtensionContext) => {
@@ -296,11 +348,10 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			activeJobs.delete(job.id);
 			latestTerminal = job;
 		} else {
-			activeJobs.delete(job.id);
 			activeJobs.set(job.id, job);
 		}
 		refreshFooter(ctx);
-		void getRuntimeUiAdapter()?.refresh(ctx, { codexJobs: [...activeJobs.values()] }).catch(() => undefined);
+		refreshDock(ctx);
 	};
 
 	const eventId = (job: CodexJobView): string | undefined => {
@@ -455,6 +506,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 					monitorTimers.delete(initial.id);
 					activeJobs.delete(initial.id);
 					refreshFooter(ctx);
+					refreshDock(ctx);
 					return;
 				}
 				const previous = activeJobs.get(initial.id) ?? initial;
@@ -486,6 +538,8 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		monitorTimers.clear();
 		activeJobs.clear();
 		latestTerminal = undefined;
+		lastFooterText = undefined;
+		lastDockProjection = undefined;
 		if (ctx.hasUI) ctx.ui.setStatus("codex_delegate", undefined);
 		if (options.refreshRuntime !== false) {
 			void getRuntimeUiAdapter()?.refresh(ctx, { codexJobs: [] }).catch(() => undefined);

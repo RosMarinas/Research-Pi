@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, w
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import codexDelegateExtension, { formatCodexStatus } from "../.pi/extensions/codex-delegate.ts";
+import codexDelegateExtension, { formatCodexJobsStatus, formatCodexStatus } from "../.pi/extensions/codex-delegate.ts";
 import {
 	DEFAULT_CODEX_MODEL,
 	DEFAULT_CODEX_REASONING_EFFORT,
@@ -78,6 +78,25 @@ test("Codex delegation exposes bounded running and terminal footer states", () =
 		progress: "completed",
 	});
 	assert.equal(completed, "✓ Codex advisor abcdef12 · completed · phase: completed");
+
+	const parallel = formatCodexStatus({
+		id: "codex-2026-08-11-feedbeef",
+		mode: "executor",
+		status: "running",
+		progress: "child activity changed",
+		activeActivityCount: 3,
+		activeActivities: [
+			{ id: "one", summary: "first child" },
+			{ id: "two", summary: "second child" },
+		],
+	});
+	assert.equal(parallel, "⚙ Codex executor feedbeef · running · 3 parallel activities · /watch");
+
+	const aggregate = formatCodexJobsStatus([
+		{ id: "codex-b", mode: "executor", status: "running", createdAt: "2026-08-11T00:00:02Z" },
+		{ id: "codex-a", mode: "advisor", status: "input_required", createdAt: "2026-08-11T00:00:01Z" },
+	]);
+	assert.equal(aggregate, "? Codex 2 active · 1 waiting · details above editor");
 });
 
 test("a stale Pi Session cannot start new Codex work after Leader ownership moves", async () => {
@@ -201,7 +220,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       send({ method: "item/completed", params: { threadId: foreignThread, turnId: foreignTurn, item: { id: "foreign-message", type: "agentMessage", phase: "final_answer", text: foreignResult } } });
       send({ method: "turn/completed", params: { threadId: foreignThread, turn: { id: foreignTurn, status: "completed", items: [], error: null } } });
     }
-    if (prompt.includes("objective activity")) {
+    if (prompt.includes("parallel objective activity")) {
+      send({ method: "item/started", params: { threadId: "thread-fake-123", turnId: activeTurn, item: { id: "parallel-one", type: "commandExecution", status: "inProgress", command: "python3 probe-a.py", cwd: process.cwd() } } });
+      send({ method: "item/started", params: { threadId: "thread-fake-123", turnId: activeTurn, item: { id: "parallel-two", type: "commandExecution", status: "inProgress", command: "python3 probe-b.py", cwd: process.cwd() } } });
+    } else if (prompt.includes("objective activity")) {
       send({ method: "item/started", params: { threadId: "thread-fake-123", turnId: activeTurn, item: { id: "command-observed", type: "commandExecution", status: "inProgress", command: "python3 probe.py", commandActions: [], cwd: process.cwd(), durationMs: null, exitCode: null, aggregatedOutput: null } } });
       send({ method: "item/completed", params: { threadId: "thread-fake-123", turnId: activeTurn, item: { id: "command-observed", type: "commandExecution", status: "completed", command: "python3 probe.py", commandActions: [], cwd: process.cwd(), durationMs: 12, exitCode: 0, aggregatedOutput: "probe-ok" } } });
       send({ method: "item/completed", params: { threadId: "thread-fake-123", turnId: activeTurn, item: { id: "collab-observed", type: "collabAgentToolCall", tool: "spawnAgent", status: "completed", senderThreadId: "thread-fake-123", receiverThreadIds: ["thread-child-1"], agentsStates: { "thread-child-1": { status: "running", message: "checking probe" } }, model: "gpt-5.6-luna", reasoningEffort: "high", prompt: "Check the probe result" } } });
@@ -949,6 +971,40 @@ test("App Server objective command and subagent events reach the bounded audit p
 		const subagent = events.find((event) => event.category === "subagent");
 		assert.deepEqual(subagent.receiverThreadIds, ["thread-child-1"]);
 		assert.equal(subagent.model, "gpt-5.6-luna");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("parallel objective activities remain separately visible in live job state", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-parallel-ui-"));
+	try {
+		const workspace = join(root, "workspace");
+		const jobRoot = join(root, "codex", "jobs");
+		mkdirSync(workspace, { recursive: true });
+		const started = await startCodexJob({
+			cwd: workspace,
+			jobRoot,
+			codexBin: makeFakeCodex(root, 500),
+			mode: "advisor",
+			task: "emit parallel objective activity for the TUI",
+		});
+		let active;
+		for (let attempt = 0; attempt < 100; attempt++) {
+			const current = await readCodexJob(started.id, { jobRoot });
+			if (current.activeActivityCount === 2) {
+				active = current;
+				break;
+			}
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		assert.equal(active?.status, "running", JSON.stringify(active));
+		assert.equal(active?.activeActivityCount, 2);
+		assert.deepEqual(active?.activeActivities.map((activity) => activity.id), ["parallel-one", "parallel-two"]);
+		assert.ok(active?.activeActivities.every((activity) => activity.threadId === "thread-fake-123"));
+		const completed = await waitForCodexJob(started.id, { jobRoot });
+		assert.equal(completed.activeActivityCount, 0);
+		assert.deepEqual(completed.activeActivities, []);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

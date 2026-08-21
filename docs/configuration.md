@@ -198,7 +198,7 @@ The UI policy is intentionally semantic rather than pixel-based:
 }
 ```
 
-`runtimeStrip=auto` shows the compact Project/Actor dock only while work is active or Runtime state needs attention; `always` keeps the single-line idle view and `off` removes it. `density` is `compact` or `balanced`. `showProfileStatus` controls the optional `◇ profile` footer item; it defaults off because Pi already renders the effective model and thinking level. Terminal breakpoints and Board columns adapt automatically and are not user-configured pixels. `configPanelRows` controls Research Pi selector height, currently used by the theme panel.
+`runtimeStrip=auto` shows the compact Project/Actor dock only while work is active or Runtime state needs attention; `always` keeps the single-line idle view and `off` removes it. `density` is `compact` or `balanced`. When several Codex Actions or objective leaf activities run concurrently, the one-line Pi footer keeps only a stable aggregate while the Dock assigns deterministic rows to as many as four Actions and four activities; overflow remains available through `/watch`. `showProfileStatus` controls the optional `◇ profile` footer item; it defaults off because Pi already renders the effective model and thinking level. Terminal breakpoints and Board columns adapt automatically and are not user-configured pixels. `configPanelRows` controls Research Pi selector height, currently used by the theme panel.
 
 `diagnostics.trace` enables the sensitive Pi trace extension for ordinary `pi` startup; `pi-traced` remains the explicit one-shot override. `diagnostics.codexSqliteLogs` restores Codex App Server internal TRACE/DEBUG SQLite logging. Both defaults are false and should be returned to false after diagnosis.
 

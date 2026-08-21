@@ -62,3 +62,36 @@ test("Runtime Dock never presents a completed leaf tool as a completed executor"
 	assert.match(lines, /last: research_pi_host · completed/);
 	assert.doesNotMatch(lines, /executor 9e62a4b5 · COMPLETED/);
 });
+
+test("Runtime Dock gives concurrent Codex work stable multi-line rows", () => {
+	const active = model({ counts: { active: 2 } });
+	const jobs = [
+		{
+			id: "codex-demo-bbbbbbbb",
+			status: "running",
+			mode: "executor",
+			createdAt: "2026-08-21T00:00:02.000Z",
+			activeActivityCount: 2,
+			activeActivities: [
+				{ id: "two", threadId: "thread-child-2", category: "command", summary: "run probe B" },
+				{ id: "three", threadId: "thread-child-3", category: "subagent", summary: "review evidence" },
+			],
+		},
+		{
+			id: "codex-demo-aaaaaaaa",
+			status: "running",
+			mode: "advisor",
+			createdAt: "2026-08-21T00:00:01.000Z",
+			currentActivity: { id: "one", category: "search", summary: "checking docs" },
+		},
+	];
+	const forward = new RuntimeDockComponent(active, jobs, theme(), { density: "balanced" }).render(120);
+	const reversed = new RuntimeDockComponent(active, [...jobs].reverse(), theme(), { density: "balanced" }).render(120);
+	const text = forward.join("\n");
+	assert.ok(text.indexOf("advisor aaaaaaaa") < text.indexOf("executor bbbbbbbb"));
+	assert.match(text, /parallel: 2 active activities/);
+	assert.match(text, /command hild-2 · run probe B/);
+	assert.match(text, /subagent hild-3 · review evidence/);
+	assert.deepEqual(forward, reversed, "poll completion order must not reorder Codex rows");
+	assert.ok(forward.every((line) => visibleWidth(line) <= 120));
+});

@@ -26,10 +26,14 @@ function pad(line, width) {
 	return clipped + " ".repeat(Math.max(0, width - visibleWidth(clipped)));
 }
 
-function latestLiveJob(jobs = []) {
+function liveJobs(jobs = []) {
 	return [...jobs]
 		.filter((job) => ACTIVE.has(job.status) || job.status === "input_required")
-		.sort((left, right) => Date.parse(right.lastActivityAt ?? right.startedAt ?? right.createdAt ?? "") - Date.parse(left.lastActivityAt ?? left.startedAt ?? left.createdAt ?? ""))[0] ?? null;
+		.sort((left, right) => {
+			const leftStarted = String(left.startedAt ?? left.createdAt ?? "");
+			const rightStarted = String(right.startedAt ?? right.createdAt ?? "");
+			return leftStarted.localeCompare(rightStarted) || String(left.id).localeCompare(String(right.id));
+		});
 }
 
 function jobStateLabel(status) {
@@ -37,6 +41,8 @@ function jobStateLabel(status) {
 }
 
 function jobActivityLabel(job) {
+	const parallel = Number(job.activeActivityCount ?? job.activeActivities?.length ?? 0);
+	if (parallel > 1) return `parallel: ${parallel} active activities`;
 	if (job.currentActivity?.summary) return `now: ${inline(job.currentActivity.summary, 92)}`;
 	if (job.lastActivity?.summary) return `last: ${inline(job.lastActivity.summary, 92)}`;
 	const progress = inline(job.progress || job.mission, 92);
@@ -46,6 +52,35 @@ function jobActivityLabel(job) {
 		|| /^(?:command|file changes)\s+(?:completed|failed):/i.test(progress)
 	);
 	return `${looksLikeCompletedLeaf ? "last" : "phase"}: ${progress}`;
+}
+
+function jobLine(job, th) {
+	const jobElapsed = elapsed(job.startedAt ?? job.createdAt);
+	const jobDetail = jobActivityLabel(job);
+	return `${th.fg(job.status === "input_required" ? "warning" : "accent", job.status === "input_required" ? "?" : "●")} ${job.mode ?? "codex"} ${shortId(job.id)} · ${jobStateLabel(job.status)}${jobElapsed ? ` ${jobElapsed}` : ""}${jobDetail ? ` · ${jobDetail}` : ""}`;
+}
+
+function activityLines(jobs, th, limit = 4) {
+	const lines = [];
+	let hidden = 0;
+	for (const job of jobs) {
+		const activities = Array.isArray(job.activeActivities) ? job.activeActivities : [];
+		const total = Number(job.activeActivityCount ?? activities.length);
+		if (total <= 1) continue;
+		for (const activity of activities) {
+			if (lines.length >= limit) {
+				hidden += 1;
+				continue;
+			}
+			const owner = activity.threadId ? ` ${shortId(activity.threadId, 6)}` : "";
+			const category = inline(activity.category || "activity", 16);
+			const summary = inline(activity.summary || activity.status || "running", 84);
+			lines.push(th.fg("dim", `  ↳ ${category}${owner} · ${summary}`));
+		}
+		hidden += Math.max(0, total - activities.length);
+	}
+	if (hidden > 0) lines.push(th.fg("dim", `  ↳ +${hidden} more active activities · /watch`));
+	return lines;
 }
 
 export function runtimeDockVisible(model, mode = "auto") {
@@ -73,7 +108,7 @@ export class RuntimeDockComponent {
 	render(width) {
 		const th = this.theme;
 		const usable = Math.max(1, Math.floor(Number(width) || 1));
-		const job = latestLiveJob(this.jobs);
+		const jobs = liveJobs(this.jobs);
 		const active = this.model.counts.active;
 		const waiting = this.model.counts.waiting;
 		const unknown = this.model.counts.unknown;
@@ -94,15 +129,16 @@ export class RuntimeDockComponent {
 			open ? `${open} open` : "",
 		].filter(Boolean).join(" · ") || "idle";
 		const state = `${leader} · ${th.fg(stateColor, `memory ${freshness}`)} · ${counters}`;
-		const jobElapsed = job ? elapsed(job.startedAt ?? job.createdAt) : "";
-		const jobDetail = job ? jobActivityLabel(job) : "";
-		const jobLine = job
-			? `${th.fg(job.status === "input_required" ? "warning" : "accent", job.status === "input_required" ? "?" : "●")} ${job.mode ?? "codex"} ${shortId(job.id)} · ${jobStateLabel(job.status)}${jobElapsed ? ` ${jobElapsed}` : ""}${jobDetail ? ` · ${jobDetail}` : ""}`
-			: "";
+		const visibleJobLimit = usable < 64 || this.density === "compact" ? 3 : 4;
+		const visibleJobs = jobs.slice(0, visibleJobLimit);
+		const jobLines = visibleJobs.map((job) => jobLine(job, th));
+		if (jobs.length > visibleJobs.length) {
+			jobLines.push(th.fg("dim", `… +${jobs.length - visibleJobs.length} more Codex actions · /watch`));
+		}
 
 		if (usable < 64 || this.density === "compact") {
 			const lines = [truncateToWidth(`${headline} · ${state}`, usable, "…", true)];
-			if (jobLine) lines.push(truncateToWidth(`${jobLine} · /watch`, usable, "…", true));
+			for (const line of jobLines) lines.push(truncateToWidth(line, usable, "…", true));
 			return lines;
 		}
 
@@ -111,8 +147,9 @@ export class RuntimeDockComponent {
 		const rows = [
 			headline,
 			state,
-			...(jobLine ? [jobLine] : []),
-			th.fg("dim", jobLine ? "/runtime board · /watch <actor>" : "/runtime board · /runtime health"),
+			...jobLines,
+			...activityLines(visibleJobs, th),
+			th.fg("dim", jobLines.length ? "/runtime board · /watch <actor>" : "/runtime board · /runtime health"),
 		];
 		return [
 			border(`╭${"─".repeat(inner)}╮`),

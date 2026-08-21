@@ -64,6 +64,7 @@ test("leaf completion projects as last activity, not job lifecycle completion", 
 	}, { timestamp: "2026-08-20T00:00:00.000Z" });
 	assert.equal(update.phase, "completed");
 	assert.equal(update.activity.id, "tool-1");
+	assert.equal(update.activity.threadId, "thread-root");
 	assert.equal(update.activity.category, "tool");
 	assert.equal(update.activity.status, "completed");
 	assert.equal(update.activity.summary, "research_pi_host · completed");

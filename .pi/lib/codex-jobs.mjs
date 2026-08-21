@@ -493,6 +493,8 @@ export async function startCodexJob(options) {
 			exitCode: null,
 			progress: "queued",
 			currentActivity: null,
+			activeActivities: [],
+			activeActivityCount: 0,
 			lastActivity: null,
 			lastActivityAt: createdAt,
 			gitBefore: await getGitSnapshot(cwd),
@@ -750,6 +752,8 @@ export async function readCodexJob(jobId, options = {}) {
 				status: unknownOutcome ? "outcome_unknown" : current.status === "cancelling" ? "cancelled" : "failed",
 				finishedAt: now(),
 				currentActivity: null,
+				activeActivities: [],
+				activeActivityCount: 0,
 				progress: unknownOutcome ? "worker exited after side effects may have started" : "worker exited without a terminal record",
 				error: current.error ?? (unknownOutcome
 					? "Codex worker disappeared after the execution turn was durably marked started; external effects must be reconciled"
@@ -762,6 +766,8 @@ export async function readCodexJob(jobId, options = {}) {
 				status: "failed",
 				finishedAt: now(),
 				currentActivity: null,
+				activeActivities: [],
+				activeActivityCount: 0,
 				progress: "worker failed to start",
 				error: current.error ?? "Codex job worker did not publish its PID",
 			}));
@@ -793,6 +799,8 @@ export async function reconcileCodexJobOutcome(jobId, options = {}) {
 		status: outcome,
 		finishedAt: job.finishedAt ?? now(),
 		currentActivity: null,
+		activeActivities: [],
+		activeActivityCount: 0,
 		progress: `outcome reconciled as ${outcome}`,
 		error: outcome === "completed" ? null : job.error,
 		sideEffect: {
@@ -888,6 +896,8 @@ export async function cancelCodexJob(jobId, options = {}) {
 		status: unknownOutcome ? "outcome_unknown" : "cancelled",
 		finishedAt: now(),
 		currentActivity: null,
+		activeActivities: [],
+		activeActivityCount: 0,
 		progress: unknownOutcome ? "forced stop after side effects may have started" : "cancelled",
 		error: unknownOutcome ? "Codex was force-stopped after execution began; inspect external state before continuing" : current.error,
 		sideEffect: unknownOutcome ? { ...current.sideEffect, state: "unknown", unknownAt: now() } : current.sideEffect,
@@ -981,6 +991,16 @@ export function publicJobView(job) {
 		hostCapabilityCount: job.hostCapabilityCount ?? 0,
 		progress: job.progress,
 		currentActivity: job.currentActivity ?? null,
+		activeActivities: Array.isArray(job.activeActivities)
+			? job.activeActivities.slice(0, 8)
+			: job.currentActivity
+				? [job.currentActivity]
+				: [],
+		activeActivityCount: Number.isInteger(job.activeActivityCount)
+			? job.activeActivityCount
+			: job.currentActivity
+				? 1
+				: 0,
 		lastActivity: job.lastActivity ?? null,
 		lastActivityAt: job.lastActivityAt ?? null,
 		exitCode: job.exitCode,
