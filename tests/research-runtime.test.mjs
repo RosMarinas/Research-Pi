@@ -5,6 +5,8 @@ import { join } from "node:path";
 import test from "node:test";
 import researchRuntimeExtension, {
 	actorLines,
+	codexRuntimeMessageMarkdown,
+	codexRuntimeMessagePreview,
 	formatRuntimeHealth,
 	formatRuntimeStatus,
 	runtimeHealth,
@@ -43,6 +45,34 @@ import {
 	unconsumedRuntimeMessages,
 	withRuntimeActorAttachment,
 } from "../.pi/lib/research-runtime.mjs";
+
+test("Codex Runtime result cards preserve Markdown structure when expanded", () => {
+	const content = [
+		"[Research Runtime result msg-1 from codex:mission-demo:advisor]",
+		"Codex delegation codex-demo completed.",
+		"Mode/model: advisor · gpt-5.6-sol · max",
+		"Mission: review-design",
+		"Summary: 总判断暂不冻结。",
+		"",
+		"1. 第一条论证。",
+		"2. 第二条论证。",
+		"Evidence:",
+		"- observation A",
+		"- observation B",
+		"Uncertainties:",
+		"- limitation C",
+		"Recommended next step: run probe D",
+		"Use codex_delegate action=result with jobId=codex-demo if the full structured result is needed.",
+	].join("\n");
+	assert.equal(codexRuntimeMessagePreview(content), "总判断暂不冻结。 1. 第一条论证。 2. 第二条论证。");
+	const markdown = codexRuntimeMessageMarkdown(content);
+	assert.match(markdown, /^## Summary/m);
+	assert.match(markdown, /\n1\. 第一条论证。\n2\. 第二条论证。/);
+	assert.match(markdown, /^## Evidence/m);
+	assert.match(markdown, /^## Uncertainties/m);
+	assert.match(markdown, /^## Recommended next step/m);
+	assert.match(markdown, /^> Use codex_delegate/m);
+});
 
 test("Runtime status reports live activation instead of historical Actor count", () => {
 	const codexActors = Array.from({ length: 16 }, (_, index) => ({

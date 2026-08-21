@@ -1,4 +1,5 @@
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getMarkdownTheme, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
 	defaultCodexModel,
@@ -180,6 +181,70 @@ function formatJob(job: ReturnType<typeof publicJobView>): string {
 		return `Codex job ${job.id} needs input (${job.pendingRequest.id}): ${job.pendingRequest.question}`;
 	}
 	return `Codex job ${job.id} is ${job.status}; ${jobActivityText(job)}. Use action=result later to retrieve its structured result.`;
+}
+
+function inlineCode(value: unknown): string {
+	return `\`${String(value ?? "").replaceAll("`", "'")}\``;
+}
+
+function resultList(value: unknown): string[] {
+	return Array.isArray(value) ? value.map((item) => String(item ?? "").trim()).filter(Boolean) : [];
+}
+
+export function codexResultPreview(result: any, limit = 420): string {
+	const text = String(result?.summary ?? "Codex returned no summary.").replace(/\s+/g, " ").trim();
+	return text.length <= limit ? text : `${text.slice(0, Math.max(0, limit - 3))}...`;
+}
+
+export function codexResultMarkdown(result: any): string {
+	if (!result || typeof result !== "object") return "Codex returned no structured result.";
+	const sections: string[] = [];
+	const summary = String(result.summary ?? "").trim();
+	if (summary) sections.push(`## Summary\n\n${summary}`);
+
+	const appendList = (title: string, values: unknown) => {
+		const items = resultList(values);
+		if (items.length) sections.push(`## ${title}\n\n${items.map((item) => `- ${item}`).join("\n")}`);
+	};
+	appendList("Evidence", result.evidence);
+	appendList("Actions taken", result.actions_taken);
+
+	const changedFiles = resultList(result.changed_files);
+	if (changedFiles.length) sections.push(`## Changed files\n\n${changedFiles.map((path) => `- ${inlineCode(path)}`).join("\n")}`);
+
+	if (Array.isArray(result.checks) && result.checks.length) {
+		sections.push([
+			"## Checks",
+			"",
+			...result.checks.map((check: any) => `- ${inlineCode(check?.command)} — ${String(check?.result ?? "").trim()}`),
+		].join("\n"));
+	}
+
+	if (Array.isArray(result.external_effects) && result.external_effects.length) {
+		sections.push([
+			"## External effects",
+			"",
+			...result.external_effects.map((effect: any) => {
+				const identity = [effect?.kind, effect?.target, effect?.identifier].filter(Boolean).join(" · ");
+				const detail = String(effect?.detail ?? "").trim();
+				return `- **${identity || "effect"}**${detail ? ` — ${detail}` : ""}`;
+			}),
+		].join("\n"));
+	}
+
+	appendList("Uncertainties", result.uncertainties);
+	const next = String(result.recommended_next_step ?? "").trim();
+	if (next) sections.push(`## Recommended next step\n\n${next}`);
+	return sections.join("\n\n") || "Codex returned an empty structured result.";
+}
+
+function codexResultCounts(result: any): string {
+	return [
+		resultList(result?.evidence).length ? `${result.evidence.length} evidence` : "",
+		Array.isArray(result?.checks) && result.checks.length ? `${result.checks.length} checks` : "",
+		resultList(result?.changed_files).length ? `${result.changed_files.length} files` : "",
+		resultList(result?.uncertainties).length ? `${result.uncertainties.length} uncertainties` : "",
+	].filter(Boolean).join(" · ");
 }
 
 function formatMissions(missions: Awaited<ReturnType<typeof listCodexMissions>>): string {
@@ -445,6 +510,10 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 						to: message.to,
 						jobId: job.id,
 						status: job.status,
+						mode: job.mode,
+						model: job.model,
+						reasoningEffort: job.reasoningEffort,
+						mission: job.mission ?? null,
 						requestId: job.pendingRequest?.id ?? null,
 						transient: true,
 						attachmentEpoch: attachment.epoch ?? null,
@@ -691,6 +760,70 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		],
 		parameters: ParamsSchema,
 		executionMode: "sequential",
+		renderCall(args, theme) {
+			const mode = args.mode ?? "executor";
+			const target = args.jobId ? shortJobId(args.jobId) : args.mission ?? mode;
+			const task = args.task ?? args.followUp ?? args.message ?? "";
+			const preview = task ? codexResultPreview({ summary: task }, 100) : "";
+			return new Text([
+				`${theme.fg("toolTitle", theme.bold("Codex"))} ${theme.fg("accent", args.action)} ${theme.fg("muted", `· ${target}`)}`,
+				preview ? theme.fg("dim", `  ${preview}`) : "",
+			].filter(Boolean).join("\n"), 0, 0);
+		},
+		renderResult(result, { expanded, isPartial }, theme) {
+			const details = result.details as CodexJobView | { missions?: unknown[] } | undefined;
+			if (!details || !("id" in details)) {
+				const content = result.content.find((item) => item.type === "text");
+				return new Text(content?.type === "text" ? content.text : "Codex returned no result.", 0, 0);
+			}
+
+			const job = details as CodexJobView;
+			const container = new Container();
+			const terminal = TERMINAL_JOB_STATUSES.has(job.status);
+			const icon = job.status === "completed"
+				? theme.fg("success", "✓")
+				: job.status === "input_required" || job.status === "outcome_unknown"
+					? theme.fg("warning", job.status === "input_required" ? "?" : "!")
+					: job.status === "failed" || job.status === "cancelled"
+						? theme.fg("error", "✗")
+						: theme.fg("accent", "●");
+			container.addChild(new Text(
+				`${icon} ${theme.fg("toolTitle", theme.bold(`Codex ${job.mode}`))} ${theme.fg("accent", shortJobId(job.id))} ${theme.fg(terminal ? "muted" : "warning", `· ${job.status}`)}`,
+				0,
+				0,
+			));
+			container.addChild(new Text(
+				theme.fg("dim", [job.mission, job.model, job.reasoningEffort].filter(Boolean).join(" · ")),
+				0,
+				0,
+			));
+
+			if (job.result) {
+				container.addChild(new Spacer(1));
+				if (expanded) {
+					container.addChild(new Markdown(codexResultMarkdown(job.result), 0, 0, getMarkdownTheme()));
+					container.addChild(new Spacer(1));
+					container.addChild(new Text(theme.fg("dim", "Ctrl+O collapses · /watch for objective execution events"), 0, 0));
+				} else {
+					container.addChild(new Text(codexResultPreview(job.result), 0, 0));
+					const counts = codexResultCounts(job.result);
+					if (counts) container.addChild(new Text(theme.fg("muted", counts), 0, 0));
+					container.addChild(new Text(theme.fg("dim", "Ctrl+O expands the structured Codex response"), 0, 0));
+				}
+				return container;
+			}
+
+			const message = job.status === "failed" || job.status === "cancelled"
+				? job.error ?? job.progress
+				: job.status === "outcome_unknown"
+					? "Side effects may have occurred; inspect external state before reconciliation."
+					: job.status === "input_required" && job.pendingRequest
+						? job.pendingRequest.question
+						: jobActivityText(job);
+			container.addChild(new Text(theme.fg(job.status === "failed" ? "error" : "muted", String(message ?? "waiting")), 0, 0));
+			if (isPartial) container.addChild(new Text(theme.fg("dim", "Codex is still running..."), 0, 0));
+			return container;
+		},
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const requestedMode = params.mode;

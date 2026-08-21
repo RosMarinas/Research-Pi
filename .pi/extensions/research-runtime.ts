@@ -1,5 +1,5 @@
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Box, Text } from "@earendil-works/pi-tui";
+import { getMarkdownTheme, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Box, Markdown, Text } from "@earendil-works/pi-tui";
 import { join } from "node:path";
 import { getGitSnapshot, HARNESS_ROOT } from "../lib/codex-jobs.mjs";
 import {
@@ -81,6 +81,31 @@ const UI_RUNTIME_STRIP = ["auto", "always", "off"].includes(process.env.RESEARCH
 function compact(text: string, limit = 160): string {
 	const value = String(text ?? "").replace(/\s+/g, " ").trim();
 	return value.length <= limit ? value : `${value.slice(0, limit - 3)}...`;
+}
+
+function runtimeDisplayBody(content: string): string {
+	const lines = String(content ?? "").replace(/\r\n/g, "\n").split("\n");
+	if (/^\[Research Runtime\b/.test(lines[0] ?? "")) lines.shift();
+	return lines.join("\n").trim();
+}
+
+export function codexRuntimeMessagePreview(content: string, limit = 360): string {
+	const body = runtimeDisplayBody(content);
+	const summary = body.match(/(?:^|\n)Summary:\s*([\s\S]*?)(?=\n(?:Evidence|Actions taken|Changed files|Checks|External effects|Uncertainties|Recommended next step|Error):|\nUse codex_delegate|$)/)?.[1] ?? body;
+	return compact(summary, limit);
+}
+
+export function codexRuntimeMessageMarkdown(content: string): string {
+	const body = runtimeDisplayBody(content);
+	const summaryIndex = body.search(/(?:^|\n)Summary:/);
+	const relevant = summaryIndex >= 0 ? body.slice(summaryIndex + (body[summaryIndex] === "\n" ? 1 : 0)) : body;
+	return relevant
+		.replace(/^Summary:\s*/m, "## Summary\n\n")
+		.replace(/^(Evidence|Actions taken|Changed files|Checks|External effects|Uncertainties):\s*$/gm, "## $1")
+		.replace(/^Recommended next step:\s*/m, "## Recommended next step\n\n")
+		.replace(/^Error:\s*/m, "## Error\n\n")
+		.replace(/^(Use codex_delegate[^\n]*)$/gm, "> $1")
+		.trim();
 }
 
 function splitTargetAndBody(input: string): { target: string; body: string } {
@@ -522,12 +547,55 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		return { status: "queued", detail: `${actor.label} has no live Provider adapter` };
 	};
 
-	pi.registerMessageRenderer<{ messageId?: string; type?: string; from?: string }>(RUNTIME_MESSAGE_KIND, (message, options, theme) => {
+	pi.registerMessageRenderer<{
+		messageId?: string;
+		type?: string;
+		from?: string;
+		jobId?: string;
+		status?: string;
+		mode?: string;
+		model?: string;
+		reasoningEffort?: string;
+		mission?: string | null;
+	}>(RUNTIME_MESSAGE_KIND, (message, options, theme) => {
 		const details = message.details ?? {};
 		const content = typeof message.content === "string"
 			? message.content
 			: message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
 		const card = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
+		const isCodex = Boolean(details.jobId) || String(details.from ?? "").startsWith("codex:");
+		if (isCodex) {
+			const status = String(details.status ?? details.type ?? "result");
+			const icon = status === "completed"
+				? theme.fg("success", "✓")
+				: status === "failed" || status === "cancelled"
+					? theme.fg("error", "✗")
+					: theme.fg("warning", status === "input_required" ? "?" : "!");
+			card.addChild(new Text(
+				`${icon} ${theme.fg("customMessageLabel", theme.bold(` CODEX / ${String(details.type ?? "result").toUpperCase()} `))} ${theme.fg("muted", status)}`,
+				0,
+				0,
+			));
+			card.addChild(new Text(
+				[
+					details.mode,
+					details.jobId ? String(details.jobId).slice(-8) : undefined,
+					details.mission,
+					details.model,
+					details.reasoningEffort,
+				].filter(Boolean).map(String).join(" · "),
+				0,
+				0,
+			));
+			if (options.expanded) {
+				card.addChild(new Markdown(codexRuntimeMessageMarkdown(content), 0, 0, getMarkdownTheme()));
+				card.addChild(new Text(theme.fg("dim", "Ctrl+O collapses · /watch shows objective execution events"), 0, 0));
+			} else {
+				card.addChild(new Text(codexRuntimeMessagePreview(content), 0, 0));
+				card.addChild(new Text(theme.fg("dim", "Ctrl+O expands the Codex response"), 0, 0));
+			}
+			return card;
+		}
 		card.addChild(new Text(theme.fg("customMessageLabel", theme.bold(` RUNTIME / ${String(details.type ?? "message").toUpperCase()} `)), 0, 0));
 		card.addChild(new Text(`${theme.fg("accent", compact(details.from ?? "unknown", 54))} ${theme.fg("dim", `· ${details.messageId ?? "unknown"}`)}`, 0, 0));
 		card.addChild(new Text(compact(content, options.expanded ? 4000 : 280), 0, 0));
@@ -546,6 +614,15 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		const data = entry.data;
 		if (!data?.messageId) return undefined;
 		const card = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
+		if (String(data.from ?? "").startsWith("codex:")) {
+			const icon = data.status === "delivered" ? theme.fg("success", "✓") : theme.fg("warning", "!");
+			card.addChild(new Text(`${icon} ${theme.fg("customMessageLabel", theme.bold(` CODEX / ${String(data.type).toUpperCase()} `))} ${theme.fg("muted", data.status)}`, 0, 0));
+			card.addChild(new Text(`${theme.fg("accent", compact(data.from, 48))} ${theme.fg("dim", `· ${data.messageId}`)}`, 0, 0));
+			if (expanded) card.addChild(new Markdown(codexRuntimeMessageMarkdown(data.body), 0, 0, getMarkdownTheme()));
+			else card.addChild(new Text(codexRuntimeMessagePreview(data.body, 280), 0, 0));
+			card.addChild(new Text(theme.fg("dim", `${expanded ? "Ctrl+O collapses" : "Ctrl+O expands the Codex response"}`), 0, 0));
+			return card;
+		}
 		card.addChild(new Text(theme.fg("customMessageLabel", theme.bold(` RUNTIME / ${String(data.type).toUpperCase()} `)) + ` ${theme.fg(data.status === "delivered" ? "success" : "warning", data.status)}`, 0, 0));
 		card.addChild(new Text(`${theme.fg("accent", compact(data.from, 36))} ${theme.fg("dim", "→")} ${compact(data.to, 36)}`, 0, 0));
 		card.addChild(new Text(compact(data.body, expanded ? 4000 : 180), 0, 0));

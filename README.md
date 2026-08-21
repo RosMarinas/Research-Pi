@@ -266,7 +266,7 @@ pi doctor --workspace /path/to/research-project
 
 所有模型工具调用都会在 Pi 底部状态栏显示工具名、安全截断后的目标摘要、运行时间和成功/失败终态；并行调用显示当前数量和稳定摘要。普通工具终态保留 5 秒，`codex_delegate` 的后台 job 另有持久状态，不会因委派工具返回而消失。Pi Core 的 footer 固定为单行，因此多个 Codex Action 或一个 Action 内的并发活动会在 footer 聚合计数，并在 editor 上方的 Runtime Dock 按稳定顺序逐行显示；轮询先后不会反复切换“latest”行。
 
-运行 `/watch` 可按需打开紧凑的 Codex 执行 overlay；它不会长期占据编辑区。`←/→` 切换当前项目可见的 Codex Action，`Tab` 或 `↑/↓` 在 overview、activity、agents 三个视图间切换，`r` 刷新，`q`/`Esc` 关闭。agents 视图展示当前 Action 内部 subagent 的 thread、路径、状态、模型和最近消息。面板把 job lifecycle、当前叶子活动和最近完成活动分开显示：`research_pi_host · completed` 只表示一次 broker 调用结束，只有 job state 进入 `completed` 才表示 executor 完成。面板直接读取脱敏的 App Server 客观事件，展示命令、退出码与限长输出尾部、文件修改、MCP/动态工具、搜索以及 Codex 内部 subagent 状态；不会经过 Research Leader 转述，也不会进入 DeepSeek 上下文。
+Codex 返回后，主对话默认只显示状态、摘要预览和 evidence/check/file/uncertainty 计数；`Ctrl+O` 展开后按 Markdown 分节显示 Summary、Evidence、Actions、Checks、External effects、Uncertainties 与 Next step，不再铺开原始 JSON 或把编号压成一个长段落。运行 `/watch` 可按需打开紧凑的 Codex 执行 overlay；它不会长期占据编辑区。`←/→` 切换当前项目可见的 Codex Action，`Tab` 或 `↑/↓` 在 overview、activity、agents 三个视图间切换，`r` 刷新，`q`/`Esc` 关闭。agents 视图展示当前 Action 内部 subagent 的 thread、路径、状态、模型和最近消息。面板把 job lifecycle、当前叶子活动和最近完成活动分开显示：`research_pi_host · completed` 只表示一次 broker 调用结束，只有 job state 进入 `completed` 才表示 executor 完成。面板直接读取脱敏的 App Server 客观事件，展示命令、退出码与限长输出尾部、文件修改、MCP/动态工具、搜索以及 Codex 内部 subagent 状态；不会经过 Research Leader 转述，也不会进入 DeepSeek 上下文。
 
 ### Research Mode
 

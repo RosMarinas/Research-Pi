@@ -198,7 +198,7 @@ Pi 会获得一个 `codex-...` job ID。单个 job 时，底部状态栏持续�
 
 `outcome_unknown` 表示 executor 可能已产生文件、Git、远程 run 等副作用，但 worker 没有留下可靠终态。此时不要重跑或猜测：先检查相关外部状态，再让 Pi 调用 `codex_delegate action=reconcile`，提供 `completed|failed|cancelled` 和简短证据说明。同一 workspace 在结案前不会启动另一写入型 Codex；advisor 仍可用于只读排查。
 
-用户可随时运行 `/watch` 查看最近的 active Action，也可用 `/watch <job后缀>`、`/watch <mission>` 或 `/watch @codex:<Actor短码>` 定位。`←/→` 切换 Action；`Tab` 或 `↑/↓` 切换 overview/activity/agents；`r` 刷新；`q`/`Esc` 关闭。agents 视图显示 Codex 内部 subagent 的 thread、路径、状态、模型和最近消息。内部 subagent 只是本次 Action 的临时子节点，不会污染 Project Actor 列表。
+Codex 结果卡默认折叠为状态、摘要预览和结构化计数；按 `Ctrl+O` 后以 Markdown 标题、编号和列表显示完整结构化回复，原始 JSON 不直接占据主对话。用户可随时运行 `/watch` 查看最近的 active Action，也可用 `/watch <job后缀>`、`/watch <mission>` 或 `/watch @codex:<Actor短码>` 定位。`←/→` 切换 Action；`Tab` 或 `↑/↓` 切换 overview/activity/agents；`r` 刷新；`q`/`Esc` 关闭。agents 视图显示 Codex 内部 subagent 的 thread、路径、状态、模型和最近消息。内部 subagent 只是本次 Action 的临时子节点，不会污染 Project Actor 列表。
 
 Pi 在连续处理同一研究子任务时应使用稳定、简短的 `mission` 标签。带 mission 的新派遣默认 `reuse=auto`：运行中的同 mission/mode/track job 会直接重新挂接，已完成的会通过 App Server `thread/resume` 续接历史；同一精确 workspace、mode、mission 和 research track 可跨 Pi session 复用。换轨后默认开启新 thread；只有用户或 Leader 显式恢复旧 job 才跨 track 续接，并会收到 route-change 警告。续接时 Runtime 也会比较 Git snapshot，工作区变化则要求 Codex 重新检查当前文件。使用 `/codex missions` 查看按 track 分组的任务链，使用 `/actors` 找当前活跃 Actor，或用 `/actors all` 找 suspended Actor 的稳定 `@codex:<Actor短码>`；若要独立第二意见或主动清除旧假设，使用新的 mission。
 

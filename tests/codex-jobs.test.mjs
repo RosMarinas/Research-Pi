@@ -3,7 +3,12 @@ import { chmodSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, w
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import codexDelegateExtension, { formatCodexJobsStatus, formatCodexStatus } from "../.pi/extensions/codex-delegate.ts";
+import codexDelegateExtension, {
+	codexResultMarkdown,
+	codexResultPreview,
+	formatCodexJobsStatus,
+	formatCodexStatus,
+} from "../.pi/extensions/codex-delegate.ts";
 import {
 	DEFAULT_CODEX_MODEL,
 	DEFAULT_CODEX_REASONING_EFFORT,
@@ -97,6 +102,29 @@ test("Codex delegation exposes bounded running and terminal footer states", () =
 		{ id: "codex-a", mode: "advisor", status: "input_required", createdAt: "2026-08-11T00:00:01Z" },
 	]);
 	assert.equal(aggregate, "? Codex 2 active · 1 waiting · details above editor");
+});
+
+test("Codex structured results render as readable sections instead of raw JSON", () => {
+	const result = {
+		status: "completed",
+		goal_satisfied: true,
+		summary: "Observation first.\n\n1. Preserve the numbered argument.\n2. Keep the second point.",
+		evidence: ["Metric A passed", "Metric B remained uncertain"],
+		actions_taken: ["Inspected the project"],
+		changed_files: ["src/probe.py"],
+		checks: [{ command: "uv run pytest", result: "12 passed" }],
+		external_effects: [],
+		uncertainties: ["One surface remains untested"],
+		recommended_next_step: "Run the discriminating probe.",
+	};
+	const markdown = codexResultMarkdown(result);
+	assert.match(markdown, /^## Summary/m);
+	assert.match(markdown, /1\. Preserve the numbered argument\./);
+	assert.match(markdown, /^## Evidence/m);
+	assert.match(markdown, /`uv run pytest`/);
+	assert.match(markdown, /^## Recommended next step/m);
+	assert.doesNotMatch(markdown, /"goal_satisfied"/);
+	assert.equal(codexResultPreview(result), "Observation first. 1. Preserve the numbered argument. 2. Keep the second point.");
 });
 
 test("a stale Pi Session cannot start new Codex work after Leader ownership moves", async () => {
