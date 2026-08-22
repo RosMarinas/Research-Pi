@@ -3,6 +3,95 @@ import { createHash } from "node:crypto";
 export const RESEARCH_COMPACTION_KIND = "research-pi-compaction";
 export const RESEARCH_COMPACTION_VERSION = 1;
 export const RESEARCH_COMPACTION_POLICY_VERSION = 1;
+export const RESEARCH_STATE_TOOL_NAME = "submit_research_state";
+
+const STRING_ARRAY_SCHEMA = Object.freeze({
+	type: "array",
+	items: { type: "string" },
+});
+
+export const RESEARCH_STATE_TOOL = Object.freeze({
+	name: RESEARCH_STATE_TOOL_NAME,
+	description: "Submit the final structured research state exactly once after synthesizing the compaction evidence.",
+	parameters: {
+		type: "object",
+		additionalProperties: false,
+		required: [
+			"researchQuestion",
+			"currentClaim",
+			"hypotheses",
+			"observations",
+			"decisions",
+			"unresolvedConfounders",
+			"openQuestions",
+			"nextExperiment",
+			"criticalContext",
+		],
+		properties: {
+			researchQuestion: { type: "string" },
+			currentClaim: { type: "string" },
+			hypotheses: {
+				type: "array",
+				items: {
+					type: "object",
+					additionalProperties: false,
+					required: ["id", "statement", "status", "predictions", "rationale", "evidenceRefs"],
+					properties: {
+						id: { type: "string" },
+						statement: { type: "string" },
+						status: { type: "string", enum: ["active", "supported", "weakened", "rejected", "inconclusive"] },
+						predictions: STRING_ARRAY_SCHEMA,
+						rationale: { type: "string" },
+						evidenceRefs: STRING_ARRAY_SCHEMA,
+					},
+				},
+			},
+			observations: {
+				type: "array",
+				items: {
+					type: "object",
+					additionalProperties: false,
+					required: ["statement", "interpretation", "validity", "evidenceRefs"],
+					properties: {
+						statement: { type: "string" },
+						interpretation: { type: "string" },
+						validity: { type: "string", enum: ["valid", "invalid", "inconclusive", "unverified"] },
+						evidenceRefs: STRING_ARRAY_SCHEMA,
+					},
+				},
+			},
+			decisions: {
+				type: "array",
+				items: {
+					type: "object",
+					additionalProperties: false,
+					required: ["decision", "rationale", "reversible", "evidenceRefs"],
+					properties: {
+						decision: { type: "string" },
+						rationale: { type: "string" },
+						reversible: { type: "boolean" },
+						evidenceRefs: STRING_ARRAY_SCHEMA,
+					},
+				},
+			},
+			unresolvedConfounders: STRING_ARRAY_SCHEMA,
+			openQuestions: STRING_ARRAY_SCHEMA,
+			nextExperiment: {
+				type: "object",
+				additionalProperties: false,
+				required: ["question", "intervention", "distinguishingOutcomes", "validityChecks"],
+				properties: {
+					question: { type: "string" },
+					intervention: { type: "string" },
+					distinguishingOutcomes: STRING_ARRAY_SCHEMA,
+					validityChecks: STRING_ARRAY_SCHEMA,
+				},
+			},
+			criticalContext: STRING_ARRAY_SCHEMA,
+		},
+	},
+	constrainedSampling: { type: "json_schema", strict: "prefer" },
+});
 
 function configuredPositiveInteger(name, fallback) {
 	const value = Number(process.env[name]);
@@ -234,14 +323,161 @@ export function mergeProjectRuntimeEvidence(evidence, runtimeSnapshot) {
 	return evidence;
 }
 
-export function parseResearchState(value) {
-	if (value && typeof value === "object" && !Array.isArray(value)) return value;
+function extractFirstJsonObject(value) {
 	const raw = String(value ?? "").trim();
 	const unfenced = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
 	const start = unfenced.indexOf("{");
-	const end = unfenced.lastIndexOf("}");
-	if (start < 0 || end <= start) throw new Error("Compaction model did not return a JSON object.");
-	return JSON.parse(unfenced.slice(start, end + 1));
+	if (start < 0) throw new Error("Compaction model did not return a JSON object.");
+	let depth = 0;
+	let inString = false;
+	let escaped = false;
+	for (let index = start; index < unfenced.length; index += 1) {
+		const char = unfenced[index];
+		if (inString) {
+			if (escaped) escaped = false;
+			else if (char === "\\") escaped = true;
+			else if (char === '"') inString = false;
+			continue;
+		}
+		if (char === '"') inString = true;
+		else if (char === "{") depth += 1;
+		else if (char === "}") {
+			depth -= 1;
+			if (depth === 0) return unfenced.slice(start, index + 1);
+		}
+	}
+	throw new Error("Compaction model returned an unterminated JSON object.");
+}
+
+function escapeRawStringControls(value) {
+	let result = "";
+	let inString = false;
+	let escaped = false;
+	let repaired = 0;
+	for (const char of value) {
+		if (!inString) {
+			result += char;
+			if (char === '"') inString = true;
+			continue;
+		}
+		if (escaped) {
+			result += char;
+			escaped = false;
+			continue;
+		}
+		if (char === "\\") {
+			result += char;
+			escaped = true;
+			continue;
+		}
+		if (char === '"') {
+			result += char;
+			inString = false;
+			continue;
+		}
+		const code = char.codePointAt(0);
+		if (code < 0x20) {
+			result += char === "\n" ? "\\n" : char === "\r" ? "\\r" : char === "\t" ? "\\t" : `\\u${code.toString(16).padStart(4, "0")}`;
+			repaired += 1;
+		} else {
+			result += char;
+		}
+	}
+	return { value: result, repaired };
+}
+
+function removeTrailingCommas(value) {
+	let result = "";
+	let inString = false;
+	let escaped = false;
+	let repaired = 0;
+	for (let index = 0; index < value.length; index += 1) {
+		const char = value[index];
+		if (inString) {
+			result += char;
+			if (escaped) escaped = false;
+			else if (char === "\\") escaped = true;
+			else if (char === '"') inString = false;
+			continue;
+		}
+		if (char === '"') {
+			inString = true;
+			result += char;
+			continue;
+		}
+		if (char === ",") {
+			let next = index + 1;
+			while (/\s/.test(value[next] ?? "")) next += 1;
+			if (value[next] === "]" || value[next] === "}") {
+				repaired += 1;
+				continue;
+			}
+		}
+		result += char;
+	}
+	return { value: result, repaired };
+}
+
+function missingCommaPosition(error) {
+	if (!(error instanceof SyntaxError)) return undefined;
+	const match = error.message.match(/^Expected ',' or '.+' after (?:array element|property value) in JSON at position (\d+)/);
+	return match ? Number(match[1]) : undefined;
+}
+
+export function parseResearchStateWithDiagnostics(value) {
+	if (value && typeof value === "object" && !Array.isArray(value)) {
+		return { state: value, repairs: [] };
+	}
+	const extracted = extractFirstJsonObject(value);
+	try {
+		return { state: JSON.parse(extracted), repairs: [] };
+	} catch (strictError) {
+		const repairs = [];
+		const controls = escapeRawStringControls(extracted);
+		let candidate = controls.value;
+		if (controls.repaired) repairs.push(`escaped ${controls.repaired} raw control character(s) inside JSON strings`);
+		const trailing = removeTrailingCommas(candidate);
+		candidate = trailing.value;
+		if (trailing.repaired) repairs.push(`removed ${trailing.repaired} trailing comma(s)`);
+
+		let insertedCommas = 0;
+		for (let attempt = 0; attempt < 16; attempt += 1) {
+			try {
+				const state = JSON.parse(candidate);
+				if (insertedCommas) repairs.push(`inserted ${insertedCommas} missing comma(s)`);
+				return { state, repairs };
+			} catch (error) {
+				const position = missingCommaPosition(error);
+				const next = position === undefined ? "" : candidate[position];
+				if (position === undefined || !/["{\[\d\-tfn]/.test(next)) {
+					throw strictError;
+				}
+				candidate = `${candidate.slice(0, position)},${candidate.slice(position)}`;
+				insertedCommas += 1;
+			}
+		}
+		throw strictError;
+	}
+}
+
+export function parseResearchState(value) {
+	return parseResearchStateWithDiagnostics(value).state;
+}
+
+export function parseResearchCompactionResponse(content) {
+	const parts = Array.isArray(content) ? content : [];
+	const toolCalls = parts.filter((part) => part?.type === "toolCall" && part.name === RESEARCH_STATE_TOOL_NAME);
+	if (toolCalls.length > 1) throw new Error(`Compaction model called ${RESEARCH_STATE_TOOL_NAME} more than once.`);
+	if (toolCalls.length === 1) {
+		const parsed = parseResearchStateWithDiagnostics(toolCalls[0].arguments);
+		return { ...parsed, source: "tool" };
+	}
+	const raw = parts
+		.filter((part) => part?.type === "text" && typeof part.text === "string")
+		.map((part) => part.text)
+		.join("\n");
+	if (!raw.trim()) throw new Error("Compaction model returned neither structured state nor text JSON.");
+	return { ...parseResearchStateWithDiagnostics(raw), source: "text" };
 }
 
 function refs(value, validRefs, maxItems = 16) {
@@ -507,7 +743,7 @@ export function buildResearchCompactionPrompt({
 	projectTransitions = [],
 	customInstructions,
 }) {
-	return `You maintain working state for computational AI/communications research. Produce one JSON object only.
+	return `You maintain working state for computational AI/communications research. Submit the result by calling ${RESEARCH_STATE_TOOL_NAME} exactly once. Do not emit the state as prose. If tool calling is unavailable, return one JSON object only.
 
 This is not a software-development progress summary. Preserve competing hypotheses, distinguishing predictions, observations versus interpretations, negative-result validity, unresolved confounders, reversibility, and the next highest-information experiment. Exploratory code is disposable unless it affects interpretation or continuation.
 

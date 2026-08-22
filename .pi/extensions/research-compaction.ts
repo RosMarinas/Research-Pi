@@ -12,12 +12,13 @@ import {
 	collectResearchEvidence,
 	mergeProjectRuntimeEvidence,
 	normalizeResearchState,
-	parseResearchState,
+	parseResearchCompactionResponse,
 	RESEARCH_HARD_COMPACT_TOKENS,
 	renderResearchSummary,
 	RESEARCH_COMPACTION_KIND,
 	RESEARCH_COMPACTION_VERSION,
 	RESEARCH_SOFT_COMPACT_TOKENS,
+	RESEARCH_STATE_TOOL,
 	selectResearchCompactionPolicy,
 } from "../lib/research-compact.mjs";
 import { readRuntimeSnapshot, resolveResearchRuntime, runtimeSessionInheritancePolicy } from "../lib/research-runtime.mjs";
@@ -199,6 +200,7 @@ export default function (pi: ExtensionAPI) {
 							timestamp: Date.now(),
 						},
 					],
+					tools: [RESEARCH_STATE_TOOL],
 				},
 				{
 					maxTokens: Math.min(12_000, ctx.model.maxTokens || 12_000),
@@ -207,20 +209,23 @@ export default function (pi: ExtensionAPI) {
 					sessionId: randomUUID(),
 				},
 			);
-			const raw = response.content
-				.filter((part): part is { type: "text"; text: string } => part.type === "text")
-				.map((part) => part.text)
-				.join("\n");
-			if (!raw.trim()) throw new Error(`summarizer returned no text (stopReason=${response.stopReason})`);
-
-			const candidate = parseResearchState(raw);
-			const normalized = normalizeResearchState(candidate, evidence);
+			let parsed;
+			try {
+				parsed = parseResearchCompactionResponse(response.content);
+			} catch (error) {
+				throw new Error(`${error instanceof Error ? error.message : String(error)} (stopReason=${response.stopReason})`);
+			}
+			const normalized = normalizeResearchState(parsed.state, evidence);
+			const validationWarnings = [
+				...parsed.repairs.map((repair) => `Conservatively repaired compaction JSON syntax: ${repair}.`),
+				...normalized.warnings,
+			];
 			const files = fileLists(preparation.fileOps);
 			const summary = renderResearchSummary(normalized.state, evidence, files);
 			const details = buildResearchCompactionDetails({
 				state: normalized.state,
 				evidence,
-				warnings: normalized.warnings,
+				warnings: validationWarnings,
 				sessionId,
 				reason,
 				tokensBefore: preparation.tokensBefore,
@@ -230,9 +235,9 @@ export default function (pi: ExtensionAPI) {
 				inheritancePolicy,
 			});
 
-			if (normalized.warnings.length) {
+			if (validationWarnings.length) {
 				ctx.ui.notify(
-					`Research compaction retained the summary with ${normalized.warnings.length} validation warning(s).`,
+					`Research compaction retained the summary with ${validationWarnings.length} validation warning(s).`,
 					"warning",
 				);
 			}

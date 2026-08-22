@@ -7,9 +7,12 @@ import {
 	collectResearchEvidence,
 	mergeProjectRuntimeEvidence,
 	normalizeResearchState,
+	parseResearchCompactionResponse,
 	parseResearchState,
+	parseResearchStateWithDiagnostics,
 	RESEARCH_HARD_COMPACT_TOKENS,
 	RESEARCH_SOFT_COMPACT_TOKENS,
+	RESEARCH_STATE_TOOL,
 	renderResearchSummary,
 	selectResearchCompactionPolicy,
 } from "../.pi/lib/research-compact.mjs";
@@ -292,6 +295,49 @@ test("a superseding Project transition retires automatic carry-over of old hypot
 
 test("parses fenced JSON output", () => {
 	assert.deepEqual(parseResearchState("```json\n{\"researchQuestion\":\"q\"}\n```"), { researchQuestion: "q" });
+});
+
+test("research compaction prefers one constrained structured-state tool call", () => {
+	assert.equal(RESEARCH_STATE_TOOL.name, "submit_research_state");
+	assert.deepEqual(RESEARCH_STATE_TOOL.constrainedSampling, { type: "json_schema", strict: "prefer" });
+	assert.ok(RESEARCH_STATE_TOOL.parameters.required.includes("nextExperiment"));
+	const result = parseResearchCompactionResponse([
+		{ type: "text", text: "This text must not replace the structured state." },
+		{ type: "toolCall", name: RESEARCH_STATE_TOOL.name, arguments: { researchQuestion: "Which route survives?" } },
+	]);
+	assert.equal(result.source, "tool");
+	assert.deepEqual(result.state, { researchQuestion: "Which route survives?" });
+	assert.deepEqual(result.repairs, []);
+	assert.throws(
+		() => parseResearchCompactionResponse([
+			{ type: "toolCall", name: RESEARCH_STATE_TOOL.name, arguments: {} },
+			{ type: "toolCall", name: RESEARCH_STATE_TOOL.name, arguments: {} },
+		]),
+		/more than once/,
+	);
+});
+
+test("repairs only conservative model JSON syntax failures", () => {
+	const missingCommas = parseResearchStateWithDiagnostics(`{
+		"hypotheses": ["H1"
+		"H2"],
+		"currentClaim": "screen passed"
+		"openQuestions": []
+	}`);
+	assert.deepEqual(missingCommas.state, {
+		hypotheses: ["H1", "H2"],
+		currentClaim: "screen passed",
+		openQuestions: [],
+	});
+	assert.deepEqual(missingCommas.repairs, ["inserted 2 missing comma(s)"]);
+
+	const trailingAndControl = parseResearchStateWithDiagnostics("{\"criticalContext\":[\"line one\nline two\",],}");
+	assert.deepEqual(trailingAndControl.state, { criticalContext: ["line one\nline two"] });
+	assert.deepEqual(trailingAndControl.repairs, [
+		"escaped 1 raw control character(s) inside JSON strings",
+		"removed 2 trailing comma(s)",
+	]);
+	assert.throws(() => parseResearchState('{"hypotheses":["H1"'), /unterminated JSON object/);
 });
 
 test("research compaction uses bounded staged recent tails", () => {
