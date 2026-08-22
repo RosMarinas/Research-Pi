@@ -24,6 +24,13 @@
       "model": "deepseek-v4-flash",
       "thinking": "max"
     },
+    "opencode-go-ox-alpha": {
+      "label": "OpenCode Go · Ox Alpha Free",
+      "description": "Limited-time free preview with 1M context and Max reasoning.",
+      "provider": "opencode-go",
+      "model": "ox-alpha-free",
+      "thinking": "max"
+    },
     "opencode-go-mimo": {
       "label": "OpenCode Go · MiMo V2.5",
       "description": "Highest-quota routine coordinator; evaluate on real project judgment before making it the default.",

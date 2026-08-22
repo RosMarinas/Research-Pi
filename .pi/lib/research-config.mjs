@@ -18,6 +18,36 @@ export const RESEARCH_PI_THEME_CHOICES = Object.freeze([
 	{ name: "light", label: "Pi Light", description: "Pi Core built-in light palette for light terminals." },
 ]);
 
+const RESEARCH_PI_CUSTOM_MODELS = Object.freeze({
+	"opencode-go": [
+		{
+			id: "ox-alpha-free",
+			name: "Ox Alpha Free (limited time)",
+			api: "openai-completions",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+			reasoning: true,
+			thinkingLevelMap: {
+				off: null,
+				minimal: null,
+				low: null,
+				medium: null,
+				high: "high",
+				xhigh: null,
+				max: "max",
+			},
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1_000_000,
+			maxTokens: 131_072,
+			compat: {
+				supportsStore: false,
+				supportsDeveloperRole: false,
+				maxTokensField: "max_tokens",
+			},
+		},
+	],
+});
+
 const TOP_LEVEL_KEYS = new Set([
 	"$schema",
 	"version",
@@ -242,6 +272,10 @@ export function researchPiModels(config) {
 		for (const [model, compat] of Object.entries(models)) {
 			providers[provider].modelOverrides[model] = { compat: clone(compat) };
 		}
+	}
+	for (const [provider, models] of Object.entries(RESEARCH_PI_CUSTOM_MODELS)) {
+		providers[provider] ??= {};
+		providers[provider].models = clone(models);
 	}
 	return { providers };
 }

@@ -28,11 +28,13 @@ test("one Research Pi config resolves leader, Codex, compact, search, and UI def
 	assert.equal(config.research.search.model, "deepseek-v4-flash");
 	assert.equal(config.research.search.enabled, "auto");
 	assert.equal(config.profiles["opencode-go-flash"].provider, "opencode-go");
+	assert.equal(config.profiles["opencode-go-ox-alpha"].model, "ox-alpha-free");
+	assert.equal(config.profiles["opencode-go-ox-alpha"].thinking, "max");
 	assert.equal(config.profiles["opencode-go-luna"].model, "gpt-5.6-luna");
 	assert.equal(config.profiles["opencode-go-qwen"].model, "qwen3.7-plus");
 	assert.equal(config.profiles["opencode-go-mimo"].model, "mimo-v2.5");
 	assert.equal(config.profiles["opencode-go-kimi"].thinking, "max");
-	assert.equal(Object.values(config.profiles).filter((profile) => profile.provider === "opencode-go").length, 11);
+	assert.equal(Object.values(config.profiles).filter((profile) => profile.provider === "opencode-go").length, 12);
 	assert.equal(config.ui.density, "balanced");
 	assert.equal(config.ui.runtimeStrip, "auto");
 	assert.equal(config.ui.showProfileStatus, false);
@@ -81,10 +83,18 @@ test("config persistence creates a private file, schema, and generated Pi adapte
 			"opencode-go/kimi-k3:max",
 			"opencode-go/mimo-v2.5:high",
 			"opencode-go/minimax-m3:high",
+			"opencode-go/ox-alpha-free:max",
 			"opencode-go/qwen3.7-plus:high",
 			"opencode-go/qwen3.8-max:high",
 		]);
 		assert.equal(models.providers.deepseek.modelOverrides["deepseek-v4-flash"].compat.maxTokensField, "max_tokens");
+		const ox = models.providers["opencode-go"].models.find((model) => model.id === "ox-alpha-free");
+		assert.equal(ox.contextWindow, 1_000_000);
+		assert.equal(ox.maxTokens, 131_072);
+		assert.equal(ox.reasoning, true);
+		assert.equal(ox.thinkingLevelMap.high, "high");
+		assert.equal(ox.thinkingLevelMap.max, "max");
+		assert.equal(JSON.stringify(models).includes("configured"), false, "generated model metadata must not contain credentials");
 
 		writeResearchPiAgentConfig(agentDir, resolveResearchPiConfig({ activeProfile: "opencode-go-flash" }), {
 			coreVersion: "0.84.2",
@@ -101,6 +111,7 @@ test("config persistence creates a private file, schema, and generated Pi adapte
 			"opencode-go/kimi-k3:max",
 			"opencode-go/mimo-v2.5:high",
 			"opencode-go/minimax-m3:high",
+			"opencode-go/ox-alpha-free:max",
 			"opencode-go/qwen3.7-plus:high",
 			"opencode-go/qwen3.8-max:high",
 		]);
@@ -176,7 +187,7 @@ test("Codex, compact, and search modules consume the configured environment", ()
 
 test("model scope and status come from the single Research Pi profile catalog", async () => {
 	const config = defaultResearchPiConfig();
-	assert.equal(Object.keys(config.profiles).length, 13);
+	assert.equal(Object.keys(config.profiles).length, 14);
 	assert.equal(compactConfigPath("/Users/polaris/Documents/Utils/Pi/.worktrees/runtime-next/.pi/config.json"), "…/.worktrees/runtime-next/.pi/config.json");
 	const status = formatProfileStatus(config, {
 		model: { provider: "deepseek", id: "deepseek-v4-flash" },

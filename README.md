@@ -165,7 +165,7 @@ cp .env.example .env
 - Pi Core：`0.84.2`
 - Provider：官方 `deepseek` 与订阅 `opencode-go`
 - Active profile：`deepseek-pro`
-- Curated profiles：官方 DeepSeek Pro/Flash；OpenCode Go 的 MiMo V2.5、DeepSeek V4 Flash/Pro、Qwen3.7 Plus/Qwen3.8 Max、MiniMax M3、GPT 5.6 Luna、GLM-5.2、Grok 4.5、Kimi K3、Hy3
+- Curated profiles：官方 DeepSeek Pro/Flash；OpenCode Go 的 Ox Alpha Free、MiMo V2.5、DeepSeek V4 Flash/Pro、Qwen3.7 Plus/Qwen3.8 Max、MiniMax M3、GPT 5.6 Luna、GLM-5.2、Grok 4.5、Kimi K3、Hy3
 - Endpoint：由 Pi Core 的内置 provider catalog 管理，不需要手写 URL
 - Thinking level：`max`（通过官方 `reasoning_effort: "max"` 启用；384K 是最大输出上限，不是输入上下文或压缩阈值）
 
@@ -187,6 +187,7 @@ pi config show                    # 查看完整生效配置
 pi config path                    # 找到配置文件
 pi config list                    # 列出模型 profiles
 pi config use opencode-go-flash   # 持久切到推荐的 Go 日常 Leader
+pi config use opencode-go-ox-alpha # 试用限时免费的 Ox Alpha（1M context / Max reasoning）
 pi --profile deepseek-pro         # 本次启动使用官方高质量 Leader
 ```
 

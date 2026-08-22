@@ -72,6 +72,7 @@ Persistent switching:
 ```sh
 pi config list
 pi config use opencode-go-flash
+pi config use opencode-go-ox-alpha
 ```
 
 One-launch override:
@@ -86,7 +87,7 @@ Pi Core's lower-level `/scoped-models` command is hidden from Research Pi comman
 
 Explicit Pi CLI `--provider`, `--model`, and `--thinking` arguments are appended after the selected profile and therefore win for that invocation.
 
-The profile list is intentionally curated instead of mirroring every model in OpenCode Go. It contains the two official DeepSeek routes plus eleven Go routes requested for Research Pi: `mimo-v2.5`, `deepseek-v4-flash`, `qwen3.7-plus`, `minimax-m3`, `gpt-5.6-luna`, `deepseek-v4-pro`, `glm-5.2`, `qwen3.8-max`, `grok-4.5`, `kimi-k3`, and `hy3`. Muse Spark is excluded because the pinned Pi catalog does not define it and its provider terms permit training on prompts/completions. Pi Core owns endpoint/model metadata. To add another built-in Go model, copy a profile and change only `label`, `provider`, `model`, and `thinking`; use `provider: "opencode-go"` and a model ID supported by the pinned Pi Core.
+The profile list is intentionally curated instead of mirroring every model in OpenCode Go. It contains the two official DeepSeek routes plus twelve Go routes requested for Research Pi: `ox-alpha-free`, `mimo-v2.5`, `deepseek-v4-flash`, `qwen3.7-plus`, `minimax-m3`, `gpt-5.6-luna`, `deepseek-v4-pro`, `glm-5.2`, `qwen3.8-max`, `grok-4.5`, `kimi-k3`, and `hy3`. Ox Alpha is supplied as a small Research Pi model definition because the pinned Pi Core catalog predates it; it reuses `OPENCODE_API_KEY`, declares a 1M context window and 131072-token provider output limit, and exposes the model's `high` and `max` reasoning levels. Muse Spark is excluded because the pinned Pi catalog does not define it and its provider terms permit training on prompts/completions. Pi Core owns endpoint/model metadata for the other routes. To add another built-in Go model, copy a profile and change only `label`, `provider`, `model`, and `thinking`; use `provider: "opencode-go"` and a model ID supported by the pinned Pi Core.
 
 Credentials remain provider-specific:
 
