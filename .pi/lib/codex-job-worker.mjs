@@ -405,7 +405,7 @@ async function main() {
 					kind: "leader_consultation",
 					audience: args.audience === "user" ? "user" : "leader",
 					question: truncate(String(args.question ?? "Codex needs guidance."), 4000),
-					whyBlocking: truncate(String(args.why_blocking ?? ""), 4000),
+					whyBlocking: truncate(String(args.why_it_matters ?? args.why_blocking ?? ""), 4000),
 					options: Array.isArray(args.options) ? args.options.slice(0, 8).map(String) : [],
 					secret: false,
 					status: "pending",
@@ -757,6 +757,7 @@ async function main() {
 			await enqueueJobUpdate({ codexSqliteLogs: { mode: "unavailable", database: null, error: truncate(message, 1000) } });
 		}
 
+		const consultationWhyField = request.mode === "advisor" ? "why_it_matters" : "why_blocking";
 		const dynamicTools = [
 			{
 				name: "research_pi_host",
@@ -783,15 +784,17 @@ async function main() {
 			{
 				name: "consult_research_pi",
 				description:
-					"Ask Research Pi only when a missing research decision or user-only fact materially blocks progress. Resolve implementation details yourself. Never request or transmit secrets with this tool.",
+					request.mode === "advisor"
+						? "Continue the research dialogue with Research Pi. Ask a focused clarification, assumption check, or interpretation choice when the answer would materially improve shared understanding; the discussion does not need to be completely blocked. Avoid performative or repetitive questions. Never request or transmit secrets."
+						: "Ask Research Pi only when a missing research decision or user-only fact materially blocks progress. Resolve implementation details yourself. Never request or transmit secrets with this tool.",
 				inputSchema: {
 					type: "object",
 					additionalProperties: false,
-					required: ["audience", "question", "why_blocking"],
+					required: ["audience", "question", consultationWhyField],
 					properties: {
 						audience: { type: "string", enum: ["leader", "user"] },
 						question: { type: "string", maxLength: 4000 },
-						why_blocking: { type: "string", maxLength: 4000 },
+						[consultationWhyField]: { type: "string", maxLength: 4000 },
 						options: { type: "array", maxItems: 8, items: { type: "string", maxLength: 1000 } },
 					},
 				},

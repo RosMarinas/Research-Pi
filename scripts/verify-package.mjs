@@ -27,6 +27,7 @@ for (const required of [
 	"bin/pi.mjs",
 	".pi/APPEND_SYSTEM.md",
 	".pi/config.defaults.json",
+	".pi/schemas/codex-advisor-result.json",
 	".pi/schemas/research-pi-config.schema.json",
 	".pi/themes/research-pi.json",
 	".pi/extensions/research-config.ts",

@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Research Pi Codex advisor working synthesis",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "shared_understanding",
+    "points_of_agreement",
+    "candidate_explanations",
+    "questions_to_resolve",
+    "evidence",
+    "uncertainties",
+    "working_synthesis",
+    "suggested_next_exchange"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["working_synthesis", "needs_clarification", "blocked"]
+    },
+    "shared_understanding": {
+      "type": "string",
+      "maxLength": 12000
+    },
+    "points_of_agreement": {
+      "type": "array",
+      "maxItems": 24,
+      "items": { "type": "string", "maxLength": 3000 }
+    },
+    "candidate_explanations": {
+      "type": "array",
+      "maxItems": 24,
+      "items": { "type": "string", "maxLength": 4000 }
+    },
+    "questions_to_resolve": {
+      "type": "array",
+      "maxItems": 24,
+      "items": { "type": "string", "maxLength": 3000 }
+    },
+    "evidence": {
+      "type": "array",
+      "maxItems": 32,
+      "items": { "type": "string", "maxLength": 4000 }
+    },
+    "uncertainties": {
+      "type": "array",
+      "maxItems": 32,
+      "items": { "type": "string", "maxLength": 4000 }
+    },
+    "working_synthesis": {
+      "type": "string",
+      "maxLength": 12000
+    },
+    "suggested_next_exchange": {
+      "type": "string",
+      "maxLength": 8000
+    }
+  }
+}

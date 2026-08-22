@@ -10,6 +10,7 @@ import codexDelegateExtension, {
 	formatCodexStatus,
 } from "../.pi/extensions/codex-delegate.ts";
 import {
+	DEFAULT_CODEX_ADVISOR_SCHEMA_PATH,
 	DEFAULT_CODEX_MODEL,
 	DEFAULT_CODEX_REASONING_EFFORT,
 	buildDelegationPrompt,
@@ -54,6 +55,9 @@ test("Pi registers one Codex delegation tool instead of a family of noisy tools"
 	assert.equal(registered.name, "codex_delegate");
 	assert.equal(registered.executionMode, "sequential");
 	assert.match(registered.description, /gpt-5\.6-sol\/max/);
+	assert.match(registered.description, /collaborative research consultation/);
+	assert.doesNotMatch(registered.description, /second opinion|independent proposal or critique/i);
+	assert.match(registered.promptGuidelines.join("\n"), /research question is immature/);
 	assert.equal(command.name, "codex");
 	assert.match(command.definition.description, /mission threads/);
 });
@@ -127,6 +131,28 @@ test("Codex structured results render as readable sections instead of raw JSON",
 	assert.equal(codexResultPreview(result), "Observation first. 1. Preserve the numbered argument. 2. Keep the second point.");
 });
 
+test("Codex advisor results render as a continuation surface instead of a review verdict", () => {
+	const result = {
+		status: "working_synthesis",
+		shared_understanding: "The representation question is not yet mature enough for a verdict.",
+		points_of_agreement: ["The intervention must be explicit"],
+		candidate_explanations: ["The gain comes from memory", "The gain comes from evaluation leakage"],
+		questions_to_resolve: ["Which observation separates the two explanations?"],
+		evidence: ["The current pilot is inconclusive"],
+		uncertainties: ["No oracle result yet"],
+		working_synthesis: "Keep both explanations live and design one discriminating probe.",
+		suggested_next_exchange: "Ask Research Pi which intervention is affordable first.",
+	};
+	const markdown = codexResultMarkdown(result);
+	assert.match(markdown, /^## Shared understanding/m);
+	assert.match(markdown, /^## Candidate explanations/m);
+	assert.match(markdown, /^## Questions to resolve/m);
+	assert.match(markdown, /^## Working synthesis/m);
+	assert.match(markdown, /^## Suggested next exchange/m);
+	assert.doesNotMatch(markdown, /review score|goal_satisfied/);
+	assert.equal(codexResultPreview(result), "Keep both explanations live and design one discriminating probe.");
+});
+
 test("a stale Pi Session cannot start new Codex work after Leader ownership moves", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-stale-leader-"));
 	const previousRuntimeRoot = process.env.RESEARCH_PI_RUNTIME_DIR;
@@ -186,6 +212,8 @@ let activeTurn = null;
 let completionTimer;
 let deltaNotificationsOptedOut = false;
 let hostToolPresent = false;
+let consultationField = "missing-consultation-field";
+let isAdvisorSchema = false;
 process.stderr.write("fake app-server warning\\n");
 
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
@@ -193,11 +221,22 @@ const complete = (prompt, leaderResponse = "") => {
   if (sandbox === "${CODEX_EXECUTOR_PROFILE}") {
     writeFileSync(join(process.cwd(), "codex-executed.txt"), "executor ran\\n", "utf8");
   }
-  const result = {
+  const evidence = [model, sandbox, prompt.includes("Research Pi") ? "role-present" : "role-missing", deltaNotificationsOptedOut ? "delta-opt-out" : "delta-not-opted-out", hostToolPresent ? "host-tool-present" : "host-tool-missing", consultationField, process.env.SSH_AUTH_SOCK ? "child-ssh-agent-present" : "child-ssh-agent-absent", leaderResponse].filter(Boolean);
+  const result = isAdvisorSchema ? {
+    status: "working_synthesis",
+    shared_understanding: "The question is still being clarified.",
+    points_of_agreement: ["Keep the research objective with Research Pi"],
+    candidate_explanations: ["candidate A", "candidate B"],
+    questions_to_resolve: ["Which observation would distinguish them?"],
+    evidence,
+    uncertainties: [],
+    working_synthesis: isResume ? "resumed consultation" : "finished collaborative consultation",
+    suggested_next_exchange: "Continue the same mission after answering the open question"
+  } : {
     status: "completed",
     goal_satisfied: true,
     summary: isResume ? "resumed" : "finished",
-    evidence: [model, sandbox, prompt.includes("Research Pi") ? "role-present" : "role-missing", deltaNotificationsOptedOut ? "delta-opt-out" : "delta-not-opted-out", hostToolPresent ? "host-tool-present" : "host-tool-missing", process.env.SSH_AUTH_SOCK ? "child-ssh-agent-present" : "child-ssh-agent-absent", leaderResponse].filter(Boolean),
+    evidence,
     actions_taken: ["fake action"],
     changed_files: sandbox === "${CODEX_EXECUTOR_PROFILE}" ? ["codex-executed.txt"] : [],
     checks: [{ command: "fake-check", result: "passed" }],
@@ -217,16 +256,21 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   } else if (message.method === "thread/start") {
     model = message.params.model;
     hostToolPresent = message.params.dynamicTools?.some((tool) => tool.name === "research_pi_host") ?? false;
+    const consultation = message.params.dynamicTools?.find((tool) => tool.name === "consult_research_pi");
+    consultationField = consultation?.inputSchema?.required?.includes("why_it_matters") ? "why-it-matters" : consultation?.inputSchema?.required?.includes("why_blocking") ? "why-blocking" : "missing-consultation-field";
     send({ id: message.id, result: { thread: { id: "thread-fake-123", turns: [] } } });
     send({ method: "thread/started", params: { thread: { id: "thread-fake-123", turns: [] } } });
   } else if (message.method === "thread/resume") {
     model = message.params.model;
     hostToolPresent = message.params.dynamicTools?.some((tool) => tool.name === "research_pi_host") ?? false;
+    const consultation = message.params.dynamicTools?.find((tool) => tool.name === "consult_research_pi");
+    consultationField = consultation?.inputSchema?.required?.includes("why_it_matters") ? "why-it-matters" : consultation?.inputSchema?.required?.includes("why_blocking") ? "why-blocking" : "missing-consultation-field";
     isResume = true;
     send({ id: message.id, result: { thread: { id: message.params.threadId, turns: [] } } });
     send({ method: "thread/started", params: { thread: { id: message.params.threadId, turns: [] } } });
   } else if (message.method === "turn/start") {
     activeTurn = "turn-fake-456";
+    isAdvisorSchema = message.params.outputSchema?.required?.includes("shared_understanding") ?? false;
     const prompt = message.params.input[0].text;
     send({ id: message.id, result: { turn: { id: activeTurn, status: "inProgress", items: [], error: null } } });
     send({ method: "turn/started", params: { threadId: "thread-fake-123", turn: { id: activeTurn, status: "inProgress", items: [], error: null } } });
@@ -292,9 +336,14 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 	return path;
 }
 
-test("delegation prompt encodes distinct advisor and project-bounded executor roles", () => {
+test("delegation prompt makes advisor collaborative while preserving executor authority", () => {
 	const advisor = buildDelegationPrompt({ mode: "advisor", task: "inspect", successCriteria: [], context: "" });
-	assert.match(advisor, /read-only advisor/);
+	assert.match(advisor, /read-only research advisor collaborating with Research Pi/);
+	assert.match(advisor, /question may be incomplete/);
+	assert.match(advisor, /jointly expand substantively different candidate explanations/);
+	assert.match(advisor, /do not need to wait until progress is completely blocked/);
+	assert.match(advisor, /continuation surface, not a verdict or review score/);
+	assert.doesNotMatch(advisor, /challenge weak assumptions|return a concrete proposal|independent critique/);
 	assert.doesNotMatch(advisor, /committing or pushing Git changes/);
 
 	const executor = buildDelegationPrompt({
@@ -377,9 +426,15 @@ test("advisor, executor, and explicit resume produce durable structured jobs", a
 		assert.equal(advisor.model, DEFAULT_CODEX_MODEL);
 		assert.equal(advisor.reasoningEffort, DEFAULT_CODEX_REASONING_EFFORT);
 		assert.equal(advisor.sandbox, CODEX_ADVISOR_PROFILE);
-		assert.equal(advisor.result.goal_satisfied, true);
+		assert.equal(advisor.result.status, "working_synthesis");
+		assert.equal(advisor.result.working_synthesis, "finished collaborative consultation");
 		assert.equal(advisor.threadId, "thread-fake-123");
 		assert.match(advisor.result.evidence.join("\n"), /child-ssh-agent-absent/);
+		assert.match(advisor.result.evidence.join("\n"), /why-it-matters/);
+		assert.equal(
+			JSON.parse(readFileSync(join(jobRoot, advisorStart.id, "request.json"), "utf8")).schemaPath,
+			DEFAULT_CODEX_ADVISOR_SCHEMA_PATH,
+		);
 
 		const executorStart = await startCodexJob({
 			cwd: workspace,
@@ -393,6 +448,7 @@ test("advisor, executor, and explicit resume produce durable structured jobs", a
 		assert.equal(executor.model, DEFAULT_CODEX_MODEL);
 		assert.equal(executor.reasoningEffort, DEFAULT_CODEX_REASONING_EFFORT);
 		assert.equal(executor.sandbox, CODEX_EXECUTOR_PROFILE);
+		assert.match(executor.result.evidence.join("\n"), /why-blocking/);
 		assert.equal(readFileSync(join(workspace, "codex-executed.txt"), "utf8"), "executor ran\n");
 
 		const resumedStart = await resumeCodexJob(executor.id, {
@@ -479,8 +535,8 @@ test("unrelated app-server threads cannot replace or complete the owned Codex tu
 		const completed = await waitForCodexJob(started.id, { jobRoot });
 		assert.equal(completed.status, "completed");
 		assert.equal(completed.threadId, "thread-fake-123");
-		assert.equal(completed.result.goal_satisfied, true);
-		assert.equal(completed.result.summary, "finished");
+		assert.equal(completed.result.status, "working_synthesis");
+		assert.equal(completed.result.working_synthesis, "finished collaborative consultation");
 		assert.ok(completed.workerIo.foreignMessagesIgnored >= 4, JSON.stringify(completed.workerIo));
 	} finally {
 		rmSync(root, { recursive: true, force: true });

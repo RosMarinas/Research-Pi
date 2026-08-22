@@ -34,13 +34,13 @@ Project
 
 ## 2. Codex 在 Project 内负责什么
 
-Codex Actor 是执行器或独立顾问，不是科研 Leader：
+Codex Actor 是执行器或协作顾问，不是科研 Leader：
 
 - `executor`：完成有界实现、诊断、实验执行或其他工具密集任务；
-- `advisor`：只读审查、提出第二意见或挑战方案；
-- 可以在任务中向 Research Leader 或用户提出一个真正阻塞的问题；
+- `advisor`：围绕尚未成熟的问题进行只读协作，澄清共同理解、提出聚焦问题、展开候选解释并逐步形成 working synthesis；默认不充当反方评审；
+- advisor 可以在答案会明显改善讨论时向 Research Leader 提出高价值问题，不必等到完全阻塞；executor 仍只在真正阻塞时提问；
 - 可以接收纠偏、补充证据和回复；
-- 必须返回操作结果、证据、局限与未解决事项；
+- executor 必须返回操作结果、证据、局限与未解决事项；advisor 返回共同理解、候选解释、未决问题、证据、不确定性与建议的下一轮交流；
 - 不自动决定研究目标，不因 Action completed 就更新科学结论。
 
 同一 mission 的 advisor 与 executor 是两个 Actor，避免同时存在时 `/steer` 路由到错误 Activation。

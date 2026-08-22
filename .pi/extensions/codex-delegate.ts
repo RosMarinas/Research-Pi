@@ -197,7 +197,7 @@ function resultList(value: unknown): string[] {
 }
 
 export function codexResultPreview(result: any, limit = 420): string {
-	const text = String(result?.summary ?? "Codex returned no summary.").replace(/\s+/g, " ").trim();
+	const text = String(result?.summary ?? result?.working_synthesis ?? result?.shared_understanding ?? "Codex returned no summary.").replace(/\s+/g, " ").trim();
 	return text.length <= limit ? text : `${text.slice(0, Math.max(0, limit - 3))}...`;
 }
 
@@ -206,12 +206,17 @@ export function codexResultMarkdown(result: any): string {
 	const sections: string[] = [];
 	const summary = String(result.summary ?? "").trim();
 	if (summary) sections.push(`## Summary\n\n${summary}`);
+	const sharedUnderstanding = String(result.shared_understanding ?? "").trim();
+	if (sharedUnderstanding) sections.push(`## Shared understanding\n\n${sharedUnderstanding}`);
 
 	const appendList = (title: string, values: unknown) => {
 		const items = resultList(values);
 		if (items.length) sections.push(`## ${title}\n\n${items.map((item) => `- ${item}`).join("\n")}`);
 	};
+	appendList("Points of agreement", result.points_of_agreement);
+	appendList("Candidate explanations", result.candidate_explanations);
 	appendList("Evidence", result.evidence);
+	appendList("Questions to resolve", result.questions_to_resolve);
 	appendList("Actions taken", result.actions_taken);
 
 	const changedFiles = resultList(result.changed_files);
@@ -238,14 +243,20 @@ export function codexResultMarkdown(result: any): string {
 	}
 
 	appendList("Uncertainties", result.uncertainties);
+	const workingSynthesis = String(result.working_synthesis ?? "").trim();
+	if (workingSynthesis) sections.push(`## Working synthesis\n\n${workingSynthesis}`);
 	const next = String(result.recommended_next_step ?? "").trim();
 	if (next) sections.push(`## Recommended next step\n\n${next}`);
+	const nextExchange = String(result.suggested_next_exchange ?? "").trim();
+	if (nextExchange) sections.push(`## Suggested next exchange\n\n${nextExchange}`);
 	return sections.join("\n\n") || "Codex returned an empty structured result.";
 }
 
 function codexResultCounts(result: any): string {
 	return [
 		resultList(result?.evidence).length ? `${result.evidence.length} evidence` : "",
+		resultList(result?.candidate_explanations).length ? `${result.candidate_explanations.length} candidates` : "",
+		resultList(result?.questions_to_resolve).length ? `${result.questions_to_resolve.length} questions` : "",
 		Array.isArray(result?.checks) && result.checks.length ? `${result.checks.length} checks` : "",
 		resultList(result?.changed_files).length ? `${result.changed_files.length} files` : "",
 		resultList(result?.uncertainties).length ? `${result.uncertainties.length} uncertainties` : "",
@@ -440,7 +451,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 				`Codex delegation ${job.id} is waiting for ${pending.audience === "user" ? "the user" : "Research Pi"}.`,
 				`Request id: ${pending.id}`,
 				`Question: ${pending.question}`,
-				pending.whyBlocking ? `Why it blocks progress: ${pending.whyBlocking}` : undefined,
+				pending.whyBlocking ? `${job.mode === "advisor" ? "Why this matters" : "Why it blocks progress"}: ${pending.whyBlocking}` : undefined,
 				pending.options?.length ? `Options: ${pending.options.join(" | ")}` : undefined,
 				pending.kind === "host_capability"
 					? "Research Pi will open the exact host-capability approval dialog in the attached TUI and return the decision to this same Codex turn."
@@ -851,7 +862,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		name: "codex_delegate",
 		label: "Codex Delegate",
 		description: [
-			"Delegate bounded operational work to a context-isolated local Codex executor, or obtain a read-only Codex second opinion.",
+			"Delegate bounded operational work to a context-isolated local Codex executor, or open a read-only collaborative research consultation with Codex.",
 			`Configured defaults: advisor ${defaultCodexModel("advisor")}/${defaultCodexReasoningEffort("advisor")}; executor ${defaultCodexModel("executor")}/${defaultCodexReasoningEffort("executor")}.`,
 			"Executor jobs run automatically inside the current project boundary. They may edit/delete files, freely commit, use public network, and run expensive experiments. Exact user-approved external-read, SSH-target, or fixed-script capabilities are available through an opaque host broker; raw credentials never enter Codex.",
 			"Pi remains responsible for framing the research question, judging evidence, and choosing the next research action.",
@@ -860,14 +871,14 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			"If an executor loses its worker after execution started, it stops at outcome_unknown. Inspect Git and external run state, then use action=reconcile; the harness blocks another writer until this is resolved.",
 			"Background completion and blocking requests enter the project Runtime mailbox and are delivered to the currently attached Research Leader session. respond answers an explicit request; steer corrects an active turn without restarting it.",
 		].join(" "),
-		promptSnippet: "Delegate long operational work or a bounded second opinion to local Codex",
+		promptSnippet: "Delegate long operational work or collaboratively clarify a research question with Codex",
 		promptGuidelines: [
 			"Use codex_delegate when a bounded execution task would require many tools or produce enough intermediate output to pollute the research context; delegation is for context isolation, not automatic parallelism.",
 			"Before starting Codex, state the objective and success criteria. Send only relevant research context; do not copy the full conversation or ask Codex to decide the research objective.",
-			"Use a stable mission label for consecutive work on one research subtask and reuse=auto. The mission is a project Codex Actor and survives Pi session rotation. Start a fresh mission for an independent critique, a different research route, a different workspace, or substantially stale assumptions.",
+			"Use a stable mission label for consecutive work on one research subtask and reuse=auto. The mission is a project Codex Actor and survives Pi session rotation. Continue the same advisor mission while jointly refining one question; start a fresh mission for a different research route, a different workspace, or substantially stale assumptions.",
 			"Use mode=executor when Codex should actually complete the work. It has standing authority for destructive, long-running, and expensive steps inside the current project and should not be micromanaged command by command.",
 			"If Codex needs an unapproved outside path, SSH target, or host command, its structured request opens the Pi TUI approval dialog automatically. Do not ask the user to manufacture or return a grant id, and do not disguise the operation as a new delegation.",
-			"Use mode=advisor only for a genuinely useful independent proposal or critique. Advisor is read-only but still uses max reasoning by default.",
+			"Use mode=advisor when the research question is immature or Pi would benefit from clarification, focused questions, competing explanations, or collaborative synthesis. Advisor is read-only, should not default to opposition or verdicts, and still uses max reasoning by default.",
 			"After retrieving a result, inspect its evidence and validity limitations. Codex completion does not by itself establish a scientific conclusion.",
 			"Never guess an outcome_unknown resolution. Reconcile only after inspecting the relevant Git state, files, remote runs, or other external effects, and record that evidence in note.",
 			"When a Codex request arrives, answer it promptly with action=respond if Pi can decide. Ask the user only for user-owned choices or direct credential setup. Never place secrets in a response.",

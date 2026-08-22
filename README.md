@@ -329,16 +329,16 @@ DeepSeek V4 Pro/Flash 使用 Max reasoning，但不把 1M 容量等同于等质�
 
 强结论必须引用有效的 `record_experiment` entry；仅引用无效或 inconclusive 运行的 supported/weakened/rejected 状态会被降级。实验记录同时镜像为精简的 project-level evidence，同一 Git Project 的其他已知 worktree 可索引原 ledger。模型输出不能解析或校验时，自动回退到 Pi 原生 compact。使用 `/research-state` 可检查最近一次结构化状态。
 
-### Codex Executor
+### Codex collaboration
 
 `codex_delegate` 将本地 Codex CLI 作为上下文隔离的执行器或顾问，Pi 继续负责研究问题、假设、证据判断和下一步决策。
 
-- `advisor`：只读分析，模型与 reasoning 默认值来自 `config.json` 的 `codex.advisor`；
+- `advisor`：只读协作咨询，适合尚未成熟的问题；Codex 会先澄清共同理解、提出聚焦问题、展开候选解释并形成可继续修改的 working synthesis，而不是默认反驳或给出评审结论。模型与 reasoning 默认值来自 `config.json` 的 `codex.advisor`；
 - `executor`：完整执行任务，模型与 reasoning 默认值来自 `codex.executor`，自动使用 project-write permission profile；
 - 每次调用都可覆盖 Codex model 和 reasoning effort；
 - executor 可在项目内修改或删除文件、安装项目依赖、自由提交，以及启动或取消昂贵实验；需要新的宿主权限时，`research_pi_host` 会让同一 tool call 暂停并在 Pi TUI 自动弹出精确授权，用户决定后原 Codex turn 继续，不需要复制凭据、手工返回 grantId 或重开 delegation；
 - Codex 通过本地 stdio App Server 运行，保存稳定的 thread/turn ID；长任务默认后台运行，通过同一个工具的 `status`、`result`、`respond`、`steer`、`resume`、`cancel` 和 `reconcile` action 管理；
-- 连续处理同一研究子任务时，Pi 会给它稳定的 `mission` 标签并使用 `reuse=auto`：只有同一精确 workspace、mission、advisor/executor mode 和 research track 才自动续接原 thread。跨 Pi Session 可以复用；换轨后即使复用了旧 mission 也会新建 thread。独立批判、主动清除旧假设或另一 worktree 应使用新 mission；
+- 连续处理同一研究子任务时，Pi 会给它稳定的 `mission` 标签并使用 `reuse=auto`：只有同一精确 workspace、mission、advisor/executor mode 和 research track 才自动续接原 thread。跨 Pi Session 可以复用；同一个 advisor mission 可持续澄清和修改 working synthesis，换轨后即使复用了旧 mission 也会新建 thread。不同研究路线、主动清除旧假设或另一 worktree 应使用新 mission；
 - `/codex missions` 查看当前 project workspace 按 research track 分组的 mission/thread 链。新 job 由 `projectKey + research-leader Actor` 所有，不再绑定一个 conversation branch；文件操作仍强制绑定原精确 workspace。续接前会比较上次终态与当前 Git snapshot；显式跨 track 恢复旧 thread 时还会加入醒目的 route-change 提示，要求 Codex 重新确认介入、有效性标准与决策目标；
 - `respond` 回答 Codex 在运行中提出的显式问题；`steer` 将修正或新证据注入仍在运行的 turn，不需要终止并重开任务；
 - 单个后台任务会在 Pi 底部状态栏持续显示 job 后八位、明确的 job lifecycle，以及 `now:`/`last:` 叶子活动；多个 Action 或并发叶子活动改为稳定聚合，详细行进入 Runtime Dock，最多显示四个 Action 和四条活动，其余引导到 `/watch`。工具自身的 `completed` 不会被显示成 executor 完成。完成、失败、取消或需要输入时，限长结构化事件进入 project Runtime mailbox，只交给当前 attached Research Leader session；
