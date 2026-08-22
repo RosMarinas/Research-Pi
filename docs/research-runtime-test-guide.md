@@ -133,6 +133,16 @@ sequenceDiagram
 
 回复不是启动另一只 Codex，也不需要把完整问题复制进新 Session。
 
+Host capability 不走上述自由文本咨询路径。Codex 调用 `research_pi_host` 且没有匹配 grant 时：
+
+1. 原 tool call 保持挂起，job 进入带 `kind=host_capability` 的 `input_required`；
+2. attached Pi TUI 自动展示精确 cwd/target、完整操作和建议持久前缀；
+3. 用户批准或拒绝；
+4. Harness 自动把决定送回原 request ID，同一个 Codex turn 继续；
+5. Runtime `ask` 在决定真正送回前保持 open，不能因为 Leader 已看到消息就提前 consumed。
+
+如果没有 attached project-aware TUI，请求应耐久留在 inbox；恢复 TUI 后再弹窗。整个过程不要求 Leader 生成 grantId，也不应额外调用 `consult_research_pi`。
+
 ### 4.3 用户纠偏
 
 ```text

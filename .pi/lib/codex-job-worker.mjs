@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import { appendFile, mkdir, readdir } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import { executeGrantedCapability } from "./host-capabilities.mjs";
+import { executeGrantedCapability, inspectCapabilityAuthorization } from "./host-capabilities.mjs";
 import { compactCodexAuditEvent, describeCodexNotification, projectCodexActivityUpdate } from "./codex-activity.mjs";
 import { configureCodexSqliteLogs } from "./codex-sqlite-logs.mjs";
 import {
@@ -77,9 +77,25 @@ function publicPendingRequest(record) {
 		whyBlocking: record.whyBlocking,
 		options: record.options,
 		questions: record.questions,
+		capability: record.capability,
 		secret: record.secret,
 		createdAt: record.createdAt,
 	};
+}
+
+function hostCapabilityQuestion(request, input = {}) {
+	if (request.kind === "host-command") {
+		return [
+			`Authorize host command in cwd=${request.cwd}.`,
+			`Exact argv: ${request.argv.map((part) => JSON.stringify(part)).join(" ")}`,
+			`Suggested project prefix: ${(request.suggestedPrefix ?? request.argv).map((part) => JSON.stringify(part)).join(" ")}`,
+		].join("\n");
+	}
+	if (request.kind === "ssh-target") {
+		return `Authorize project SSH target: ${request.target}\nCurrent remote command: ${String(input.remoteCommand ?? "[missing]")}`;
+	}
+	if (request.kind === "external-read") return `Authorize external ${request.directory ? "directory" : "file"} read: ${request.target}`;
+	return `Authorize project host script: ${request.target}\nExact args: ${(request.args ?? []).map((part) => JSON.stringify(part)).join(" ") || "[none]"}`;
 }
 
 async function main() {
@@ -327,6 +343,41 @@ async function main() {
 							args: args.args ?? [],
 							timeoutSeconds: args.timeoutSeconds,
 						};
+				let inspected = await inspectCapabilityAuthorization(request.hostCapabilityContext, input);
+				if (!inspected.grant) {
+					const record = {
+						version: 1,
+						id,
+						jobId: request.jobId,
+						threadId: params.threadId ?? threadId,
+						turnId: params.turnId ?? activeTurnId,
+						kind: "host_capability",
+						audience: "user",
+						question: truncate(hostCapabilityQuestion(inspected.request, input), 4000),
+						whyBlocking: "Codex requested host-user authority that is not covered by an active project or Pi-session grant.",
+						options: ["Approve once", "Approve this Pi session (24h)", "Trust for this project", "Deny"],
+						capability: {
+							input,
+							context: request.hostCapabilityContext,
+						},
+						secret: false,
+						status: "pending",
+						createdAt: now(),
+					};
+					const response = await waitForHumanResponse(record);
+					await settleHumanRequest(record, response);
+					inspected = await inspectCapabilityAuthorization(request.hostCapabilityContext, input);
+					if (!inspected.grant) {
+						send({
+							id: message.id,
+							result: {
+								success: false,
+								contentItems: [{ type: "inputText", text: "Research Pi did not approve the requested host capability." }],
+							},
+						});
+						return;
+					}
+				}
 				const result = await executeGrantedCapability(request.hostCapabilityContext, input, {
 					signal: hostCapabilityAbort.signal,
 					env: process.env,
@@ -710,7 +761,7 @@ async function main() {
 			{
 				name: "research_pi_host",
 				description:
-					"Use Research Pi host capabilities for justified SSH or host-user operations. Project-trusted SSH targets and command prefixes run automatically. For a listed command grant, pass grantId so its approved cwd is restored; do not switch capability kind or create a shell wrapper after a cwd mismatch. Otherwise ask Research Pi for approval through consult_research_pi. Normal uv/Python/shell commands stay in the project sandbox. Advisor mode may use read only.",
+					"Use Research Pi host capabilities for justified SSH or host-user operations. Project-trusted SSH targets and command prefixes run automatically. For a listed command grant, pass grantId so its approved cwd is restored; do not switch capability kind or create a shell wrapper after a cwd mismatch. A missing grant pauses this same tool call for the Pi TUI decision; do not duplicate it through consult_research_pi. Normal uv/Python/shell commands stay in the project sandbox. Advisor mode may use read only.",
 				inputSchema: {
 					type: "object",
 					additionalProperties: false,

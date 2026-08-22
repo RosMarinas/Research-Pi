@@ -16,6 +16,7 @@ import {
 	resolveProjectRoot,
 	sanitizeBoundaryEnvironment,
 } from "../.pi/lib/project-boundary.mjs";
+import { getHostCapabilityUiAdapter } from "../.pi/lib/research-runtime-adapters.mjs";
 
 test("project boundary exposes one opaque host-capability tool", () => {
 	const tools = [];
@@ -36,6 +37,7 @@ test("project boundary exposes one opaque host-capability tool", () => {
 	assert.match(JSON.stringify(hostTool.parameters), /"command"/);
 	assert.match(JSON.stringify(hostTool.parameters), /grantId/);
 	assert.deepEqual(commands, ["boundary"]);
+	assert.equal(typeof getHostCapabilityUiAdapter()?.review, "function");
 });
 
 test("path resolution accepts project paths and detects traversal plus symlink escapes", async () => {

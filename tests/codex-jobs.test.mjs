@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -1106,6 +1106,67 @@ test("Codex executor reuses a project-trusted host-command prefix", async () => 
 		assert.equal(completed.status, "completed");
 		assert.match(completed.result.evidence.join("\n"), /host-command:from-codex/);
 		assert.match(completed.result.evidence.join("\n"), new RegExp(`cwd=${grant.cwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a missing Codex host grant becomes structured input and resumes the same tool call after approval", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-host-approval-"));
+	try {
+		const workspace = join(root, "workspace");
+		const jobRoot = join(root, "codex", "jobs");
+		mkdirSync(join(workspace, ".git"), { recursive: true });
+		const commandScript = join(workspace, "host-command.mjs");
+		writeFileSync(commandScript, "process.stdout.write(`approved-host-command:${process.argv[2]}:cwd=${process.cwd()}`);\n", { mode: 0o600 });
+		const hostCapabilityContext = await resolveCapabilityContext(workspace, "pi-session-host-approval", {
+			stateRoot: join(root, "capabilities"),
+		});
+		const codexBin = makeFakeCodex(root);
+		const started = await startCodexJob({
+			cwd: workspace,
+			jobRoot,
+			codexBin,
+			mode: "executor",
+			task: `Request a new host command. HOST_COMMAND_PATH=${commandScript}`,
+			leaderSessionId: "pi-session-host-approval",
+			hostCapabilityContext,
+		});
+
+		let waiting;
+		for (let attempt = 0; attempt < 200; attempt += 1) {
+			const current = await readCodexJob(started.id, { jobRoot });
+			if (current.status === "input_required") {
+				waiting = current;
+				break;
+			}
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		assert.equal(waiting?.pendingRequest?.kind, "host_capability", JSON.stringify(waiting));
+		assert.equal(waiting?.pendingRequest?.audience, "user");
+		assert.deepEqual(waiting?.pendingRequest?.capability?.input?.argv, [process.execPath, commandScript, "from-codex"]);
+		assert.equal(waiting?.pendingRequest?.capability?.input?.cwd, realpathSync(workspace));
+
+		const approvalRequest = await prepareCapabilityRequest(
+			hostCapabilityContext,
+			waiting.pendingRequest.capability.input,
+		);
+		const grant = await createCapabilityGrant(hostCapabilityContext, approvalRequest, "project");
+		await respondToCodexJob(started.id, {
+			jobRoot,
+			requestId: waiting.pendingRequest.id,
+			response: `Approved ${grant.id}`,
+		});
+		const completed = await waitForCodexJob(started.id, { jobRoot });
+		assert.equal(completed.status, "completed");
+		assert.match(completed.result.evidence.join("\n"), /approved-host-command:from-codex/);
+		const requestRecord = JSON.parse(readFileSync(
+			join(jobRoot, started.id, "requests", `${waiting.pendingRequest.id}.json`),
+			"utf8",
+		));
+		assert.equal(requestRecord.status, "resolved");
+		assert.equal(requestRecord.responseSha256.length, 64);
+		assert.equal(completed.pendingRequest, null);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

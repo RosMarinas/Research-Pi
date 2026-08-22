@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import type { ExtensionAPI, BashOperations } from "@earendil-works/pi-coding-agent";
 import { createBashTool } from "@earendil-works/pi-coding-agent";
@@ -17,6 +18,7 @@ import {
 	resolveCapabilityContext,
 	revokeCapabilityGrant,
 } from "../lib/host-capabilities.mjs";
+import { registerHostCapabilityUiAdapter } from "../lib/research-runtime-adapters.mjs";
 import {
 	boundaryWarning,
 	buildSandboxRuntimeConfig,
@@ -34,6 +36,15 @@ import { resolveSystemRuntimePolicy } from "../lib/security-policy.mjs";
 type BoundaryRuntime = Awaited<ReturnType<typeof prepareBoundaryRuntime>>;
 type CapabilityContext = Awaited<ReturnType<typeof resolveCapabilityContext>>;
 type SystemRuntimePolicy = Awaited<ReturnType<typeof resolveSystemRuntimePolicy>>;
+
+function sameCapabilityProject(left: CapabilityContext, right: CapabilityContext): boolean {
+	if (left.projectRoot !== right.projectRoot || left.projectLedgerPath !== right.projectLedgerPath) return false;
+	const stateDir = dirname(left.projectLedgerPath);
+	return (
+		right.ledgerPath === join(stateDir, "sessions", `${right.sessionId}.json`)
+		&& right.legacyLedgerPath === join(stateDir, `${right.sessionId}.json`)
+	);
+}
 
 function parseCommandWords(input: string): string[] {
 	const words: string[] = [];
@@ -256,7 +267,13 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 		return capabilityContext;
 	};
 
-	const requestInteractiveGrant = async (request: any, ctx: any, operation?: any) => {
+	const requestInteractiveGrant = async (
+		request: any,
+		ctx: any,
+		operation?: any,
+		approvalContext: CapabilityContext = requireCapabilityContext(),
+		announce = true,
+	) => {
 		if (!ctx.hasUI) return undefined;
 		const projectTrustLabel = request.kind === "ssh-target"
 			? "Trust this SSH target for the project"
@@ -273,14 +290,40 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 		);
 		if (choice !== "Approve once" && choice !== "Approve this Pi session (24h)" && choice !== projectTrustLabel) return undefined;
 		const grant = await createCapabilityGrant(
-			requireCapabilityContext(),
+			approvalContext,
 			request,
 			choice === "Approve once" ? "once" : choice === "Approve this Pi session (24h)" ? "session" : "project",
 		);
-		ctx.ui.notify(`Approved ${capabilityGrantSummary(grant)}`, "warning");
-		await refreshBoundaryStatus(ctx);
+		if (announce) {
+			ctx.ui.notify(`Approved ${capabilityGrantSummary(grant)}`, "warning");
+			await refreshBoundaryStatus(ctx);
+		}
 		return grant;
 	};
+
+	registerHostCapabilityUiAdapter({
+		review: async ({ pendingRequest, ctx }: { pendingRequest: any; ctx: any }) => {
+			const capability = pendingRequest?.capability;
+			if (pendingRequest?.kind !== "host_capability" || !capability?.input || !capability?.context) {
+				return { status: "unsupported" as const };
+			}
+			if (!ctx.hasUI) return { status: "unavailable" as const };
+			const activeContext = requireCapabilityContext();
+			const sourceContext = capability.context as CapabilityContext;
+			if (!sameCapabilityProject(activeContext, sourceContext)) {
+				throw new Error("Codex host-capability request belongs to another project capability ledger");
+			}
+			const inspected = await inspectCapabilityAuthorization(sourceContext, capability.input);
+			if (inspected.grant) {
+				return { status: "approved" as const, grant: inspected.grant, existing: true };
+			}
+			const grant = await requestInteractiveGrant(inspected.request, ctx, capability.input, sourceContext, false);
+			if (grant) await refreshBoundaryStatus(ctx).catch(() => undefined);
+			return grant
+				? { status: "approved" as const, grant, existing: false }
+				: { status: "denied" as const };
+		},
+	});
 
 	pi.registerTool({
 		name: "host_capability",

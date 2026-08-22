@@ -282,7 +282,11 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	let localAttachmentEpoch: string | undefined;
 	let activeActivationId: string | undefined;
 	const consumedMessageIds = new Set<string>();
-	const materializedMessages = new Map<string, string | null>();
+	const materializedMessages = new Map<string, {
+		attachmentEpoch: string | null;
+		requestId: string | null;
+		type: string | null;
+	}>();
 	const migrationAttemptedProjects = new Set<string>();
 	let projectViewText = "";
 	let projectViewHash = "";
@@ -487,13 +491,15 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 				customType: RUNTIME_MESSAGE_KIND,
 				content: runtimeMessageText(message),
 				display: true,
-					details: {
+				details: {
 					messageId: message.id,
 					type: message.type,
 					from: message.from,
 					to: message.to,
-						transient: true,
-						attachmentEpoch: attachment.epoch ?? null,
+					requestId: message.metadata?.requestId ?? null,
+					jobId: message.metadata?.jobId ?? null,
+					transient: true,
+					attachmentEpoch: attachment.epoch ?? null,
 				},
 			},
 			idle
@@ -796,12 +802,22 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			};
 		}
 		if (snapshot.ledgerEventCount !== projectViewEventCount) await refreshProjectView(ctx, snapshot);
+		const runtimeMessagesById = new Map(snapshot.messages.map((message) => [message.id, message]));
 		const messages = event.messages.filter((message) => {
 			if (message.role !== "custom" || message.customType !== RUNTIME_MESSAGE_KIND) return true;
 			const messageId = String(message.details?.messageId ?? "");
 			if (!messageId) return true;
 			if (consumedMessageIds.has(messageId)) return false;
-			materializedMessages.set(messageId, String(message.details?.attachmentEpoch ?? "") || null);
+			const runtimeMessage = runtimeMessagesById.get(messageId);
+			if (runtimeMessage?.status === "consumed" || runtimeMessage?.status === "superseded") {
+				consumedMessageIds.add(messageId);
+				return false;
+			}
+			materializedMessages.set(messageId, {
+				attachmentEpoch: String(message.details?.attachmentEpoch ?? "") || null,
+				requestId: String(message.details?.requestId ?? "") || null,
+				type: String(message.details?.type ?? "") || null,
+			});
 			return true;
 		});
 		return { messages: materializeProjectView(messages, projectViewText, { fingerprint: projectViewHash }) };
@@ -835,11 +851,15 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		if (!materializedMessages.size) return;
 		const activeRuntime = await getRuntime(ctx);
 		const sessionId = ctx.sessionManager.getSessionId();
-		for (const [messageId, attachmentEpoch] of materializedMessages) {
+		for (const [messageId, materialized] of materializedMessages) {
+			// A blocking Codex ask is only settled when a response/approval is
+			// actually queued. Merely showing it to the Leader must not make the
+			// Runtime inbox look empty while the underlying job still waits.
+			if (materialized.type === "ask" && materialized.requestId) continue;
 			const result = await consumeRuntimeMessageForAttachment(activeRuntime, messageId, {
 				sessionId,
 				actorId: RESEARCH_LEADER_ACTOR_ID,
-				attachmentEpoch,
+				attachmentEpoch: materialized.attachmentEpoch,
 			});
 			if (result.status === "consumed") consumedMessageIds.add(messageId);
 		}

@@ -524,11 +524,45 @@ test("Runtime steer is non-preemptive by default and leaves context after one se
 		const agentMessage = { role: "custom", ...sent[0].message, timestamp: Date.now() };
 		const firstContext = await handlers.get("context")({ type: "context", messages: [agentMessage] }, ctx);
 		assert.equal(firstContext.messages.filter((message) => message.customType === RUNTIME_MESSAGE_KIND).length, 1);
-		await handlers.get("agent_settled")({ type: "agent_settled" }, ctx);
-		const laterContext = await handlers.get("context")({ type: "context", messages: [agentMessage] }, ctx);
-		assert.equal(laterContext.messages.filter((message) => message.customType === RUNTIME_MESSAGE_KIND).length, 0);
+			await handlers.get("agent_settled")({ type: "agent_settled" }, ctx);
+			const laterContext = await handlers.get("context")({ type: "context", messages: [agentMessage] }, ctx);
+			assert.equal(laterContext.messages.filter((message) => message.customType === RUNTIME_MESSAGE_KIND).length, 0);
 
-		await commands.get("steer").handler("--preempt @research-leader urgent correction", ctx);
+			const runtime = await resolveResearchRuntime(workspace);
+			const pendingRuntimeAsk = await createRuntimeMessage(runtime, {
+				id: "msg-codex-pending-request",
+				type: "ask",
+				from: "codex:request-test:executor",
+				to: RESEARCH_LEADER_ACTOR_ID,
+				body: "Codex needs an explicit response.",
+				relatesTo: "request-pending",
+				metadata: { requestId: "request-pending", jobId: "codex-request-test" },
+			});
+			const pendingAsk = {
+				role: "custom",
+				customType: RUNTIME_MESSAGE_KIND,
+				content: "Codex needs an explicit response.",
+				display: true,
+				details: {
+					messageId: pendingRuntimeAsk.id,
+					type: "ask",
+					requestId: "request-pending",
+					attachmentEpoch: null,
+				},
+				timestamp: Date.now(),
+			};
+			await handlers.get("context")({ type: "context", messages: [pendingAsk] }, ctx);
+			await handlers.get("agent_settled")({ type: "agent_settled" }, ctx);
+			const waitingContext = await handlers.get("context")({ type: "context", messages: [pendingAsk] }, ctx);
+			assert.equal(waitingContext.messages.filter((message) => message.details?.requestId === "request-pending").length, 1);
+			await consumeRuntimeMessageForAttachment(runtime, pendingRuntimeAsk.id, {
+				sessionId: "session-extension",
+				actorId: RESEARCH_LEADER_ACTOR_ID,
+			});
+			const resolvedContext = await handlers.get("context")({ type: "context", messages: [pendingAsk] }, ctx);
+			assert.equal(resolvedContext.messages.filter((message) => message.details?.requestId === "request-pending").length, 0);
+
+			await commands.get("steer").handler("--preempt @research-leader urgent correction", ctx);
 		assert.equal(aborts, 1);
 		assert.equal(sent.at(-1).options.deliverAs, "followUp");
 	} finally {

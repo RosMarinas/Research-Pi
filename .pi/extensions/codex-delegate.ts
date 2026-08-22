@@ -18,11 +18,16 @@ import {
 	steerCodexJob,
 	waitForCodexJob,
 } from "../lib/codex-jobs.mjs";
-import { getRuntimeUiAdapter, registerCodexRuntimeAdapter } from "../lib/research-runtime-adapters.mjs";
+import {
+	getHostCapabilityUiAdapter,
+	getRuntimeUiAdapter,
+	registerCodexRuntimeAdapter,
+} from "../lib/research-runtime-adapters.mjs";
 import {
 	RESEARCH_LEADER_ACTOR_ID,
 	RUNTIME_MESSAGE_KIND,
 	codexActorId,
+	consumeRuntimeMessageForAttachment,
 	readRuntimeSnapshot,
 	recordCodexRuntimeEvent,
 	registerCodexRuntimeJob,
@@ -383,6 +388,8 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 	const activeJobs = new Map<string, CodexJobView>();
 	const monitorTimers = new Map<string, NodeJS.Timeout>();
 	const deliveredEvents = new Set<string>();
+	const capabilityApprovalRequests = new Map<string, Promise<boolean>>();
+	let capabilityApprovalQueue: Promise<unknown> = Promise.resolve();
 	let latestTerminal: CodexJobView | undefined;
 	let shuttingDown = false;
 	let lastFooterText: string | undefined;
@@ -437,9 +444,14 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 				`Question: ${pending.question}`,
 				pending.whyBlocking ? `Why it blocks progress: ${pending.whyBlocking}` : undefined,
 				pending.options?.length ? `Options: ${pending.options.join(" | ")}` : undefined,
+				pending.kind === "host_capability"
+					? "Research Pi will open the exact host-capability approval dialog in the attached TUI and return the decision to this same Codex turn."
+					: undefined,
 				pending.secret
 					? "This request is marked secret. Do not ask for or transmit the secret through Pi, model context, codex_delegate, or job files. Ask the user to configure it directly, then continue without echoing it."
-					: `Answer with codex_delegate action=respond, jobId=${job.id}, requestId=${pending.id}. Use action=steer only for unsolicited corrections to the active turn.`,
+					: pending.kind === "host_capability"
+						? undefined
+						: `Answer with codex_delegate action=respond, jobId=${job.id}, requestId=${pending.id}. Use action=steer only for unsolicited corrections to the active turn.`,
 			]
 				.filter(Boolean)
 				.join("\n");
@@ -469,6 +481,100 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			.join("\n");
 	};
 
+	const consumeCodexRequestMessages = async (
+		runtime: Awaited<ReturnType<typeof resolveResearchRuntime>>,
+		requestId: string,
+		ctx: ExtensionContext,
+		attachmentEpoch?: string | null,
+	) => {
+		const snapshot = await readRuntimeSnapshot(runtime);
+		for (const message of snapshot.messages) {
+			if (
+				message.type !== "ask"
+				|| message.relatesTo !== requestId
+				|| (message.status !== "queued" && message.status !== "delivered")
+			) continue;
+			await consumeRuntimeMessageForAttachment(runtime, message.id, {
+				sessionId: ctx.sessionManager.getSessionId(),
+				actorId: RESEARCH_LEADER_ACTOR_ID,
+				attachmentEpoch,
+			});
+		}
+	};
+
+	const resolveHostCapabilityRequest = async (
+		job: CodexJobView,
+		message: Awaited<ReturnType<typeof recordCodexRuntimeEvent>>,
+		runtime: Awaited<ReturnType<typeof resolveResearchRuntime>>,
+		attachment: NonNullable<ReturnType<typeof runtimeActorAttachment>>,
+		ctx: ExtensionContext,
+	): Promise<boolean> => {
+		const pending = job.pendingRequest;
+		if (!pending?.id || pending.kind !== "host_capability") return false;
+		const existing = capabilityApprovalRequests.get(pending.id);
+		if (existing) return await existing;
+
+		const run = async () => {
+			const adapter = getHostCapabilityUiAdapter();
+			if (!adapter?.review || !ctx.hasUI) return false;
+			let decision;
+			try {
+				decision = await adapter.review({ job, pendingRequest: pending, ctx });
+			} catch (error) {
+				if (!shuttingDown && ctx.hasUI) {
+					ctx.ui.notify(`Could not open Codex host approval: ${error instanceof Error ? error.message : String(error)}`, "warning");
+				}
+				return false;
+			}
+			if (decision?.status === "unsupported" || decision?.status === "unavailable") return false;
+			if (shuttingDown) return false;
+			const approved = decision?.status === "approved";
+			const grantId = approved ? decision.grant?.id : undefined;
+			const ownerCheck = await jobManagementScope(ctx, job.id);
+			await withRuntimeActorAttachment(
+				runtime,
+				RESEARCH_LEADER_ACTOR_ID,
+				{
+					sessionId: ctx.sessionManager.getSessionId(),
+					attachmentEpoch: attachment.epoch,
+				},
+				() => respondToCodexJob(job.id, {
+					requestId: pending.id,
+					response: approved
+						? `Research Pi user approved host capability ${grantId}. Continue the same tool call.`
+						: "Research Pi user denied the requested host capability. Do not retry or bypass it.",
+					...ownerCheck,
+				}),
+			);
+			if (message?.status === "queued") {
+				await settleRuntimeMessage(runtime, message.id, "delivered", {
+					sessionId: ctx.sessionManager.getSessionId(),
+					actorId: RESEARCH_LEADER_ACTOR_ID,
+					attachmentEpoch: attachment.epoch,
+				});
+			}
+			await consumeCodexRequestMessages(runtime, pending.id, ctx, attachment.epoch);
+			if (!shuttingDown && ctx.hasUI) {
+				ctx.ui.notify(
+					approved
+						? `Approved ${grantId}; Codex ${shortJobId(job.id)} is resuming automatically.`
+						: `Denied host capability request from Codex ${shortJobId(job.id)}; the same turn will receive the denial.`,
+					approved ? "warning" : "info",
+				);
+			}
+			return true;
+		};
+
+		const queued = capabilityApprovalQueue.then(run, run);
+		capabilityApprovalQueue = queued.catch(() => undefined);
+		capabilityApprovalRequests.set(pending.id, queued);
+		try {
+			return await queued;
+		} finally {
+			if (capabilityApprovalRequests.get(pending.id) === queued) capabilityApprovalRequests.delete(pending.id);
+		}
+	};
+
 	const deliverJobEvent = async (job: CodexJobView, ctx: ExtensionContext) => {
 		if (shuttingDown) return;
 		const id = eventId(job);
@@ -477,7 +583,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		if (shuttingDown) return;
 		const message = await recordCodexRuntimeEvent(runtime, job, eventContent(job));
 		if (shuttingDown) return;
-		if (!message || message.status !== "queued") {
+		if (!message) {
 			deliveredEvents.add(id);
 			return;
 		}
@@ -495,6 +601,14 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			ctx.sessionManager.getSessionId(),
 		);
 		if (!attachment) return;
+		if (await resolveHostCapabilityRequest(job, message, runtime, attachment, ctx)) {
+			deliveredEvents.add(id);
+			return;
+		}
+		if (message.status !== "queued") {
+			deliveredEvents.add(id);
+			return;
+		}
 		const editorHasDraft = ctx.hasUI && Boolean(ctx.ui.getEditorText?.().trim());
 		try {
 			pi.sendMessage(
@@ -660,12 +774,14 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			let nextJob = latest;
 
 			if (message.type === "reply" && live && latest.pendingRequest?.id) {
+				const requestId = latest.pendingRequest.id;
 				const queued = await withLeaderLease(() => respondToCodexJob(latest.id, {
-					requestId: latest.pendingRequest.id,
+					requestId,
 					response: message.body,
 					...ownerCheck,
 				}));
 				nextJob = queued.job;
+				await consumeCodexRequestMessages(owner.runtime, requestId, ctx, owner.attachmentEpoch);
 			} else if (live && !preempt) {
 				const queued = await withLeaderLease(() => steerCodexJob(latest.id, { message: instruction, ...ownerCheck }));
 				nextJob = queued.job;
@@ -752,7 +868,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			"Before starting Codex, state the objective and success criteria. Send only relevant research context; do not copy the full conversation or ask Codex to decide the research objective.",
 			"Use a stable mission label for consecutive work on one research subtask and reuse=auto. The mission is a project Codex Actor and survives Pi session rotation. Start a fresh mission for an independent critique, a different research route, a different workspace, or substantially stale assumptions.",
 			"Use mode=executor when Codex should actually complete the work. It has standing authority for destructive, long-running, and expensive steps inside the current project and should not be micromanaged command by command.",
-			"If Codex needs an unapproved outside path, SSH target, or host script, review the exact request and ask the user for the returned /boundary grant. After approval, respond so Codex can retry the same turn. Do not disguise the operation as a new delegation.",
+			"If Codex needs an unapproved outside path, SSH target, or host command, its structured request opens the Pi TUI approval dialog automatically. Do not ask the user to manufacture or return a grant id, and do not disguise the operation as a new delegation.",
 			"Use mode=advisor only for a genuinely useful independent proposal or critique. Advisor is read-only but still uses max reasoning by default.",
 			"After retrieving a result, inspect its evidence and validity limitations. Codex completion does not by itself establish a scientific conclusion.",
 			"Never guess an outcome_unknown resolution. Reconcile only after inspecting the relevant Git state, files, remote runs, or other external effects, and record that evidence in note.",
@@ -924,15 +1040,17 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 					}
 					case "respond": {
 						const jobId = requireText(params.jobId, "jobId");
+						const requestId = requireText(params.requestId, "requestId");
 						ownerCheck = await jobManagementScope(ctx, jobId);
 						const queued = await withLeaderLease(() => respondToCodexJob(jobId, {
-							requestId: requireText(params.requestId, "requestId"),
+							requestId,
 							response: params.response,
 							answers: params.answers,
 							...ownerCheck,
 						}));
 						job = queued.job;
-						commandReceipt = `Response queued for Codex request ${params.requestId} in job ${job.id}.`;
+						await consumeCodexRequestMessages(owner.runtime, requestId, ctx, owner.attachmentEpoch);
+						commandReceipt = `Response queued for Codex request ${requestId} in job ${job.id}.`;
 						break;
 					}
 					case "steer": {
@@ -991,6 +1109,11 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 						onUpdate: (current) => {
 							const currentView = publicJobView(current);
 							rememberJob(currentView, ctx);
+							if (currentView.status === "input_required") {
+								void deliverJobEvent(currentView, ctx).catch((error) => {
+									if (!shuttingDown && ctx.hasUI) ctx.ui.notify(`Could not deliver Codex request: ${error instanceof Error ? error.message : String(error)}`, "warning");
+								});
+							}
 							if (ctx.hasUI) ctx.ui.setWorkingMessage(formatCodexStatus(currentView));
 							onUpdate?.({
 								content: [{ type: "text", text: `Codex ${current.status}: ${current.progress}` }],

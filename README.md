@@ -258,6 +258,8 @@ pi doctor --workspace /path/to/research-project
 /boundary revoke <grant-id|all>
 ```
 
+Codex 的 `research_pi_host` 使用同一审批桥。缺少 grant 时，原 tool call 会进入结构化 `input_required`，当前 attached Pi TUI 自动显示精确 cwd、完整 argv 和建议前缀；批准或拒绝后，决定自动返回同一个 Codex turn。这里不需要 Leader 转述请求、让用户手工制造 grantId，也不会先把 host tool 标成失败。若当时没有 attached TUI 或处于 clean Session，请求保留在 Runtime inbox，等 project-aware TUI 接管后再审批。尚未回答的权限 ask 在底层 request 真正结算前保持 open，不会仅因 Leader 看过消息就从 inbox 消失。
+
 `/boundary` 显示当前边界和 grant 数量。`grant-*` 是当前 session 规则，`trust-*` 是按项目根目录隔离的持久规则；两者都可随时 revoke。授权账本位于当前状态目录的 `capabilities/`（源码开发模式即 Git 忽略的 `.pi/capabilities/`），不会打包或进入 Git；它只保存项目哈希、目标、scope、到期时间、argv 前缀及兼容脚本哈希，不保存密钥。
 
 `host-command` 是显式离开 sandbox 的宿主执行：它继承用户账号可用的运行时环境与 SSH agent，因此比不透明 `ssh-target` 更强。界面会同时显示完整 argv、cwd 和建议持久前缀，只有用户授权后才能执行。shell sandbox 越界时，Pi 应优先通过该 broker 申请一次或项目规则并继续当前任务；只有 broker 无法表达操作时才退回人工 `!` / `!!` 通道。
@@ -334,7 +336,7 @@ DeepSeek V4 Pro/Flash 使用 Max reasoning，但不把 1M 容量等同于等质�
 - `advisor`：只读分析，模型与 reasoning 默认值来自 `config.json` 的 `codex.advisor`；
 - `executor`：完整执行任务，模型与 reasoning 默认值来自 `codex.executor`，自动使用 project-write permission profile；
 - 每次调用都可覆盖 Codex model 和 reasoning effort；
-- executor 可在项目内修改或删除文件、安装项目依赖、自由提交，以及启动或取消昂贵实验；经过用户授权后，它还可通过 `research_pi_host` 使用精确外部只读、SSH target 和固定脚本，不需要复制凭据或重开 delegation；
+- executor 可在项目内修改或删除文件、安装项目依赖、自由提交，以及启动或取消昂贵实验；需要新的宿主权限时，`research_pi_host` 会让同一 tool call 暂停并在 Pi TUI 自动弹出精确授权，用户决定后原 Codex turn 继续，不需要复制凭据、手工返回 grantId 或重开 delegation；
 - Codex 通过本地 stdio App Server 运行，保存稳定的 thread/turn ID；长任务默认后台运行，通过同一个工具的 `status`、`result`、`respond`、`steer`、`resume`、`cancel` 和 `reconcile` action 管理；
 - 连续处理同一研究子任务时，Pi 会给它稳定的 `mission` 标签并使用 `reuse=auto`：只有同一精确 workspace、mission、advisor/executor mode 和 research track 才自动续接原 thread。跨 Pi Session 可以复用；换轨后即使复用了旧 mission 也会新建 thread。独立批判、主动清除旧假设或另一 worktree 应使用新 mission；
 - `/codex missions` 查看当前 project workspace 按 research track 分组的 mission/thread 链。新 job 由 `projectKey + research-leader Actor` 所有，不再绑定一个 conversation branch；文件操作仍强制绑定原精确 workspace。续接前会比较上次终态与当前 Git snapshot；显式跨 track 恢复旧 thread 时还会加入醒目的 route-change 提示，要求 Codex 重新确认介入、有效性标准与决策目标；
