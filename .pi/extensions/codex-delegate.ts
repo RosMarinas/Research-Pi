@@ -366,8 +366,6 @@ export function formatCodexJobsStatus(jobs: CodexJobView[]): string | undefined 
 
 function codexUiProjection(jobs: CodexJobView[]): string {
 	return JSON.stringify({
-		// Preserve useful elapsed-time movement without redrawing on every 750 ms poll.
-		elapsedBucket: jobs.length ? Math.floor(Date.now() / 30_000) : null,
 		jobs: stableCodexJobs(jobs).map((job) => ({
 			id: job.id,
 			status: job.status,

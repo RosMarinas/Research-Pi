@@ -20,7 +20,12 @@ import {
 } from "../lib/research-runtime-adapters.mjs";
 import { buildRuntimeBoardModel } from "../lib/runtime-board.mjs";
 import { RuntimeBoardOverlay } from "../lib/runtime-board-ui.mjs";
-import { RuntimeDockComponent, runtimeDockVisible } from "../lib/runtime-dock-ui.mjs";
+import {
+	createRuntimeDockClock,
+	RuntimeDockComponent,
+	runtimeDockNeedsClock,
+	runtimeDockVisible,
+} from "../lib/runtime-dock-ui.mjs";
 import { resolveResearchPiPaths } from "../lib/runtime-paths.mjs";
 import {
 	RESEARCH_LEADER_ACTOR_ID,
@@ -293,6 +298,8 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	let projectViewEventCount = -1;
 	let latestProjectView: Awaited<ReturnType<typeof buildProjectView>> | undefined;
 	let latestCodexJobs: any[] = [];
+	let runtimeDockTui: { requestRender?: () => void } | undefined;
+	const runtimeDockClock = createRuntimeDockClock(() => runtimeDockTui?.requestRender?.());
 	let attachmentLossNotified = false;
 	let sessionInheritancePolicy: SessionInheritancePolicy = "project";
 
@@ -395,6 +402,8 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		if (!ctx.hasUI || typeof ctx.ui.setWidget !== "function") return;
 		if (options.codexJobs) latestCodexJobs = options.codexJobs;
 		if (UI_RUNTIME_STRIP === "off") {
+			runtimeDockClock.stop();
+			runtimeDockTui = undefined;
 			ctx.ui.setWidget(RUNTIME_DOCK_KEY, undefined);
 			return;
 		}
@@ -402,14 +411,20 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		const snapshot = options.snapshot ?? await readRuntimeSnapshot(activeRuntime);
 		const model = await runtimeModelFromSnapshot(ctx, activeRuntime, snapshot);
 		if (!runtimeDockVisible(model, UI_RUNTIME_STRIP)) {
+			runtimeDockClock.stop();
+			runtimeDockTui = undefined;
 			ctx.ui.setWidget(RUNTIME_DOCK_KEY, undefined);
 			return;
 		}
 		ctx.ui.setWidget(
 			RUNTIME_DOCK_KEY,
-			(_tui, theme) => new RuntimeDockComponent(model, latestCodexJobs, theme, { density: UI_DENSITY }),
+			(tui, theme) => {
+				runtimeDockTui = tui;
+				return new RuntimeDockComponent(model, latestCodexJobs, theme, { density: UI_DENSITY });
+			},
 			{ placement: "aboveEditor" },
 		);
+		runtimeDockClock.setActive(runtimeDockNeedsClock(latestCodexJobs));
 	};
 
 	const refreshStatus = async (ctx: ExtensionContext) => {
@@ -713,6 +728,8 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		runtimeDockClock.stop();
+		runtimeDockTui = undefined;
 		if (!runtime || !localSessionId) return;
 		if (activeActivationId) {
 			await settleRuntimeActorActivation(runtime, activeActivationId, { reason: "session shutdown" });

@@ -1,6 +1,7 @@
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 const ACTIVE = new Set(["starting", "running", "cancelling"]);
+export const RUNTIME_DOCK_CLOCK_MS = 1_000;
 
 function shortId(value, length = 8) {
 	const text = String(value ?? "");
@@ -34,6 +35,37 @@ function liveJobs(jobs = []) {
 			const rightStarted = String(right.startedAt ?? right.createdAt ?? "");
 			return leftStarted.localeCompare(rightStarted) || String(left.id).localeCompare(String(right.id));
 		});
+}
+
+export function runtimeDockNeedsClock(jobs = []) {
+	return liveJobs(jobs).length > 0;
+}
+
+export function createRuntimeDockClock(requestRender, options = {}) {
+	const schedule = options.setInterval ?? setInterval;
+	const cancel = options.clearInterval ?? clearInterval;
+	const intervalMs = Number.isFinite(options.intervalMs) && options.intervalMs > 0
+		? options.intervalMs
+		: RUNTIME_DOCK_CLOCK_MS;
+	let timer;
+	return {
+		setActive(active) {
+			if (!active) {
+				if (timer !== undefined) cancel(timer);
+				timer = undefined;
+				return;
+			}
+			if (timer !== undefined) return;
+			timer = schedule(() => requestRender(), intervalMs);
+			timer?.unref?.();
+		},
+		isActive() {
+			return timer !== undefined;
+		},
+		stop() {
+			this.setActive(false);
+		},
+	};
 }
 
 function jobStateLabel(status) {

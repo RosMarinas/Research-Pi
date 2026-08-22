@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { RuntimeDockComponent, runtimeDockVisible } from "../.pi/lib/runtime-dock-ui.mjs";
+import {
+	createRuntimeDockClock,
+	RUNTIME_DOCK_CLOCK_MS,
+	RuntimeDockComponent,
+	runtimeDockNeedsClock,
+	runtimeDockVisible,
+} from "../.pi/lib/runtime-dock-ui.mjs";
 
 function theme() {
 	return {
@@ -24,6 +30,40 @@ test("Runtime Dock auto-hides healthy idle state and surfaces actionable state",
 	assert.equal(runtimeDockVisible(model({ project: { freshness: "missing" } }), "auto"), true);
 	assert.equal(runtimeDockVisible(model(), "always"), true);
 	assert.equal(runtimeDockVisible(model({ counts: { active: 1 } }), "off"), false);
+});
+
+test("Runtime Dock clock redraws once per second only while a live Codex job exists", () => {
+	let callback;
+	let scheduled = 0;
+	let cancelled = 0;
+	let renders = 0;
+	const handle = { unrefCalled: false, unref() { this.unrefCalled = true; } };
+	const clock = createRuntimeDockClock(() => { renders += 1; }, {
+		setInterval(next, intervalMs) {
+			callback = next;
+			scheduled += 1;
+			assert.equal(intervalMs, RUNTIME_DOCK_CLOCK_MS);
+			return handle;
+		},
+		clearInterval(value) {
+			assert.equal(value, handle);
+			cancelled += 1;
+		},
+	});
+
+	assert.equal(runtimeDockNeedsClock([]), false);
+	assert.equal(runtimeDockNeedsClock([{ status: "completed" }]), false);
+	assert.equal(runtimeDockNeedsClock([{ status: "running" }]), true);
+	assert.equal(runtimeDockNeedsClock([{ status: "input_required" }]), true);
+	clock.setActive(true);
+	clock.setActive(true);
+	assert.equal(scheduled, 1, "repeated state refreshes must not create timer storms");
+	assert.equal(handle.unrefCalled, true);
+	callback();
+	assert.equal(renders, 1);
+	clock.setActive(false);
+	assert.equal(cancelled, 1);
+	assert.equal(clock.isActive(), false);
 });
 
 test("Runtime Dock is responsive and renders objective Codex progress", () => {
