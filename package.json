@@ -19,6 +19,7 @@
     ".pi/config.defaults.json",
     ".pi/extensions/",
     ".pi/lib/",
+    ".pi/skills/",
     ".pi/schemas/",
     ".pi/themes/",
     ".pi/vendor/",

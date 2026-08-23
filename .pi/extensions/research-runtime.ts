@@ -3,14 +3,17 @@ import { Box, Markdown, Text } from "@earendil-works/pi-tui";
 import { join } from "node:path";
 import { getGitSnapshot, HARNESS_ROOT } from "../lib/codex-jobs.mjs";
 import {
+	PROJECT_VIEW_DELTA_KIND,
 	PROJECT_VIEW_KIND,
 	buildProjectView,
 	commitProjectState,
-	materializeProjectView,
+	materializeProjectViewDelta,
 	migrateLatestProjectState,
 	projectViewFingerprint,
+	projectViewRefreshFingerprint,
 	readRecentExperiments,
 	renderProjectView,
+	renderProjectViewDelta,
 } from "../lib/project-view.mjs";
 import { RESEARCH_HARD_COMPACT_TOKENS, RESEARCH_SOFT_COMPACT_TOKENS } from "../lib/research-compact.mjs";
 import {
@@ -64,6 +67,17 @@ type RuntimeMessage = ReturnType<typeof pendingRuntimeMessages>[number];
 type RuntimeSnapshot = Awaited<ReturnType<typeof readRuntimeSnapshot>>;
 type RuntimeActivation = RuntimeSnapshot["activations"][number];
 type SessionInheritancePolicy = "project" | "clean";
+type ProjectViewReceipt = {
+	version: number;
+	persistent: true;
+	mode: "snapshot" | "delta";
+	projectRevision: number;
+	stateRevision: number;
+	trackRef: string;
+	gitFingerprint: string;
+	fingerprint: string;
+	freshness: string;
+};
 
 class RuntimeLeaderBusyError extends Error {
 	readonly activation: RuntimeActivation;
@@ -280,6 +294,56 @@ function inboxLines(snapshot: Awaited<ReturnType<typeof readRuntimeSnapshot>>, i
 		.join("\n\n");
 }
 
+function projectViewGitFingerprint(view: Awaited<ReturnType<typeof buildProjectView>>): string {
+	return `${view.git.branch ?? "unknown"}:${view.git.commit ?? "unknown"}:${String(view.git.dirty ?? "unknown")}`;
+}
+
+function latestProjectViewReceipt(entries: any[]): ProjectViewReceipt | undefined {
+	let afterCompaction = 0;
+	for (const [index, entry] of entries.entries()) if (entry?.type === "compaction") afterCompaction = index + 1;
+	for (let index = entries.length - 1; index >= afterCompaction; index -= 1) {
+		const entry = entries[index];
+		if (entry?.type !== "custom_message" || entry.customType !== PROJECT_VIEW_KIND) continue;
+		const details = entry.details;
+		if (details?.persistent !== true || !Number.isInteger(details.projectRevision)) continue;
+		return details as ProjectViewReceipt;
+	}
+	return undefined;
+}
+
+function projectViewReceipt(
+	view: Awaited<ReturnType<typeof buildProjectView>>,
+	mode: ProjectViewReceipt["mode"],
+): ProjectViewReceipt {
+	return {
+		version: view.version,
+		persistent: true,
+		mode,
+		projectRevision: view.projectRevision,
+		stateRevision: view.stateRevision,
+		trackRef: view.currentTrack?.ref ?? "project:initial",
+		gitFingerprint: projectViewGitFingerprint(view),
+		fingerprint: projectViewFingerprint(view),
+		freshness: view.freshness,
+	};
+}
+
+function projectViewPersistenceMode(
+	view: Awaited<ReturnType<typeof buildProjectView>>,
+	previous?: ProjectViewReceipt,
+): ProjectViewReceipt["mode"] | null {
+	if (!previous) return "snapshot";
+	const gitChanged = previous.gitFingerprint !== projectViewGitFingerprint(view);
+	const revisionChanged = previous.projectRevision !== view.projectRevision;
+	if (!gitChanged && !revisionChanged) return null;
+	if (
+		view.projectRevision < previous.projectRevision
+		|| view.stateRevision !== previous.stateRevision
+		|| (view.currentTrack?.ref ?? "project:initial") !== previous.trackRef
+	) return "snapshot";
+	return "delta";
+}
+
 export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	let runtime: RuntimeContext | undefined;
 	let runtimeInputCwd: string | undefined;
@@ -295,7 +359,9 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	const migrationAttemptedProjects = new Set<string>();
 	let projectViewText = "";
 	let projectViewHash = "";
-	let projectViewEventCount = -1;
+	let projectViewSnapshotHash = "";
+	let projectViewDirty = true;
+	let persistedProjectView: ProjectViewReceipt | undefined;
 	let latestProjectView: Awaited<ReturnType<typeof buildProjectView>> | undefined;
 	let latestCodexJobs: any[] = [];
 	let runtimeDockTui: { requestRender?: () => void } | undefined;
@@ -366,7 +432,8 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		latestProjectView = view;
 		projectViewText = renderProjectView(view);
 		projectViewHash = projectViewFingerprint(view);
-		projectViewEventCount = snapshot.ledgerEventCount;
+		projectViewSnapshotHash = projectViewRefreshFingerprint(snapshot);
+		projectViewDirty = false;
 		return { snapshot, view };
 	};
 
@@ -659,6 +726,9 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			snapshot,
 			ctx.sessionManager.getSessionId(),
 		) as SessionInheritancePolicy;
+		persistedProjectView = sessionInheritancePolicy === "project"
+			? latestProjectViewReceipt(ctx.sessionManager.getBranch())
+			: undefined;
 		let view: Awaited<ReturnType<typeof refreshProjectView>>["view"] | null = null;
 		consumedMessageIds.clear();
 		materializedMessages.clear();
@@ -683,7 +753,8 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			} else {
 				projectViewText = "";
 				projectViewHash = "";
-				projectViewEventCount = snapshot.ledgerEventCount;
+				projectViewSnapshotHash = projectViewRefreshFingerprint(snapshot);
+				projectViewDirty = false;
 			}
 			const pendingRotation = [...(snapshot.pendingRotations ?? [])].reverse().find((rotation) => {
 				if (rotation.fromSessionId === currentSessionId) return false;
@@ -714,7 +785,8 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		} else {
 			projectViewText = "";
 			projectViewHash = "";
-			projectViewEventCount = snapshot.ledgerEventCount;
+			projectViewSnapshotHash = projectViewRefreshFingerprint(snapshot);
+			projectViewDirty = false;
 		}
 		for (const message of snapshot.messages) {
 			if (message.status === "consumed") consumedMessageIds.add(message.id);
@@ -744,7 +816,9 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		runtimeInputCwd = undefined;
 		localSessionId = undefined;
 		localAttachmentEpoch = undefined;
-		projectViewEventCount = -1;
+		projectViewSnapshotHash = "";
+		projectViewDirty = true;
+		persistedProjectView = undefined;
 		latestProjectView = undefined;
 		latestCodexJobs = [];
 		sessionInheritancePolicy = "project";
@@ -769,6 +843,35 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			}
 			return { action: "handled" as const };
 		}
+	});
+
+	pi.on("before_agent_start", async (_event, ctx) => {
+		if (sessionInheritancePolicy === "clean") return;
+		const activeRuntime = await getRuntime(ctx);
+		const snapshot = await readRuntimeSnapshot(activeRuntime);
+		if (!runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID, ctx.sessionManager.getSessionId())) return;
+		if (projectViewDirty || projectViewRefreshFingerprint(snapshot) !== projectViewSnapshotHash) {
+			await refreshProjectView(ctx, snapshot);
+		}
+		const view = latestProjectView ?? (await refreshProjectView(ctx, snapshot)).view;
+		// Re-read receipts after compaction/tree changes. A receipt before the
+		// latest compaction is no longer present in provider context.
+		persistedProjectView = latestProjectViewReceipt(ctx.sessionManager.getBranch());
+		const previous = persistedProjectView;
+		const mode = projectViewPersistenceMode(view, previous);
+		if (!mode) return;
+		const content = mode === "snapshot"
+			? projectViewText
+			: renderProjectViewDelta(view, previous?.projectRevision ?? 0);
+		persistedProjectView = projectViewReceipt(view, mode);
+		return {
+			message: {
+				customType: PROJECT_VIEW_KIND,
+				content,
+				display: false,
+				details: persistedProjectView,
+			},
+		};
 	});
 
 	pi.on("agent_start", async (_event, ctx) => {
@@ -799,6 +902,24 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		activeActivationId = undefined;
 	});
 
+	const projectViewMutatingTools = new Set([
+		"bash",
+		"edit",
+		"write",
+		"record_experiment",
+		"record_research_transition",
+		"amend_project_state",
+		"research_checkpoint",
+		"codex_delegate",
+	]);
+
+	pi.on("tool_execution_end", (event) => {
+		// Refresh only after tools that can change project evidence, Git, files,
+		// or Runtime delegation state. The next context hook performs one
+		// deterministic rebuild; read-only tools preserve the exact prompt suffix.
+		if (projectViewMutatingTools.has(event.toolName)) projectViewDirty = true;
+	});
+
 	pi.on("context", async (event, ctx) => {
 		const activeRuntime = await getRuntime(ctx);
 		const snapshot = await readRuntimeSnapshot(activeRuntime);
@@ -814,11 +935,14 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		if (sessionInheritancePolicy === "clean") {
 			return {
 				messages: event.messages.filter((message) =>
-					message.customType !== PROJECT_VIEW_KIND && message.customType !== RUNTIME_MESSAGE_KIND,
+					message.customType !== PROJECT_VIEW_KIND
+					&& message.customType !== PROJECT_VIEW_DELTA_KIND
+					&& message.customType !== RUNTIME_MESSAGE_KIND,
 				),
 			};
 		}
-		if (snapshot.ledgerEventCount !== projectViewEventCount) await refreshProjectView(ctx, snapshot);
+		const snapshotHash = projectViewRefreshFingerprint(snapshot);
+		if (projectViewDirty || snapshotHash !== projectViewSnapshotHash) await refreshProjectView(ctx, snapshot);
 		const runtimeMessagesById = new Map(snapshot.messages.map((message) => [message.id, message]));
 		const messages = event.messages.filter((message) => {
 			if (message.role !== "custom" || message.customType !== RUNTIME_MESSAGE_KIND) return true;
@@ -837,7 +961,26 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			});
 			return true;
 		});
-		return { messages: materializeProjectView(messages, projectViewText, { fingerprint: projectViewHash }) };
+		const view = latestProjectView ?? (await refreshProjectView(ctx, snapshot)).view;
+		const hasPersistentView = messages.some((message) =>
+			message.role === "custom" && message.customType === PROJECT_VIEW_KIND && message.details?.persistent === true,
+		);
+		let updateText = "";
+		if (!hasPersistentView) {
+			updateText = projectViewText;
+		} else if (
+			!persistedProjectView
+			|| view.projectRevision !== persistedProjectView.projectRevision
+			|| projectViewGitFingerprint(view) !== persistedProjectView.gitFingerprint
+		) {
+			updateText = renderProjectViewDelta(view, persistedProjectView?.projectRevision ?? 0);
+		}
+		return {
+			messages: materializeProjectViewDelta(messages, updateText, {
+				fingerprint: projectViewHash,
+				projectRevision: view.projectRevision,
+			}),
+		};
 	});
 
 	pi.on("session_compact", async (event, ctx) => {

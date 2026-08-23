@@ -35,6 +35,7 @@ for (const required of [
 	"docs/configuration.md",
 	".pi/extensions/project-boundary.ts",
 	".pi/lib/project-boundary.mjs",
+	".pi/skills/research-briefing/SKILL.md",
 ]) {
 	assert.ok(files.includes(required), `npm package is missing ${required}`);
 }

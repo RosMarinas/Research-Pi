@@ -199,8 +199,11 @@ async function spawnCore(argv) {
 	const coreCli = join(packageRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
 	if (!existsSync(coreCli)) throw new Error(`Pinned Pi core is missing: ${coreCli}`);
 	const args = ["--no-skills", "--no-extensions", "--no-themes"];
-	for (const configuredPath of config.resources.skills) {
-		const skill = expandUserPath(configuredPath);
+	const skillPaths = [
+		join(packageRoot, ".pi", "skills", "research-briefing"),
+		...config.resources.skills.map((configuredPath) => expandUserPath(configuredPath)),
+	];
+	for (const skill of new Set(skillPaths)) {
 		if (existsSync(join(skill, "SKILL.md"))) args.push("--skill", skill);
 	}
 	const profile = researchPiProfile(config);

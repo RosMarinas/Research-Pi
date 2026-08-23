@@ -27,6 +27,7 @@ import {
 	initializeResearchRuntime,
 	pendingRuntimeMessages,
 	readRuntimeSnapshot,
+	recordRuntimeEvidence,
 	recordResearchTransition,
 	recordCodexRuntimeEvent,
 	requestRuntimeSessionRotation,
@@ -975,6 +976,82 @@ test("a cross-session research transition refreshes ProjectView at the next mode
 		const activityResult = await handlers.get("context")({ type: "context", messages: [{ role: "user", content: "continue again" }] }, ctx);
 		const refreshedView = activityResult.messages.find((message) => message.customType === "research-project-view");
 		assert.match(String(refreshedView?.content), /cross-session-action \[running\]/);
+	} finally {
+		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
+		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("ProjectView persists an append-only snapshot and then a short semantic delta", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-project-view-persistence-"));
+	const previousRoot = process.env.RESEARCH_PI_RUNTIME_DIR;
+	process.env.RESEARCH_PI_RUNTIME_DIR = join(root, "runtime");
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace);
+		const handlers = new Map();
+		const branch = [];
+		const pi = {
+			on(name, handler) { handlers.set(name, handler); },
+			registerCommand() {},
+			registerMessageRenderer() {},
+			registerEntryRenderer() {},
+			sendMessage() {},
+			appendEntry() {},
+		};
+		researchRuntimeExtension(pi);
+		const ctx = {
+			cwd: workspace,
+			hasUI: true,
+			ui: { setStatus() {}, notify() {} },
+			sessionManager: {
+				getSessionId: () => "session-a",
+				getLeafId: () => "leaf-a",
+				getBranch: () => branch,
+			},
+			getContextUsage: () => null,
+			isIdle: () => false,
+			abort() {},
+		};
+		await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
+
+		const first = await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "start" }, ctx);
+		assert.equal(first.message.customType, "research-project-view");
+		assert.equal(first.message.details.persistent, true);
+		assert.equal(first.message.details.mode, "snapshot");
+		branch.push({ type: "custom_message", customType: first.message.customType, content: first.message.content, details: first.message.details });
+		assert.equal(await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "unchanged" }, ctx), undefined);
+
+		const runtime = await resolveResearchRuntime(workspace);
+		await recordRuntimeEvidence(runtime, {
+			id: "exp-persistent-delta",
+			question: "Did the probe separate the hypotheses?",
+			intervention: "Enabled the oracle bypass.",
+			observation: "The margin increased from 0.02 to 0.31.",
+			validityChecks: ["The bypass path was active."],
+			validityJudgment: "valid",
+			evidenceMode: "diagnostic",
+			conclusion: "The encoder is the current failure locus.",
+			nextStep: "Test staged encoder training.",
+		});
+		const next = await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "continue" }, ctx);
+		assert.equal(next.message.details.mode, "delta");
+		assert.match(String(next.message.content), /<research_project_delta>/);
+		assert.match(String(next.message.content), /observation: The margin increased from 0.02 to 0.31/);
+		branch.push({ type: "custom_message", customType: next.message.customType, content: next.message.content, details: next.message.details });
+
+		const context = await handlers.get("context")({
+			type: "context",
+			messages: branch.map((entry) => ({
+				role: "custom",
+				customType: entry.customType,
+				content: entry.content,
+				details: entry.details,
+			})),
+		}, ctx);
+		assert.equal(context.messages.filter((message) => message.customType === "research-project-view").length, 2);
+		assert.equal(context.messages.some((message) => message.customType === "research-project-view-delta"), false);
 	} finally {
 		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
 		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;

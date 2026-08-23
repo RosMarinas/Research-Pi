@@ -174,7 +174,7 @@ In the TUI, ask for a one-sentence response without tools, then open `/model` an
 
 ## Skills, UI and diagnostics
 
-`resources.skills` is the complete default skill allowlist used with Pi's `--no-skills`. Missing paths are skipped. A one-off `--skill` argument remains possible.
+Research Pi uses Pi's `--no-skills`, always loads the packaged `research-briefing` skill, and then loads the external allowlist in `resources.skills`. Missing external paths are skipped. A one-off `--skill` argument remains possible.
 
 Research Pi explicitly loads its bundled theme set, so all three palettes are available in both source and packaged installs. `pi.settings.theme` may still select `dark`, `light`, or another explicitly loaded Pi theme.
 

@@ -201,18 +201,19 @@ Research Pi 会从 config 生成内部 Pi `settings.json/models.json` adapter；
 
 ## Skill 白名单
 
-启动器使用 Pi 原生的 `--no-skills` 关闭全局和项目 skill 自动发现，再从 `config.json` 的 `resources.skills` 通过 `--skill` 加载经过检查的默认白名单：
+启动器使用 Pi 原生的 `--no-skills` 关闭全局和项目 skill 自动发现，然后显式加载一个随 Harness 发布的内置 skill，以及 `config.json` 的外部资源白名单：
 
+- `.pi/skills/research-briefing`：重大结果、阶段交接或上下文恢复时的自适应科研汇报；
 - `~/.agents/skills/cognitive-knowledge-network`：研究概念、方法和证据导航；
 - `~/.codex/skills/remote-workspace`：远程环境、实验和 GPU 执行。
 
-其他 skills 不会因为存在于 `~/.agents/skills/`、`.agents/skills/` 或 `.pi/skills/` 而自动进入上下文。需要临时启用时，仍可使用 Pi 原生命令行参数：
+除这个打包内置项外，其他 skills 不会因为存在于 `~/.agents/skills/`、`.agents/skills/` 或目标项目 `.pi/skills/` 而自动进入上下文。需要临时启用时，仍可使用 Pi 原生命令行参数：
 
 ```sh
 pi --skill /path/to/skill
 ```
 
-白名单 skill 在当前机器不存在时会被跳过并给出提示，不影响 Pi 启动。
+外部白名单 skill 在当前机器不存在时会被跳过，不影响 Pi 启动；打包验证会确保内置 `research-briefing` 存在。
 
 同理，启动器使用 `--no-extensions` 关闭目标项目和用户目录中的可执行 extension 自动发现，只显式加载本仓库审查过的 harness extensions。需要临时加载目标项目 extension 时必须由用户在启动命令中明确传入 `--extension /path/to/extension.ts`；这属于宿主代码执行授权，不受模型 shell 沙箱保护。
 
@@ -372,7 +373,11 @@ Codex job、请求账本、精简 JSONL 审计事件和委派 prompt 保存在�
 - `/runtime new clean [reason]`：创建既不复制 transcript、也不自动注入 ProjectView/mailbox 的 clean Session。Project ledger 仍保留在磁盘；clean compact 只更新该 Session，旧 Codex mission 不自动复用；
 - `/runtime inherit [reason]`：在当前 clean Session 中显式恢复 ProjectView、未消费 mailbox 和 project-aware 工作方式。它不恢复旧 transcript；后续 compact 以 canonical Project State 为基线，clean summary 只作为需重新核对 provenance 的候选综合。
 
-Runtime message 是瞬时控制/通信，不自动成为长期科研判断。每次结构化 research compact 会把 `researchState + provenance + basedOnProjectRevision` 提交到 project ledger；窄幅 `amend_project_state` 以同样的 revision CAS 和 Leader lease 追加修订来源。如果压缩或修订期间出现了新 transition/evidence，陈旧写入不能覆盖 Project State。普通新 Session 得到一个限长、不可见的 ProjectView，优先展示 active research track、memory freshness、当前决策、关键约束与未结 Action；clean Session 则明确跳过这项自动继承。实验只显示短索引，详情按需检索。Evidence、Action、message 与 Codex job 都带 research-track 来源，旧路线信息可以保留，但不会静默当作当前介入的证据；`parallel` 路线可跨后续主路线切换继续保持并列。较新的 transition/evidence 会把旧 state 标为 stale；较新的 Action/Git 只标为 unconfirmed，不会由文件变化自动推断科研结论。下一模型边界会按 Runtime ledger 的语义事件数刷新 ProjectView，因此另一 Session 新增的 Action/mailbox 不依赖 compact 才能被看到。ProjectView 不复制完整旧 transcript，也不会把 Codex completed 自动提升为科学结论。Runtime rotation 会重投 queued 或 delivered-but-unconsumed 的 Leader 消息；已经 consumed 的消息仍被过滤。
+Runtime message 是瞬时控制/通信，不自动成为长期科研判断。每次结构化 research compact 会把 `researchState + provenance + basedOnProjectRevision` 提交到 project ledger；窄幅 `amend_project_state` 以同样的 revision CAS 和 Leader lease 追加修订来源。如果压缩或修订期间出现了新 transition/evidence，陈旧写入不能覆盖 Project State。普通新 Session 得到一个限长、不可见的 ProjectView；clean Session 则明确跳过这项自动继承。ProjectView 现在分成 structured-state baseline 与 live delta：每个用户轮次开始前，`before_agent_start` 只在 Project revision、state/track 或 Git identity 改变时，向 Session 尾部持久追加一份 snapshot 或短 delta，不再删除旧视图并把整块文本搬到最新问题前。若 `record_experiment`、transition 或项目写入发生在同一个 agent turn 内，`context` hook 只在下一次模型调用尾部补一份临时 delta，下一用户轮再把它持久化。新 experiment 和 research transition 因此不必等 `/compact`；`bash/edit/write` 等可能改变项目的工具结束后也会把下一边界标成待刷新。普通 read-only tool 和 Leader activation 生命周期不会制造新的 ProjectView 消息。
+
+当新 evidence 晚于 structured state 时，旧 claim、hypotheses 和 planned next experiment 只以“实验前 baseline”出现，不能再被当作当前裁决；delta 会直接携带最近实验的 intervention、observation、validity、interpretation 和 next step。Leader 在真正的语义边界用 `amend_project_state`、`record_research_transition` 或一次 research compact 将它综合成新的 canonical state，不会为每个实验机械调用模型压缩。Action/Git 单独变化只标为 unconfirmed，不自动推断科研结论。Evidence、Action、message 与 Codex job 都带 research-track 来源，旧路线信息可以保留，但不会静默当作当前介入的证据；`parallel` 路线可跨后续主路线切换继续保持并列。ProjectView 不复制完整旧 transcript，也不会把 Codex completed 自动提升为科学结论。Runtime rotation 会重投 queued 或 delivered-but-unconsumed 的 Leader 消息；已经 consumed 的消息仍被过滤。
+
+这种 append-only 排列也服务 provider prompt/KV cache：system prompt、工具定义和白名单技能保持稳定，既有 user/assistant/tool/ProjectView history 不被重排，变化频繁的 delta 只追加在尾部；ProjectView fingerprint 只按实际进入模型的文本计算，不受未渲染时间戳和 actor lifecycle 影响。缓存是否命中仍由 provider 决定，Harness 不承诺固定百分比。内置 `research-briefing` 技能只在长委派回报、重大结果、冲突证据、阶段交接或用户需要恢复脉络时补充清晰汇报；普通技术追问沿用已经建立的共同语境，不强制套模板。
 
 Runtime Board 是既有 ledger/ProjectView 的只读投影，不进入模型上下文，也不创建另一份日志或 heartbeat。它不会后台轮询；只有打开面板和按 `r` 时读取当前状态，sessions 页会显示 attachment 与当前 agent activation，也不会为了观察而抢占另一个 Session。一次 Leader agent run 只写 start/settled 两个稀疏 activation 事件。Ledger 启动写入前只检查最后一条 JSONL；崩溃留下的末尾半条记录会在锁内截断，历史中部损坏仍明确报错而不静默跳过。需要连续观察 Codex 执行细节时使用 `/watch`。
 

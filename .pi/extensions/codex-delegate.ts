@@ -458,6 +458,13 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 
 	const boundedList = (values: unknown, limit = 8): string[] =>
 		Array.isArray(values) ? values.slice(0, limit).map((value) => boundedProgress(String(value))) : [];
+	const boundedDetailList = (values: unknown, limit: number, itemLimit: number): string[] =>
+		Array.isArray(values)
+			? values.slice(0, limit).map((value) => {
+				const text = String(value ?? "").replace(/\s+/g, " ").trim();
+				return text.length <= itemLimit ? text : `${text.slice(0, itemLimit - 3)}...`;
+			}).filter(Boolean)
+			: [];
 
 	const eventContent = (job: CodexJobView): string => {
 		if (job.status === "input_required" && job.pendingRequest) {
@@ -490,6 +497,15 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			].join("\n");
 		}
 		const result = job.result ?? {};
+		const actionsTaken = boundedDetailList(result.actions_taken, 6, 360);
+		const changedFiles = boundedDetailList(result.changed_files, 12, 360);
+		const externalEffects = Array.isArray(result.external_effects)
+			? result.external_effects.slice(0, 6).map((effect: any) => {
+				const identity = [effect?.kind, effect?.target, effect?.identifier].filter(Boolean).join(" · ") || "effect";
+				const detail = String(effect?.detail ?? "").replace(/\s+/g, " ").trim();
+				return `${identity}${detail ? ` — ${detail.slice(0, 500)}` : ""}`;
+			})
+			: [];
 		return [
 			`Codex delegation ${job.id} ${job.status}. Pi must inspect this result and decide the next research action; completion alone is not scientific evidence.`,
 			`Mode/model: ${job.mode} · ${job.model} · ${job.reasoningEffort}`,
@@ -497,6 +513,9 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			result.outcome ? `Delegation outcome: ${result.outcome} · goal_satisfied=${result.goal_satisfied === true}` : undefined,
 			result.completion_basis ? `Completion basis: ${String(result.completion_basis).slice(0, 3000)}` : undefined,
 			result.summary ? `Summary: ${String(result.summary).slice(0, 5000)}` : undefined,
+			actionsTaken.length ? `Actions taken:\n- ${actionsTaken.join("\n- ")}` : undefined,
+			changedFiles.length ? `Changed files:\n- ${changedFiles.join("\n- ")}` : undefined,
+			externalEffects.length ? `External effects:\n- ${externalEffects.join("\n- ")}` : undefined,
 			boundedList(result.evidence).length ? `Evidence:\n- ${boundedList(result.evidence).join("\n- ")}` : undefined,
 			boundedList(result.uncertainties).length ? `Uncertainties:\n- ${boundedList(result.uncertainties).join("\n- ")}` : undefined,
 			boundedList(result.remaining_work).length ? `Remaining delegated work:\n- ${boundedList(result.remaining_work).join("\n- ")}` : undefined,

@@ -42,7 +42,7 @@ pi --profile deepseek-pro   # 只覆盖本次启动
 
 所有字段、示例和覆盖优先级见 [Research Pi Configuration](configuration.md)。
 
-Research Pi 默认关闭 Pi 的 skill 和 executable extension 自动发现，只加载经过检查的研究白名单与 harness extensions。某次任务需要额外 skill 时可显式添加：
+Research Pi 默认关闭 Pi 的 skill 和 executable extension 自动发现，只加载内置 `research-briefing`、经过检查的外部研究白名单与 harness extensions。某次任务需要额外 skill 时可显式添加：
 
 ```sh
 pi --skill /path/to/skill
@@ -252,7 +252,9 @@ Pi 在连续处理同一研究子任务时应使用稳定、简短的 `mission` 
 - 会话很长但仍在解决同一问题：可手动使用 `/compact`。默认在约 272K/384K 总上下文处标记自动压缩，但会等当前 agent run 及其工具调用链完整 settled 后才执行，不会中断正在进行的任务。默认按当前分支第 1/2/3 次 compact 保留约 24K/32K/40K recent tail，结构化摘要目标 8K、生成硬上限 16K，compact 后通常约为 32K/40K/48K；这些数值统一在 `config.json` 的 `research.compaction` 调节。竞争假设、有效性、evidence refs 与下一实验写入结构化 compact，完整 JSONL 历史仍保留。
 - 新会话需要恢复旧证据：使用 memory search/read，不必先恢复整个旧 session。
 - 普通新 Session 会自动收到基于最近 structured state、实验账本、Git 和 Runtime 的限长 ProjectView；它是导航信息而非证据替代。用 `/runtime view` 可检查来源，用 `/runtime recommend` 可查看是否值得 compact 或轮换。确定交接时优先使用 `/runtime rotate`：它先检查 Project State、未知副作用与 Action 恢复身份，再创建空白 transcript 的 project-aware Session；原生 `/new` 不做这份 readiness/audit。若目的是主动排除项目记忆影响而非接手，则使用 `/runtime new clean`，之后只有显式 `/runtime inherit` 才恢复自动注入。
-- ProjectView 显示 `current/unconfirmed/stale/transitioning/missing` freshness。新 experiment 或 research transition 晚于最近 compact 时，旧 claim/next experiment 不再作为当前结论；只有较新的 Action 或 Git 变化时标为 unconfirmed，要求确认但不自动宣布换轨。
+- ProjectView 显示 `current/unconfirmed/stale/transitioning/missing` freshness，并按“structured baseline → live delta”表达。新 experiment 或 research transition 晚于最近 compact 时，旧 claim/next experiment 只作为实验前基线；delta 在下一次模型调用前直接加入 intervention、observation、validity 与 conclusion。窄更新用 `amend_project_state`，实质换轨用 `record_research_transition`，真正的阶段检查点再 compact，不需要每次实验都压缩。
+- 用户轮开始时，Runtime 通过 `before_agent_start` 把变化后的 ProjectView snapshot/短 delta 作为隐藏 Session 消息追加在历史尾部；同一轮工具刚产生新 evidence 时，`context` 只临时补一个尾部 delta，下一用户轮再持久化。旧 ProjectView 不被删除或搬位，因此完整旧请求更容易成为下一请求的共同前缀。普通只读工具与 Session activation 不创建新视图；实际命中率以 provider 返回的 cache usage 为准。
+- 长委派结束、重大实验结果、冲突证据、阶段交接或需要恢复上下文时，Leader 会按需加载 `research-briefing`，说明“做了什么—看到什么—是否有效—意味着什么—下一步为何如此”。如果你已经理解当前阶段并继续追问，它不会机械重复整段背景。
 
 方向实质变化时可以直接告诉 Pi：
 

@@ -667,6 +667,7 @@ export async function recordRuntimeEvidence(runtime, record) {
 		validityJudgment: ["valid", "invalid", "inconclusive"].includes(record.validityJudgment)
 			? record.validityJudgment
 			: "inconclusive",
+		observation: boundedRuntimeText(record.observation, 2400),
 		conclusion: boundedRuntimeText(record.conclusion, 2000),
 		nextStep: boundedRuntimeText(record.nextStep, 1200),
 		runId: boundedRuntimeText(record.runId, 300) || null,
