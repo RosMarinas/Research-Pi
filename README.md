@@ -277,7 +277,9 @@ Research Pi 默认处于探索与验证阶段：构造竞争假设，优先高�
 
 ### `record_experiment`
 
-当一次运行会改变后续研究判断时，记录假设、介入、预期、有效性检查、观察与下一步。记录写入目标科研项目的 `.pi/research/experiments.jsonl`，该文件默认不应进入版本控制。若结果在换轨后才返回，可显式填写原 `trackRef`，避免把旧路线实验误标为当前路线证据。
+当一次运行会改变后续研究判断时，用 `evidenceMode` 标明它是 `confirmatory`、`exploratory`、`diagnostic` 或 `validity_failure`。只有 confirmatory 必须有真实假设和观察前预测；探索、诊断或失败记录可以省略当时不存在的 hypothesis、prediction、validityChecks 或 nextStep，Harness 不会再诱导事后补写。prediction 用 `predictionStatus` 区分 preregistered、recorded_before_observation、not_recorded、not_applicable 或 unspecified；preregistered 还必须给出 `registrationRef`。有效记录至少要有一项实际完成的有效性检查。
+
+记录写入目标科研项目的 `.pi/research/experiments.jsonl`，默认不进版本控制。写入前先校验 `trackRef`，因此未知路线不会留下半条记录；重试通过 run ID、显式 `idempotencyKey` 或相同内容去重。`runGitCommit` 表示真正产生运行结果的代码，`recordedAtGit` 只表示写备忘录时的本地 Git 状态，两者不会混用。
 
 ### `record_research_transition`
 
@@ -321,14 +323,14 @@ Pi 可直接完成有界的小型调研；当用户指定，或任务确实需�
 
 ### Research Compaction
 
-DeepSeek V4 Pro/Flash 使用 Max reasoning，但不把 1M 容量等同于等质量注意力。默认在约 272K 总上下文时标记软 compact，384K 作为硬触发线；阈值与 recent-tail schedule 由 `config.json` 的 `research.compaction` 管理。真正压缩只在当前 agent run（包括工具调用链）完整 settled 后开始，不会为压缩 abort 尚未完成的科研任务。默认 recent tail 按当前分支第 1/2/3 次 compact 取约 32K/40K/48K，之后固定在 48K。结构化研究状态和可检索历史负责承接更早证据。
+DeepSeek V4 Pro/Flash 使用 Max reasoning，但不把 1M 容量等同于等质量注意力。默认在约 272K 总上下文时标记软 compact，384K 作为硬触发线；阈值、recent-tail schedule 和摘要预算由 `config.json` 的 `research.compaction` 管理。真正压缩只在当前 agent run（包括工具调用链）完整 settled 后开始，不会为压缩 abort 尚未完成的科研任务。默认 recent tail 按当前分支第 1/2/3 次 compact 取约 24K/32K/40K，结构化状态目标不超过 8K、生成硬上限 16K，因此 compact 后通常约为 32K/40K/48K，而不是把 64K 当作摘要目标。结构化研究状态和可检索历史负责承接更早证据。
 
 `/compact` 或自动 compact 时，扩展同时生成：
 
 - 给模型继续工作的科研状态摘要；
 - 存在 compaction entry `details` 中的结构化 `researchState`、evidence ledger 和 provenance。
 
-强结论必须引用有效的 `record_experiment` entry；仅引用无效或 inconclusive 运行的 supported/weakened/rejected 状态会被降级。实验记录同时镜像为精简的 project-level evidence，同一 Git Project 的其他已知 worktree 可索引原 ledger。模型输出不能解析或校验时，自动回退到 Pi 原生 compact。使用 `/research-state` 可检查最近一次结构化状态。
+compact 不再把所有 `valid` 记录视为同等证据：`supported` 必须引用带观察前预测的有效 confirmatory 记录；`weakened/rejected` 必须引用有效 confirmatory 或 diagnostic 记录；exploratory 只能进入观察、决策与待确认假设，validity_failure 不能更新假设。路由、预测来源、registrationRef 和 run-producing Git 会随 project-level evidence 一起保留。结构化 compact 强制使用限长 state schema；若首次输出因 length 截断，会在相同 16K 硬上限内用 minimal-state 指令重试一次，而不是扩张到 64K。仍不能解析或校验时才回退到 Pi 原生 compact。使用 `/research-state` 可检查最近一次结构化状态。
 
 ### Codex collaboration
 

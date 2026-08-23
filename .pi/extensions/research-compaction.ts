@@ -14,6 +14,7 @@ import {
 	normalizeResearchState,
 	parseResearchCompactionResponse,
 	RESEARCH_HARD_COMPACT_TOKENS,
+	RESEARCH_SUMMARY_MAX_TOKENS,
 	renderResearchSummary,
 	RESEARCH_COMPACTION_KIND,
 	RESEARCH_COMPACTION_VERSION,
@@ -190,30 +191,50 @@ export default function (pi: ExtensionAPI) {
 		);
 
 		try {
-			const response = await ctx.modelRegistry.complete(
+			const requestState = async (requestPrompt: string) => await ctx.modelRegistry.complete(
 				ctx.model,
 				{
 					messages: [
 						{
 							role: "user",
-							content: [{ type: "text", text: prompt }],
+							content: [{ type: "text", text: requestPrompt }],
 							timestamp: Date.now(),
 						},
 					],
 					tools: [RESEARCH_STATE_TOOL],
 				},
 				{
-					maxTokens: Math.min(12_000, ctx.model.maxTokens || 12_000),
+					maxTokens: Math.min(RESEARCH_SUMMARY_MAX_TOKENS, ctx.model.maxTokens || RESEARCH_SUMMARY_MAX_TOKENS),
+					toolChoice: ctx.model.api === "openai-completions"
+						? { type: "function", function: { name: RESEARCH_STATE_TOOL.name } }
+						: undefined,
 					signal,
 					cacheRetention: "none",
 					sessionId: randomUUID(),
 				},
 			);
+			let response = await requestState(prompt);
 			let parsed;
 			try {
 				parsed = parseResearchCompactionResponse(response.content);
-			} catch (error) {
-				throw new Error(`${error instanceof Error ? error.message : String(error)} (stopReason=${response.stopReason})`);
+			} catch (firstError) {
+				if (response.stopReason !== "length") {
+					throw new Error(`${firstError instanceof Error ? firstError.message : String(firstError)} (stopReason=${response.stopReason})`);
+				}
+				if (ctx.hasUI) {
+					ctx.ui.notify(
+						`Research compaction output reached its ${RESEARCH_SUMMARY_MAX_TOKENS.toLocaleString()}-token cap; retrying once with a minimal-state instruction.`,
+						"warning",
+					);
+				}
+				response = await requestState(
+					`${prompt}\n\nRECOVERY: The previous structured response was truncated. Return a minimal state well below the target budget. Keep only decision-relevant hypotheses, observations, provenance, and the next discriminating experiment; do not elaborate.`,
+				);
+				try {
+					parsed = parseResearchCompactionResponse(response.content);
+				} catch (retryError) {
+					throw new Error(`${retryError instanceof Error ? retryError.message : String(retryError)} (stopReason=${response.stopReason}, after one bounded retry)`);
+				}
 			}
 			const normalized = normalizeResearchState(parsed.state, evidence);
 			const validationWarnings = [

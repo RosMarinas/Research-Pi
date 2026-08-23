@@ -7,7 +7,8 @@ export const RESEARCH_STATE_TOOL_NAME = "submit_research_state";
 
 const STRING_ARRAY_SCHEMA = Object.freeze({
 	type: "array",
-	items: { type: "string" },
+	maxItems: 16,
+	items: { type: "string", maxLength: 1_000 },
 });
 
 export const RESEARCH_STATE_TOOL = Object.freeze({
@@ -28,33 +29,35 @@ export const RESEARCH_STATE_TOOL = Object.freeze({
 			"criticalContext",
 		],
 		properties: {
-			researchQuestion: { type: "string" },
-			currentClaim: { type: "string" },
+			researchQuestion: { type: "string", maxLength: 2_000 },
+			currentClaim: { type: "string", maxLength: 2_000 },
 			hypotheses: {
 				type: "array",
+				maxItems: 24,
 				items: {
 					type: "object",
 					additionalProperties: false,
 					required: ["id", "statement", "status", "predictions", "rationale", "evidenceRefs"],
 					properties: {
-						id: { type: "string" },
-						statement: { type: "string" },
+						id: { type: "string", maxLength: 80 },
+						statement: { type: "string", maxLength: 1_200 },
 						status: { type: "string", enum: ["active", "supported", "weakened", "rejected", "inconclusive"] },
 						predictions: STRING_ARRAY_SCHEMA,
-						rationale: { type: "string" },
+						rationale: { type: "string", maxLength: 1_200 },
 						evidenceRefs: STRING_ARRAY_SCHEMA,
 					},
 				},
 			},
 			observations: {
 				type: "array",
+				maxItems: 24,
 				items: {
 					type: "object",
 					additionalProperties: false,
 					required: ["statement", "interpretation", "validity", "evidenceRefs"],
 					properties: {
-						statement: { type: "string" },
-						interpretation: { type: "string" },
+						statement: { type: "string", maxLength: 1_200 },
+						interpretation: { type: "string", maxLength: 1_200 },
 						validity: { type: "string", enum: ["valid", "invalid", "inconclusive", "unverified"] },
 						evidenceRefs: STRING_ARRAY_SCHEMA,
 					},
@@ -62,13 +65,14 @@ export const RESEARCH_STATE_TOOL = Object.freeze({
 			},
 			decisions: {
 				type: "array",
+				maxItems: 16,
 				items: {
 					type: "object",
 					additionalProperties: false,
 					required: ["decision", "rationale", "reversible", "evidenceRefs"],
 					properties: {
-						decision: { type: "string" },
-						rationale: { type: "string" },
+						decision: { type: "string", maxLength: 1_200 },
+						rationale: { type: "string", maxLength: 1_200 },
 						reversible: { type: "boolean" },
 						evidenceRefs: STRING_ARRAY_SCHEMA,
 					},
@@ -81,8 +85,8 @@ export const RESEARCH_STATE_TOOL = Object.freeze({
 				additionalProperties: false,
 				required: ["question", "intervention", "distinguishingOutcomes", "validityChecks"],
 				properties: {
-					question: { type: "string" },
-					intervention: { type: "string" },
+					question: { type: "string", maxLength: 1_200 },
+					intervention: { type: "string", maxLength: 2_000 },
 					distinguishingOutcomes: STRING_ARRAY_SCHEMA,
 					validityChecks: STRING_ARRAY_SCHEMA,
 				},
@@ -103,12 +107,14 @@ function configuredTailSchedule() {
 		.split(",")
 		.map((value) => Number(value.trim()))
 		.filter((value) => Number.isInteger(value) && value > 0);
-	return values.length ? values : [32 * 1024, 40 * 1024, 48 * 1024];
+	return values.length ? values : [24 * 1024, 32 * 1024, 40 * 1024];
 }
 
 export const RESEARCH_SOFT_COMPACT_TOKENS = configuredPositiveInteger("RESEARCH_PI_COMPACT_SOFT_TOKENS", 272 * 1024);
 export const RESEARCH_HARD_COMPACT_TOKENS = configuredPositiveInteger("RESEARCH_PI_COMPACT_HARD_TOKENS", 384 * 1024);
 export const RESEARCH_RECENT_TAIL_SCHEDULE = Object.freeze(configuredTailSchedule());
+export const RESEARCH_SUMMARY_TARGET_TOKENS = configuredPositiveInteger("RESEARCH_PI_COMPACT_SUMMARY_TARGET_TOKENS", 8 * 1024);
+export const RESEARCH_SUMMARY_MAX_TOKENS = configuredPositiveInteger("RESEARCH_PI_COMPACT_SUMMARY_MAX_TOKENS", 16 * 1024);
 
 const MAX_HYPOTHESES = 24;
 const MAX_OBSERVATIONS = 32;
@@ -172,7 +178,35 @@ function refFor(sessionId, entryId) {
 	return `S:${sessionId}/E:${entryId}`;
 }
 
+function normalizePredictionStatus(data) {
+	return ["preregistered", "recorded_before_observation", "not_recorded", "not_applicable", "unspecified"].includes(data?.predictionStatus)
+		? data.predictionStatus
+		: data?.prediction
+			? "unspecified"
+			: "not_recorded";
+}
+
+function normalizeEvidenceMode(data, predictionStatus) {
+	if (["confirmatory", "exploratory", "diagnostic", "validity_failure"].includes(data?.evidenceMode)) {
+		return data.evidenceMode;
+	}
+	if (data?.validityJudgment === "invalid") return "validity_failure";
+	if (data?.prediction && ["preregistered", "recorded_before_observation"].includes(predictionStatus)) {
+		return "confirmatory";
+	}
+	return "exploratory";
+}
+
+function normalizeGitIdentity(data) {
+	if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
+	const root = text(data.root, 4_000) || undefined;
+	const commit = text(data.commit, 160) || undefined;
+	const dirty = typeof data.dirty === "boolean" ? data.dirty : undefined;
+	return root || commit || dirty !== undefined ? { root, commit, dirty } : undefined;
+}
+
 function normalizeExperiment(data, ref, entryId) {
+	const predictionStatus = normalizePredictionStatus(data);
 	return {
 		ref,
 		entryId,
@@ -182,6 +216,9 @@ function normalizeExperiment(data, ref, entryId) {
 		hypothesis: text(data?.hypothesis),
 		intervention: text(data?.intervention),
 		prediction: text(data?.prediction),
+		predictionStatus,
+		evidenceMode: normalizeEvidenceMode(data, predictionStatus),
+		registrationRef: text(data?.registrationRef, 1_000) || undefined,
 		validityChecks: list(data?.validityChecks, 20, 700),
 		observation: text(data?.observation, 4_000),
 		validityJudgment: ["valid", "invalid", "inconclusive"].includes(data?.validityJudgment)
@@ -190,7 +227,11 @@ function normalizeExperiment(data, ref, entryId) {
 		conclusion: text(data?.conclusion, 4_000),
 		nextStep: text(data?.nextStep, 2_000),
 		runId: text(data?.runId, 300) || undefined,
+		runGitCommit: text(data?.runGitCommit, 160) || undefined,
+		recordedAtGit: normalizeGitIdentity(data?.recordedAtGit ?? data?.git),
 		artifacts: list(data?.artifacts, 20, 1_000),
+		trackRef: text(data?.trackRef, 300) || undefined,
+		trackLabel: text(data?.trackLabel, 600) || undefined,
 		contentHash: hash(JSON.stringify(data ?? {})),
 	};
 }
@@ -282,21 +323,36 @@ export function mergeProjectRuntimeEvidence(evidence, runtimeSnapshot) {
 		evidence.previousProjectRevision = runtimeSnapshot.projectState.revision ?? 0;
 		evidence.previousProjectStateEntryId = runtimeSnapshot.projectState.source?.entryId ?? evidence.previousProjectStateEntryId;
 	}
-	const seen = new Set(evidence.experiments.map((item) => item.id));
+	const seen = new Map(evidence.experiments.map((item) => [item.id, item]));
 	for (const record of runtimeSnapshot?.evidence ?? []) {
-		if (!record?.id || seen.has(record.id)) continue;
+		if (!record?.id) continue;
+		const existing = seen.get(record.id);
+		if (existing) {
+			existing.trackRef = text(record.trackRef, 300) || existing.trackRef;
+			existing.trackLabel = text(record.trackLabel, 600) || existing.trackLabel;
+			if (record.evidenceMode) existing.evidenceMode = normalizeEvidenceMode(record, existing.predictionStatus);
+			if (record.predictionStatus) existing.predictionStatus = normalizePredictionStatus(record);
+			existing.registrationRef = text(record.registrationRef, 1_000) || existing.registrationRef;
+			existing.runGitCommit = text(record.runGitCommit, 160) || existing.runGitCommit;
+			existing.recordedAtGit = normalizeGitIdentity(record.recordedAtGit) || existing.recordedAtGit;
+			continue;
+		}
 		const sessionId = text(record.source?.sessionId, 200) || "project-runtime";
 		const ref = refFor(sessionId, record.id);
+		const predictionStatus = normalizePredictionStatus(record);
 		evidence.experiments.push({
 			ref,
 			entryId: record.id,
 			id: record.id,
 			timestamp: text(record.timestamp, 80),
 			question: text(record.question),
-			hypothesis: "",
-			intervention: "",
-			prediction: "",
-			validityChecks: [],
+			hypothesis: text(record.hypothesis),
+			intervention: text(record.intervention),
+			prediction: text(record.prediction),
+			predictionStatus,
+			evidenceMode: normalizeEvidenceMode(record, predictionStatus),
+			registrationRef: text(record.registrationRef, 1_000) || undefined,
+			validityChecks: list(record.validityChecks, 20, 700),
 			observation: "",
 			validityJudgment: ["valid", "invalid", "inconclusive"].includes(record.validityJudgment)
 				? record.validityJudgment
@@ -304,6 +360,8 @@ export function mergeProjectRuntimeEvidence(evidence, runtimeSnapshot) {
 			conclusion: text(record.conclusion, 4_000),
 			nextStep: text(record.nextStep, 2_000),
 			runId: text(record.runId, 300) || undefined,
+			runGitCommit: text(record.runGitCommit, 160) || undefined,
+			recordedAtGit: normalizeGitIdentity(record.recordedAtGit),
 			artifacts: list(record.artifacts, 12, 1_000),
 			trackRef: text(record.trackRef, 300) || "project:initial",
 			trackLabel: text(record.trackLabel, 600) || "initial project track",
@@ -311,7 +369,7 @@ export function mergeProjectRuntimeEvidence(evidence, runtimeSnapshot) {
 			projectRuntimeSource: true,
 		});
 		evidence.validRefs.add(ref);
-		seen.add(record.id);
+		seen.set(record.id, evidence.experiments.at(-1));
 	}
 	const transition = runtimeSnapshot?.activeTransition;
 	evidence.activeTransition = transition ?? null;
@@ -615,7 +673,16 @@ export function applyResearchStatePatch(current, patch) {
 	return state;
 }
 
-function mergePreviousHypotheses(current, previous, warnings, validRefs, validExperimentRefs) {
+function experimentRefsForStrongStatus(status, evidenceSets) {
+	return status === "supported" ? evidenceSets.confirmatory : evidenceSets.challenge;
+}
+
+function hasStrongExperimentEvidence(status, evidenceRefs, evidenceSets) {
+	const allowedRefs = experimentRefsForStrongStatus(status, evidenceSets);
+	return evidenceRefs.some((ref) => allowedRefs.has(ref));
+}
+
+function mergePreviousHypotheses(current, previous, warnings, validRefs, evidenceSets) {
 	if (!Array.isArray(previous?.hypotheses)) return current;
 	const ids = new Set(current.map((item) => item.id));
 	for (const old of previous.hypotheses) {
@@ -627,8 +694,8 @@ function mergePreviousHypotheses(current, previous, warnings, validRefs, validEx
 		let status = ["active", "supported", "weakened", "rejected", "inconclusive"].includes(old?.status)
 			? old.status
 			: "inconclusive";
-		if (["supported", "weakened", "rejected"].includes(status) && !evidenceRefs.some((ref) => validExperimentRefs.has(ref))) {
-			warnings.push(`Downgraded preserved hypothesis ${id} from ${status}: its valid experiment provenance is no longer available.`);
+		if (["supported", "weakened", "rejected"].includes(status) && !hasStrongExperimentEvidence(status, evidenceRefs, evidenceSets)) {
+			warnings.push(`Downgraded preserved hypothesis ${id} from ${status}: its evidence mode/provenance is not sufficient for that strong update.`);
 			status = "inconclusive";
 		}
 		current.push({
@@ -651,6 +718,26 @@ export function normalizeResearchState(candidate, evidence) {
 	const validExperimentRefs = new Set(
 		evidence.experiments.filter((item) => item.validityJudgment === "valid").map((item) => item.ref),
 	);
+	const confirmatoryExperimentRefs = new Set(
+		evidence.experiments
+			.filter((item) =>
+				item.validityJudgment === "valid"
+				&& item.evidenceMode === "confirmatory"
+				&& Boolean(item.prediction)
+				&& ["preregistered", "recorded_before_observation"].includes(item.predictionStatus)
+				&& (item.predictionStatus !== "preregistered" || Boolean(item.registrationRef)),
+			)
+			.map((item) => item.ref),
+	);
+	const challengeExperimentRefs = new Set(
+		evidence.experiments
+			.filter((item) =>
+				item.validityJudgment === "valid"
+				&& ["confirmatory", "diagnostic"].includes(item.evidenceMode),
+			)
+			.map((item) => item.ref),
+	);
+	const evidenceSets = { confirmatory: confirmatoryExperimentRefs, challenge: challengeExperimentRefs };
 	const allowedStatuses = new Set(["active", "supported", "weakened", "rejected", "inconclusive"]);
 	const seenIds = new Set();
 	const hypotheses = [];
@@ -663,8 +750,11 @@ export function normalizeResearchState(candidate, evidence) {
 		seenIds.add(id);
 		const evidenceRefs = refs(item.evidenceRefs, evidence.validRefs);
 		let status = allowedStatuses.has(item.status) ? item.status : "inconclusive";
-		if (["supported", "weakened", "rejected"].includes(status) && !evidenceRefs.some((ref) => validExperimentRefs.has(ref))) {
-			warnings.push(`Downgraded ${id} from ${status}: no cited valid experiment record supports a strong update.`);
+		if (["supported", "weakened", "rejected"].includes(status) && !hasStrongExperimentEvidence(status, evidenceRefs, evidenceSets)) {
+			const requirement = status === "supported"
+				? "no cited valid confirmatory record has an observation-before prediction"
+				: "no cited valid confirmatory or diagnostic record supports that challenge";
+			warnings.push(`Downgraded ${id} from ${status}: ${requirement}.`);
 			status = "inconclusive";
 		}
 		hypotheses.push({
@@ -679,7 +769,7 @@ export function normalizeResearchState(candidate, evidence) {
 	if (evidence.preservePreviousHypotheses === false) {
 		warnings.push("Did not carry previous hypotheses into the active state because a superseding research transition was recorded.");
 	} else {
-		mergePreviousHypotheses(hypotheses, evidence.previousState, warnings, evidence.validRefs, validExperimentRefs);
+		mergePreviousHypotheses(hypotheses, evidence.previousState, warnings, evidence.validRefs, evidenceSets);
 	}
 
 	const observations = [];
@@ -747,16 +837,20 @@ export function buildResearchCompactionPrompt({
 
 This is not a software-development progress summary. Preserve competing hypotheses, distinguishing predictions, observations versus interpretations, negative-result validity, unresolved confounders, reversibility, and the next highest-information experiment. Exploratory code is disposable unless it affects interpretation or continuation.
 
+The structured state is an index, not a replacement transcript. Target at most ${RESEARCH_SUMMARY_TARGET_TOKENS.toLocaleString()} output tokens. Prefer concise evidence references and omit low-value operational detail; do not consume the full output allowance merely because it is available.
+
 Rules:
 1. Never turn an invalid or inconclusive experiment into evidence against a hypothesis.
-2. A strong hypothesis status (supported, weakened, rejected) must cite at least one recorded experiment whose validityJudgment is valid.
-3. Use only provenance references present below. Do not invent run IDs, paths, results, or references.
-4. Preserve previous hypothesis IDs. If a previous hypothesis changed, include it with the new status and evidence; do not silently omit it.
-5. Separate what was observed from how it was interpreted.
-6. Match the dominant language of the conversation.
-7. A recorded project transition with archived/superseded disposition changes the active research route. Keep the old route as retrievable history, but do not present its claim or next experiment as current. A parallel disposition does not retire it.
-8. Experiment trackRef/trackLabel identify route provenance. Evidence from a retired route may remain scientifically relevant, but do not silently use it as evidence that the current route's intervention occurred.
-9. An independent clean-Session summary is a candidate synthesis, not Project authority or experimental evidence. Retain useful hypotheses, but require normal provenance before making strong updates.
+2. Mark a hypothesis supported only from a valid confirmatory experiment with a real observation-before prediction. A preregistered prediction must also have registrationRef.
+3. Mark a hypothesis weakened or rejected only from a valid confirmatory or diagnostic experiment. Exploratory observations may motivate hypotheses, decisions, and confirmation runs, but cannot alone create a strong hypothesis status. validity_failure records cannot update a hypothesis.
+4. Use only provenance references present below. Do not invent run IDs, paths, results, predictions, registration references, or evidence modes.
+5. Preserve previous hypothesis IDs. If a previous hypothesis changed, include it with the new status and evidence; do not silently omit it.
+6. Separate what was observed from how it was interpreted.
+7. Match the dominant language of the conversation.
+8. A recorded project transition with archived/superseded disposition changes the active research route. Keep the old route as retrievable history, but do not present its claim or next experiment as current. A parallel disposition does not retire it.
+9. Experiment trackRef/trackLabel identify route provenance. Evidence from a retired route may remain scientifically relevant, but do not silently use it as evidence that the current route's intervention occurred.
+10. runGitCommit identifies code that produced a run; recordedAtGit only identifies the workspace when the memo was written. Never substitute one for the other.
+11. An independent clean-Session summary is a candidate synthesis, not Project authority or experimental evidence. Retain useful hypotheses, but require normal provenance before making strong updates.
 
 Required schema:
 {
@@ -879,7 +973,7 @@ export function renderResearchSummary(state, evidence, fileOps = {}) {
 	if (!recentExperiments.length) lines.push("- 当前分支没有 record_experiment 记录。");
 	for (const item of recentExperiments) {
 		lines.push(
-			`- ${item.ref} [${item.validityJudgment}] track=${item.trackRef ?? "project:initial"}${item.runId ? ` run=${item.runId}` : ""}: ${item.conclusion || item.observation || item.hypothesis}`,
+			`- ${item.ref} [${item.validityJudgment}; ${item.evidenceMode ?? "exploratory"}; prediction=${item.predictionStatus ?? "not_recorded"}] track=${item.trackRef ?? "unknown"}${item.runId ? ` run=${item.runId}` : ""}${item.runGitCommit ? ` runGit=${item.runGitCommit}` : ""}: ${item.conclusion || item.observation || item.hypothesis}`,
 		);
 	}
 	for (const item of evidence.checkpoints.slice(-12)) {

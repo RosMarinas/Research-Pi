@@ -38,7 +38,22 @@
     "research": {
       "type": "object",
       "properties": {
-        "compaction": { "type": "object" },
+        "compaction": {
+          "type": "object",
+          "required": ["softTokens", "hardTokens", "recentTailTokens", "summaryTargetTokens", "summaryMaxTokens"],
+          "properties": {
+            "softTokens": { "type": "integer", "minimum": 1 },
+            "hardTokens": { "type": "integer", "minimum": 1 },
+            "recentTailTokens": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "integer", "minimum": 1 }
+            },
+            "summaryTargetTokens": { "type": "integer", "minimum": 1 },
+            "summaryMaxTokens": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false
+        },
         "search": {
           "type": "object",
           "properties": {

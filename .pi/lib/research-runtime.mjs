@@ -463,6 +463,18 @@ function runtimeTrackLabel(snapshot, trackRef) {
 	return transition?.to ?? null;
 }
 
+export function resolveRuntimeResearchTrack(snapshot, requestedTrackRef) {
+	const current = runtimeResearchTrack(snapshot);
+	const trackRef = String(requestedTrackRef ?? "").trim() || current.ref;
+	const trackLabel = trackRef === current.ref ? current.label : runtimeTrackLabel(snapshot, trackRef);
+	if (!trackLabel) throw new Error(`Unknown research track provenance: ${trackRef}`);
+	return {
+		trackRef,
+		trackLabel,
+		status: runtimeTrackStatus(snapshot, trackRef),
+	};
+}
+
 export async function ensureRuntimeActor(runtime, actor) {
 	validateActorId(actor.id);
 	const snapshot = await readRuntimeSnapshot(runtime);
@@ -632,20 +644,38 @@ function boundedRuntimeText(value, max) {
 export async function recordRuntimeEvidence(runtime, record) {
 	if (!record?.id) throw new Error("Project evidence id is required");
 	const snapshot = await readRuntimeSnapshot(runtime);
-	const track = runtimeResearchTrack(snapshot);
-	const trackRef = record.trackRef ?? track.ref;
-	const trackLabel = record.trackLabel ?? (trackRef === track.ref ? track.label : runtimeTrackLabel(snapshot, trackRef));
-	if (!trackLabel) throw new Error(`Unknown research track provenance: ${trackRef}`);
+	const resolvedTrack = resolveRuntimeResearchTrack(snapshot, record.trackRef);
+	const trackRef = resolvedTrack.trackRef;
+	const trackLabel = record.trackLabel ?? resolvedTrack.trackLabel;
 	const data = {
 		id: String(record.id),
 		timestamp: record.timestamp ?? now(),
 		question: boundedRuntimeText(record.question, 1200),
+		hypothesis: boundedRuntimeText(record.hypothesis, 1200),
+		intervention: boundedRuntimeText(record.intervention, 1200),
+		prediction: boundedRuntimeText(record.prediction, 1200),
+		predictionStatus: ["preregistered", "recorded_before_observation", "not_recorded", "not_applicable", "unspecified"].includes(record.predictionStatus)
+			? record.predictionStatus
+			: record.prediction ? "unspecified" : "not_recorded",
+		evidenceMode: ["confirmatory", "exploratory", "diagnostic", "validity_failure"].includes(record.evidenceMode)
+			? record.evidenceMode
+			: "exploratory",
+		registrationRef: boundedRuntimeText(record.registrationRef, 1000) || null,
+		validityChecks: Array.isArray(record.validityChecks)
+			? record.validityChecks.map((item) => boundedRuntimeText(item, 700)).filter(Boolean).slice(0, 20)
+			: [],
 		validityJudgment: ["valid", "invalid", "inconclusive"].includes(record.validityJudgment)
 			? record.validityJudgment
 			: "inconclusive",
 		conclusion: boundedRuntimeText(record.conclusion, 2000),
 		nextStep: boundedRuntimeText(record.nextStep, 1200),
 		runId: boundedRuntimeText(record.runId, 300) || null,
+		runGitCommit: boundedRuntimeText(record.runGitCommit, 160) || null,
+		recordedAtGit: record.recordedAtGit ? {
+			root: boundedRuntimeText(record.recordedAtGit.root, 4000) || null,
+			commit: boundedRuntimeText(record.recordedAtGit.commit, 160) || null,
+			dirty: record.recordedAtGit.dirty ?? null,
+		} : null,
 		artifacts: Array.isArray(record.artifacts) ? record.artifacts.map((item) => boundedRuntimeText(item, 1000)).filter(Boolean).slice(0, 12) : [],
 		source: {
 			workspaceRoot: boundedRuntimeText(record.source?.workspaceRoot, 4000) || null,

@@ -25,6 +25,9 @@ test("one Research Pi config resolves leader, Codex, compact, search, and UI def
 	assert.equal(config.profiles[config.activeProfile].model, "deepseek-v4-pro");
 	assert.equal(config.codex.executor.model, "gpt-5.6-sol");
 	assert.equal(config.research.compaction.hardTokens, 384 * 1024);
+	assert.deepEqual(config.research.compaction.recentTailTokens, [24 * 1024, 32 * 1024, 40 * 1024]);
+	assert.equal(config.research.compaction.summaryTargetTokens, 8 * 1024);
+	assert.equal(config.research.compaction.summaryMaxTokens, 16 * 1024);
 	assert.equal(config.research.search.model, "deepseek-v4-flash");
 	assert.equal(config.research.search.enabled, "auto");
 	assert.equal(config.profiles["opencode-go-flash"].provider, "opencode-go");
@@ -52,6 +55,10 @@ test("partial user config merges over defaults and rejects dangerous ambiguity",
 	assert.throws(() => resolveResearchPiConfig({ activeProfile: "missing" }), /does not exist/);
 	assert.throws(() => resolveResearchPiConfig({ typoSetting: true }), /Unknown Research Pi config key/);
 	assert.throws(() => resolveResearchPiConfig({ research: { compaction: { softTokens: 500_000 } } }), /below hardTokens/);
+	assert.throws(
+		() => resolveResearchPiConfig({ research: { compaction: { summaryTargetTokens: 20_000, summaryMaxTokens: 10_000 } } }),
+		/below summaryMaxTokens/,
+	);
 	assert.throws(() => resolveResearchPiConfig({ research: { search: { enabled: "sometimes" } } }), /auto, on, or off/);
 	assert.throws(() => resolveResearchPiConfig({ pi: { settings: { api_key: "do-not-store-here" } } }), /credential-like/);
 });
@@ -126,6 +133,8 @@ test("config exports one deterministic environment for runtime consumers", () =>
 	assert.equal(environment.RESEARCH_PI_ACTIVE_PROFILE, "deepseek-flash");
 	assert.equal(environment.RESEARCH_PI_CODEX_ADVISOR_MODEL, "gpt-5.6-sol");
 	assert.equal(environment.RESEARCH_PI_COMPACT_HARD_TOKENS, String(384 * 1024));
+	assert.equal(environment.RESEARCH_PI_COMPACT_SUMMARY_TARGET_TOKENS, String(8 * 1024));
+	assert.equal(environment.RESEARCH_PI_COMPACT_SUMMARY_MAX_TOKENS, String(16 * 1024));
 	assert.equal(environment.RESEARCH_PI_SEARCH_MODEL, "deepseek-v4-flash");
 	assert.equal(environment.RESEARCH_PI_SEARCH_ENABLED, "auto");
 	assert.equal(environment.RESEARCH_PI_UI_DENSITY, "balanced");
@@ -158,7 +167,7 @@ test("Codex, compact, and search modules consume the configured environment", ()
 		const compact = await import(${JSON.stringify(compact)});
 		const search = await import(${JSON.stringify(search)});
 		const parsed = search.parseDeepSeekWebSearchResponse({content:[{type:"web_search_tool_result",content:[1,2,3].map(i=>({type:"web_search_result",url:"https://example.com/"+i,title:"S"+i}))}]});
-		console.log(JSON.stringify({advisor:codex.defaultCodexModel("advisor"),executor:codex.defaultCodexModel("executor"),effort:codex.defaultCodexReasoningEffort("advisor"),soft:compact.RESEARCH_SOFT_COMPACT_TOKENS,hard:compact.RESEARCH_HARD_COMPACT_TOKENS,tail:compact.RESEARCH_RECENT_TAIL_SCHEDULE,sources:parsed.sources.length}));
+		console.log(JSON.stringify({advisor:codex.defaultCodexModel("advisor"),executor:codex.defaultCodexModel("executor"),effort:codex.defaultCodexReasoningEffort("advisor"),soft:compact.RESEARCH_SOFT_COMPACT_TOKENS,hard:compact.RESEARCH_HARD_COMPACT_TOKENS,tail:compact.RESEARCH_RECENT_TAIL_SCHEDULE,summaryTarget:compact.RESEARCH_SUMMARY_TARGET_TOKENS,summaryMax:compact.RESEARCH_SUMMARY_MAX_TOKENS,sources:parsed.sources.length}));
 	`;
 	const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
 		encoding: "utf8",
@@ -170,6 +179,8 @@ test("Codex, compact, and search modules consume the configured environment", ()
 			RESEARCH_PI_COMPACT_SOFT_TOKENS: "111",
 			RESEARCH_PI_COMPACT_HARD_TOKENS: "222",
 			RESEARCH_PI_COMPACT_RECENT_TAIL_TOKENS: "7,8",
+			RESEARCH_PI_COMPACT_SUMMARY_TARGET_TOKENS: "9",
+			RESEARCH_PI_COMPACT_SUMMARY_MAX_TOKENS: "18",
 			RESEARCH_PI_SEARCH_MAX_SOURCES: "2",
 		},
 	});
@@ -181,6 +192,8 @@ test("Codex, compact, and search modules consume the configured environment", ()
 		soft: 111,
 		hard: 222,
 		tail: [7, 8],
+		summaryTarget: 9,
+		summaryMax: 18,
 		sources: 2,
 	});
 });

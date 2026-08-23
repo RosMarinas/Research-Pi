@@ -147,6 +147,11 @@ export function validateResearchPiConfig(config) {
 		throw new Error("research.compaction.recentTailTokens must be a non-empty array");
 	}
 	compact.recentTailTokens.forEach((value, index) => positiveInteger(value, `research.compaction.recentTailTokens[${index}]`));
+	positiveInteger(compact.summaryTargetTokens, "research.compaction.summaryTargetTokens");
+	positiveInteger(compact.summaryMaxTokens, "research.compaction.summaryMaxTokens");
+	if (compact.summaryTargetTokens >= compact.summaryMaxTokens) {
+		throw new Error("research.compaction.summaryTargetTokens must be below summaryMaxTokens");
+	}
 	const search = config.research?.search;
 	if (!plainObject(search) || !SAFE_ID.test(String(search.model ?? ""))) throw new Error("research.search.model is invalid");
 	if (!SEARCH_MODES.has(search.enabled)) throw new Error("research.search.enabled must be auto, on, or off");
@@ -304,6 +309,8 @@ export function researchPiEnvironment(config) {
 		RESEARCH_PI_COMPACT_SOFT_TOKENS: String(compact.softTokens),
 		RESEARCH_PI_COMPACT_HARD_TOKENS: String(compact.hardTokens),
 		RESEARCH_PI_COMPACT_RECENT_TAIL_TOKENS: compact.recentTailTokens.join(","),
+		RESEARCH_PI_COMPACT_SUMMARY_TARGET_TOKENS: String(compact.summaryTargetTokens),
+		RESEARCH_PI_COMPACT_SUMMARY_MAX_TOKENS: String(compact.summaryMaxTokens),
 		RESEARCH_PI_SEARCH_MODEL: search.model,
 		RESEARCH_PI_SEARCH_ENABLED: search.enabled,
 		RESEARCH_PI_SEARCH_THINKING_BUDGET_TOKENS: String(search.thinkingBudgetTokens),
@@ -326,7 +333,7 @@ export function researchPiConfigSummary(config, path) {
 		`Leader: ${config.activeProfile} · ${profile.provider}/${profile.model} · thinking ${profile.thinking}`,
 		`Codex advisor: ${config.codex.advisor.model}/${config.codex.advisor.reasoningEffort}`,
 		`Codex executor: ${config.codex.executor.model}/${config.codex.executor.reasoningEffort}`,
-		`Research compact: ${config.research.compaction.softTokens}/${config.research.compaction.hardTokens} tokens`,
+		`Research compact: ${config.research.compaction.softTokens}/${config.research.compaction.hardTokens} tokens · summary target/max ${config.research.compaction.summaryTargetTokens}/${config.research.compaction.summaryMaxTokens}`,
 		`Search: ${config.research.search.enabled} · deepseek/${config.research.search.model} · max ${config.research.search.maxSources} sources`,
 		`UI: theme ${config.pi.settings.theme ?? "research-pi"} · ${config.ui.density} · runtime strip ${config.ui.runtimeStrip}`,
 		`Profiles: ${Object.keys(config.profiles).join(", ")}`,
