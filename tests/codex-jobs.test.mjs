@@ -88,6 +88,15 @@ test("Codex delegation exposes bounded running and terminal footer states", () =
 	});
 	assert.equal(completed, "✓ Codex advisor abcdef12 · completed · phase: completed");
 
+	const partial = formatCodexStatus({
+		id: "codex-2026-08-11-abcddcba",
+		mode: "executor",
+		status: "completed",
+		progress: "completed",
+		result: { outcome: "partial", goal_satisfied: false },
+	});
+	assert.equal(partial, "! Codex executor abcddcba · completed/partial · phase: completed");
+
 	const parallel = formatCodexStatus({
 		id: "codex-2026-08-11-feedbeef",
 		mode: "executor",
@@ -110,8 +119,9 @@ test("Codex delegation exposes bounded running and terminal footer states", () =
 
 test("Codex structured results render as readable sections instead of raw JSON", () => {
 	const result = {
-		status: "completed",
+		outcome: "succeeded",
 		goal_satisfied: true,
+		completion_basis: "All delegated acceptance criteria passed.",
 		summary: "Observation first.\n\n1. Preserve the numbered argument.\n2. Keep the second point.",
 		evidence: ["Metric A passed", "Metric B remained uncertain"],
 		actions_taken: ["Inspected the project"],
@@ -119,9 +129,12 @@ test("Codex structured results render as readable sections instead of raw JSON",
 		checks: [{ command: "uv run pytest", result: "12 passed" }],
 		external_effects: [],
 		uncertainties: ["One surface remains untested"],
+		remaining_work: [],
 		recommended_next_step: "Run the discriminating probe.",
 	};
 	const markdown = codexResultMarkdown(result);
+	assert.match(markdown, /^## Delegation outcome/m);
+	assert.match(markdown, /All delegated acceptance criteria passed/);
 	assert.match(markdown, /^## Summary/m);
 	assert.match(markdown, /1\. Preserve the numbered argument\./);
 	assert.match(markdown, /^## Evidence/m);
@@ -212,8 +225,11 @@ let activeTurn = null;
 let completionTimer;
 let deltaNotificationsOptedOut = false;
 let hostToolPresent = false;
+let submissionToolPresent = false;
+let turnOutputSchemaPresent = false;
 let consultationField = "missing-consultation-field";
 let isAdvisorSchema = false;
+let pendingFinalPrompt = "";
 process.stderr.write("fake app-server warning\\n");
 
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
@@ -221,8 +237,8 @@ const complete = (prompt, leaderResponse = "") => {
   if (sandbox === "${CODEX_EXECUTOR_PROFILE}") {
     writeFileSync(join(process.cwd(), "codex-executed.txt"), "executor ran\\n", "utf8");
   }
-  const evidence = [model, sandbox, prompt.includes("Research Pi") ? "role-present" : "role-missing", deltaNotificationsOptedOut ? "delta-opt-out" : "delta-not-opted-out", hostToolPresent ? "host-tool-present" : "host-tool-missing", consultationField, process.env.SSH_AUTH_SOCK ? "child-ssh-agent-present" : "child-ssh-agent-absent", leaderResponse].filter(Boolean);
-  const result = isAdvisorSchema ? {
+  const evidence = [model, sandbox, prompt.includes("Research Pi") ? "role-present" : "role-missing", deltaNotificationsOptedOut ? "delta-opt-out" : "delta-not-opted-out", hostToolPresent ? "host-tool-present" : "host-tool-missing", submissionToolPresent ? "submission-tool-present" : "submission-tool-missing", turnOutputSchemaPresent ? "turn-schema-present" : "turn-schema-absent", consultationField, process.env.SSH_AUTH_SOCK ? "child-ssh-agent-present" : "child-ssh-agent-absent", leaderResponse].filter(Boolean);
+  let result = isAdvisorSchema ? {
     status: "working_synthesis",
     shared_understanding: "The question is still being clarified.",
     points_of_agreement: ["Keep the research objective with Research Pi"],
@@ -233,8 +249,9 @@ const complete = (prompt, leaderResponse = "") => {
     working_synthesis: isResume ? "resumed consultation" : "finished collaborative consultation",
     suggested_next_exchange: "Continue the same mission after answering the open question"
   } : {
-    status: "completed",
+    outcome: "succeeded",
     goal_satisfied: true,
+    completion_basis: "The delegated fake objective and check completed.",
     summary: isResume ? "resumed" : "finished",
     evidence,
     actions_taken: ["fake action"],
@@ -242,10 +259,25 @@ const complete = (prompt, leaderResponse = "") => {
     checks: [{ command: "fake-check", result: "passed" }],
     external_effects: [],
     uncertainties: [],
+    remaining_work: [],
     recommended_next_step: "inspect result"
   };
-  send({ method: "item/completed", params: { threadId: "thread-fake-123", turnId: activeTurn, item: { id: "message-1", type: "agentMessage", phase: "final_answer", text: JSON.stringify(result) } } });
-  send({ method: "turn/completed", params: { threadId: "thread-fake-123", turn: { id: activeTurn, status: "completed", items: [], error: null } } });
+  if (!isAdvisorSchema && prompt.includes("legacy completed false")) {
+    result = {
+      status: "completed",
+      goal_satisfied: false,
+      summary: "legacy checkpoint",
+      evidence: [],
+      actions_taken: [],
+      changed_files: [],
+      checks: [],
+      external_effects: [],
+      uncertainties: [],
+      recommended_next_step: "finish the delegated implementation"
+    };
+  }
+  pendingFinalPrompt = prompt;
+  send({ id: "server-submit-result-1", method: "item/tool/call", params: { threadId: "thread-fake-123", turnId: activeTurn, callId: "submit-call-1", tool: "submit_research_pi_result", arguments: result } });
 };
 
 createInterface({ input: process.stdin }).on("line", (line) => {
@@ -257,6 +289,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     model = message.params.model;
     hostToolPresent = message.params.dynamicTools?.some((tool) => tool.name === "research_pi_host") ?? false;
     const consultation = message.params.dynamicTools?.find((tool) => tool.name === "consult_research_pi");
+    const submission = message.params.dynamicTools?.find((tool) => tool.name === "submit_research_pi_result");
+    submissionToolPresent = Boolean(submission);
+    isAdvisorSchema = submission?.inputSchema?.required?.includes("shared_understanding") ?? false;
     consultationField = consultation?.inputSchema?.required?.includes("why_it_matters") ? "why-it-matters" : consultation?.inputSchema?.required?.includes("why_blocking") ? "why-blocking" : "missing-consultation-field";
     send({ id: message.id, result: { thread: { id: "thread-fake-123", turns: [] } } });
     send({ method: "thread/started", params: { thread: { id: "thread-fake-123", turns: [] } } });
@@ -264,13 +299,16 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     model = message.params.model;
     hostToolPresent = message.params.dynamicTools?.some((tool) => tool.name === "research_pi_host") ?? false;
     const consultation = message.params.dynamicTools?.find((tool) => tool.name === "consult_research_pi");
+    const submission = message.params.dynamicTools?.find((tool) => tool.name === "submit_research_pi_result");
+    submissionToolPresent = Boolean(submission);
+    isAdvisorSchema = submission?.inputSchema?.required?.includes("shared_understanding") ?? false;
     consultationField = consultation?.inputSchema?.required?.includes("why_it_matters") ? "why-it-matters" : consultation?.inputSchema?.required?.includes("why_blocking") ? "why-blocking" : "missing-consultation-field";
     isResume = true;
     send({ id: message.id, result: { thread: { id: message.params.threadId, turns: [] } } });
     send({ method: "thread/started", params: { thread: { id: message.params.threadId, turns: [] } } });
   } else if (message.method === "turn/start") {
     activeTurn = "turn-fake-456";
-    isAdvisorSchema = message.params.outputSchema?.required?.includes("shared_understanding") ?? false;
+    turnOutputSchemaPresent = Boolean(message.params.outputSchema);
     const prompt = message.params.input[0].text;
     send({ id: message.id, result: { turn: { id: activeTurn, status: "inProgress", items: [], error: null } } });
     send({ method: "turn/started", params: { threadId: "thread-fake-123", turn: { id: activeTurn, status: "inProgress", items: [], error: null } } });
@@ -321,6 +359,12 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   } else if (message.id === "server-host-command-1") {
     const answer = message.result?.contentItems?.[0]?.text ?? message.error?.message ?? "missing host response";
     complete("Research Pi", answer);
+  } else if (message.id === "server-submit-result-1") {
+    send({ method: "item/completed", params: { threadId: "thread-fake-123", turnId: activeTurn, item: { id: "message-1", type: "agentMessage", phase: "final_answer", text: "Structured handoff submitted." } } });
+    if (pendingFinalPrompt.includes("late commentary after final")) {
+      send({ method: "item/completed", params: { threadId: "thread-fake-123", turnId: activeTurn, item: { id: "message-commentary", type: "agentMessage", phase: "commentary", text: "late commentary must not replace the submitted result" } } });
+    }
+    send({ method: "turn/completed", params: { threadId: "thread-fake-123", turn: { id: activeTurn, status: "completed", items: [], error: null } } });
   } else if (message.method === "turn/steer") {
     send({ id: message.id, result: { turnId: activeTurn } });
   } else if (message.method === "turn/interrupt") {
@@ -358,6 +402,9 @@ test("delegation prompt makes advisor collaborative while preserving executor au
 	assert.match(executor, /research_pi_host/);
 	assert.match(executor, /credential contents never enter/);
 	assert.match(executor, /record the run id/);
+	assert.match(executor, /phase=commentary/);
+	assert.match(executor, /phase=final_answer/);
+	assert.match(executor, /never encode a plan, preamble, checkpoint/);
 	assert.match(executor, /hypothesis H1/);
 });
 
@@ -448,7 +495,14 @@ test("advisor, executor, and explicit resume produce durable structured jobs", a
 		assert.equal(executor.model, DEFAULT_CODEX_MODEL);
 		assert.equal(executor.reasoningEffort, DEFAULT_CODEX_REASONING_EFFORT);
 		assert.equal(executor.sandbox, CODEX_EXECUTOR_PROFILE);
+		assert.equal(executor.result.outcome, "succeeded");
+		assert.equal(executor.result.goal_satisfied, true);
+		assert.equal(executor.result.status, undefined);
+		assert.deepEqual(executor.result.remaining_work, []);
+		assert.equal(executor.resultSource, "submit_research_pi_result");
 		assert.match(executor.result.evidence.join("\n"), /why-blocking/);
+		assert.match(executor.result.evidence.join("\n"), /submission-tool-present/);
+		assert.match(executor.result.evidence.join("\n"), /turn-schema-absent/);
 		assert.equal(readFileSync(join(workspace, "codex-executed.txt"), "utf8"), "executor ran\n");
 
 		const resumedStart = await resumeCodexJob(executor.id, {
@@ -460,6 +514,53 @@ test("advisor, executor, and explicit resume produce durable structured jobs", a
 		assert.equal(resumed.status, "completed");
 		assert.equal(resumed.continuationOf, executor.id);
 		assert.equal(resumed.result.summary, "resumed");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("submitted executor result cannot be replaced by a later commentary item", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-phase-result-"));
+	try {
+		const workspace = join(root, "workspace");
+		const jobRoot = join(root, "codex", "jobs");
+		mkdirSync(workspace, { recursive: true });
+		const completed = await waitForCodexJob((await startCodexJob({
+			cwd: workspace,
+			jobRoot,
+			codexBin: makeFakeCodex(root),
+			mode: "executor",
+			task: "late commentary after final protocol smoke",
+		})).id, { jobRoot });
+		assert.equal(completed.status, "completed");
+		assert.equal(completed.result.outcome, "succeeded");
+		assert.equal(completed.result.goal_satisfied, true);
+		assert.equal(completed.result.summary, "finished");
+		assert.doesNotMatch(completed.result.summary, /late commentary/);
+		assert.equal(completed.resultSource, "submit_research_pi_result");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("legacy completed plus goal_satisfied false normalizes to a partial outcome", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-legacy-outcome-"));
+	try {
+		const workspace = join(root, "workspace");
+		const jobRoot = join(root, "codex", "jobs");
+		mkdirSync(workspace, { recursive: true });
+		const completed = await waitForCodexJob((await startCodexJob({
+			cwd: workspace,
+			jobRoot,
+			codexBin: makeFakeCodex(root),
+			mode: "executor",
+			task: "legacy completed false protocol smoke",
+		})).id, { jobRoot });
+		assert.equal(completed.status, "completed");
+		assert.equal(completed.result.status, undefined);
+		assert.equal(completed.result.outcome, "partial");
+		assert.equal(completed.result.goal_satisfied, false);
+		assert.deepEqual(completed.result.remaining_work, ["finish the delegated implementation"]);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

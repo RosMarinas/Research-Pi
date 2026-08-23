@@ -269,7 +269,7 @@ Codex 的 `research_pi_host` 使用同一审批桥。缺少 grant 时，原 tool
 
 所有模型工具调用都会在 Pi 底部状态栏显示工具名、安全截断后的目标摘要、运行时间和成功/失败终态；并行调用显示当前数量和稳定摘要。普通工具终态保留 5 秒，`codex_delegate` 的后台 job 另有持久状态，不会因委派工具返回而消失。Pi Core 的 footer 固定为单行，因此多个 Codex Action 或一个 Action 内的并发活动会在 footer 聚合计数，并在 editor 上方的 Runtime Dock 按稳定顺序逐行显示；轮询先后不会反复切换“latest”行。
 
-Codex 返回后，主对话默认只显示状态、摘要预览和 evidence/check/file/uncertainty 计数；`Ctrl+O` 展开后按 Markdown 分节显示 Summary、Evidence、Actions、Checks、External effects、Uncertainties 与 Next step，不再铺开原始 JSON 或把编号压成一个长段落。运行 `/watch` 可按需打开紧凑的 Codex 执行 overlay；它不会长期占据编辑区。`←/→` 切换当前项目可见的 Codex Action，`Tab` 或 `↑/↓` 在 overview、activity、agents 三个视图间切换，`r` 刷新，`q`/`Esc` 关闭。agents 视图展示当前 Action 内部 subagent 的 thread、路径、状态、模型和最近消息。面板把 job lifecycle、当前叶子活动和最近完成活动分开显示：`research_pi_host · completed` 只表示一次 broker 调用结束，只有 job state 进入 `completed` 才表示 executor 完成。面板直接读取脱敏的 App Server 客观事件，展示命令、退出码与限长输出尾部、文件修改、MCP/动态工具、搜索以及 Codex 内部 subagent 状态；不会经过 Research Leader 转述，也不会进入 DeepSeek 上下文。
+Codex 返回后，主对话默认只显示状态、摘要预览和 evidence/check/file/uncertainty/remaining-work 计数；`Ctrl+O` 展开后按 Markdown 分节显示 Delegation outcome、Summary、Evidence、Actions、Checks、External effects、Uncertainties、Remaining work 与 Next step。App Server turn 不再挂全局 output schema：中间 `phase=commentary` 是自然语言，终态通过一次性的 `submit_research_pi_result` 动态工具严格提交，随后只发简短 `phase=final_answer` acknowledgement；commentary 不可能覆盖已提交结果。executor 终态使用 `outcome=succeeded|partial|blocked|failed`，与 App Server turn 的 `completed` lifecycle 分开：只有 `outcome=succeeded + goal_satisfied=true` 才表示委派目标完成。运行 `/watch` 可按需打开紧凑的 Codex 执行 overlay；面板直接读取脱敏的客观事件，展示命令、退出码与限长输出尾部、文件修改、MCP/动态工具、搜索以及 Codex 内部 subagent 状态，不进入 DeepSeek 上下文。
 
 ### Research Mode
 
@@ -338,13 +338,14 @@ compact 不再把所有 `valid` 记录视为同等证据：`supported` 必须引
 
 - `advisor`：只读协作咨询，适合尚未成熟的问题；Codex 会先澄清共同理解、提出聚焦问题、展开候选解释并形成可继续修改的 working synthesis，而不是默认反驳或给出评审结论。模型与 reasoning 默认值来自 `config.json` 的 `codex.advisor`；
 - `executor`：完整执行任务，模型与 reasoning 默认值来自 `codex.executor`，自动使用 project-write permission profile；
+- executor 的进度、计划和审计节点只走自然语言 `phase=commentary`；结构化结果通过 `submit_research_pi_result` 只提交一次，并以 `outcome`、`completion_basis`、`remaining_work` 明确说明任务是否真正结束。旧版 `status=completed + goal_satisfied=false` 结果在读取时会保守归一化为 `outcome=partial`；
 - 每次调用都可覆盖 Codex model 和 reasoning effort；
 - executor 可在项目内修改或删除文件、安装项目依赖、自由提交，以及启动或取消昂贵实验；需要新的宿主权限时，`research_pi_host` 会让同一 tool call 暂停并在 Pi TUI 自动弹出精确授权，用户决定后原 Codex turn 继续，不需要复制凭据、手工返回 grantId 或重开 delegation；
 - Codex 通过本地 stdio App Server 运行，保存稳定的 thread/turn ID；长任务默认后台运行，通过同一个工具的 `status`、`result`、`respond`、`steer`、`resume`、`cancel` 和 `reconcile` action 管理；
 - 连续处理同一研究子任务时，Pi 会给它稳定的 `mission` 标签并使用 `reuse=auto`：只有同一精确 workspace、mission、advisor/executor mode 和 research track 才自动续接原 thread。跨 Pi Session 可以复用；同一个 advisor mission 可持续澄清和修改 working synthesis，换轨后即使复用了旧 mission 也会新建 thread。不同研究路线、主动清除旧假设或另一 worktree 应使用新 mission；
 - `/codex missions` 查看当前 project workspace 按 research track 分组的 mission/thread 链。新 job 由 `projectKey + research-leader Actor` 所有，不再绑定一个 conversation branch；文件操作仍强制绑定原精确 workspace。续接前会比较上次终态与当前 Git snapshot；显式跨 track 恢复旧 thread 时还会加入醒目的 route-change 提示，要求 Codex 重新确认介入、有效性标准与决策目标；
 - `respond` 回答 Codex 在运行中提出的显式问题；`steer` 将修正或新证据注入仍在运行的 turn，不需要终止并重开任务；
-- 单个后台任务会在 Pi 底部状态栏持续显示 job 后八位、明确的 job lifecycle，以及 `now:`/`last:` 叶子活动；多个 Action 或并发叶子活动改为稳定聚合，详细行进入 Runtime Dock，最多显示四个 Action 和四条活动，其余引导到 `/watch`。工具自身的 `completed` 不会被显示成 executor 完成。完成、失败、取消或需要输入时，限长结构化事件进入 project Runtime mailbox，只交给当前 attached Research Leader session；
+- 单个后台任务会在 Pi 底部状态栏持续显示 job 后八位、明确的 transport lifecycle，以及 `now:`/`last:` 叶子活动；多个 Action 或并发叶子活动改为稳定聚合，详细行进入 Runtime Dock，最多显示四个 Action 和四条活动，其余引导到 `/watch`。工具或 App Server turn 的 `completed` 不等同于 executor 目标成功，最终以结构化 `outcome/goal_satisfied` 为准。完成、失败、取消或需要输入时，限长结构化事件进入 project Runtime mailbox，只交给当前 attached Research Leader session；
 - Codex worker 与 Pi TUI 解耦：直接退出 Pi 不会取消正在运行的后台 Codex，之后重新进入同一 workspace 即可查看结果或继续通信；需要停止任务时显式使用 `cancel`；
 - `/watch [job后缀|mission|@codex:<Actor短码>]` 直接查看 executor 或 advisor 当前 Action 的客观执行；Codex 内部临时 subagent 作为 Action 子节点展示，不自动注册成长期 Project Actor；
 - Project 同时只有一个 attached Research Leader Session。新开的第二个 TUI 先作为观察者；普通研究输入会在旧 Session 没有 active agent run 时接管，旧 Session 正在生成时则保留输入并提示等待。需要明确越过该保护时使用 `/runtime takeover <reason>`。claim、activation start 和 Codex 状态写入都受同一 attachment lease 约束；每次 attachment 都有 epoch，失去所有权的 Session 会在下一模型边界停止，不能再启动、取消或回复 Codex 工作，也不能把旧 epoch 已 materialize 的消息标为 consumed；

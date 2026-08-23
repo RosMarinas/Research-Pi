@@ -174,7 +174,8 @@ function jobActivityText(job: any): string {
 
 function formatJob(job: ReturnType<typeof publicJobView>): string {
 	if (job.status === "completed" && job.result) {
-		return `Codex job ${job.id} completed.\n${JSON.stringify(job.result, null, 2)}`;
+		const outcome = job.result.outcome ? ` Delegation outcome=${job.result.outcome}; goal_satisfied=${job.result.goal_satisfied === true}.` : "";
+		return `Codex turn ${job.id} completed.${outcome}\n${JSON.stringify(job.result, null, 2)}`;
 	}
 	if (job.status === "failed" || job.status === "cancelled") {
 		return `Codex job ${job.id} ${job.status}: ${job.error ?? job.progress}`;
@@ -204,6 +205,16 @@ export function codexResultPreview(result: any, limit = 420): string {
 export function codexResultMarkdown(result: any): string {
 	if (!result || typeof result !== "object") return "Codex returned no structured result.";
 	const sections: string[] = [];
+	const outcome = String(result.outcome ?? "").trim();
+	const completionBasis = String(result.completion_basis ?? "").trim();
+	if (outcome || completionBasis) {
+		sections.push([
+			"## Delegation outcome",
+			"",
+			outcome ? `**${outcome}** · goal satisfied: ${result.goal_satisfied === true ? "yes" : "no"}` : "",
+			completionBasis,
+		].filter(Boolean).join("\n\n"));
+	}
 	const summary = String(result.summary ?? "").trim();
 	if (summary) sections.push(`## Summary\n\n${summary}`);
 	const sharedUnderstanding = String(result.shared_understanding ?? "").trim();
@@ -243,6 +254,7 @@ export function codexResultMarkdown(result: any): string {
 	}
 
 	appendList("Uncertainties", result.uncertainties);
+	appendList("Remaining delegated work", result.remaining_work);
 	const workingSynthesis = String(result.working_synthesis ?? "").trim();
 	if (workingSynthesis) sections.push(`## Working synthesis\n\n${workingSynthesis}`);
 	const next = String(result.recommended_next_step ?? "").trim();
@@ -260,6 +272,7 @@ function codexResultCounts(result: any): string {
 		Array.isArray(result?.checks) && result.checks.length ? `${result.checks.length} checks` : "",
 		resultList(result?.changed_files).length ? `${result.changed_files.length} files` : "",
 		resultList(result?.uncertainties).length ? `${result.uncertainties.length} uncertainties` : "",
+		resultList(result?.remaining_work).length ? `${result.remaining_work.length} remaining` : "",
 	].filter(Boolean).join(" · ");
 }
 
@@ -349,12 +362,14 @@ async function listOwnedCodexMissions(ctx: ExtensionContext) {
 }
 
 export function formatCodexStatus(job: CodexJobView, activeCount = 1): string {
-	const icon = job.status === "completed" ? "✓" : job.status === "outcome_unknown" ? "!" : job.status === "failed" || job.status === "cancelled" ? "✗" : job.status === "input_required" ? "?" : "⚙";
+	const outcome = job.status === "completed" ? String(job.result?.outcome ?? "") : "";
+	const semanticIncomplete = Boolean(outcome && outcome !== "succeeded");
+	const icon = job.status === "completed" ? semanticIncomplete ? "!" : "✓" : job.status === "outcome_unknown" ? "!" : job.status === "failed" || job.status === "cancelled" ? "✗" : job.status === "input_required" ? "?" : "⚙";
 	const count = activeCount > 1 && !TERMINAL_JOB_STATUSES.has(job.status) ? `${activeCount} running · ` : "";
 	const mission = job.mission ? ` · ${boundedProgress(job.mission).slice(0, 36)}` : "";
 	const parallel = Number(job.activeActivityCount ?? job.activeActivities?.length ?? 0);
 	const activity = parallel > 1 ? `${parallel} parallel activities · /watch` : jobActivityText(job);
-	return `${icon} Codex ${count}${job.mode} ${shortJobId(job.id)}${mission} · ${job.status} · ${activity}`;
+	return `${icon} Codex ${count}${job.mode} ${shortJobId(job.id)}${mission} · ${job.status}${outcome ? `/${outcome}` : ""} · ${activity}`;
 }
 
 function stableCodexJobs(jobs: CodexJobView[]): CodexJobView[] {
@@ -479,9 +494,12 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			`Codex delegation ${job.id} ${job.status}. Pi must inspect this result and decide the next research action; completion alone is not scientific evidence.`,
 			`Mode/model: ${job.mode} · ${job.model} · ${job.reasoningEffort}`,
 			job.mission ? `Mission: ${job.mission}` : undefined,
+			result.outcome ? `Delegation outcome: ${result.outcome} · goal_satisfied=${result.goal_satisfied === true}` : undefined,
+			result.completion_basis ? `Completion basis: ${String(result.completion_basis).slice(0, 3000)}` : undefined,
 			result.summary ? `Summary: ${String(result.summary).slice(0, 5000)}` : undefined,
 			boundedList(result.evidence).length ? `Evidence:\n- ${boundedList(result.evidence).join("\n- ")}` : undefined,
 			boundedList(result.uncertainties).length ? `Uncertainties:\n- ${boundedList(result.uncertainties).join("\n- ")}` : undefined,
+			boundedList(result.remaining_work).length ? `Remaining delegated work:\n- ${boundedList(result.remaining_work).join("\n- ")}` : undefined,
 			result.recommended_next_step ? `Recommended next step: ${String(result.recommended_next_step).slice(0, 3000)}` : undefined,
 			job.error ? `Error: ${String(job.error).slice(0, 3000)}` : undefined,
 			`Use codex_delegate action=result with jobId=${job.id} if the full structured result is needed.`,
@@ -880,6 +898,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			"If Codex needs an unapproved outside path, SSH target, or host command, its structured request opens the Pi TUI approval dialog automatically. Do not ask the user to manufacture or return a grant id, and do not disguise the operation as a new delegation.",
 			"Use mode=advisor when the research question is immature or Pi would benefit from clarification, focused questions, competing explanations, or collaborative synthesis. Advisor is read-only, should not default to opposition or verdicts, and still uses max reasoning by default.",
 			"After retrieving a result, inspect its evidence and validity limitations. Codex completion does not by itself establish a scientific conclusion.",
+			"Treat job status=completed as App Server lifecycle only. For executor work, outcome=succeeded with goal_satisfied=true means the delegated objective completed; partial, blocked, or failed should be handled explicitly rather than described as success.",
 			"Never guess an outcome_unknown resolution. Reconcile only after inspecting the relevant Git state, files, remote runs, or other external effects, and record that evidence in note.",
 			"When a Codex request arrives, answer it promptly with action=respond if Pi can decide. Ask the user only for user-owned choices or direct credential setup. Never place secrets in a response.",
 		],
@@ -905,15 +924,17 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			const job = details as CodexJobView;
 			const container = new Container();
 			const terminal = TERMINAL_JOB_STATUSES.has(job.status);
+			const outcome = job.status === "completed" ? String(job.result?.outcome ?? "") : "";
+			const semanticIncomplete = Boolean(outcome && outcome !== "succeeded");
 			const icon = job.status === "completed"
-				? theme.fg("success", "✓")
+				? theme.fg(semanticIncomplete ? "warning" : "success", semanticIncomplete ? "!" : "✓")
 				: job.status === "input_required" || job.status === "outcome_unknown"
 					? theme.fg("warning", job.status === "input_required" ? "?" : "!")
 					: job.status === "failed" || job.status === "cancelled"
 						? theme.fg("error", "✗")
 						: theme.fg("accent", "●");
 			container.addChild(new Text(
-				`${icon} ${theme.fg("toolTitle", theme.bold(`Codex ${job.mode}`))} ${theme.fg("accent", shortJobId(job.id))} ${theme.fg(terminal ? "muted" : "warning", `· ${job.status}`)}`,
+				`${icon} ${theme.fg("toolTitle", theme.bold(`Codex ${job.mode}`))} ${theme.fg("accent", shortJobId(job.id))} ${theme.fg(terminal ? "muted" : "warning", `· ${job.status}${outcome ? `/${outcome}` : ""}`)}`,
 				0,
 				0,
 			));
