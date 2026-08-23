@@ -1,48 +1,47 @@
-# Local secrets and research data
+# Security Policy
 
-This repository contains executable agent configuration. Treat its local runtime data as sensitive.
+Research Pi executes model-generated code and coordinates local or remote
+research work. Security reports are welcome, especially when behavior crosses
+the documented project, credential, approval, or session boundaries.
 
-The source checkout is a fast-iteration development harness. Stable npm installs keep immutable package files separate from user configuration (`~/.config/research-pi` by default) and runtime state (`~/.local/state/research-pi` by default). Neither directory belongs in this repository or in a release tarball.
+## Supported branches
 
-Never commit:
+| Branch | Status |
+|---|---|
+| `main` | Supported |
+| `windows-research-pi` | Preview; security reports and fixes are handled on a best-effort basis |
+| Older commits and other development branches | Not supported |
 
-- `.env` or any real API key;
-- local `.pi/config.json` or stable-install `credentials.env`; `config.json` is designed to be non-secret but remains a user-local preference file;
-- `.npmrc`, private keys or credential files;
-- `.pi/agent/*`, which contains generated Pi Core adapter settings, trust state, and traces for the current worktree;
-- Pi sessions or traces, which contain prompts, reasoning, tool arguments and outputs;
-- `.pi/memory/`, which is a rebuildable local search index derived from sensitive sessions and experiment records;
-- `.pi/research/*.jsonl`, which may contain absolute paths, run IDs and project-sensitive observations;
-- `.pi/codex/`, which contains delegated prompts, Codex JSON events, local process metadata and structured results;
-- `.pi/runtime/`, which contains project Actor, Action and mailbox events and may include user or agent message text;
-- model checkpoints, datasets or experiment artifacts unless deliberately versioned elsewhere.
+Research Pi does not yet publish stable release tags. Reproduce a report on the
+latest relevant branch when practical.
 
-`/watch` reads the existing bounded Codex audit stream and does not create another trace. Command output tails and subagent prompts are truncated and common credential patterns are replaced wholesale, but redaction is best-effort; do not make a delegated command print credentials merely because the panel is local.
+## Reporting a vulnerability
 
-Model-generated Pi shell commands use an OS sandbox runtime (Seatbelt on macOS, bubblewrap/seccomp on Linux); `codex_delegate` jobs use Codex permission profiles. The current project is writable, including Git objects, refs, index and config; `.git/hooks` remains read-only. Proxy-aware Web traffic is allowed without a domain allowlist, but raw TCP clients such as OpenSSH do not receive implicit host access. Other user directories, Unix sockets, SSH agent access and secret-named environment variables are unavailable to ordinary model tool subprocesses. Pi shell has no general system-temp write access; macOS retains only the narrow `xcrun_db` cache paths Apple Git requires. Direct Pi file tools require human approval for outside or protected paths. Human-entered `!` / `!!` commands intentionally bypass the agent sandbox and run with the user's normal account permissions.
+Prefer GitHub's private vulnerability reporting form under the repository's
+**Security** tab. Include the affected commit, operating system, expected
+boundary, observed behavior, impact, and the smallest safe reproduction.
 
-User-approved host capabilities are the escalation path shared by Pi and its Codex jobs. External reads resolve symlinks and reject known credential material. SSH grants bind one exact target and invoke the system SSH client with `BatchMode=yes` and strict known-host checking; credentials stay opaque. Host-command grants use structured argv with `shell:false`, require an in-project working directory, and may run any project entrypoint with the user's host authority. Once/session grants match the complete argv and session grants expire after 24 hours. Project grants persist by canonical project root: SSH grants match one exact target, while command grants match the explicitly displayed argv prefix and approved cwd. Supplying a grant ID restores that existing cwd but cannot change its argv authority; an omitted cwd is inferred only when all matching active grants identify one cwd, otherwise execution fails as ambiguous. Code-string forms such as `sh -c`, `python3 -c`, and `node -e` default to an exact full-argv project rule rather than a broad interpreter prefix. The older project-script mode remains available when exact SHA-256 plus exact argv pinning is desired.
+If private reporting is unavailable, open a minimal public issue requesting a
+private contact channel. Do not include exploit details, credentials, private
+paths, research data, session transcripts, or trace output in that issue.
 
-Host-command is intentionally broader than opaque SSH: the process receives operational host environment such as `HOME`, `SSH_AUTH_SOCK`, virtual-environment and `UV_*` settings, while API-key/token-named variables are removed. Code run through an approved command can still read files and use credentials available to the user's account, so approve only reviewed project entrypoints and narrow prefixes. Persistent grants live in the user runtime-state capability ledger (or the Git-ignored `.pi/capabilities/` in source development mode), never in repository policy files, and can be revoked with `/boundary revoke`. A project cannot grant itself host authority by editing tracked files.
+Reports are handled on a best-effort basis; this project does not currently
+promise a response or remediation SLA. Please allow the maintainer an
+opportunity to investigate before public disclosure.
 
-This broker does not make a remote account itself safe: after trusting an SSH target, remote commands have the authority of that account. It also does not make a trusted command intrinsically safe: changed project code behind a trusted prefix executes with host authority. Project trust is a user assertion about that project and entrypoint, not a content hash.
+## Scope
 
-Codex CLI 0.146 的 permission-profile 仍保留自身的系统临时目录兼容路径，即使 profile 请求拒绝系统 temp。Harness 会把 `TMPDIR` 重定向到项目内，并在委派约定中禁止主动使用项目外 temp；因此 Codex executor 对其他用户目录仍是 OS 级拒绝，但其系统 temp 边界目前属于纵深防御，不与 Pi shell 的硬边界等强。
+Security-relevant examples include:
 
-To keep normal commits usable without exposing `~/.gitconfig`, trusted harness startup reads only global `user.name` and `user.email` and injects those four author/committer environment fields. No credential helper, include, alias, signing-key or remote configuration is forwarded.
+- sandbox escape or access beyond the current project without approval;
+- credential, SSH-agent, keychain, session, or trace disclosure;
+- bypass of a displayed host-capability approval;
+- cross-project or cross-session message and authority confusion;
+- sensitive Runtime data entering Git or an npm package;
+- unsafe WSL access that crosses the documented Windows filesystem boundary.
 
-System runtime access is a separate read-only zone, compiled into both the Pi sandbox and Codex permission profiles. On macOS the trusted launcher resolves the active Developer directory with `xcode-select -p`, canonicalizes it, grants that directory read access, and injects `DEVELOPER_DIR`. Optional additional runtime roots require `RESEARCH_PI_RUNTIME_ROOTS`; roots under the user's home additionally require the explicit high-risk opt-in `RESEARCH_PI_ALLOW_HOME_RUNTIME_ROOTS=1`, because read/execute permission also makes their contents model-readable.
+Ordinary functional bugs and research-result disagreements can use the public
+issue tracker without sensitive attachments.
 
-Every Codex job performs a model-free sandbox preflight before App Server startup. A Git repository must support `git --version` and `git status` under the exact advisor/executor profile; an available `python3` is also probed. Failure stops the job before model execution. `pi doctor` and `/boundary doctor` expose the same checks for installation and incident diagnosis.
-
-This is a capability boundary, not a guarantee that project-local code is benign. A permitted command may still delete project files, create commits, consume compute, contact public services, or modify scripts that a human later runs. Review the project and delegation objective accordingly.
-
-Before every release or first push, inspect:
-
-```sh
-git status --short --ignored
-git diff --cached --stat
-git diff --cached
-```
-
-If a credential is ever staged or committed, remove it from history and revoke or rotate it immediately. Removing the file in a later commit is not sufficient.
+For the implemented trust model, local-data rules, known limitations, and
+release checks, see [Security model and local research data](docs/security-model.md).

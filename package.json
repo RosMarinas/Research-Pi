@@ -3,7 +3,7 @@
   "version": "0.2.0",
   "type": "module",
   "description": "Research-first Pi harness for AI and communications experiments",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+ssh://git@github.com/RosMarinas/Research-Pi.git"
@@ -26,9 +26,12 @@
     "docs/pi-basic-guide.md",
     "docs/configuration.md",
     "docs/research-runtime-test-guide.md",
+    "docs/security-model.md",
     ".env.example",
     "README.md",
-    "SECURITY.md"
+    "SECURITY.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "scripts": {
     "pi": "./run-pi.sh",

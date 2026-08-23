@@ -36,6 +36,10 @@ for (const required of [
 	".pi/extensions/project-boundary.ts",
 	".pi/lib/project-boundary.mjs",
 	".pi/skills/research-briefing/SKILL.md",
+	"LICENSE",
+	"SECURITY.md",
+	"THIRD_PARTY_NOTICES.md",
+	"docs/security-model.md",
 ]) {
 	assert.ok(files.includes(required), `npm package is missing ${required}`);
 }

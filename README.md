@@ -143,6 +143,11 @@ npm run test:package
 - [基本使用指南](docs/pi-basic-guide.md)
 - [统一配置说明](docs/configuration.md)
 - [Project Runtime 测试与恢复](docs/research-runtime-test-guide.md)
+- [安全模型与本地数据](docs/security-model.md)
 - [设计思想与阶段成果汇报](thesis/main.pdf)
 
 当前版本是可日常使用的 Research Runtime，不是全自动 AI Scientist。它不会替用户冻结科研结论，也不会在缺少证据时自动选择研究路线。
+
+## License
+
+Research Pi 的原创代码与文档采用 [MIT License](LICENSE)。第三方组件保留各自许可证，详见 [Third-Party Notices](THIRD_PARTY_NOTICES.md)。
