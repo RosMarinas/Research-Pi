@@ -6,6 +6,7 @@ import test from "node:test";
 import codexDelegateExtension, {
 	codexResultMarkdown,
 	codexResultPreview,
+	formatCodexJob,
 	formatCodexJobsStatus,
 	formatCodexStatus,
 } from "../.pi/extensions/codex-delegate.ts";
@@ -143,6 +144,26 @@ test("Codex delegation exposes bounded running and terminal footer states", () =
 		{ id: "codex-a", mode: "advisor", status: "input_required", createdAt: "2026-08-11T00:00:01Z" },
 	]);
 	assert.equal(aggregate, "? Codex 2 active · 1 waiting · details above editor");
+});
+
+test("a synchronous advisor ASK tells the Leader to resume the exact paused turn", () => {
+	const text = formatCodexJob({
+		id: "codex-2026-08-24T10-27-17-695Z-a19e1bec",
+		mode: "advisor",
+		status: "input_required",
+		pendingRequest: {
+			id: "request-a19e1bec-b1b04fb465a5",
+			audience: "leader",
+			question: "Which interpretation should remain live?",
+			whyBlocking: "The answer changes the comparison surface.",
+			options: ["H1", "H2"],
+		},
+	});
+	assert.match(text, /paused for input; its worker and current turn remain alive/);
+	assert.match(text, /action=respond/);
+	assert.match(text, /jobId=codex-2026-08-24T10-27-17-695Z-a19e1bec/);
+	assert.match(text, /requestId=request-a19e1bec-b1b04fb465a5/);
+	assert.match(text, /Do not cancel, restart, or replace/);
 });
 
 test("Codex structured results render as readable sections instead of raw JSON", () => {
@@ -1062,19 +1083,15 @@ test("app-server delegation supports live leader requests and durable session re
 		assert.equal(started.leaderSessionId, "pi-session-live");
 		assert.equal((await listCodexJobs({ jobRoot })).length, 1);
 
-		let waiting;
-		let observed;
-		for (let attempt = 0; attempt < 200; attempt++) {
-			const [job] = await listCodexJobs({ jobRoot, leaderSessionId: "pi-session-live", cwd: workspace });
-			if (job) observed = job;
-			if (job?.status === "input_required") {
-				waiting = job;
-				break;
-			}
-			await new Promise((resolve) => setTimeout(resolve, 25));
-		}
-		assert.equal(waiting?.pendingRequest?.question, "Choose H1 or H2", JSON.stringify(observed));
+		const waiting = await waitForCodexJob(started.id, {
+			jobRoot,
+			returnOnInputRequired: (job) => job.pendingRequest?.kind === "leader_consultation",
+		});
+		assert.equal(waiting.status, "input_required");
+		assert.equal(waiting.pendingRequest?.question, "Choose H1 or H2", JSON.stringify(waiting));
 		assert.equal(waiting?.activeTurnId, "turn-fake-456");
+		const pausedWorkerPid = waiting.workerPid;
+		const pausedThreadId = waiting.threadId;
 
 		const steering = await steerCodexJob(started.id, {
 			jobRoot,
@@ -1099,6 +1116,8 @@ test("app-server delegation supports live leader requests and durable session re
 		});
 		const completed = await waitForCodexJob(started.id, { jobRoot });
 		assert.equal(completed.status, "completed");
+		assert.equal(completed.workerPid, pausedWorkerPid, "Leader response must continue the same Codex worker");
+		assert.equal(completed.threadId, pausedThreadId, "Leader response must continue the same Codex thread");
 		assert.match(completed.result.evidence.join("\n"), /Use H2/);
 
 		const commandName = readdirSync(join(jobRoot, started.id, "commands")).find((name) =>

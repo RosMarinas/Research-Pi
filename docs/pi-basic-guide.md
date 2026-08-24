@@ -223,6 +223,8 @@ side 问答会以卡片保存在 session 中。`Ctrl+O` 在展开/收起之间�
 
 advisor 保持项目只读，但不再默认采取反驳姿态。它可通过 Runtime mailbox 向 Pi 提出会显著改善讨论的问题；Pi 用 `respond` 回答后，同一 Codex turn 继续。后续使用同一 mission 会恢复原 Codex thread，使咨询内容不随 Pi Session 轮换丢失。
 
+同步 advisor 遇到问题时不会继续占住当前 tool call：它以 `input_required` 把控制权交还 Leader，Leader 使用返回的精确 `jobId/requestId` 回复，随后沿用同一个 worker、thread 和 turn 继续。此状态不是失败，不应 cancel 或重新启动 advisor。完全异步咨询仍可显式使用 `background=true`。
+
 Pi 会获得一个 `codex-...` job ID。单个 job 时，底部状态栏持续显示 job 后八位、advisor/executor 模式和明确的 `starting/running/completed/failed/cancelled/outcome_unknown` transport lifecycle；`now:` 表示当前叶子活动，`last:` 表示最近结束的命令或工具。两个以上 Action 或并发叶子活动出现时，footer 只显示不会跳动的聚合计数，Runtime Dock 为每个 Action/活动保留固定多行；超过可见上限时使用 `/watch`。`research_pi_host · completed` 只表示一次工具调用完成，job `completed` 只表示 Codex turn 正常结算；executor 是否完成委派目标由 final result 的 `outcome=succeeded` 且 `goal_satisfied=true` 决定。后台任务未结束时，应查询同一 job 的 status/result，或续接同一 Codex Actor，而不是重复启动任务。状态、阻塞问题和完成事件先进入项目 Runtime mailbox，再交给最近 attached 的 Research Leader session。默认 executor 是 project-write + public-network，advisor 是 project-read + public-network；各自的默认 model/effort 位于 `config.json` 的 `codex.executor` 与 `codex.advisor`，也可以在具体委派时覆盖。
 
 `outcome_unknown` 表示 executor 可能已产生文件、Git、远程 run 等副作用，但 worker 没有留下可靠终态。此时不要重跑或猜测：先检查相关外部状态，再让 Pi 调用 `codex_delegate action=reconcile`，提供 `completed|failed|cancelled` 和简短证据说明。同一 workspace 在结案前不会启动另一写入型 Codex；advisor 仍可用于只读排查。

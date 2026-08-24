@@ -897,6 +897,13 @@ export async function waitForCodexJob(jobId, options = {}) {
 			options.onUpdate?.(job);
 		}
 		if (isTerminalStatus(job.status)) return job;
+		if (
+			job.status === "input_required"
+			&& (
+				options.returnOnInputRequired === true
+				|| (typeof options.returnOnInputRequired === "function" && options.returnOnInputRequired(job))
+			)
+		) return job;
 		await delay(options.pollMs ?? 500);
 	}
 }

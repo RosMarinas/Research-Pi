@@ -173,7 +173,7 @@ function jobActivityText(job: any): string {
 	return `${completedLeaf ? "last" : "phase"}: ${progress}`;
 }
 
-function formatJob(job: ReturnType<typeof publicJobView>): string {
+export function formatCodexJob(job: ReturnType<typeof publicJobView>): string {
 	if (job.status === "completed" && job.result) {
 		const outcome = job.result.outcome ? ` Delegation outcome=${job.result.outcome}; goal_satisfied=${job.result.goal_satisfied === true}.` : "";
 		return `Codex turn ${job.id} completed.${outcome}\n${JSON.stringify(job.result, null, 2)}`;
@@ -185,7 +185,17 @@ function formatJob(job: ReturnType<typeof publicJobView>): string {
 		return `Codex job ${job.id} has outcome_unknown: side effects may have occurred. Inspect Git and external run state, then use action=reconcile with outcome and an evidence note before starting another executor in this workspace.`;
 	}
 	if (job.status === "input_required" && job.pendingRequest) {
-		return `Codex job ${job.id} needs input (${job.pendingRequest.id}): ${job.pendingRequest.question}`;
+		const pending = job.pendingRequest;
+		return [
+			`Codex job ${job.id} paused for input; its worker and current turn remain alive.`,
+			`Request id: ${pending.id}`,
+			`Question: ${pending.question}`,
+			pending.whyBlocking ? `${job.mode === "advisor" ? "Why this matters" : "Why it blocks progress"}: ${pending.whyBlocking}` : undefined,
+			pending.options?.length ? `Options: ${pending.options.join(" | ")}` : undefined,
+			pending.audience === "user"
+				? "This requires a user-owned choice. Ask the user, then answer this exact request; do not cancel or restart the Codex job."
+				: `Respond now with codex_delegate action=respond, jobId=${job.id}, requestId=${pending.id}. Do not cancel, restart, or replace this advisor turn.`,
+		].filter(Boolean).join("\n");
 	}
 	return `Codex job ${job.id} is ${job.status}; ${jobActivityText(job)}. Use action=result later to retrieve its structured result.`;
 }
@@ -922,6 +932,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			"Treat job status=completed as App Server lifecycle only. For executor work, outcome=succeeded with goal_satisfied=true means the delegated objective completed; partial, blocked, or failed should be handled explicitly rather than described as success.",
 			"Never guess an outcome_unknown resolution. Reconcile only after inspecting the relevant Git state, files, remote runs, or other external effects, and record that evidence in note.",
 			"When a Codex request arrives, answer it promptly with action=respond if Pi can decide. Ask the user only for user-owned choices or direct credential setup. Never place secrets in a response.",
+			"A synchronous advisor returns input_required instead of blocking the Leader tool call. Treat it as the same live consultation: answer the exact jobId/requestId with action=respond, never by cancelling or starting a replacement advisor.",
 		],
 		parameters: ParamsSchema,
 		executionMode: "sequential",
@@ -1157,10 +1168,11 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 					job = await waitForCodexJob(job.id, {
 						signal,
 						...ownerCheck,
+						returnOnInputRequired: (current) => current.pendingRequest?.kind !== "host_capability" || !ctx.hasUI,
 						onUpdate: (current) => {
 							const currentView = publicJobView(current);
 							rememberJob(currentView, ctx);
-							if (currentView.status === "input_required") {
+							if (currentView.status === "input_required" && currentView.pendingRequest?.kind === "host_capability") {
 								void deliverJobEvent(currentView, ctx).catch((error) => {
 									if (!shuttingDown && ctx.hasUI) ctx.ui.notify(`Could not deliver Codex request: ${error instanceof Error ? error.message : String(error)}`, "warning");
 								});
@@ -1175,6 +1187,10 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 					view = publicJobView(job);
 					await registerCodexRuntimeJob(owner.runtime, view);
 					rememberJob(view, ctx);
+					if (view.status === "input_required") {
+						await deliverJobEvent(view, ctx);
+						monitorJob(view, ctx);
+					}
 				} else if (!TERMINAL_JOB_STATUSES.has(view.status)) {
 					monitorJob(view, ctx);
 				}
@@ -1183,8 +1199,8 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 					content: [{
 						type: "text",
 						text: commandReceipt && TERMINAL_JOB_STATUSES.has(view.status)
-							? `${commandReceipt}\n${formatJob(view)}`
-							: commandReceipt ?? formatJob(view),
+							? `${commandReceipt}\n${formatCodexJob(view)}`
+							: commandReceipt ?? formatCodexJob(view),
 					}],
 					details: view,
 				};
