@@ -87,6 +87,10 @@ test("Pi registers one Codex delegation tool instead of a family of noisy tools"
 	assert.match(registered.description, /collaborative research consultation/);
 	assert.doesNotMatch(registered.description, /second opinion|independent proposal or critique/i);
 	assert.match(registered.promptGuidelines.join("\n"), /research question is immature/);
+	assert.match(registered.promptGuidelines.join("\n"), /executor delegation, state a concrete objective and observable success criteria/);
+	assert.match(registered.promptGuidelines.join("\n"), /advisor consultation, start from the research uncertainty/);
+	assert.match(registered.promptGuidelines.join("\n"), /continuation of inquiry, not an automatic review or approval gate/);
+	assert.match(registered.promptGuidelines.join("\n"), /explicit critique, verdict, or adjudication language only/);
 	assert.equal(command.name, "codex");
 	assert.match(command.definition.description, /mission threads/);
 });
