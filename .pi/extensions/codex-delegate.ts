@@ -29,6 +29,7 @@ import {
 	codexActorId,
 	consumeRuntimeMessageForAttachment,
 	readRuntimeSnapshot,
+	reconcileCodexRuntimeAsks,
 	recordCodexRuntimeEvent,
 	registerCodexRuntimeJob,
 	resolveResearchRuntime,
@@ -627,6 +628,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		if (!id || deliveredEvents.has(id)) return;
 		const runtime = await resolveResearchRuntime(ctx.cwd);
 		if (shuttingDown) return;
+		await reconcileCodexRuntimeAsks(runtime, job);
 		const message = await recordCodexRuntimeEvent(runtime, job, eventContent(job));
 		if (shuttingDown) return;
 		if (!message) {

@@ -11,6 +11,7 @@ import {
 	readJson,
 	releaseWriterLock,
 	sanitizeCodexEnvironment,
+	supersedePendingCodexRequests,
 	updateJobFile,
 	writeJsonAtomic,
 } from "./codex-jobs.mjs";
@@ -965,6 +966,10 @@ async function main() {
 		const status = cancellationRequested ? "cancelled" : !turnFailed && !timedOut && (submittedResult || resultText) ? "completed" : "failed";
 		const settledAt = now();
 		const gitAfter = await getGitSnapshot(request.cwd);
+		await supersedePendingCodexRequests(request.jobId, {
+			jobRoot: dirname(jobDir),
+			terminalStatus: status,
+		}).catch(() => undefined);
 		await writeJobUpdate((current) => ({
 			...current,
 			status,
@@ -995,9 +1000,14 @@ async function main() {
 		await writeJsonAtomic(resultPath, submittedResult ?? parseStructuredResult(finalAgentText || unphasedAgentText, lastError, request.mode)).catch(() => undefined);
 		const unknownOutcome = request.mode === "executor" && sideEffectStarted;
 		const finishedAt = now();
+		const terminalStatus = unknownOutcome ? "outcome_unknown" : cancellationRequested ? "cancelled" : "failed";
+		await supersedePendingCodexRequests(request.jobId, {
+			jobRoot: dirname(jobDir),
+			terminalStatus,
+		}).catch(() => undefined);
 		await writeJobUpdate((current) => ({
 			...current,
-			status: unknownOutcome ? "outcome_unknown" : cancellationRequested ? "cancelled" : "failed",
+			status: terminalStatus,
 			finishedAt,
 			activeTurnId: null,
 			pendingRequest: null,

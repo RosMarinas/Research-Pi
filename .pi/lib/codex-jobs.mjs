@@ -745,6 +745,42 @@ export async function respondToCodexJob(jobId, options = {}) {
 	);
 }
 
+export async function supersedePendingCodexRequests(jobId, options = {}) {
+	validateJobId(jobId);
+	const terminalStatus = String(options.terminalStatus ?? "");
+	if (!TERMINAL_STATUSES.has(terminalStatus)) {
+		throw new Error(`Cannot supersede Codex requests for non-terminal status: ${terminalStatus || "missing"}`);
+	}
+	const jobRoot = resolve(options.jobRoot ?? DEFAULT_CODEX_JOB_ROOT);
+	const requestDir = join(jobRoot, jobId, "requests");
+	let entries;
+	try {
+		entries = await readdir(requestDir, { withFileTypes: true });
+	} catch (error) {
+		if (error?.code === "ENOENT") return [];
+		throw error;
+	}
+	const superseded = [];
+	for (const entry of entries) {
+		if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+		const requestPath = join(requestDir, entry.name);
+		try {
+			const request = await readJson(requestPath);
+			if (request.status !== "pending") continue;
+			await writeJsonAtomic(requestPath, {
+				...request,
+				status: "superseded",
+				resolvedAt: now(),
+				resolutionReason: `codex_job_${terminalStatus}`,
+			});
+			superseded.push(request.id ?? entry.name.slice(0, -5));
+		} catch {
+			// A damaged historical request must not block terminal job settlement.
+		}
+	}
+	return superseded;
+}
+
 export async function steerCodexJob(jobId, options = {}) {
 	const message = String(options.message ?? "").trim();
 	if (!message) throw new Error("A steering message is required");

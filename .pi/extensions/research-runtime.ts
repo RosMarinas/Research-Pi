@@ -2,7 +2,12 @@ import { getMarkdownTheme, type ExtensionAPI, type ExtensionCommandContext, type
 import { Box, Markdown, Text } from "@earendil-works/pi-tui";
 import { join } from "node:path";
 import { Type } from "typebox";
-import { getGitSnapshot, HARNESS_ROOT } from "../lib/codex-jobs.mjs";
+import {
+	getGitSnapshot,
+	HARNESS_ROOT,
+	readCodexJob,
+	supersedePendingCodexRequests,
+} from "../lib/codex-jobs.mjs";
 import {
 	PROJECT_VIEW_DELTA_KIND,
 	PROJECT_VIEW_KIND,
@@ -50,6 +55,7 @@ import {
 	isRuntimeActorAttached,
 	pendingRuntimeMessages,
 	readRuntimeSnapshot,
+	reconcileCodexRuntimeAsks,
 	requestRuntimeSessionRotation,
 	requestRuntimeSessionInheritance,
 	resolveRuntimeActor,
@@ -94,6 +100,7 @@ class RuntimeLeaderBusyError extends Error {
 const MESSAGE_TYPES = new Set(["ask", "reply", "notify", "result"]);
 const ACTIVE_ACTION_STATUSES = new Set(["starting", "running", "cancelling"]);
 const RECOVERABLE_ACTION_STATUSES = new Set([...ACTIVE_ACTION_STATUSES, "input_required"]);
+const CODEX_TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled", "outcome_unknown"]);
 const RUNTIME_DOCK_KEY = "research_runtime_dock";
 const UI_DENSITY = process.env.RESEARCH_PI_UI_DENSITY === "compact" ? "compact" : "balanced";
 const UI_RUNTIME_STRIP = ["auto", "always", "off"].includes(process.env.RESEARCH_PI_UI_RUNTIME_STRIP ?? "")
@@ -121,6 +128,41 @@ export function analysisSessionToolBlockReason(
 	if (ANALYSIS_SAFE_TOOLS.has(toolName)) return null;
 	if (toolName === "codex_delegate" && ANALYSIS_CODEX_READ_ACTIONS.has(String(input.action ?? ""))) return null;
 	return `Analysis Session cannot use ${toolName}: it may inspect local/remote evidence and discuss it, but cannot modify code, run experiments, steer workers, or update Project State. Use analysis_send_to_leader, or /runtime promote <reason> to become the Leader Session.`;
+}
+
+export async function reconcileStaleCodexMailbox(
+	runtime: RuntimeContext,
+	snapshot: RuntimeSnapshot,
+	dependencies: {
+		readJob?: typeof readCodexJob;
+		supersedeRequests?: typeof supersedePendingCodexRequests;
+	} = {},
+): Promise<RuntimeSnapshot> {
+	const readJob = dependencies.readJob ?? readCodexJob;
+	const supersedeRequests = dependencies.supersedeRequests ?? supersedePendingCodexRequests;
+	const jobIds = new Set(snapshot.messages
+		.filter((message) => message.type === "ask" && ["queued", "delivered"].includes(message.status))
+		.map((message) => String(message.metadata?.jobId ?? ""))
+		.filter(Boolean));
+	let changed = false;
+	for (const jobId of jobIds) {
+		let job;
+		try {
+			job = await readJob(jobId, {
+				expectedProjectKey: runtime.projectKey,
+				expectedLeaderActorId: RESEARCH_LEADER_ACTOR_ID,
+			});
+		} catch {
+			// Missing, damaged, legacy, or cross-project jobs need explicit user review.
+			continue;
+		}
+		if (CODEX_TERMINAL_STATUSES.has(job.status)) {
+			await supersedeRequests(job.id, { terminalStatus: job.status }).catch(() => undefined);
+		}
+		const settled = await reconcileCodexRuntimeAsks(runtime, job);
+		if (settled.length) changed = true;
+	}
+	return changed ? await readRuntimeSnapshot(runtime) : snapshot;
 }
 
 function analysisSessionContext(content: string): string {
@@ -388,6 +430,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	let localAttachmentEpoch: string | undefined;
 	let activeActivationId: string | undefined;
 	const consumedMessageIds = new Set<string>();
+	const supersededMessageIds = new Set<string>();
 	const materializedMessages = new Map<string, {
 		attachmentEpoch: string | null;
 		requestId: string | null;
@@ -657,8 +700,12 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		options: { triggerTurn?: boolean } = {},
 	) => {
 		const sessionId = ctx.sessionManager.getSessionId();
+		const currentSnapshot = await reconcileStaleCodexMailbox(activeRuntime, snapshot);
+		for (const message of currentSnapshot.messages) {
+			if (message.status === "superseded") supersededMessageIds.add(message.id);
+		}
 		let delivered = 0;
-		for (const message of unconsumedRuntimeMessages(snapshot, { to: RESEARCH_LEADER_ACTOR_ID, forSessionId: sessionId })) {
+		for (const message of unconsumedRuntimeMessages(currentSnapshot, { to: RESEARCH_LEADER_ACTOR_ID, forSessionId: sessionId })) {
 			const result = await deliverToCurrentLeader(activeRuntime, message, ctx, { triggerTurn: options.triggerTurn });
 			if (result.status !== "delivered") continue;
 			await settleRuntimeMessage(activeRuntime, message.id, "delivered", {
@@ -702,6 +749,13 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		mission?: string | null;
 	}>(RUNTIME_MESSAGE_KIND, (message, options, theme) => {
 		const details = message.details ?? {};
+		if (details.messageId && details.type === "ask" && supersededMessageIds.has(String(details.messageId))) {
+			return new Text(
+				`${theme.fg("success", "✓")} ${theme.fg("dim", `CODEX / ASK settled · ${String(details.messageId).slice(-8)} · obsolete request`)}`,
+				0,
+				0,
+			);
+		}
 		const content = typeof message.content === "string"
 			? message.content
 			: message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
@@ -796,6 +850,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			: undefined;
 		let view: Awaited<ReturnType<typeof refreshProjectView>>["view"] | null = null;
 		consumedMessageIds.clear();
+		supersededMessageIds.clear();
 		materializedMessages.clear();
 		if (event.reason === "new") {
 			const currentSessionId = ctx.sessionManager.getSessionId();
@@ -855,6 +910,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		}
 		for (const message of snapshot.messages) {
 			if (message.status === "consumed") consumedMessageIds.add(message.id);
+			if (message.status === "superseded") supersededMessageIds.add(message.id);
 		}
 		if (sessionInheritancePolicy === "analysis") {
 			if (await isRuntimeActorAttached(activeRuntime, RESEARCH_LEADER_ACTOR_ID, ctx.sessionManager.getSessionId())) {
@@ -887,6 +943,8 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		runtimeInputCwd = undefined;
 		localSessionId = undefined;
 		localAttachmentEpoch = undefined;
+		consumedMessageIds.clear();
+		supersededMessageIds.clear();
 		projectViewSnapshotHash = "";
 		projectViewDirty = true;
 		persistedProjectView = undefined;
@@ -1008,6 +1066,9 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	pi.on("context", async (event, ctx) => {
 		const activeRuntime = await getRuntime(ctx);
 		const snapshot = await readRuntimeSnapshot(activeRuntime);
+		for (const message of snapshot.messages) {
+			if (message.status === "superseded") supersededMessageIds.add(message.id);
+		}
 		const sessionId = ctx.sessionManager.getSessionId();
 		if (!isAnalysisSession() && !runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID, sessionId)) {
 			ctx.abort();

@@ -95,7 +95,7 @@ queued -> delivered -> consumed
 - `queued`：已耐久写入 Project mailbox，Provider 尚未接受；
 - `delivered`：已交给目标 Adapter 或 attached Leader Session；
 - `consumed`：已进入一次 Leader 模型运行并完全 settled；之后从模型上下文过滤；
-- `superseded`：被明确的新控制消息替代；第一阶段已经支持状态，但 UI 尚未提供专用替换命令。
+- `superseded`：请求已被更新请求替代，或所属 Codex job 已进入终态；终态 ASK 会在投递前自动结算，避免跨 Session 反复出现。
 
 投递采用 at-least-once 的恢复思路：如果进程在模型看到消息后、`agent_settled` 前崩溃，消息可能在恢复时再出现一次；不会为了追求 exactly-once 而增加高频事务写入。
 

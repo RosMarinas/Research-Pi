@@ -10,6 +10,7 @@ import researchRuntimeExtension, {
 	codexRuntimeMessagePreview,
 	formatRuntimeHealth,
 	formatRuntimeStatus,
+	reconcileStaleCodexMailbox,
 	runtimeHealth,
 	runtimeActorSummary,
 	runtimeRotationReadiness,
@@ -28,6 +29,7 @@ import {
 	initializeResearchRuntime,
 	pendingRuntimeMessages,
 	readRuntimeSnapshot,
+	reconcileCodexRuntimeAsks,
 	recordRuntimeEvidence,
 	recordResearchTransition,
 	recordCodexRuntimeEvent,
@@ -223,6 +225,78 @@ test("Runtime message and Action terminal states cannot regress under delayed cr
 		assert.equal(snapshot.messages.find((item) => item.id === message.id)?.status, "consumed");
 		assert.equal(snapshot.actions.find((item) => item.id === "action-terminal")?.status, "completed");
 		assert.equal(snapshot.actions.find((item) => item.id === "action-unknown")?.status, "completed");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("Codex ASK lifecycle keeps only the current request and supersedes all asks at job terminal", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-ask-lifecycle-"));
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace);
+		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a" }, { runtimeRoot: join(root, "runtime") });
+		for (const requestId of ["request-old", "request-current"]) {
+			await createRuntimeMessage(runtime, {
+				id: `message-${requestId}`,
+				type: "ask",
+				from: "codex:fixture:executor",
+				to: RESEARCH_LEADER_ACTOR_ID,
+				body: requestId,
+				relatesTo: requestId,
+				metadata: { jobId: "codex-fixture", requestId },
+			});
+		}
+
+		await reconcileCodexRuntimeAsks(runtime, {
+			id: "codex-fixture",
+			status: "input_required",
+			pendingRequest: { id: "request-current" },
+		});
+		let snapshot = await readRuntimeSnapshot(runtime);
+		assert.equal(snapshot.messages.find((message) => message.id === "message-request-old")?.status, "superseded");
+		assert.equal(snapshot.messages.find((message) => message.id === "message-request-current")?.status, "queued");
+
+		await reconcileCodexRuntimeAsks(runtime, { id: "codex-fixture", status: "completed", pendingRequest: null });
+		snapshot = await readRuntimeSnapshot(runtime);
+		assert.equal(snapshot.messages.find((message) => message.id === "message-request-current")?.status, "superseded");
+		assert.equal(unconsumedRuntimeMessages(snapshot, { to: RESEARCH_LEADER_ACTOR_ID }).length, 0);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("mailbox repair settles terminal Codex asks before a resumed Session can redeliver them", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-mailbox-repair-"));
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace);
+		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-old" }, { runtimeRoot: join(root, "runtime") });
+		const ask = await createRuntimeMessage(runtime, {
+			id: "message-stale-terminal-ask",
+			type: "ask",
+			from: "codex:fixture:executor",
+			to: RESEARCH_LEADER_ACTOR_ID,
+			body: "obsolete permission request",
+			relatesTo: "request-stale",
+			metadata: { jobId: "codex-terminal-fixture", requestId: "request-stale" },
+		});
+		await settleRuntimeMessage(runtime, ask.id, "delivered", { sessionId: "session-old" });
+		let requestSettlement;
+		const repaired = await reconcileStaleCodexMailbox(runtime, await readRuntimeSnapshot(runtime), {
+			readJob: async (_jobId, options) => {
+				assert.equal(options.expectedProjectKey, runtime.projectKey);
+				assert.equal(options.expectedLeaderActorId, RESEARCH_LEADER_ACTOR_ID);
+				return { id: "codex-terminal-fixture", status: "completed", pendingRequest: null };
+			},
+			supersedeRequests: async (jobId, options) => {
+				requestSettlement = { jobId, ...options };
+				return ["request-stale"];
+			},
+		});
+		assert.equal(repaired.messages.find((message) => message.id === ask.id)?.status, "superseded");
+		assert.deepEqual(requestSettlement, { jobId: "codex-terminal-fixture", terminalStatus: "completed" });
+		assert.equal(unconsumedRuntimeMessages(repaired, { to: RESEARCH_LEADER_ACTOR_ID, forSessionId: "session-new" }).length, 0);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

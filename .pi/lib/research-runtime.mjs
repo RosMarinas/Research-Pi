@@ -906,6 +906,30 @@ export function unconsumedRuntimeMessages(snapshot, options = {}) {
 	});
 }
 
+export async function reconcileCodexRuntimeAsks(runtime, job) {
+	const jobId = String(job?.id ?? "");
+	if (!jobId) return [];
+	const activeRequestId = job.status === "input_required" ? String(job.pendingRequest?.id ?? "") : "";
+	const snapshot = await readRuntimeSnapshot(runtime);
+	const superseded = [];
+	for (const message of snapshot.messages) {
+		if (
+			message.type !== "ask"
+			|| message.metadata?.jobId !== jobId
+			|| (message.status !== "queued" && message.status !== "delivered")
+		) continue;
+		const requestId = String(message.metadata?.requestId ?? message.relatesTo ?? "");
+		if (activeRequestId && requestId === activeRequestId) continue;
+		await settleRuntimeMessage(runtime, message.id, "superseded", {
+			jobId,
+			requestId: requestId || null,
+			reason: activeRequestId ? "codex_request_replaced" : `codex_job_${String(job.status ?? "not_waiting")}`,
+		});
+		superseded.push(message.id);
+	}
+	return superseded;
+}
+
 export async function requestRuntimeSessionRotation(runtime, input) {
 	const fromSessionId = boundedRuntimeText(input.fromSessionId, 200);
 	if (!fromSessionId) throw new Error("Runtime Session rotation requires a source Session id");

@@ -26,6 +26,7 @@ import {
 	sanitizeCodexEnvironment,
 	startCodexJob,
 	steerCodexJob,
+	supersedePendingCodexRequests,
 	waitForCodexJob,
 } from "../.pi/lib/codex-jobs.mjs";
 import { CODEX_ADVISOR_PROFILE, CODEX_EXECUTOR_PROFILE } from "../.pi/lib/project-boundary.mjs";
@@ -39,6 +40,33 @@ import {
 	prepareCapabilityRequest,
 	resolveCapabilityContext,
 } from "../.pi/lib/host-capabilities.mjs";
+
+test("terminal Codex jobs supersede unresolved request records without changing resolved history", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-request-settlement-"));
+	try {
+		const jobRoot = join(root, "jobs");
+		const jobId = "codex-2026-08-24T00-00-00-000Z-deadbeef";
+		const requestDir = join(jobRoot, jobId, "requests");
+		mkdirSync(requestDir, { recursive: true });
+		writeFileSync(join(requestDir, "request-pending.json"), JSON.stringify({ id: "request-pending", status: "pending", question: "old ask" }));
+		writeFileSync(join(requestDir, "request-resolved.json"), JSON.stringify({ id: "request-resolved", status: "resolved", resolvedAt: "2026-08-24T00:00:00.000Z" }));
+
+		const settled = await supersedePendingCodexRequests(jobId, { jobRoot, terminalStatus: "completed" });
+		assert.deepEqual(settled, ["request-pending"]);
+		const pending = JSON.parse(readFileSync(join(requestDir, "request-pending.json"), "utf8"));
+		const resolved = JSON.parse(readFileSync(join(requestDir, "request-resolved.json"), "utf8"));
+		assert.equal(pending.status, "superseded");
+		assert.equal(pending.resolutionReason, "codex_job_completed");
+		assert.match(pending.resolvedAt, /^\d{4}-\d{2}-\d{2}T/);
+		assert.equal(resolved.status, "resolved");
+		await assert.rejects(
+			supersedePendingCodexRequests(jobId, { jobRoot, terminalStatus: "input_required" }),
+			/non-terminal status/,
+		);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
 
 test("Pi registers one Codex delegation tool instead of a family of noisy tools", () => {
 	let registered;
