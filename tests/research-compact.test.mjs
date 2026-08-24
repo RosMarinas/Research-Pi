@@ -105,6 +105,17 @@ test("clean compaction state stays local when the Session later restores Project
 				researchState: { currentClaim: "independent clean-session synthesis" },
 			},
 		},
+		{
+			type: "compaction",
+			id: "analysis-compact",
+			details: {
+				kind: "research-pi-compaction",
+				version: 1,
+				inheritancePolicy: "analysis",
+				projectRevision: 3,
+				researchState: { currentClaim: "independent analysis-session synthesis" },
+			},
+		},
 	];
 	assert.equal(
 		collectResearchEvidence(branch, "session-clean", undefined, { inheritancePolicy: "clean" }).previousState.currentClaim,
@@ -113,6 +124,10 @@ test("clean compaction state stays local when the Session later restores Project
 	assert.equal(
 		collectResearchEvidence(branch, "session-clean", undefined, { inheritancePolicy: "project" }).previousState.currentClaim,
 		"canonical Project claim",
+	);
+	assert.equal(
+		collectResearchEvidence(branch, "session-analysis", undefined, { inheritancePolicy: "analysis" }).previousState.currentClaim,
+		"independent analysis-session synthesis",
 	);
 });
 

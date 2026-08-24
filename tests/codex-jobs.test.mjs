@@ -194,7 +194,7 @@ test("a stale Pi Session cannot start new Codex work after Leader ownership move
 		};
 		await assert.rejects(
 			registered.execute("tool-call", { action: "start", task: "must not launch" }, new AbortController().signal, undefined, ctx),
-			/no longer owns the Research Leader/,
+			/no longer the Leader Session/,
 		);
 	} finally {
 		if (previousRuntimeRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;

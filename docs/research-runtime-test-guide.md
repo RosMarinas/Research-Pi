@@ -11,7 +11,9 @@ Codex 不属于某个 Pi 对话。它在 Project 中承担一个有界、可续�
 | 对象 | 含义 | 生命周期 |
 |---|---|---|
 | Project | 长期科研边界与 Runtime 状态所有者 | 跨 Session、跨模型长期存在 |
-| Research Leader Actor | 项目负责人，当前由 Pi/DeepSeek 承载 | 身份稳定，可更换 Pi Session |
+| Leader Actor | 项目中稳定的研究领导身份，当前由 Pi/DeepSeek 承载 | 身份稳定，可更换 Leader Session |
+| Leader Session | 当前拥有执行、Project State 写入、Codex 调度和 Leader mailbox 的 Pi Session | 同一 Project 同时只有一个 |
+| Analysis Session | 继承 ProjectView 的只读讨论入口；可查本地/远端证据，但不执行 | 可与 Leader Session 并存 |
 | Codex Actor | 一个稳定的 Codex 子职责，当前由 `mission + mode` 定义 | 跨 Pi Session 存在，可反复激活 |
 | Action/job | Codex Actor 接受的一次具体委派或续接 | 有明确开始与终态 |
 | Activation | 正在运行的 worker、Codex App Server、thread/turn | 仅在 Action 运行期间存活 |
@@ -22,15 +24,18 @@ Codex 不属于某个 Pi 对话。它在 Project 中承担一个有界、可续�
 
 ```text
 Project
-├── Research Leader Actor
-│   └── 当前 attached Pi Session
+├── Leader Actor
+│   └── 当前 attached Leader Session
+├── Analysis Session 1..N (read-only, no Leader mailbox)
 └── Codex Actor: mission + mode
     ├── stable Codex thread
     ├── Action/job 1 -> completed
     └── Action/job 2 -> running
 ```
 
-“跨 Session 续接”不是把 Session A 的完整对话交给 Session B，也不是让 Session B 拥有 Session A。它表示 Session B attach 到同一个 Research Leader Actor 后，可以依据 Project Runtime 状态继续管理原 Codex Actor 和 thread。
+“跨 Session 续接”不是把 Session A 的完整对话交给 Session B，也不是让 Session B 拥有 Session A。它表示 Session B 成为 Leader Session、attach 到同一个 Leader Actor 后，可以依据 Project Runtime 状态继续管理原 Codex Actor 和 thread。Analysis Session 只读取同一 ProjectView，不发生这次 attachment 转移。
+
+Analysis Session 的最小流程是：从另一终端运行 `pi --analysis` 进入讨论；用只读工具或受限 SSH 核查结果；用 `/analysis send <message>` 将候选综合写入 Leader mailbox；只有用户执行 `/runtime promote <reason>` 后才取得执行权。analysis compact 保持 session-local，handoff 只是 proposal，不自动写入 Project State 或 Evidence。
 
 ## 2. Codex 在 Project 内负责什么
 

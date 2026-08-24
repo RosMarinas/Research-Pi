@@ -9,6 +9,22 @@ cd /path/to/research-project
 pi
 ```
 
+Research Pi 有两个直观的项目角色：
+
+- **Leader Session**：默认入口 `pi`。可以修改项目、运行实验、调度 Codex、更新 Project State，并独占 durable Leader mailbox。
+- **Analysis Session**：入口 `pi --analysis`。读取同一 ProjectView 并讨论问题，但不抢占 Leader、不接收 Codex ASK/result，也不能修改代码、启动实验或更新 Project State。
+
+Analysis Session 可以使用项目内只读工具，也可以通过 `host_capability` 读取已批准的外部文件或执行受限 SSH 检查。SSH 允许 `cat/head/tail/grep/rg/find/ls/stat`、只读 Git、调度器和 `nvidia-smi` 查询等单条命令或只读 pipeline；shell 串联、重定向、解释器、进程控制和实验启动会被拒绝。目标已获得 Project trust 时无需重复审批，否则只审批 SSH target，凭据本身不会进入模型上下文。
+
+讨论形成可操作结论后，有两条路：
+
+```text
+/analysis send 这里写给当前 Leader 的观察、解释和建议
+/runtime promote 因为用户决定由本 Session 执行已讨论的诊断
+```
+
+前者只把“候选分析”放进 Leader mailbox，不会自动成为科研事实；后者显式接管 Leader 角色并恢复执行工具。需要同时保留原 Leader 并行工作时，应从另一个终端运行 `pi --analysis`；同一 TUI 内的 `/runtime analysis` 适合把当前 Session 原地降为只读讨论。
+
 第一次交互式启动若出现 project trust 提示，确认信任本项目的 `.pi` 配置。进入界面后直接输入自然语言任务并按 Enter。
 
 源码开发时，可以从 harness 目录显式启动：
@@ -155,7 +171,10 @@ Pi 现在提供这些低摩擦研究工具：
 - `/message`、`/steer`：面向 Actor 通信；steer 默认等待下一安全模型边界，只有 `--preempt` 才主动中断。
 - `/runtime`（或 `/runtime board`）：打开 Project 控制面；左右或 Tab 切换 overview/actors/messages/sessions，`r` 手动刷新，`v` 查看完整 ProjectView。Actors 页用上下键选择，Enter 或 `w` 直接打开对应 Codex Watch。面板不进入模型上下文，也不后台轮询。需要注意的 Runtime 状态会通过 editor 上方的自折叠 Dock 显示。
 - `/runtime health|recommend|view`：查看 Project Runtime 健康度、只读生命周期建议或当前 ProjectView。
-- `/runtime takeover <reason>`：当另一 Session 正在占用 Research Leader 且确实需要人工接管时，显式转移 attachment；旧运行会在下一模型边界停止。
+- `/runtime analysis [reason]`：把当前 Session 原地切为 Analysis Session；释放 Leader attachment，但保留 ProjectView 供只读讨论。
+- `/analysis send <message>`：将 Analysis Session 的讨论摘要作为 proposal 投递给当前 Leader，不更新 Project State。
+- `/runtime promote <reason>`：将当前 Analysis Session 显式晋升为 Leader Session；接管执行权并接收未消费 mailbox。
+- `/runtime takeover <reason>`：当另一 Leader Session 正在工作且确实需要人工接管时，显式转移 attachment；旧运行会在下一模型边界停止。
 - `/runtime rotate [reason]`：在 Project State 可恢复且没有未知副作用时，人工创建一个不复制旧 transcript、但自动继承 ProjectView/mailbox 的新 Leader Session；Runtime 会记录交接和 receipt。不会自动触发。
 - `/runtime new clean [reason]`：创建不复制 transcript、也不自动继承 ProjectView/mailbox 的 clean Session；Project 数据不删除，clean compact 不回写 Project State，Codex mission 的 `reuse=auto` 会降为新 thread。
 - `/runtime inherit [reason]`：让当前 clean Session 从下一轮开始恢复 ProjectView、未消费 mailbox 与 project-aware 操作；旧 transcript 仍不会恢复。后续 compact 以 canonical Project State 为 previous state，已有 clean summary 只作为非权威候选综合。
@@ -240,6 +259,8 @@ Pi 在连续处理同一研究子任务时应使用稳定、简短的 `mission` 
 | 查看最近结构化科研状态 | `/research-state` |
 | 查看 Project Runtime/ProjectView | `/runtime`、`/runtime health`、`/runtime view` |
 | 用 Project State 交接到空白 Session | `/runtime rotate [reason]` |
+| 启动并行只读讨论 | 新终端运行 `pi --analysis` |
+| 将分析交给 Leader / 转为执行 | `/analysis send <message>` / `/runtime promote <reason>` |
 | 新建不带 Project 记忆的 Session | `/runtime new clean [reason]` |
 | 让 clean Session 恢复 Project 继承 | `/runtime inherit [reason]` |
 | 窄幅纠正当前 Project State | 说明修订依据，让 Leader 调用 `amend_project_state` |

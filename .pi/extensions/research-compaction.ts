@@ -167,7 +167,7 @@ export default function (pi: ExtensionAPI) {
 		);
 		const independentSessionSummary = inheritancePolicy === "project"
 			&& latestResearchCompaction?.type === "compaction"
-			&& latestResearchCompaction.details?.inheritancePolicy === "clean"
+			&& ["clean", "analysis"].includes(latestResearchCompaction.details?.inheritancePolicy)
 				? preparation.previousSummary
 				: undefined;
 		const conversationText = serializeConversation(
@@ -186,7 +186,7 @@ export default function (pi: ExtensionAPI) {
 		});
 
 		ctx.ui.notify(
-			`Research compaction #${policy.ordinal}${inheritancePolicy === "clean" ? " (clean Session, no Project inheritance)" : ""}: ${preparation.tokensBefore.toLocaleString()} tokens, keeping ~${policy.keepRecentTokens.toLocaleString()} recent tokens, ${evidence.experiments.length} experiment record(s).`,
+			`Research compaction #${policy.ordinal}${inheritancePolicy === "clean" ? " (clean Session, no Project inheritance)" : inheritancePolicy === "analysis" ? " (Analysis Session, Project read-only)" : ""}: ${preparation.tokensBefore.toLocaleString()} tokens, keeping ~${policy.keepRecentTokens.toLocaleString()} recent tokens, ${evidence.experiments.length} experiment record(s).`,
 			"info",
 		);
 

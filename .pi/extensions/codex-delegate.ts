@@ -307,7 +307,7 @@ async function leaderScope(ctx: ExtensionContext, options: { requireAttached?: b
 	const leaderSessionId = ctx.sessionManager.getSessionId();
 	const attachment = runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID, leaderSessionId);
 	if (options.requireAttached && !attachment) {
-		throw new Error("This Pi Session no longer owns the Research Leader; stop this run or explicitly take over before changing Codex work.");
+		throw new Error("This Pi Session is no longer the Leader Session; stop this run or explicitly take over before changing Codex work.");
 	}
 	return {
 		runtime,
@@ -906,7 +906,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			"Give related work a stable mission label and use reuse=auto to continue its exact Codex Actor thread across Pi sessions in this project workspace; use action=missions to inspect project mission threads.",
 			"Use action=status/result/cancel/resume/respond/steer with the returned job id; Actor-owned jobs remain bound to the exact project workspace but are not owned by one Pi conversation.",
 			"If an executor loses its worker after execution started, it stops at outcome_unknown. Inspect Git and external run state, then use action=reconcile; the harness blocks another writer until this is resolved.",
-			"Background completion and blocking requests enter the project Runtime mailbox and are delivered to the currently attached Research Leader session. respond answers an explicit request; steer corrects an active turn without restarting it.",
+			"Background completion and blocking requests enter the project Runtime mailbox and are delivered to the currently attached Leader Session. respond answers an explicit request; steer corrects an active turn without restarting it.",
 		].join(" "),
 		promptSnippet: "Delegate long operational work or collaboratively clarify a research question with Codex",
 		promptGuidelines: [

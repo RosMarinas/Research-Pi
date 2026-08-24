@@ -270,13 +270,15 @@ export function collectResearchEvidence(branchEntries, sessionId, firstKeptEntry
 			entry?.type === "compaction" &&
 			entry.details?.kind === RESEARCH_COMPACTION_KIND &&
 			entry.details?.version === RESEARCH_COMPACTION_VERSION &&
-			entry.details?.researchState &&
-			(
-				options.inheritancePolicy === "clean"
-					? entry.details.inheritancePolicy === "clean"
-					: entry.details.inheritancePolicy !== "clean"
-			)
+			entry.details?.researchState
 		) {
+			const entryPolicy = ["clean", "analysis"].includes(entry.details.inheritancePolicy)
+				? entry.details.inheritancePolicy
+				: "project";
+			const requestedPolicy = ["clean", "analysis"].includes(options.inheritancePolicy)
+				? options.inheritancePolicy
+				: "project";
+			if (entryPolicy !== requestedPolicy) continue;
 			previousState = entry.details.researchState;
 			previousCompactionEntryId = entry.id;
 			previousProjectRevision = Number.isInteger(entry.details.projectRevision)
@@ -850,7 +852,7 @@ Rules:
 8. A recorded project transition with archived/superseded disposition changes the active research route. Keep the old route as retrievable history, but do not present its claim or next experiment as current. A parallel disposition does not retire it.
 9. Experiment trackRef/trackLabel identify route provenance. Evidence from a retired route may remain scientifically relevant, but do not silently use it as evidence that the current route's intervention occurred.
 10. runGitCommit identifies code that produced a run; recordedAtGit only identifies the workspace when the memo was written. Never substitute one for the other.
-11. An independent clean-Session summary is a candidate synthesis, not Project authority or experimental evidence. Retain useful hypotheses, but require normal provenance before making strong updates.
+11. An independent clean or Analysis Session summary is a candidate synthesis, not Project authority or experimental evidence. Retain useful hypotheses, but require normal provenance before making strong updates.
 
 Required schema:
 {
@@ -893,7 +895,7 @@ ${JSON.stringify(previousState ?? null)}
 Legacy Pi summary (fallible migration input; present only when no structured research state exists):
 ${text(legacyPreviousSummary, 40_000) || "None"}
 
-Independent clean-Session summary (fallible session-local input, never Project authority by itself):
+Independent non-Leader Session summary (fallible clean/analysis input, never Project authority by itself):
 ${text(independentSessionSummary, 40_000) || "None"}
 
 Recorded experiments (authoritative for their exact fields, but interpret according to validityJudgment):
@@ -1012,7 +1014,7 @@ export function buildResearchCompactionDetails({
 		tokensBefore,
 		compactionPolicy: policy,
 		projectRevision: Number.isInteger(projectRevision) ? projectRevision : 0,
-		inheritancePolicy: inheritancePolicy === "clean" ? "clean" : "project",
+		inheritancePolicy: ["clean", "analysis"].includes(inheritancePolicy) ? inheritancePolicy : "project",
 		researchState: state,
 		evidenceLedger: {
 			experiments: evidence.experiments,

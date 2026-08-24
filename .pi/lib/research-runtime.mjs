@@ -32,7 +32,7 @@ const MESSAGE_STATES = new Set(["delivered", "consumed", "superseded"]);
 const TERMINAL_MESSAGE_STATES = new Set(["consumed", "superseded"]);
 const FINAL_ACTION_STATES = new Set(["completed", "failed", "cancelled"]);
 const ROTATION_STATES = new Set(["completed", "cancelled"]);
-const SESSION_INHERITANCE_POLICIES = new Set(["project", "clean"]);
+const SESSION_INHERITANCE_POLICIES = new Set(["project", "clean", "analysis"]);
 const SESSION_INHERITANCE_STATES = new Set(["applied", "cancelled"]);
 const MAX_MESSAGE_LENGTH = 16_000;
 const LEDGER_LOCK_STALE_MS = 30_000;
@@ -69,6 +69,10 @@ function createEventId(prefix) {
 
 function createMessageId() {
 	return createEventId("msg");
+}
+
+export function analysisSessionActorId(sessionId) {
+	return `analysis:${shortHash(String(sessionId ?? "unknown"), 24)}`;
 }
 
 function delay(ms) {
@@ -594,7 +598,7 @@ export async function initializeResearchRuntime(cwd, session, options = {}) {
 	await ensureRuntimeActor(runtime, {
 		id: RESEARCH_LEADER_ACTOR_ID,
 		kind: "leader",
-		label: "Research Leader",
+		label: "Leader Session",
 		provider: "pi",
 	});
 	if (options.attach !== false) await attachRuntimeActor(runtime, RESEARCH_LEADER_ACTOR_ID, session);

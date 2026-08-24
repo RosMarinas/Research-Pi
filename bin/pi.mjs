@@ -92,6 +92,12 @@ function loadConfigurationEnvironment() {
 
 function takeResearchOptions(argv, config) {
 	const args = [...argv];
+	let sessionMode;
+	const analysisIndex = args.indexOf("--analysis");
+	if (analysisIndex >= 0) {
+		sessionMode = "analysis";
+		args.splice(analysisIndex, 1);
+	}
 	let workspace = process.env.PI_RESEARCH_WORKSPACE ?? process.cwd();
 	const index = args.indexOf("--workspace");
 	if (index >= 0) {
@@ -108,7 +114,7 @@ function takeResearchOptions(argv, config) {
 		effectiveConfig = resolveResearchPiConfig({ ...config, activeProfile: profile });
 		args.splice(profileIndex, 2);
 	}
-	return { workspace: resolve(workspace), args, config: effectiveConfig };
+	return { workspace: resolve(workspace), args, config: effectiveConfig, sessionMode };
 }
 
 function applyConfigurationEnvironment(config) {
@@ -176,7 +182,7 @@ function configCommand(argv) {
 
 async function spawnCore(argv) {
 	const baseConfig = prepareConfig();
-	const { workspace, args: userArgs, config } = takeResearchOptions(argv, baseConfig);
+	const { workspace, args: userArgs, config, sessionMode } = takeResearchOptions(argv, baseConfig);
 	writeResearchPiAgentConfig(paths.agentDir, config, { coreVersion });
 	if (!existsSync(workspace)) throw new Error(`Research workspace does not exist: ${workspace}`);
 	loadConfigurationEnvironment();
@@ -194,6 +200,7 @@ async function spawnCore(argv) {
 	process.env.PI_CODING_AGENT_DIR = paths.agentDir;
 	process.env.RESEARCH_PI_CONFIG_DIR = paths.configRoot;
 	process.env.RESEARCH_PI_STATE_DIR = paths.stateRoot;
+	if (sessionMode === "analysis") process.env.RESEARCH_PI_INITIAL_SESSION_MODE = "analysis";
 	if (process.env.RESEARCH_PI_TRACE === "1") process.env.PI_TRACE_DIR = paths.traceDir;
 
 	const coreCli = join(packageRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");

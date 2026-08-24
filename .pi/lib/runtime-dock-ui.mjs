@@ -125,7 +125,8 @@ export function runtimeDockVisible(model, mode = "auto") {
 		|| model.counts.openMessages
 		|| model.project.freshness !== "current"
 		|| !model.leader.isCurrentSessionAttached
-		|| model.leader.inheritancePolicy === "clean",
+		|| model.leader.inheritancePolicy === "clean"
+		|| model.leader.inheritancePolicy === "analysis",
 	);
 }
 
@@ -147,7 +148,9 @@ export class RuntimeDockComponent {
 		const open = this.model.counts.openMessages;
 		const freshness = this.model.project.freshness;
 		const stateColor = freshness === "current" ? "success" : freshness === "missing" || freshness === "stale" ? "warning" : "accent";
-		const leader = this.model.leader.inheritancePolicy === "clean"
+		const leader = this.model.leader.inheritancePolicy === "analysis"
+			? th.fg("accent", "Analysis Session")
+			: this.model.leader.inheritancePolicy === "clean"
 			? th.fg("warning", "clean context")
 			: this.model.leader.isCurrentSessionAttached
 				? th.fg("success", "Leader here")

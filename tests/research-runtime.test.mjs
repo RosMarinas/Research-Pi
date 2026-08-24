@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import researchRuntimeExtension, {
+	analysisSessionToolBlockReason,
 	actorLines,
 	codexRuntimeMessageMarkdown,
 	codexRuntimeMessagePreview,
@@ -105,6 +106,18 @@ test("Runtime status reports live activation instead of historical Actor count",
 	assert.doesNotMatch(actorLines(snapshot), /mission-1/);
 	assert.match(actorLines(snapshot, false), /18 registered/);
 	assert.match(actorLines(snapshot, false), /mission-1 · codex · suspended \(completed\)/);
+});
+
+test("Analysis Session exposes inspection tools but blocks work and Project mutation", () => {
+	for (const tool of ["read", "grep", "find", "ls", "research_memory_search", "research_memory_read", "web_search", "host_capability", "analysis_send_to_leader"]) {
+		assert.equal(analysisSessionToolBlockReason("analysis", tool), null, tool);
+	}
+	assert.equal(analysisSessionToolBlockReason("analysis", "codex_delegate", { action: "result" }), null);
+	assert.match(analysisSessionToolBlockReason("analysis", "bash"), /cannot use bash/);
+	assert.match(analysisSessionToolBlockReason("analysis", "edit"), /cannot use edit/);
+	assert.match(analysisSessionToolBlockReason("analysis", "record_experiment"), /cannot use record_experiment/);
+	assert.match(analysisSessionToolBlockReason("analysis", "codex_delegate", { action: "start", mode: "advisor" }), /cannot use codex_delegate/);
+	assert.equal(analysisSessionToolBlockReason("project", "bash"), null);
 });
 
 test("lifecycle health is observe-only and prioritizes ambiguous side effects", () => {
@@ -491,6 +504,7 @@ test("Runtime steer is non-preemptive by default and leaves context after one se
 			registerCommand(name, command) {
 				commands.set(name, command);
 			},
+			registerTool() {},
 			registerMessageRenderer() {},
 			registerEntryRenderer() {},
 			sendMessage(message, options) {
@@ -590,6 +604,7 @@ test("/runtime rotate creates a fresh Session and records a ProjectView receipt"
 		const pi = {
 			on(name, handler) { handlers.set(name, handler); },
 			registerCommand(name, command) { commands.set(name, command); },
+			registerTool() {},
 			registerMessageRenderer() {},
 			registerEntryRenderer() {},
 			sendMessage(message, options) { sent.push({ message, options }); },
@@ -672,6 +687,7 @@ test("/runtime new clean starts without transcript, ProjectView, mailbox, or Pro
 		const pi = {
 			on(name, handler) { handlers.set(name, handler); },
 			registerCommand(name, command) { commands.set(name, command); },
+			registerTool() {},
 			registerMessageRenderer() {},
 			registerEntryRenderer() {},
 			sendMessage(message, options) { sent.push({ message, options }); },
@@ -771,6 +787,140 @@ test("/runtime new clean starts without transcript, ProjectView, mailbox, or Pro
 	}
 });
 
+test("Analysis Session observes Project state without stealing the Leader, then can hand off or promote", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-analysis-session-"));
+	const previousRoot = process.env.RESEARCH_PI_RUNTIME_DIR;
+	process.env.RESEARCH_PI_RUNTIME_DIR = join(root, "runtime");
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace, { recursive: true });
+		const runtime = await initializeResearchRuntime(workspace, {
+			sessionId: "session-leader",
+			branchAnchorId: "leaf-leader",
+		});
+		await appendRuntimeEventAtRevision(runtime, "project.state.committed", {
+			state: {
+				researchQuestion: "Which mechanism explains the result?",
+				currentClaim: "The current evidence supports H1 only provisionally.",
+				hypotheses: [], observations: [], decisions: [], unresolvedConfounders: [], openQuestions: [],
+				nextExperiment: { question: "Distinguish H1 from H2", intervention: "read-only fixture", distinguishingOutcomes: [], validityChecks: [] },
+				criticalContext: [],
+			},
+			source: { sessionId: "session-leader", entryId: "compact-leader" },
+		}, 0, { id: "project-state:analysis-session-test" });
+		const existingMessage = await createRuntimeMessage(runtime, {
+			id: "message-for-working-leader",
+			type: "notify",
+			from: "user",
+			to: RESEARCH_LEADER_ACTOR_ID,
+			body: "Only the working Leader should receive this.",
+		});
+
+		const handlers = new Map();
+		const commands = new Map();
+		const tools = new Map();
+		const sent = [];
+		const notices = [];
+		const branch = [{
+			type: "custom",
+			id: "analysis-policy",
+			customType: RUNTIME_SESSION_POLICY_ENTRY_KIND,
+			data: { policy: "analysis", reason: "test discussion" },
+		}];
+		const pi = {
+			on(name, handler) { handlers.set(name, handler); },
+			registerCommand(name, command) { commands.set(name, command); },
+			registerTool(tool) { tools.set(tool.name, tool); },
+			registerMessageRenderer() {},
+			registerEntryRenderer() {},
+			sendMessage(message, options) { sent.push({ message, options }); },
+			appendEntry(customType, data) {
+				branch.push({ type: "custom", id: `entry-${branch.length}`, customType, data });
+			},
+		};
+		researchRuntimeExtension(pi);
+		let aborts = 0;
+		const ctx = {
+			cwd: workspace,
+			hasUI: true,
+			ui: {
+				setStatus() {},
+				notify(message) { notices.push(message); },
+				setEditorText() {},
+			},
+			sessionManager: {
+				getSessionId: () => "session-analysis",
+				getSessionFile: () => join(root, "session-analysis.jsonl"),
+				getLeafId: () => "leaf-analysis",
+				getBranch: () => branch,
+			},
+			getContextUsage: () => ({ tokens: 12_000, contextWindow: 384_000, percent: 3.1 }),
+			isIdle: () => true,
+			abort() { aborts += 1; },
+			waitForIdle: async () => {},
+		};
+
+		await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
+		let snapshot = await readRuntimeSnapshot(runtime);
+		assert.equal(runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID)?.sessionId, "session-leader");
+		assert.ok(snapshot.actors.some((actor) => actor.kind === "analysis" && actor.metadata?.sessionId === "session-analysis"));
+		assert.equal(sent.length, 0, "Analysis Session must not drain the Leader mailbox");
+
+		const injected = await handlers.get("before_agent_start")({ type: "before_agent_start" }, ctx);
+		assert.match(injected.message.content, /Session role: Analysis Session/);
+		assert.match(injected.message.content, /Which mechanism explains the result/);
+		await handlers.get("agent_start")({ type: "agent_start" }, ctx);
+		assert.equal(aborts, 0, "Analysis Session can reason without owning the Leader attachment");
+		assert.equal(handlers.get("tool_call")({ toolName: "read", input: {} }), undefined);
+		assert.equal(handlers.get("tool_call")({ toolName: "bash", input: { command: "echo mutate" } }).block, true);
+		await commands.get("steer").handler("@research-leader do work", ctx);
+		assert.equal(runtimeActorAttachment(await readRuntimeSnapshot(runtime), RESEARCH_LEADER_ACTOR_ID)?.sessionId, "session-leader");
+		assert.ok(notices.some((message) => /cannot steer project Actors/.test(message)));
+
+		const filtered = await handlers.get("context")({
+			type: "context",
+			messages: [
+				{ role: "custom", customType: RUNTIME_MESSAGE_KIND, content: "Leader-only mailbox event" },
+				{ role: "user", content: "Discuss H1 versus H2" },
+			],
+		}, ctx);
+		assert.equal(filtered.messages.some((message) => message.customType === RUNTIME_MESSAGE_KIND), false);
+		assert.ok(filtered.messages.some((message) => message.content === "Discuss H1 versus H2"));
+
+		const revisionBeforeCompact = snapshot.revision;
+		await handlers.get("session_compact")({ type: "session_compact", compactionEntry: { type: "compaction", id: "analysis-compact" } }, ctx);
+		assert.equal((await readRuntimeSnapshot(runtime)).revision, revisionBeforeCompact, "Analysis compaction must not write Project State");
+
+		const handoff = await tools.get("analysis_send_to_leader").execute(
+			"tool-call-analysis",
+			{ message: "Observation: H1 is provisional. Proposal: compare the held-out pattern predicted by H2." },
+			undefined,
+			undefined,
+			ctx,
+		);
+		assert.equal(handoff.isError, undefined);
+		snapshot = await readRuntimeSnapshot(runtime);
+		const analysisMessage = snapshot.messages.find((message) => message.metadata?.kind === "analysis_handoff");
+		assert.ok(analysisMessage);
+		assert.match(analysisMessage.from, /^analysis:/);
+		assert.equal(analysisMessage.to, RESEARCH_LEADER_ACTOR_ID);
+		assert.equal(analysisMessage.status, "queued");
+
+		await commands.get("runtime").handler("promote execute the agreed diagnostic", ctx);
+		snapshot = await readRuntimeSnapshot(runtime);
+		assert.equal(runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID)?.sessionId, "session-analysis");
+		assert.equal(runtimeSessionInheritancePolicy(branch), "project");
+		assert.equal(sent.length, 2, "Promotion delivers both the existing Leader message and analysis handoff");
+		assert.deepEqual(new Set(sent.map((item) => item.message.details.messageId)), new Set([existingMessage.id, analysisMessage.id]));
+		assert.equal(handlers.get("tool_call")({ toolName: "bash", input: { command: "echo execute" } }), undefined);
+		assert.ok(notices.some((message) => /now the Leader Session/.test(message)));
+	} finally {
+		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
+		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("opening the Runtime Board does not steal the Leader attachment from another Session", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-board-observe-"));
 	const previousRoot = process.env.RESEARCH_PI_RUNTIME_DIR;
@@ -784,6 +934,7 @@ test("opening the Runtime Board does not steal the Leader attachment from anothe
 		const pi = {
 			on(name, handler) { handlers.set(name, handler); },
 			registerCommand(name, command) { commands.set(name, command); },
+			registerTool() {},
 			registerMessageRenderer() {},
 			registerEntryRenderer() {},
 			sendMessage() {},
@@ -866,6 +1017,7 @@ test("an active Leader Session blocks silent takeover but explicit takeover adva
 		const pi = {
 			on(name, handler) { handlers.set(name, handler); },
 			registerCommand(name, command) { commands.set(name, command); },
+			registerTool() {},
 			registerMessageRenderer() {},
 			registerEntryRenderer() {},
 			sendMessage(payload) { sent.push(payload); },
@@ -934,6 +1086,7 @@ test("a cross-session research transition refreshes ProjectView at the next mode
 		const pi = {
 			on(name, handler) { handlers.set(name, handler); },
 			registerCommand() {},
+			registerTool() {},
 			registerMessageRenderer() {},
 			registerEntryRenderer() {},
 			sendMessage() {},
@@ -995,6 +1148,7 @@ test("ProjectView persists an append-only snapshot and then a short semantic del
 		const pi = {
 			on(name, handler) { handlers.set(name, handler); },
 			registerCommand() {},
+			registerTool() {},
 			registerMessageRenderer() {},
 			registerEntryRenderer() {},
 			sendMessage() {},

@@ -14,6 +14,146 @@ export const CODEX_ADVISOR_PROFILE = "research_pi_advisor";
 
 const SECRET_ENVIRONMENT_PATTERN = /(?:^|_)(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?|AUTH)(?:_|$)/i;
 const DIRECT_PATH_TOOLS = new Set(["read", "write", "edit", "grep", "find", "ls"]);
+const ANALYSIS_REMOTE_READ_COMMANDS = new Set([
+	"cat", "head", "tail", "grep", "rg", "find", "ls", "stat", "wc", "du", "df", "file",
+	"readlink", "realpath", "pwd", "hostname", "uname", "date", "uptime", "whoami", "id", "ps",
+	"pgrep", "jq", "sort", "uniq", "cut", "tr", "column", "journalctl", "squeue", "sacct", "sstat",
+]);
+const ANALYSIS_GIT_READ_SUBCOMMANDS = new Set([
+	"status", "log", "show", "diff", "rev-parse", "ls-files", "ls-tree", "cat-file", "describe", "name-rev",
+]);
+const REMOTE_CREDENTIAL_PATH_PATTERN = /(?:^|[\s'"/])(?:\.ssh|\.gnupg|\.aws|\.config\/gcloud|\.kube)(?:[\s'"/]|$)|(?:^|[\s'"/])(?:id_rsa|id_ed25519|auth\.json|credentials(?:\.json)?|\.env(?:\.[^\s/'"]*)?|[^\s/'"]+\.(?:pem|key))(?:[\s'"/]|$)|\/proc\/(?:self|\d+)\/environ|\/etc\/(?:shadow|gshadow)/i;
+
+function parseAnalysisShellWords(input) {
+	const words = [];
+	let current = "";
+	let quote;
+	let escaped = false;
+	for (const character of String(input ?? "").trim()) {
+		if (escaped) {
+			current += character;
+			escaped = false;
+			continue;
+		}
+		if (character === "\\" && quote !== "'") {
+			escaped = true;
+			continue;
+		}
+		if (quote) {
+			if (character === quote) quote = undefined;
+			else current += character;
+			continue;
+		}
+		if (character === "'" || character === '"') {
+			quote = character;
+			continue;
+		}
+		if (/\s/.test(character)) {
+			if (current) words.push(current);
+			current = "";
+			continue;
+		}
+		current += character;
+	}
+	if (escaped || quote) return null;
+	if (current) words.push(current);
+	return words;
+}
+
+function splitAnalysisPipeline(input) {
+	const parts = [];
+	let current = "";
+	let quote;
+	let escaped = false;
+	for (const character of String(input ?? "").trim()) {
+		if (escaped) {
+			current += character;
+			escaped = false;
+			continue;
+		}
+		if (character === "\\" && quote !== "'") {
+			current += character;
+			escaped = true;
+			continue;
+		}
+		if (quote) {
+			current += character;
+			if (character === quote) quote = undefined;
+			continue;
+		}
+		if (character === "'" || character === '"') {
+			quote = character;
+			current += character;
+			continue;
+		}
+		if (character === "|") {
+			if (!current.trim()) return null;
+			parts.push(current.trim());
+			current = "";
+			continue;
+		}
+		current += character;
+	}
+	if (escaped || quote || !current.trim()) return null;
+	parts.push(current.trim());
+	return parts;
+}
+
+function analysisGitReadOnly(words) {
+	if (words.some((word) => word === "-o" || word === "--output" || word.startsWith("--output=") || word === "--ext-diff" || word === "--textconv")) return false;
+	let index = 1;
+	while (index < words.length) {
+		const word = words[index];
+		if (word === "-C") {
+			index += 2;
+			continue;
+		}
+		if (word === "--no-pager" || word.startsWith("--git-dir=") || word.startsWith("--work-tree=")) {
+			index += 1;
+			continue;
+		}
+		if (word.startsWith("-")) return false;
+		return ANALYSIS_GIT_READ_SUBCOMMANDS.has(word);
+	}
+	return false;
+}
+
+function analysisNvidiaSmiReadOnly(words) {
+	if (words.length === 1) return true;
+	for (let index = 1; index < words.length; index += 1) {
+		const word = words[index];
+		if (word === "-L" || word === "--list-gpus" || word.startsWith("--query-") || word.startsWith("--format=")) continue;
+		if (word === "-i" || word === "--id") {
+			index += 1;
+			if (index < words.length && /^[0-9,]+$/.test(words[index])) continue;
+		}
+		return false;
+	}
+	return true;
+}
+
+export function isAnalysisReadOnlySshCommand(command) {
+	const text = String(command ?? "").trim();
+	if (!text || text.length > 12_000) return false;
+	if (REMOTE_CREDENTIAL_PATH_PATTERN.test(text)) return false;
+	if (/[\r\n;&<>`$(){}]/.test(text) || text.includes("||")) return false;
+	const pipeline = splitAnalysisPipeline(text);
+	if (!pipeline?.length) return false;
+	return pipeline.every((part) => {
+		const words = parseAnalysisShellWords(part);
+		if (!words?.length) return false;
+		const commandName = basename(words[0]);
+		if (commandName === "git") return analysisGitReadOnly(words);
+		if (commandName === "nvidia-smi") return analysisNvidiaSmiReadOnly(words);
+		if (commandName === "systemctl") return ["status", "show", "is-active", "is-enabled"].includes(words[1]);
+		if (commandName === "journalctl" && words.some((word) => word === "--rotate" || word === "--flush" || word === "--sync" || word === "--relinquish-var" || word.startsWith("--vacuum-"))) return false;
+		if (!ANALYSIS_REMOTE_READ_COMMANDS.has(commandName)) return false;
+		if (commandName === "find" && words.some((word) => ["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fls"].includes(word))) return false;
+		if (commandName === "rg" && words.some((word) => word === "--pre" || word.startsWith("--pre=") || word.startsWith("--pre-glob"))) return false;
+		if (commandName === "sort" && words.some((word) => word === "-o" || word === "--output" || word.startsWith("--output="))) return false;
+		return true;
+	});
+}
 
 function expandHome(path) {
 	if (path === "~") return homedir();

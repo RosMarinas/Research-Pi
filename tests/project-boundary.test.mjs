@@ -10,6 +10,7 @@ import {
 	buildSandboxRuntimeConfig,
 	codexPermissionConfigArguments,
 	directToolPath,
+	isAnalysisReadOnlySshCommand,
 	isProtectedProjectMutation,
 	permissionProfileDefinition,
 	resolveBoundaryPath,
@@ -111,6 +112,28 @@ test("sandboxed commands do not inherit secret-named variables", () => {
 	assert.equal(env.OPENAI_API_KEY, undefined);
 	assert.equal(env.SSH_AUTH_SOCK, undefined);
 	assert.equal(env.RUN_TOKEN, undefined);
+});
+
+test("Analysis Session SSH accepts inspection commands and rejects remote side effects", () => {
+	for (const command of [
+		"cat /home/research/runs/r1/summary.json",
+		"rg 'loss|accuracy' /home/research/runs/r1 | head -50",
+		"git -C /home/research/project log -5 --oneline",
+		"nvidia-smi --query-gpu=name,memory.used --format=csv,noheader",
+		"squeue -u researcher",
+	]) assert.equal(isAnalysisReadOnlySshCommand(command), true, command);
+
+	for (const command of [
+		"python3 -c 'print(1)'",
+		"cat result.json > copied.json",
+		"find /home/research/runs -delete",
+		"git reset --hard HEAD~1",
+		"git diff --output=/tmp/result.diff",
+		"cat ~/.ssh/id_ed25519",
+		"cat result.json; rm result.json",
+		"journalctl --vacuum-time=1s",
+		"nvidia-smi -pm 1",
+	]) assert.equal(isAnalysisReadOnlySshCommand(command), false, command);
 });
 
 test("Codex executor profile keeps project and Git writable with public network", () => {

@@ -18,7 +18,7 @@ Research Pi 是面向 AI、机器人、通信、优化与仿真等计算实验�
 
 ```mermaid
 flowchart LR
-    U[User] <--> P[Pi Research Leader]
+    U[User] <--> P[Pi Leader Session]
     P <--> R[Project Runtime]
     R --> V[ProjectView]
     R --> E[Evidence / Memory]
@@ -52,6 +52,12 @@ cd /path/to/research-project
 pi
 ```
 
+如果只想阅读结果、讨论和分析，而不允许当前 Session 改代码或启动实验：
+
+```sh
+pi --analysis
+```
+
 首次接入现有项目时，可以直接说：
 
 ```text
@@ -81,12 +87,14 @@ ProjectView 使用 append-only snapshot/delta：研究 revision 或 Git identity
 |---|---|
 | `/runtime` | 查看 ProjectView、Actors、Actions、mailbox 和 Session 状态 |
 | `/runtime rotate` | 新建不复制旧 transcript、但继承 Project 状态的 Leader Session |
+| `pi --analysis` | 新开只读 Analysis Session；不抢占 Leader，不接收其 mailbox |
+| `/analysis send <摘要>` | 把有价值的讨论投递给 Leader；用 `/runtime promote <原因>` 转为 Leader |
 | `/runtime new clean` | 新建不继承 ProjectView 的纯净 Session；用 `/runtime inherit` 恢复 |
 | `/memory <query>` | 搜索当前 Project 的历史 Session 与实验记录 |
 | `/side <问题>` | 隔离追问；有价值时用 `/side use <id>` 提升到主线 |
 | `/watch` | 观察 Codex 的命令、文件修改和 subagent 活动，不污染 Leader 上下文 |
 | `/actors`、`/inbox` | 查看活跃 Actor 和待处理 Runtime 消息 |
-| `/model` | 切换并持久化 Research Leader 模型 |
+| `/model` | 切换并持久化 Leader Session 模型 |
 | `/config` | 查看统一配置和切换主题 |
 | `/boundary doctor` | 检查项目、Git、Python、sandbox 与 Codex 环境 |
 

@@ -1,6 +1,7 @@
 import { getMarkdownTheme, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Box, Markdown, Text } from "@earendil-works/pi-tui";
 import { join } from "node:path";
+import { Type } from "typebox";
 import { getGitSnapshot, HARNESS_ROOT } from "../lib/codex-jobs.mjs";
 import {
 	PROJECT_VIEW_DELTA_KIND,
@@ -37,12 +38,14 @@ import {
 	RUNTIME_SESSION_POLICY_ENTRY_KIND,
 	RuntimeAttachmentChangedError,
 	USER_ACTOR_ID,
+	analysisSessionActorId,
 	appendRuntimeEvent,
 	appendRuntimeEventAtRevision,
 	claimRuntimeActorAttachment,
 	createRuntimeMessage,
 	consumeRuntimeMessageForAttachment,
 	detachRuntimeActor,
+	ensureRuntimeActor,
 	initializeResearchRuntime,
 	isRuntimeActorAttached,
 	pendingRuntimeMessages,
@@ -66,7 +69,7 @@ type RuntimeContext = Awaited<ReturnType<typeof initializeResearchRuntime>>;
 type RuntimeMessage = ReturnType<typeof pendingRuntimeMessages>[number];
 type RuntimeSnapshot = Awaited<ReturnType<typeof readRuntimeSnapshot>>;
 type RuntimeActivation = RuntimeSnapshot["activations"][number];
-type SessionInheritancePolicy = "project" | "clean";
+type SessionInheritancePolicy = "project" | "clean" | "analysis";
 type ProjectViewReceipt = {
 	version: number;
 	persistent: true;
@@ -82,7 +85,7 @@ type ProjectViewReceipt = {
 class RuntimeLeaderBusyError extends Error {
 	readonly activation: RuntimeActivation;
 	constructor(activation: RuntimeActivation) {
-		super(`Research Leader is active in Session ${String(activation.sessionId).slice(-8)}. Wait for it to settle or use /runtime takeover <reason>.`);
+		super(`The Leader Session is active in Session ${String(activation.sessionId).slice(-8)}. Wait for it to settle or use /runtime takeover <reason>.`);
 		this.name = "RuntimeLeaderBusyError";
 		this.activation = activation;
 	}
@@ -96,6 +99,37 @@ const UI_DENSITY = process.env.RESEARCH_PI_UI_DENSITY === "compact" ? "compact" 
 const UI_RUNTIME_STRIP = ["auto", "always", "off"].includes(process.env.RESEARCH_PI_UI_RUNTIME_STRIP ?? "")
 	? process.env.RESEARCH_PI_UI_RUNTIME_STRIP as "auto" | "always" | "off"
 	: "auto";
+const ANALYSIS_SAFE_TOOLS = new Set([
+	"read",
+	"grep",
+	"find",
+	"ls",
+	"research_memory_search",
+	"research_memory_read",
+	"web_search",
+	"host_capability",
+	"analysis_send_to_leader",
+]);
+const ANALYSIS_CODEX_READ_ACTIONS = new Set(["status", "result", "missions"]);
+
+export function analysisSessionToolBlockReason(
+	policy: SessionInheritancePolicy,
+	toolName: string,
+	input: Record<string, unknown> = {},
+): string | null {
+	if (policy !== "analysis") return null;
+	if (ANALYSIS_SAFE_TOOLS.has(toolName)) return null;
+	if (toolName === "codex_delegate" && ANALYSIS_CODEX_READ_ACTIONS.has(String(input.action ?? ""))) return null;
+	return `Analysis Session cannot use ${toolName}: it may inspect local/remote evidence and discuss it, but cannot modify code, run experiments, steer workers, or update Project State. Use analysis_send_to_leader, or /runtime promote <reason> to become the Leader Session.`;
+}
+
+function analysisSessionContext(content: string): string {
+	return [
+		"# Session role: Analysis Session",
+		"You are a read-only research thinking partner. Discuss, explain, compare hypotheses, and inspect local or approved remote evidence. Do not modify code, start experiments, steer workers, consume the Leader mailbox, or update Project State. Treat new interpretations as proposals, not evidence. Use analysis_send_to_leader when the working Leader should receive a concise synthesis; the user can explicitly promote this Session if execution is needed.",
+		content,
+	].filter(Boolean).join("\n\n");
+}
 
 function compact(text: string, limit = 160): string {
 	const value = String(text ?? "").replace(/\s+/g, " ").trim();
@@ -185,6 +219,7 @@ export function formatRuntimeStatus(projectKey: string, snapshot: RuntimeSnapsho
 	if (!states.length) states.push("idle");
 	if (open) states.push(`${open} open`);
 	if (inheritancePolicy === "clean") states.push("clean context");
+	if (inheritancePolicy === "analysis") states.push("analysis only");
 	return `Runtime ${projectKey.slice(-8)} · ${states.join(" · ")}`;
 }
 
@@ -202,6 +237,8 @@ export function runtimeHealth(
 	const baseRotation = runtimeRotationReadiness(snapshot);
 	const rotation = inheritancePolicy === "clean"
 		? { ...baseRotation, ready: false, blockers: ["current Session intentionally has clean context; use /runtime inherit before a Project-aware handoff", ...baseRotation.blockers] }
+		: inheritancePolicy === "analysis"
+			? { ...baseRotation, ready: false, blockers: ["current Session is analysis-only; use /runtime promote before a Leader handoff", ...baseRotation.blockers] }
 		: baseRotation;
 	let recommendation = "continue";
 	let reason = "No Runtime recovery issue or context-pressure threshold currently requires intervention.";
@@ -278,7 +315,7 @@ export function actorLines(snapshot: RuntimeSnapshot, activeOnly = true): string
 					? `suspended (${latestAction?.status ?? "resumable"})`
 					: latestAction?.status ?? "registered";
 			} else state = attachment ? `attached ${String(attachment.sessionId).slice(-8)}` : "detached";
-			return `- ${target} · ${actor.label} · ${actor.kind} · ${state}`;
+			return `- ${target} · ${actor.id === RESEARCH_LEADER_ACTOR_ID ? "Leader Session" : actor.label} · ${actor.kind} · ${state}`;
 		}) : ["No active Runtime Actor. Use /actors all to inspect registered and suspended Actors."]),
 	].join("\n");
 }
@@ -368,6 +405,24 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	const runtimeDockClock = createRuntimeDockClock(() => runtimeDockTui?.requestRender?.());
 	let attachmentLossNotified = false;
 	let sessionInheritancePolicy: SessionInheritancePolicy = "project";
+	let requestedInitialSessionMode: SessionInheritancePolicy | undefined =
+		process.env.RESEARCH_PI_INITIAL_SESSION_MODE === "analysis" ? "analysis" : undefined;
+
+	const isAnalysisSession = () => sessionInheritancePolicy === "analysis";
+	const isProjectAwareSession = () => sessionInheritancePolicy !== "clean";
+
+	const ensureAnalysisSessionActor = async (activeRuntime: RuntimeContext, ctx: ExtensionContext) => {
+		const sessionId = ctx.sessionManager.getSessionId();
+		const actorId = analysisSessionActorId(sessionId);
+		await ensureRuntimeActor(activeRuntime, {
+			id: actorId,
+			kind: "analysis",
+			label: `Analysis Session ${String(sessionId).slice(-8)}`,
+			provider: "pi",
+			metadata: { sessionId },
+		});
+		return actorId;
+	};
 
 	const getRuntime = async (
 		ctx: ExtensionContext,
@@ -500,7 +555,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		const snapshot = await readRuntimeSnapshot(activeRuntime);
 		const summary = runtimeActorSummary(snapshot);
 		const open = unconsumedRuntimeMessages(snapshot).length;
-		const showFooterStatus = summary.active > 0 || summary.waiting > 0 || open > 0 || sessionInheritancePolicy === "clean" || UI_RUNTIME_STRIP === "off";
+		const showFooterStatus = summary.active > 0 || summary.waiting > 0 || open > 0 || sessionInheritancePolicy === "clean" || sessionInheritancePolicy === "analysis" || UI_RUNTIME_STRIP === "off";
 		ctx.ui.setStatus(
 			"research_runtime",
 			showFooterStatus ? formatRuntimeStatus(activeRuntime.projectKey, snapshot, sessionInheritancePolicy) : undefined,
@@ -564,7 +619,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		const sessionId = ctx.sessionManager.getSessionId();
 		const attachment = runtimeActorAttachment(await readRuntimeSnapshot(activeRuntime), RESEARCH_LEADER_ACTOR_ID, sessionId);
 		if (!attachment) {
-			return { status: "queued" as const, detail: "Research Leader is attached to another Pi session" };
+			return { status: "queued" as const, detail: "The Leader Session is attached to another Pi session" };
 		}
 		if (options.preempt && !ctx.isIdle()) ctx.abort();
 		const idle = ctx.isIdle();
@@ -721,12 +776,22 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (event, ctx) => {
 		const activeRuntime = await getRuntime(ctx);
 		let snapshot = await readRuntimeSnapshot(activeRuntime);
-		sessionInheritancePolicy = runtimeSessionInheritancePolicy(
-			ctx.sessionManager.getBranch(),
-			snapshot,
-			ctx.sessionManager.getSessionId(),
-		) as SessionInheritancePolicy;
-		persistedProjectView = sessionInheritancePolicy === "project"
+		if (requestedInitialSessionMode === "analysis") {
+			pi.appendEntry(RUNTIME_SESSION_POLICY_ENTRY_KIND, {
+				policy: "analysis",
+				reason: "pi --analysis",
+				projectKey: activeRuntime.projectKey,
+			});
+			sessionInheritancePolicy = "analysis";
+			requestedInitialSessionMode = undefined;
+		} else {
+			sessionInheritancePolicy = runtimeSessionInheritancePolicy(
+				ctx.sessionManager.getBranch(),
+				snapshot,
+				ctx.sessionManager.getSessionId(),
+			) as SessionInheritancePolicy;
+		}
+		persistedProjectView = isProjectAwareSession()
 			? latestProjectViewReceipt(ctx.sessionManager.getBranch())
 			: undefined;
 		let view: Awaited<ReturnType<typeof refreshProjectView>>["view"] | null = null;
@@ -746,7 +811,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 				});
 				snapshot = await readRuntimeSnapshot(activeRuntime);
 			}
-			if (sessionInheritancePolicy === "project") {
+			if (isProjectAwareSession()) {
 				const refreshed = await refreshProjectView(ctx, snapshot);
 				snapshot = refreshed.snapshot;
 				view = refreshed.view;
@@ -778,7 +843,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 					);
 				}
 			}
-		} else if (sessionInheritancePolicy === "project") {
+		} else if (isProjectAwareSession()) {
 			const refreshed = await refreshProjectView(ctx, snapshot);
 			snapshot = refreshed.snapshot;
 			view = refreshed.view;
@@ -791,7 +856,13 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		for (const message of snapshot.messages) {
 			if (message.status === "consumed") consumedMessageIds.add(message.id);
 		}
-		if (sessionInheritancePolicy === "project") {
+		if (sessionInheritancePolicy === "analysis") {
+			if (await isRuntimeActorAttached(activeRuntime, RESEARCH_LEADER_ACTOR_ID, ctx.sessionManager.getSessionId())) {
+				await detachRuntimeActor(activeRuntime, RESEARCH_LEADER_ACTOR_ID, ctx.sessionManager.getSessionId(), localAttachmentEpoch);
+				localAttachmentEpoch = undefined;
+			}
+			await ensureAnalysisSessionActor(activeRuntime, ctx);
+		} else if (sessionInheritancePolicy === "project") {
 			await deliverOpenLeaderMessages(activeRuntime, snapshot, ctx, { triggerTurn: false });
 		} else if (ctx.hasUI) {
 			ctx.ui.notify("Clean Runtime Session: ProjectView and mailbox injection are paused. Use /runtime inherit to restore them.", "info");
@@ -826,10 +897,13 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 
 	pi.on("input", async (event, ctx) => {
 		if (event.source === "extension") return;
+		if (/^\/runtime\s+analysis(?:\s|$)/.test(event.text.trim())) return;
 		try {
-			const activeRuntime = await getRuntime(ctx, { claim: true });
+			const activeRuntime = await getRuntime(ctx, { claim: !isAnalysisSession() });
 			attachmentLossNotified = false;
-			if (sessionInheritancePolicy === "project") {
+			if (isAnalysisSession()) {
+				await refreshProjectView(ctx);
+			} else if (sessionInheritancePolicy === "project") {
 				const { snapshot } = await refreshProjectView(ctx);
 				if (await deliverOpenLeaderMessages(activeRuntime, snapshot, ctx, { triggerTurn: false })) {
 					await refreshProjectView(ctx);
@@ -849,7 +923,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		if (sessionInheritancePolicy === "clean") return;
 		const activeRuntime = await getRuntime(ctx);
 		const snapshot = await readRuntimeSnapshot(activeRuntime);
-		if (!runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID, ctx.sessionManager.getSessionId())) return;
+		if (!isAnalysisSession() && !runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID, ctx.sessionManager.getSessionId())) return;
 		if (projectViewDirty || projectViewRefreshFingerprint(snapshot) !== projectViewSnapshotHash) {
 			await refreshProjectView(ctx, snapshot);
 		}
@@ -860,9 +934,10 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		const previous = persistedProjectView;
 		const mode = projectViewPersistenceMode(view, previous);
 		if (!mode) return;
-		const content = mode === "snapshot"
+		const rawContent = mode === "snapshot"
 			? projectViewText
 			: renderProjectViewDelta(view, previous?.projectRevision ?? 0);
+		const content = isAnalysisSession() ? analysisSessionContext(rawContent) : rawContent;
 		persistedProjectView = projectViewReceipt(view, mode);
 		return {
 			message: {
@@ -875,12 +950,13 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_start", async (_event, ctx) => {
+		if (isAnalysisSession()) return;
 		const activeRuntime = await getRuntime(ctx);
 		const sessionId = ctx.sessionManager.getSessionId();
 		const attachment = runtimeActorAttachment(await readRuntimeSnapshot(activeRuntime), RESEARCH_LEADER_ACTOR_ID, sessionId);
 		if (!attachment) {
 			ctx.abort();
-			if (ctx.hasUI) ctx.ui.notify("This Session no longer owns the Research Leader; the agent run was stopped before further model work.", "warning");
+			if (ctx.hasUI) ctx.ui.notify("This is no longer the Leader Session; the agent run was stopped before further model work.", "warning");
 			return;
 		}
 		try {
@@ -892,7 +968,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		} catch (error) {
 			if (!(error instanceof RuntimeAttachmentChangedError)) throw error;
 			ctx.abort();
-			if (ctx.hasUI) ctx.ui.notify("Research Leader ownership changed while this run was starting; no model work was allowed to begin.", "warning");
+			if (ctx.hasUI) ctx.ui.notify("Leader Session ownership changed while this run was starting; no model work was allowed to begin.", "warning");
 		}
 	});
 
@@ -913,6 +989,15 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		"codex_delegate",
 	]);
 
+	pi.on("tool_call", (event) => {
+		const reason = analysisSessionToolBlockReason(
+			sessionInheritancePolicy,
+			event.toolName,
+			(event.input ?? {}) as Record<string, unknown>,
+		);
+		return reason ? { block: true, reason, terminate: false } : undefined;
+	});
+
 	pi.on("tool_execution_end", (event) => {
 		// Refresh only after tools that can change project evidence, Git, files,
 		// or Runtime delegation state. The next context hook performs one
@@ -924,11 +1009,11 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		const activeRuntime = await getRuntime(ctx);
 		const snapshot = await readRuntimeSnapshot(activeRuntime);
 		const sessionId = ctx.sessionManager.getSessionId();
-		if (!runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID, sessionId)) {
+		if (!isAnalysisSession() && !runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID, sessionId)) {
 			ctx.abort();
 			if (ctx.hasUI && !attachmentLossNotified) {
 				attachmentLossNotified = true;
-				ctx.ui.notify("Research Leader ownership moved to another Session; this run stopped at the next model boundary.", "warning");
+				ctx.ui.notify("Leader Session ownership moved to another Session; this run stopped at the next model boundary.", "warning");
 			}
 			return { messages: event.messages };
 		}
@@ -945,6 +1030,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		if (projectViewDirty || snapshotHash !== projectViewSnapshotHash) await refreshProjectView(ctx, snapshot);
 		const runtimeMessagesById = new Map(snapshot.messages.map((message) => [message.id, message]));
 		const messages = event.messages.filter((message) => {
+			if (isAnalysisSession() && message.role === "custom" && message.customType === RUNTIME_MESSAGE_KIND) return false;
 			if (message.role !== "custom" || message.customType !== RUNTIME_MESSAGE_KIND) return true;
 			const messageId = String(message.details?.messageId ?? "");
 			if (!messageId) return true;
@@ -975,6 +1061,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		) {
 			updateText = renderProjectViewDelta(view, persistedProjectView?.projectRevision ?? 0);
 		}
+		if (isAnalysisSession() && updateText) updateText = analysisSessionContext(updateText);
 		return {
 			messages: materializeProjectViewDelta(messages, updateText, {
 				fingerprint: projectViewHash,
@@ -986,6 +1073,10 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	pi.on("session_compact", async (event, ctx) => {
 		if (sessionInheritancePolicy === "clean") {
 			if (ctx.hasUI) ctx.ui.notify("Clean Session compaction remains session-local and did not replace Project State.", "info");
+			return;
+		}
+		if (sessionInheritancePolicy === "analysis") {
+			if (ctx.hasUI) ctx.ui.notify("Analysis Session compaction remains local and did not replace Project State.", "info");
 			return;
 		}
 		const activeRuntime = await getRuntime(ctx, { claim: true });
@@ -1028,13 +1119,69 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		await refreshStatus(ctx);
 	});
 
+	const queueAnalysisForLeader = async (body: string, ctx: ExtensionContext) => {
+		if (!isAnalysisSession()) throw new Error("This command is available only in an Analysis Session.");
+		const activeRuntime = await getRuntime(ctx);
+		const actorId = await ensureAnalysisSessionActor(activeRuntime, ctx);
+		const sessionId = ctx.sessionManager.getSessionId();
+		const message = await createRuntimeMessage(activeRuntime, {
+			type: "notify",
+			from: actorId,
+			to: RESEARCH_LEADER_ACTOR_ID,
+			body: `[Analysis Session handoff ${String(sessionId).slice(-8)}]\n${body.trim()}`,
+			metadata: { kind: "analysis_handoff", sourceSessionId: sessionId },
+		});
+		await refreshStatus(ctx);
+		return message;
+	};
+
+	pi.registerTool({
+		name: "analysis_send_to_leader",
+		label: "Send Analysis to Leader",
+		description: "Send a concise discussion synthesis or recommendation from this read-only Analysis Session to the durable mailbox of the current Leader Session. This does not update Project State or count as evidence.",
+		promptSnippet: "Send a concise candidate analysis to the working Leader without changing Project State",
+		promptGuidelines: [
+			"Use only when the user wants the working Leader to receive a useful synthesis, competing explanation, question, or recommendation.",
+			"Separate observations already present in ProjectView from your new interpretation. The message is a proposal, not experimental evidence.",
+		],
+		parameters: Type.Object({
+			message: Type.String({ minLength: 1, maxLength: 12_000, description: "Concise analysis to queue for the Leader Session" }),
+		}),
+		executionMode: "sequential",
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			try {
+				const message = await queueAnalysisForLeader(params.message, ctx);
+				return {
+					content: [{ type: "text", text: `Queued ${message.id} for the Leader Session. It remains a proposal until the Leader or user promotes it into Project State.` }],
+					details: { messageId: message.id, status: message.status },
+				};
+			} catch (error) {
+				return { content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }], isError: true };
+			}
+		},
+	});
+
+	pi.registerCommand("analysis", {
+		description: "Send a discussion synthesis to the Leader (/analysis send <message>)",
+		handler: async (args, ctx) => {
+			try {
+				const match = args.trim().match(/^send\s+([\s\S]+)$/);
+				if (!match) throw new Error("Usage: /analysis send <message>");
+				const message = await queueAnalysisForLeader(match[1], ctx);
+				ctx.ui.notify(`${message.id} queued for the Leader Session; Project State was not changed.`, "info");
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			}
+		},
+	});
+
 	pi.registerCommand("runtime", {
-		description: "Open the Project Runtime board, manage Session inheritance, or manually rotate the Leader Session",
+		description: "Open Project Runtime, enter Analysis Session mode, or explicitly hand off the Leader Session",
 		handler: async (args, ctx) => {
 			try {
 				const [mode = "board", ...rest] = args.trim().split(/\s+/).filter(Boolean);
-				if (!["board", "health", "recommend", "view", "rotate", "takeover", "new", "inherit"].includes(mode)) {
-					throw new Error("Usage: /runtime [board|health|recommend|view|rotate [reason]|takeover <reason>|new clean [reason]|inherit [reason]]");
+				if (!["board", "health", "recommend", "view", "rotate", "takeover", "analysis", "promote", "new", "inherit"].includes(mode)) {
+					throw new Error("Usage: /runtime [board|health|recommend|view|analysis [reason]|promote <reason>|rotate [reason]|takeover <reason>|new <clean|analysis> [reason]|inherit [reason]]");
 				}
 				if (mode === "board") {
 					await showRuntimeBoard(ctx);
@@ -1042,6 +1189,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 					return;
 				}
 				if (mode === "takeover") {
+					if (isAnalysisSession()) throw new Error("Analysis Session promotion must be explicit: use /runtime promote <reason>.");
 					const reason = rest.join(" ").trim();
 					if (!reason) throw new Error("Usage: /runtime takeover <reason>");
 					const activeRuntime = await getRuntime(ctx, { claim: true, force: true, reason });
@@ -1053,19 +1201,59 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 						}
 					}
 					ctx.ui.notify(
-						`This ${sessionInheritancePolicy === "clean" ? "clean " : ""}Session now owns the Research Leader. A previous active Session will stop at its next model boundary.`,
+						`This ${sessionInheritancePolicy === "clean" ? "clean " : ""}Session is now the Leader Session. A previous active Session will stop at its next model boundary.`,
 						"warning",
 					);
 					await refreshStatus(ctx);
 					return;
 				}
+				if (mode === "analysis") {
+					const reason = rest.join(" ").trim() || "read-only discussion and analysis";
+					const activeRuntime = await getRuntime(ctx);
+					if (await isRuntimeActorAttached(activeRuntime, RESEARCH_LEADER_ACTOR_ID, ctx.sessionManager.getSessionId())) {
+						await detachRuntimeActor(activeRuntime, RESEARCH_LEADER_ACTOR_ID, ctx.sessionManager.getSessionId(), localAttachmentEpoch);
+						localAttachmentEpoch = undefined;
+					}
+					pi.appendEntry(RUNTIME_SESSION_POLICY_ENTRY_KIND, {
+						policy: "analysis",
+						reason,
+						projectKey: activeRuntime.projectKey,
+					});
+					sessionInheritancePolicy = "analysis";
+					persistedProjectView = undefined;
+					await ensureAnalysisSessionActor(activeRuntime, ctx);
+					await refreshProjectView(ctx);
+					ctx.ui.notify("This is now an Analysis Session: local and approved remote evidence are readable, but execution and Project State writes are blocked. The Leader mailbox remains with the Leader Session.", "info");
+					await refreshStatus(ctx);
+					return;
+				}
+				if (mode === "promote") {
+					if (!isAnalysisSession()) throw new Error("Only an Analysis Session needs promotion; this Session is already a Leader or clean Session.");
+					const reason = rest.join(" ").trim();
+					if (!reason) throw new Error("Usage: /runtime promote <reason>");
+					const activeRuntime = await getRuntime(ctx, { claim: true, force: true, reason });
+					pi.appendEntry(RUNTIME_SESSION_POLICY_ENTRY_KIND, {
+						policy: "project",
+						reason,
+						projectKey: activeRuntime.projectKey,
+					});
+					sessionInheritancePolicy = "project";
+					persistedProjectView = undefined;
+					attachmentLossNotified = false;
+					const { snapshot } = await refreshProjectView(ctx);
+					await deliverOpenLeaderMessages(activeRuntime, snapshot, ctx, { triggerTurn: false });
+					ctx.ui.notify("This Session is now the Leader Session. Execution tools and the durable Leader mailbox are active; a previous Leader will stop at its next model boundary.", "warning");
+					await refreshStatus(ctx);
+					return;
+				}
 				if (mode === "new") {
-					if (rest[0] !== "clean") throw new Error("Usage: /runtime new clean [reason]");
+					if (!["clean", "analysis"].includes(rest[0] ?? "")) throw new Error("Usage: /runtime new <clean|analysis> [reason]");
 					await ctx.waitForIdle();
-					const activeRuntime = await getRuntime(ctx, { claim: true });
-					const reason = rest.slice(1).join(" ").trim() || "explicit clean-context Session";
+					const policy = rest[0] as "clean" | "analysis";
+					const activeRuntime = await getRuntime(ctx, { claim: !isAnalysisSession() });
+					const reason = rest.slice(1).join(" ").trim() || (policy === "analysis" ? "fresh read-only Analysis Session" : "explicit clean-context Session");
 					const request = await requestRuntimeSessionInheritance(activeRuntime, {
-						policy: "clean",
+						policy,
 						fromSessionId: ctx.sessionManager.getSessionId(),
 						fromSessionFile: ctx.sessionManager.getSessionFile(),
 						reason,
@@ -1075,7 +1263,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 						result = await ctx.newSession({
 							setup: async (sessionManager) => {
 								sessionManager.appendCustomEntry(RUNTIME_SESSION_POLICY_ENTRY_KIND, {
-									policy: "clean",
+									policy,
 									requestId: request.id,
 									reason,
 									projectKey: activeRuntime.projectKey,
@@ -1092,12 +1280,13 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 						await settleRuntimeSessionInheritance(activeRuntime, request.id, "cancelled", {
 							reason: "Pi session replacement was cancelled",
 						});
-						ctx.ui.notify("Clean Session creation was cancelled; the current Session remains project-aware.", "info");
+						ctx.ui.notify(`${policy === "analysis" ? "Analysis" : "Clean"} Session creation was cancelled; the current Session remains unchanged.`, "info");
 					}
 					return;
 				}
 				if (mode === "inherit") {
 					await ctx.waitForIdle();
+					if (isAnalysisSession()) throw new Error("Use /runtime promote <reason> to turn an Analysis Session into the Leader Session.");
 					const activeRuntime = await getRuntime(ctx, { claim: true });
 					if (sessionInheritancePolicy === "project") {
 						ctx.ui.notify("This Session already inherits ProjectView and Runtime mailbox.", "info");
@@ -1117,6 +1306,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 					return;
 				}
 				if (mode === "rotate") {
+					if (isAnalysisSession()) throw new Error("Analysis Session cannot rotate the Leader. Use /runtime promote <reason>, or continue analysis without taking execution ownership.");
 					if (sessionInheritancePolicy === "clean") {
 						throw new Error("/runtime rotate is a Project-aware handoff. Use /runtime inherit first, or continue the clean Session without Project inheritance.");
 					}
@@ -1193,6 +1383,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		description: "Send an ask/reply/notify/result to a project Actor",
 		handler: async (args, ctx) => {
 			try {
+				if (isAnalysisSession()) throw new Error("Analysis Session cannot send operational Actor messages. Use /analysis send <message> to hand a proposal to the Leader Session.");
 				const match = args.trim().match(/^(ask|reply|notify|result)\s+([\s\S]+)$/);
 				if (!match || !MESSAGE_TYPES.has(match[1])) throw new Error("Usage: /message <ask|reply|notify|result> @actor <message>");
 				const { target, body } = splitTargetAndBody(match[2]);
@@ -1224,6 +1415,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		description: "Correct a project Actor without aborting by default; add --preempt for urgent interruption",
 		handler: async (args, ctx) => {
 			try {
+				if (isAnalysisSession()) throw new Error("Analysis Session cannot steer project Actors. Send analysis to the Leader or use /runtime promote <reason> first.");
 				let input = args.trim();
 				const preempt = input.startsWith("--preempt ");
 				if (preempt) input = input.slice("--preempt ".length).trim();

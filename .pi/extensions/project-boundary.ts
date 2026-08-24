@@ -24,6 +24,7 @@ import {
 	buildSandboxRuntimeConfig,
 	directToolPath,
 	isProtectedProjectMutation,
+	isAnalysisReadOnlySshCommand,
 	likelySandboxDenial,
 	prepareBoundaryRuntime,
 	readGitIdentity,
@@ -31,6 +32,7 @@ import {
 	runCodexSandboxPreflight,
 	sanitizeBoundaryEnvironment,
 } from "../lib/project-boundary.mjs";
+import { runtimeSessionInheritancePolicy } from "../lib/research-runtime.mjs";
 import { resolveSystemRuntimePolicy } from "../lib/security-policy.mjs";
 
 type BoundaryRuntime = Awaited<ReturnType<typeof prepareBoundaryRuntime>>;
@@ -111,6 +113,16 @@ function capabilityInput(params: any) {
 		};
 	}
 	throw new Error(`Unsupported host capability action: ${params.action}`);
+}
+
+function analysisCapabilityBlockReason(ctx: any, params: any): string | null {
+	if (runtimeSessionInheritancePolicy(ctx.sessionManager.getBranch()) !== "analysis") return null;
+	if (params.action === "list" || params.action === "read") return null;
+	if (params.action === "ssh" && isAnalysisReadOnlySshCommand(params.remoteCommand)) return null;
+	if (params.action === "ssh") {
+		return "Analysis Session SSH is inspection-only. Use one read-only command or pipeline such as cat/head/tail/grep/rg/find/ls/stat/git status|log|show|diff, scheduler queries, or nvidia-smi queries. Shell chaining, redirection, interpreters, credential paths, writes, process control, and experiment launch commands are blocked.";
+	}
+	return `Analysis Session cannot use host_capability action=${String(params.action)}. External exact-file reads and conservatively validated SSH inspection are allowed; host commands and scripts require promotion to the Leader Session.`;
 }
 
 function describeCapabilityRequest(request: any, operation?: any): string {
@@ -331,11 +343,13 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 		description: [
 			"Use a host capability when a justified project operation needs SSH credentials or host-user authority.",
 			"read accesses an approved external file; ssh uses an approved exact target with opaque credentials; command runs an argv inside the project cwd with host authority; script is the legacy strict exact-script mode.",
+			"In an Analysis Session, only list, exact external reads, and conservatively validated read-only SSH inspection commands are available.",
 			"Project-trusted SSH targets and command prefixes run without repeated approval. Never use this tool to inspect private keys, tokens, or credential stores.",
 		].join(" "),
 		promptSnippet: "Use project-trusted SSH or host-command capabilities instead of handing executable commands back to the user",
 		promptGuidelines: [
-			"Run arbitrary uv, Python, shell, Node, Git, and test commands normally inside the project sandbox. Command syntax such as sh -c or python -c is not itself a reason to refuse.",
+			"In a Leader Session, run arbitrary uv, Python, shell, Node, Git, and test commands normally inside the project sandbox. In an Analysis Session, use read tools or read-only SSH inspection instead.",
+			"For Analysis Session SSH inspection, use absolute remote paths and a single read command or read-only pipeline; do not use cd, shell chaining, redirection, an interpreter, or a process-changing command.",
 			"When a justified command needs host SSH access or another host-user capability, call host_capability command with an exact argv. Reuse a listed grantId when possible; its approved cwd is then restored automatically.",
 			"Direct SSH uses opaque credentials. Host-command has broader user authority and must match an approved exact command or project prefix; never request, read, print, copy, or transmit private keys or tokens.",
 			"If a command grant reports a cwd mismatch, retry the same command action with that grantId. Do not switch to script or wrap it in a new shell command merely to obtain another grant.",
@@ -356,6 +370,8 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 		executionMode: "sequential",
 		async execute(_id, params, signal, onUpdate, ctx) {
 			try {
+				const analysisBlock = analysisCapabilityBlockReason(ctx, params);
+				if (analysisBlock) throw new Error(analysisBlock);
 				const context = requireCapabilityContext();
 				if (params.action === "list") {
 					const grants = await listCapabilityGrants(context);
@@ -401,6 +417,12 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			"Unix sockets and host credential files remain outside the project sandbox. If a justified operation needs them, use host_capability command or a project-trusted SSH target instead of asking the user to copy a terminal command.",
 		],
 		async execute(id, params, signal, onUpdate, ctx) {
+			if (runtimeSessionInheritancePolicy(ctx.sessionManager.getBranch()) === "analysis") {
+				return {
+					content: [{ type: "text", text: "Analysis Session cannot use project bash because an arbitrary command could modify code or start work. Use read/grep/find/ls, approved external reads, or host_capability ssh with a read-only inspection command." }],
+					isError: true,
+				};
+			}
 			if (!runtime) {
 				return {
 					content: [
