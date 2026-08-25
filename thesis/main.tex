@@ -179,19 +179,22 @@ Research-Pi 将 Harness 归纳为三个相互耦合的轴：记忆 $M$ 维持跨
     & \term{结构化证据记忆}。记录“发生了什么及是否可解释”，但不自动代表当前结论 \\
     \addlinespace[2pt]\cmidrule(lr){1-3}\addlinespace[2pt]
     \memtag{M3}\quad\term{长期状态}\par\smallskip
-    \term{Project State}\par{\footnotesize via Research Compaction}
-    & 在阶段检查点综合 research question、claim、竞争假设、观察、决策、混淆因素和下一实验；按 revision 持久化，amendment/transition 做显式更新
-    & \term{Project 级持久状态源}。回答“当前依据什么相信什么”，跨 Session 共享且带 provenance \\
+    \term{Project State}
+    & Research Compact 在阶段检查点综合 research question、claim、竞争假设、观察、决策、混淆因素和下一实验；状态按 revision 持久化，也可通过 amendment 做小范围修订
+    & \term{Project 级持久状态}。回答“当前依据什么相信什么”，跨 Session 共享且带 provenance \\
     \addlinespace[2pt]\cmidrule(lr){1-3}\addlinespace[2pt]
     \memtag{M4}\quad\term{调用视图}\par\smallskip
     \term{ProjectView}
-    & 每次从 Project State、最新 evidence/transition、task handoff、Git 与 Runtime 状态重新渲染限长 snapshot/delta
-    & \term{可重建的模型上下文投影}。回答“这次调用需要看到什么”，带 freshness，但不是新的状态源 \\
+    & 从 Project State、最新 evidence/transition、task handoff、Git 与 Runtime 状态确定性地渲染限长视图；按需要发送完整 snapshot 或短 delta
+    & \term{模型可见的项目视图}。回答“这次调用需要看到什么”，带 freshness，但不形成新的研究状态 \\
     \bottomrule
   \end{tabularx}
 \end{table}
 
-四层并不互相替代：Research Memory 找回精确来源，Experiment Ledger 保存证据，Compact 形成 Project State，ProjectView 再与最新 delta 共同生成 Model Context。\term{M3 是状态源，M4 是状态视图}：M3 持久、低频并承载 Project 级综合；M4 按 Session/调用重建、受上下文预算约束，随 freshness 和 live delta 变化。新 evidence 可以先出现在 M4 中，但在 compact/amend/transition 前仍标记为“尚未综合”，不能反向覆盖 M3。普通 compact 回答“此前对话说了什么”；Research Compaction 则回答“现在依据什么相信什么、还不知道什么、下一实验要区分什么”。
+\newpage
+四层并不互相替代：Research Memory 找回精确来源，Experiment Ledger 保存证据，Research Compact 在阶段检查点形成 Project State，ProjectView 再把 Project State 与其后发生的新变化投影到 Model Context。\term{M3 是持久状态，M4 是调用视图}：snapshot 与 delta 只是 ProjectView 的完整和增量传递形式，不是另一份状态。新 evidence 可以先出现在 ProjectView 中，但在 compact 或 amendment 前仍标记为“尚未综合”，不能反向覆盖 Project State。
+
+\noindent\textit{形成与投影：Research Compact 是形成过程，Project State 是持久结果，ProjectView 是面向模型的投影。Compact Summary 与完整 ProjectView 会共享部分核心字段；前者维持 Session 连续性，后者负责跨 Session 定向和最新状态校正。}
 
 \subsection{C：消息沿 Project Runtime 路由，而不是绑定某个聊天窗口}
 
@@ -263,7 +266,7 @@ Research Contract 把代码视为检验假设的工具：原因不明时形成�
 
 \subsection{上下文与缓存：稳定前缀，动态尾部}
 
-ProjectView 使用 append-only snapshot/delta：历史请求尽量保持为共同前缀，新 evidence、handoff 和 freshness 变化集中在尾部，从而兼顾状态及时性与 DeepSeek KV-cache locality。Research compact 只在 agent 和工具链 settled 后触发；soft 阈值为 272K、hard 阈值为 384K，三档 recent tail 为 32K、40K 和 48K。缓存收益最终以 provider 的 cache-read tokens 判断，不由 Harness 自己宣布。
+ProjectView 使用 append-only snapshot/delta：用户轮开始时把变化后的完整 snapshot 或短 delta 持久追加到 Session；同一轮工具刚产生的新 evidence、handoff 和 freshness 变化，只以临时 delta 放在当前请求尾部，下一用户轮再持久化。这样历史请求尽量保持为共同前缀，兼顾状态及时性与 DeepSeek KV-cache locality。Research compact 只在 agent 和工具链 settled 后触发；soft 阈值为 272K、hard 阈值为 384K，三档原始 recent tail 为 24K、32K 和 40K，加上目标约 8K 的结构化摘要后，compact 后通常约为 32K、40K 和 48K。缓存收益最终以 provider 的 cache-read tokens 判断，不由 Harness 自己宣布。
 
 \subsection{一次模型调用：长前缀保持稳定，变化集中在尾部}
 
@@ -271,7 +274,7 @@ ProjectView 使用 append-only snapshot/delta：历史请求尽量保持为共�
 \[
 R_{t,k}=P\;\Vert\;H_{t-1}\;\Vert\;U_t\;\Vert\;W_{t,k}\;\Vert\;\Delta V_{t,k},
 \]
-其中 $P$ 是 Harness 前缀，$H_{t-1}$ 是进入本轮前的持久 Session 历史，$U_t$ 是当前用户请求，$W_{t,k}$ 是本轮已发生的 assistant/tool 消息，$\Delta V_{t,k}$ 是同一轮中新 evidence 或 Runtime 变化产生的临时 ProjectView delta。
+其中 $P$ 是 Harness 前缀；$H_{t-1}$ 是持久 Session 历史，包含 compact summary、recent tail、既往消息以及已经持久化的 ProjectView snapshot/delta；$U_t$ 是当前用户请求；$W_{t,k}$ 是本轮已发生的 assistant/tool 消息；$\Delta V_{t,k}$ 是可选的尾部修正，只在同一轮中新 evidence 或 Runtime 变化尚未持久化时出现。$H$ 中的 ProjectView 消息与末尾 $\Delta V$ 属于同一个 ProjectView 机制，区别只是持久前缀与临时更新。
 
 \begin{figure}[H]
   \centering
@@ -292,7 +295,7 @@ R_{t,k}=P\;\Vert\;H_{t-1}\;\Vert\;U_t\;\Vert\;W_{t,k}\;\Vert\;\Delta V_{t,k},
     \node[stable, below=2.5mm of p] (h) {%
       \term{$H_{t-1}$\quad 持久 Session 前缀}\hfill
       \textcolor{RPGray}{来源：上一轮已落定状态；更新：追加消息或 compact 时}\\[-1pt]
-      \footnotesize Research compact、保留的 recent tail、既往对话与工具结果，以及进入本轮时的 ProjectView snapshot 和已接收 mailbox。};
+      \footnotesize Compact summary、保留的 recent tail、既往对话与工具结果，以及已经持久化的 ProjectView snapshot/短 delta 和已接收 mailbox。};
 
     \node[turn, below=5mm of h] (u) {%
       \term{$U_t$\quad 当前用户输入}\hfill
@@ -305,9 +308,9 @@ R_{t,k}=P\;\Vert\;H_{t-1}\;\Vert\;U_t\;\Vert\;W_{t,k}\;\Vert\;\Delta V_{t,k},
       \footnotesize assistant 推理外显、tool call/result、已接纳的 progress、ASK 与 RESULT。第 $k$ 次调用只在第 $k-1$ 次调用的尾部继续增长。};
 
     \node[delta, below=2.5mm of w] (d) {%
-      \term{$\Delta V_{t,k}$\quad ProjectView 实时增量}\hfill
+      \term{$\Delta V_{t,k}$\quad ProjectView 临时尾部修正}\hfill
       \textcolor{RPGray}{来源：语义状态变化；更新：必要时追加}\\[-1pt]
-      \footnotesize 尚未进入稳定 snapshot 的最新 evidence、transition、handoff、Git/Runtime 与 mailbox freshness；无实质变化时不重复注入。};
+      \footnotesize 本轮刚产生、尚未持久化的 evidence、transition、handoff、Git/Runtime 与 mailbox freshness；无实质变化时不存在。};
 
     \draw[-{Latex[length=2.2mm]}, thick, draw=RPGray]
       ($(p.west)+(-7mm,3mm)$) -- node[left,align=right,font=\scriptsize,text=RPGray]
@@ -330,7 +333,7 @@ R_{t,k}=P\;\Vert\;H_{t-1}\;\Vert\;U_t\;\Vert\;W_{t,k}\;\Vert\;\Delta V_{t,k},
     \node[right=7mm of w.east, anchor=west, align=left, text width=2.35cm,
       font=\scriptsize\bfseries, text=RPOrange] {当前轮动态尾部\\已写入部分可供下一次调用复用};
   \end{tikzpicture}
-  \caption{一次 Research-Pi 模型调用的纵向上下文栈。上方 $P$ 与 $H_{t-1}$ 构成跨轮稳定前缀；下方 $U_t$、$W_{t,k}$ 与 $\Delta V_{t,k}$ 按事件追加。ProjectView 的稳定 snapshot 位于 $H_{t-1}$，尚未综合的新变化位于末尾 delta。只要已有字节不变，provider 就能从左逻辑前缀（图中自上而下）复用 KV cache；compact、模型/工具定义变化或从历史中移除消息会建立新的缓存边界。}
+  \caption{一次 Research-Pi 模型调用的纵向上下文栈。上方 $P$ 与 $H_{t-1}$ 构成跨轮稳定前缀；下方 $U_t$、$W_{t,k}$ 与可选的 $\Delta V_{t,k}$ 按事件追加。ProjectView 没有被拆成两份：已持久化的 snapshot/短 delta 位于 $H_{t-1}$，当前运行尚未持久化的同一视图更新才临时放在请求末尾。只要已有字节不变，provider 就能从左逻辑前缀（图中自上而下）复用 KV cache；compact、模型/工具定义变化或从历史中移除消息会建立新的缓存边界。}
   \label{fig:context-composition}
 \end{figure}
 
