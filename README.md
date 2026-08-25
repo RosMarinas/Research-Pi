@@ -1,6 +1,6 @@
 # Research Pi
 
-> 让 Session 可以丢弃，让科研认知留下。
+> 面向Project设计的Research harness，拒绝一个session干到底。
 
 Research Pi 是面向 AI、机器人、通信、优化与仿真等计算实验科研的 Pi Harness。它把代码视为检验假设的实验工具，优先追求可靠信息、有效证据和高信息增益实验；只有当研究方向得到支持后，才提高工程化与稳定交付强度。
 
