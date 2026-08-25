@@ -55,7 +55,7 @@ export function buildRuntimeBoardModel({ runtime, snapshot, view, health, sessio
 		return {
 			id: actor.id,
 			target: `@${runtimeActorTarget(actor)}`,
-			label: inline(actor.label || actor.id, 100),
+			label: inline(actor.id === RESEARCH_LEADER_ACTOR_ID ? "Leader Session" : actor.label || actor.id, 100),
 			kind: actor.kind,
 			provider: actor.provider ?? null,
 			state,

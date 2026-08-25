@@ -53,6 +53,20 @@ function startsWithArray(values, prefix) {
 	return prefix.length > 0 && prefix.length <= values.length && prefix.every((value, index) => values[index] === value);
 }
 
+function commandGrantMatchesArgv(grant, argv) {
+	if (grant?.kind !== "host-command") return false;
+	return grant.match === "prefix"
+		? startsWithArray(argv ?? [], grant.argv ?? [])
+		: sameArray(grant.argv ?? [], argv ?? []);
+}
+
+function normalizeGrantId(value) {
+	if (value === undefined || value === null || value === "") return undefined;
+	const id = String(value).trim();
+	if (!/^grant-[A-Za-z0-9]{8}$/.test(id)) throw new Error("Host capability grantId must be an exact grant-XXXXXXXX id");
+	return id;
+}
+
 function recommendedCommandPrefix(argv) {
 	const executable = basename(argv[0]).toLowerCase();
 	if (executable === "uv" && argv[1] === "run" && argv[2]) {
@@ -402,7 +416,7 @@ function grantAllowedForContext(context, grant) {
 
 export function capabilityGrantSummary(grant) {
 	if (grant.kind === "host-command") {
-		return `${grant.id} · host-command ${grant.match ?? "exact"} · ${displayArgv(grant.argv ?? [])} · ${grant.scope}`;
+		return `${grant.id} · host-command ${grant.match ?? "exact"} · cwd=${grant.cwd} · ${displayArgv(grant.argv ?? [])} · ${grant.scope}`;
 	}
 	if (grant.kind === "project-script") {
 		return `${grant.id} · project-script · ${grant.target} ${(grant.args ?? []).join(" ")} · ${grant.scope}`.trim();
@@ -420,6 +434,68 @@ export async function listCapabilityGrants(context) {
 
 export async function findCapabilityGrant(context, request) {
 	return (await listCapabilityGrants(context)).find((grant) => grantMatches(grant, request));
+}
+
+function distinctCommandCwds(grants) {
+	return [...new Map(grants.filter((grant) => grant.cwd).map((grant) => [grant.cwd, grant])).values()];
+}
+
+function commandGrantChoices(grants) {
+	return distinctCommandCwds(grants)
+		.slice(0, 6)
+		.map((grant) => `${grant.id} (cwd=${grant.cwd})`)
+		.join(", ");
+}
+
+/**
+ * Resolve an invocation against active grants without consuming a one-shot grant.
+ * If cwd is omitted, a unique already-approved cwd may be adopted. This narrows
+ * execution to prior authority; it never creates or broadens a grant.
+ */
+export async function inspectCapabilityAuthorization(context, input) {
+	const grants = await listCapabilityGrants(context);
+	const grantId = normalizeGrantId(input?.grantId);
+	const selectedGrant = grantId ? grants.find((grant) => grant.id === grantId) : undefined;
+	if (grantId && !selectedGrant) throw new Error(`Unknown or inactive host capability grantId: ${grantId}`);
+	if (selectedGrant && selectedGrant.kind !== input?.kind) {
+		throw new Error(`Host capability ${grantId} is ${selectedGrant.kind}, not ${input?.kind ?? "an unspecified kind"}`);
+	}
+
+	let effectiveInput = input;
+	let commandCandidates = [];
+	if (input?.kind === "host-command") {
+		const preliminary = await prepareCapabilityRequest(context, { ...input, cwd: input.cwd ?? context.projectRoot });
+		commandCandidates = grants.filter((grant) => commandGrantMatchesArgv(grant, preliminary.argv));
+		if (selectedGrant) {
+			if (!commandGrantMatchesArgv(selectedGrant, preliminary.argv)) {
+				throw new Error(`Host capability ${grantId} does not authorize argv: ${displayArgv(preliminary.argv)}`);
+			}
+			if (input.cwd === undefined || input.cwd === null || input.cwd === "") {
+				effectiveInput = { ...input, cwd: selectedGrant.cwd };
+			}
+		} else if (input.cwd === undefined || input.cwd === null || input.cwd === "") {
+			const choices = distinctCommandCwds(commandCandidates);
+			if (choices.length === 1) effectiveInput = { ...input, cwd: choices[0].cwd };
+			else if (choices.length > 1) {
+				throw new Error(
+					`Multiple approved host-command capabilities match this argv at different working directories. ` +
+					`Retry the same command with an exact grantId; do not create a shell-wrapper grant. Candidates: ${commandGrantChoices(commandCandidates)}`,
+				);
+			}
+		}
+	}
+
+	const request = await prepareCapabilityRequest(context, effectiveInput);
+	if (selectedGrant && !grantMatches(selectedGrant, request)) {
+		throw new Error(
+			`Host capability ${grantId} is bound to cwd=${selectedGrant.cwd ?? "(not applicable)"} and does not authorize this invocation`,
+		);
+	}
+	const grant = selectedGrant ?? grants.find((candidate) => grantMatches(candidate, request));
+	const alternatives = request.kind === "host-command"
+		? commandCandidates.filter((candidate) => !grantMatches(candidate, request))
+		: [];
+	return { request, grant, alternatives, selectedGrantId: selectedGrant?.id };
 }
 
 export async function createCapabilityGrant(context, request, scope = "session") {
@@ -480,9 +556,11 @@ export async function revokeCapabilityGrant(context, selector) {
 	return removed;
 }
 
-async function consumeCapabilityGrant(context, request) {
+async function consumeCapabilityGrant(context, request, grantId) {
 	const sessionGrant = await withLedgerLock(context, "session", async (ledger, path) => {
-		const index = ledger.grants.findIndex((grant) => grantAllowedForContext(context, grant) && grantMatches(grant, request));
+		const index = ledger.grants.findIndex(
+			(grant) => grantAllowedForContext(context, grant) && (!grantId || grant.id === grantId) && grantMatches(grant, request),
+		);
 		if (index < 0) return undefined;
 		const grant = ledger.grants[index];
 		if (grant.scope === "once") {
@@ -494,13 +572,16 @@ async function consumeCapabilityGrant(context, request) {
 	});
 	if (sessionGrant) return sessionGrant;
 	return (await readLedger(context, "project")).grants.find(
-		(grant) => grantAllowedForContext(context, grant) && grantMatches(grant, request),
+		(grant) => grantAllowedForContext(context, grant) && (!grantId || grant.id === grantId) && grantMatches(grant, request),
 	);
 }
 
 export async function authorizeCapabilityRequest(context, input) {
-	const request = await prepareCapabilityRequest(context, input);
-	return { request, grant: await consumeCapabilityGrant(context, request) };
+	const inspected = await inspectCapabilityAuthorization(context, input);
+	return {
+		...inspected,
+		grant: inspected.grant ? await consumeCapabilityGrant(context, inspected.request, inspected.selectedGrantId) : undefined,
+	};
 }
 
 export function hostBridgeEnvironment(source = process.env, options = {}) {
@@ -603,8 +684,15 @@ async function readExternal(request) {
 }
 
 export async function executeGrantedCapability(context, input, options = {}) {
-	const { request, grant } = await authorizeCapabilityRequest(context, input);
+	const { request, grant, alternatives } = await authorizeCapabilityRequest(context, input);
 	if (!grant) {
+		if (request.kind === "host-command" && alternatives.length > 0) {
+			throw new Error(
+				`An approved host-command prefix exists, but cwd=${request.cwd} does not match it. ` +
+				`Retry action=command with one of the existing grantId values so its approved cwd is reused; ` +
+				`do not switch to action=script or create a shell-wrapper grant. Candidates: ${commandGrantChoices(alternatives)}`,
+			);
+		}
 		const hint = request.kind === "external-read"
 			? `/boundary grant-read ${JSON.stringify(input.path)}`
 			: request.kind === "ssh-target"

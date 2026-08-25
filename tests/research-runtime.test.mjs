@@ -4,9 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import researchRuntimeExtension, {
+	analysisSessionToolBlockReason,
 	actorLines,
+	codexRuntimeMessageMarkdown,
+	codexRuntimeMessagePreview,
 	formatRuntimeHealth,
 	formatRuntimeStatus,
+	reconcileStaleCodexMailbox,
 	runtimeHealth,
 	runtimeActorSummary,
 	runtimeRotationReadiness,
@@ -25,6 +29,8 @@ import {
 	initializeResearchRuntime,
 	pendingRuntimeMessages,
 	readRuntimeSnapshot,
+	reconcileCodexRuntimeAsks,
+	recordRuntimeEvidence,
 	recordResearchTransition,
 	recordCodexRuntimeEvent,
 	requestRuntimeSessionRotation,
@@ -43,6 +49,34 @@ import {
 	unconsumedRuntimeMessages,
 	withRuntimeActorAttachment,
 } from "../.pi/lib/research-runtime.mjs";
+
+test("Codex Runtime result cards preserve Markdown structure when expanded", () => {
+	const content = [
+		"[Research Runtime result msg-1 from codex:mission-demo:advisor]",
+		"Codex delegation codex-demo completed.",
+		"Mode/model: advisor · gpt-5.6-sol · max",
+		"Mission: review-design",
+		"Summary: 总判断暂不冻结。",
+		"",
+		"1. 第一条论证。",
+		"2. 第二条论证。",
+		"Evidence:",
+		"- observation A",
+		"- observation B",
+		"Uncertainties:",
+		"- limitation C",
+		"Recommended next step: run probe D",
+		"Use codex_delegate action=result with jobId=codex-demo if the full structured result is needed.",
+	].join("\n");
+	assert.equal(codexRuntimeMessagePreview(content), "总判断暂不冻结。 1. 第一条论证。 2. 第二条论证。");
+	const markdown = codexRuntimeMessageMarkdown(content);
+	assert.match(markdown, /^## Summary/m);
+	assert.match(markdown, /\n1\. 第一条论证。\n2\. 第二条论证。/);
+	assert.match(markdown, /^## Evidence/m);
+	assert.match(markdown, /^## Uncertainties/m);
+	assert.match(markdown, /^## Recommended next step/m);
+	assert.match(markdown, /^> Use codex_delegate/m);
+});
 
 test("Runtime status reports live activation instead of historical Actor count", () => {
 	const codexActors = Array.from({ length: 16 }, (_, index) => ({
@@ -74,6 +108,18 @@ test("Runtime status reports live activation instead of historical Actor count",
 	assert.doesNotMatch(actorLines(snapshot), /mission-1/);
 	assert.match(actorLines(snapshot, false), /18 registered/);
 	assert.match(actorLines(snapshot, false), /mission-1 · codex · suspended \(completed\)/);
+});
+
+test("Analysis Session exposes inspection tools but blocks work and Project mutation", () => {
+	for (const tool of ["read", "grep", "find", "ls", "research_memory_search", "research_memory_read", "web_search", "host_capability", "analysis_send_to_leader"]) {
+		assert.equal(analysisSessionToolBlockReason("analysis", tool), null, tool);
+	}
+	assert.equal(analysisSessionToolBlockReason("analysis", "codex_delegate", { action: "result" }), null);
+	assert.match(analysisSessionToolBlockReason("analysis", "bash"), /cannot use bash/);
+	assert.match(analysisSessionToolBlockReason("analysis", "edit"), /cannot use edit/);
+	assert.match(analysisSessionToolBlockReason("analysis", "record_experiment"), /cannot use record_experiment/);
+	assert.match(analysisSessionToolBlockReason("analysis", "codex_delegate", { action: "start", mode: "advisor" }), /cannot use codex_delegate/);
+	assert.equal(analysisSessionToolBlockReason("project", "bash"), null);
 });
 
 test("lifecycle health is observe-only and prioritizes ambiguous side effects", () => {
@@ -179,6 +225,78 @@ test("Runtime message and Action terminal states cannot regress under delayed cr
 		assert.equal(snapshot.messages.find((item) => item.id === message.id)?.status, "consumed");
 		assert.equal(snapshot.actions.find((item) => item.id === "action-terminal")?.status, "completed");
 		assert.equal(snapshot.actions.find((item) => item.id === "action-unknown")?.status, "completed");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("Codex ASK lifecycle keeps only the current request and supersedes all asks at job terminal", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-ask-lifecycle-"));
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace);
+		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a" }, { runtimeRoot: join(root, "runtime") });
+		for (const requestId of ["request-old", "request-current"]) {
+			await createRuntimeMessage(runtime, {
+				id: `message-${requestId}`,
+				type: "ask",
+				from: "codex:fixture:executor",
+				to: RESEARCH_LEADER_ACTOR_ID,
+				body: requestId,
+				relatesTo: requestId,
+				metadata: { jobId: "codex-fixture", requestId },
+			});
+		}
+
+		await reconcileCodexRuntimeAsks(runtime, {
+			id: "codex-fixture",
+			status: "input_required",
+			pendingRequest: { id: "request-current" },
+		});
+		let snapshot = await readRuntimeSnapshot(runtime);
+		assert.equal(snapshot.messages.find((message) => message.id === "message-request-old")?.status, "superseded");
+		assert.equal(snapshot.messages.find((message) => message.id === "message-request-current")?.status, "queued");
+
+		await reconcileCodexRuntimeAsks(runtime, { id: "codex-fixture", status: "completed", pendingRequest: null });
+		snapshot = await readRuntimeSnapshot(runtime);
+		assert.equal(snapshot.messages.find((message) => message.id === "message-request-current")?.status, "superseded");
+		assert.equal(unconsumedRuntimeMessages(snapshot, { to: RESEARCH_LEADER_ACTOR_ID }).length, 0);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("mailbox repair settles terminal Codex asks before a resumed Session can redeliver them", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-mailbox-repair-"));
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace);
+		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-old" }, { runtimeRoot: join(root, "runtime") });
+		const ask = await createRuntimeMessage(runtime, {
+			id: "message-stale-terminal-ask",
+			type: "ask",
+			from: "codex:fixture:executor",
+			to: RESEARCH_LEADER_ACTOR_ID,
+			body: "obsolete permission request",
+			relatesTo: "request-stale",
+			metadata: { jobId: "codex-terminal-fixture", requestId: "request-stale" },
+		});
+		await settleRuntimeMessage(runtime, ask.id, "delivered", { sessionId: "session-old" });
+		let requestSettlement;
+		const repaired = await reconcileStaleCodexMailbox(runtime, await readRuntimeSnapshot(runtime), {
+			readJob: async (_jobId, options) => {
+				assert.equal(options.expectedProjectKey, runtime.projectKey);
+				assert.equal(options.expectedLeaderActorId, RESEARCH_LEADER_ACTOR_ID);
+				return { id: "codex-terminal-fixture", status: "completed", pendingRequest: null };
+			},
+			supersedeRequests: async (jobId, options) => {
+				requestSettlement = { jobId, ...options };
+				return ["request-stale"];
+			},
+		});
+		assert.equal(repaired.messages.find((message) => message.id === ask.id)?.status, "superseded");
+		assert.deepEqual(requestSettlement, { jobId: "codex-terminal-fixture", terminalStatus: "completed" });
+		assert.equal(unconsumedRuntimeMessages(repaired, { to: RESEARCH_LEADER_ACTOR_ID, forSessionId: "session-new" }).length, 0);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -460,6 +578,7 @@ test("Runtime steer is non-preemptive by default and leaves context after one se
 			registerCommand(name, command) {
 				commands.set(name, command);
 			},
+			registerTool() {},
 			registerMessageRenderer() {},
 			registerEntryRenderer() {},
 			sendMessage(message, options) {
@@ -494,11 +613,45 @@ test("Runtime steer is non-preemptive by default and leaves context after one se
 		const agentMessage = { role: "custom", ...sent[0].message, timestamp: Date.now() };
 		const firstContext = await handlers.get("context")({ type: "context", messages: [agentMessage] }, ctx);
 		assert.equal(firstContext.messages.filter((message) => message.customType === RUNTIME_MESSAGE_KIND).length, 1);
-		await handlers.get("agent_settled")({ type: "agent_settled" }, ctx);
-		const laterContext = await handlers.get("context")({ type: "context", messages: [agentMessage] }, ctx);
-		assert.equal(laterContext.messages.filter((message) => message.customType === RUNTIME_MESSAGE_KIND).length, 0);
+			await handlers.get("agent_settled")({ type: "agent_settled" }, ctx);
+			const laterContext = await handlers.get("context")({ type: "context", messages: [agentMessage] }, ctx);
+			assert.equal(laterContext.messages.filter((message) => message.customType === RUNTIME_MESSAGE_KIND).length, 0);
 
-		await commands.get("steer").handler("--preempt @research-leader urgent correction", ctx);
+			const runtime = await resolveResearchRuntime(workspace);
+			const pendingRuntimeAsk = await createRuntimeMessage(runtime, {
+				id: "msg-codex-pending-request",
+				type: "ask",
+				from: "codex:request-test:executor",
+				to: RESEARCH_LEADER_ACTOR_ID,
+				body: "Codex needs an explicit response.",
+				relatesTo: "request-pending",
+				metadata: { requestId: "request-pending", jobId: "codex-request-test" },
+			});
+			const pendingAsk = {
+				role: "custom",
+				customType: RUNTIME_MESSAGE_KIND,
+				content: "Codex needs an explicit response.",
+				display: true,
+				details: {
+					messageId: pendingRuntimeAsk.id,
+					type: "ask",
+					requestId: "request-pending",
+					attachmentEpoch: null,
+				},
+				timestamp: Date.now(),
+			};
+			await handlers.get("context")({ type: "context", messages: [pendingAsk] }, ctx);
+			await handlers.get("agent_settled")({ type: "agent_settled" }, ctx);
+			const waitingContext = await handlers.get("context")({ type: "context", messages: [pendingAsk] }, ctx);
+			assert.equal(waitingContext.messages.filter((message) => message.details?.requestId === "request-pending").length, 1);
+			await consumeRuntimeMessageForAttachment(runtime, pendingRuntimeAsk.id, {
+				sessionId: "session-extension",
+				actorId: RESEARCH_LEADER_ACTOR_ID,
+			});
+			const resolvedContext = await handlers.get("context")({ type: "context", messages: [pendingAsk] }, ctx);
+			assert.equal(resolvedContext.messages.filter((message) => message.details?.requestId === "request-pending").length, 0);
+
+			await commands.get("steer").handler("--preempt @research-leader urgent correction", ctx);
 		assert.equal(aborts, 1);
 		assert.equal(sent.at(-1).options.deliverAs, "followUp");
 	} finally {
@@ -525,6 +678,7 @@ test("/runtime rotate creates a fresh Session and records a ProjectView receipt"
 		const pi = {
 			on(name, handler) { handlers.set(name, handler); },
 			registerCommand(name, command) { commands.set(name, command); },
+			registerTool() {},
 			registerMessageRenderer() {},
 			registerEntryRenderer() {},
 			sendMessage(message, options) { sent.push({ message, options }); },
@@ -607,6 +761,7 @@ test("/runtime new clean starts without transcript, ProjectView, mailbox, or Pro
 		const pi = {
 			on(name, handler) { handlers.set(name, handler); },
 			registerCommand(name, command) { commands.set(name, command); },
+			registerTool() {},
 			registerMessageRenderer() {},
 			registerEntryRenderer() {},
 			sendMessage(message, options) { sent.push({ message, options }); },
@@ -706,6 +861,140 @@ test("/runtime new clean starts without transcript, ProjectView, mailbox, or Pro
 	}
 });
 
+test("Analysis Session observes Project state without stealing the Leader, then can hand off or promote", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-analysis-session-"));
+	const previousRoot = process.env.RESEARCH_PI_RUNTIME_DIR;
+	process.env.RESEARCH_PI_RUNTIME_DIR = join(root, "runtime");
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace, { recursive: true });
+		const runtime = await initializeResearchRuntime(workspace, {
+			sessionId: "session-leader",
+			branchAnchorId: "leaf-leader",
+		});
+		await appendRuntimeEventAtRevision(runtime, "project.state.committed", {
+			state: {
+				researchQuestion: "Which mechanism explains the result?",
+				currentClaim: "The current evidence supports H1 only provisionally.",
+				hypotheses: [], observations: [], decisions: [], unresolvedConfounders: [], openQuestions: [],
+				nextExperiment: { question: "Distinguish H1 from H2", intervention: "read-only fixture", distinguishingOutcomes: [], validityChecks: [] },
+				criticalContext: [],
+			},
+			source: { sessionId: "session-leader", entryId: "compact-leader" },
+		}, 0, { id: "project-state:analysis-session-test" });
+		const existingMessage = await createRuntimeMessage(runtime, {
+			id: "message-for-working-leader",
+			type: "notify",
+			from: "user",
+			to: RESEARCH_LEADER_ACTOR_ID,
+			body: "Only the working Leader should receive this.",
+		});
+
+		const handlers = new Map();
+		const commands = new Map();
+		const tools = new Map();
+		const sent = [];
+		const notices = [];
+		const branch = [{
+			type: "custom",
+			id: "analysis-policy",
+			customType: RUNTIME_SESSION_POLICY_ENTRY_KIND,
+			data: { policy: "analysis", reason: "test discussion" },
+		}];
+		const pi = {
+			on(name, handler) { handlers.set(name, handler); },
+			registerCommand(name, command) { commands.set(name, command); },
+			registerTool(tool) { tools.set(tool.name, tool); },
+			registerMessageRenderer() {},
+			registerEntryRenderer() {},
+			sendMessage(message, options) { sent.push({ message, options }); },
+			appendEntry(customType, data) {
+				branch.push({ type: "custom", id: `entry-${branch.length}`, customType, data });
+			},
+		};
+		researchRuntimeExtension(pi);
+		let aborts = 0;
+		const ctx = {
+			cwd: workspace,
+			hasUI: true,
+			ui: {
+				setStatus() {},
+				notify(message) { notices.push(message); },
+				setEditorText() {},
+			},
+			sessionManager: {
+				getSessionId: () => "session-analysis",
+				getSessionFile: () => join(root, "session-analysis.jsonl"),
+				getLeafId: () => "leaf-analysis",
+				getBranch: () => branch,
+			},
+			getContextUsage: () => ({ tokens: 12_000, contextWindow: 384_000, percent: 3.1 }),
+			isIdle: () => true,
+			abort() { aborts += 1; },
+			waitForIdle: async () => {},
+		};
+
+		await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
+		let snapshot = await readRuntimeSnapshot(runtime);
+		assert.equal(runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID)?.sessionId, "session-leader");
+		assert.ok(snapshot.actors.some((actor) => actor.kind === "analysis" && actor.metadata?.sessionId === "session-analysis"));
+		assert.equal(sent.length, 0, "Analysis Session must not drain the Leader mailbox");
+
+		const injected = await handlers.get("before_agent_start")({ type: "before_agent_start" }, ctx);
+		assert.match(injected.message.content, /Session role: Analysis Session/);
+		assert.match(injected.message.content, /Which mechanism explains the result/);
+		await handlers.get("agent_start")({ type: "agent_start" }, ctx);
+		assert.equal(aborts, 0, "Analysis Session can reason without owning the Leader attachment");
+		assert.equal(handlers.get("tool_call")({ toolName: "read", input: {} }), undefined);
+		assert.equal(handlers.get("tool_call")({ toolName: "bash", input: { command: "echo mutate" } }).block, true);
+		await commands.get("steer").handler("@research-leader do work", ctx);
+		assert.equal(runtimeActorAttachment(await readRuntimeSnapshot(runtime), RESEARCH_LEADER_ACTOR_ID)?.sessionId, "session-leader");
+		assert.ok(notices.some((message) => /cannot steer project Actors/.test(message)));
+
+		const filtered = await handlers.get("context")({
+			type: "context",
+			messages: [
+				{ role: "custom", customType: RUNTIME_MESSAGE_KIND, content: "Leader-only mailbox event" },
+				{ role: "user", content: "Discuss H1 versus H2" },
+			],
+		}, ctx);
+		assert.equal(filtered.messages.some((message) => message.customType === RUNTIME_MESSAGE_KIND), false);
+		assert.ok(filtered.messages.some((message) => message.content === "Discuss H1 versus H2"));
+
+		const revisionBeforeCompact = snapshot.revision;
+		await handlers.get("session_compact")({ type: "session_compact", compactionEntry: { type: "compaction", id: "analysis-compact" } }, ctx);
+		assert.equal((await readRuntimeSnapshot(runtime)).revision, revisionBeforeCompact, "Analysis compaction must not write Project State");
+
+		const handoff = await tools.get("analysis_send_to_leader").execute(
+			"tool-call-analysis",
+			{ message: "Observation: H1 is provisional. Proposal: compare the held-out pattern predicted by H2." },
+			undefined,
+			undefined,
+			ctx,
+		);
+		assert.equal(handoff.isError, undefined);
+		snapshot = await readRuntimeSnapshot(runtime);
+		const analysisMessage = snapshot.messages.find((message) => message.metadata?.kind === "analysis_handoff");
+		assert.ok(analysisMessage);
+		assert.match(analysisMessage.from, /^analysis:/);
+		assert.equal(analysisMessage.to, RESEARCH_LEADER_ACTOR_ID);
+		assert.equal(analysisMessage.status, "queued");
+
+		await commands.get("runtime").handler("promote execute the agreed diagnostic", ctx);
+		snapshot = await readRuntimeSnapshot(runtime);
+		assert.equal(runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID)?.sessionId, "session-analysis");
+		assert.equal(runtimeSessionInheritancePolicy(branch), "project");
+		assert.equal(sent.length, 2, "Promotion delivers both the existing Leader message and analysis handoff");
+		assert.deepEqual(new Set(sent.map((item) => item.message.details.messageId)), new Set([existingMessage.id, analysisMessage.id]));
+		assert.equal(handlers.get("tool_call")({ toolName: "bash", input: { command: "echo execute" } }), undefined);
+		assert.ok(notices.some((message) => /now the Leader Session/.test(message)));
+	} finally {
+		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
+		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("opening the Runtime Board does not steal the Leader attachment from another Session", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-board-observe-"));
 	const previousRoot = process.env.RESEARCH_PI_RUNTIME_DIR;
@@ -719,6 +1008,7 @@ test("opening the Runtime Board does not steal the Leader attachment from anothe
 		const pi = {
 			on(name, handler) { handlers.set(name, handler); },
 			registerCommand(name, command) { commands.set(name, command); },
+			registerTool() {},
 			registerMessageRenderer() {},
 			registerEntryRenderer() {},
 			sendMessage() {},
@@ -801,6 +1091,7 @@ test("an active Leader Session blocks silent takeover but explicit takeover adva
 		const pi = {
 			on(name, handler) { handlers.set(name, handler); },
 			registerCommand(name, command) { commands.set(name, command); },
+			registerTool() {},
 			registerMessageRenderer() {},
 			registerEntryRenderer() {},
 			sendMessage(payload) { sent.push(payload); },
@@ -869,6 +1160,7 @@ test("a cross-session research transition refreshes ProjectView at the next mode
 		const pi = {
 			on(name, handler) { handlers.set(name, handler); },
 			registerCommand() {},
+			registerTool() {},
 			registerMessageRenderer() {},
 			registerEntryRenderer() {},
 			sendMessage() {},
@@ -911,6 +1203,145 @@ test("a cross-session research transition refreshes ProjectView at the next mode
 		const activityResult = await handlers.get("context")({ type: "context", messages: [{ role: "user", content: "continue again" }] }, ctx);
 		const refreshedView = activityResult.messages.find((message) => message.customType === "research-project-view");
 		assert.match(String(refreshedView?.content), /cross-session-action \[running\]/);
+	} finally {
+		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
+		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("ProjectView persists an append-only snapshot and then a short semantic delta", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-project-view-persistence-"));
+	const previousRoot = process.env.RESEARCH_PI_RUNTIME_DIR;
+	process.env.RESEARCH_PI_RUNTIME_DIR = join(root, "runtime");
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace);
+		const handlers = new Map();
+		const branch = [];
+		const pi = {
+			on(name, handler) { handlers.set(name, handler); },
+			registerCommand() {},
+			registerTool() {},
+			registerMessageRenderer() {},
+			registerEntryRenderer() {},
+			sendMessage() {},
+			appendEntry() {},
+		};
+		researchRuntimeExtension(pi);
+		const ctx = {
+			cwd: workspace,
+			hasUI: true,
+			ui: { setStatus() {}, notify() {} },
+			sessionManager: {
+				getSessionId: () => "session-a",
+				getLeafId: () => "leaf-a",
+				getBranch: () => branch,
+			},
+			getContextUsage: () => null,
+			isIdle: () => false,
+			abort() {},
+		};
+		await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
+
+		const first = await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "start" }, ctx);
+		assert.equal(first.message.customType, "research-project-view");
+		assert.equal(first.message.details.persistent, true);
+		assert.equal(first.message.details.mode, "snapshot");
+		branch.push({ type: "custom_message", customType: first.message.customType, content: first.message.content, details: first.message.details });
+		assert.equal(await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "unchanged" }, ctx), undefined);
+
+		const runtime = await resolveResearchRuntime(workspace);
+		await recordRuntimeEvidence(runtime, {
+			id: "exp-persistent-delta",
+			question: "Did the probe separate the hypotheses?",
+			intervention: "Enabled the oracle bypass.",
+			observation: "The margin increased from 0.02 to 0.31.",
+			validityChecks: ["The bypass path was active."],
+			validityJudgment: "valid",
+			evidenceMode: "diagnostic",
+			conclusion: "The encoder is the current failure locus.",
+			nextStep: "Test staged encoder training.",
+		});
+		const next = await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "continue" }, ctx);
+		assert.equal(next.message.details.mode, "delta");
+		assert.match(String(next.message.content), /<research_project_delta>/);
+		assert.match(String(next.message.content), /observation: The margin increased from 0.02 to 0.31/);
+		branch.push({ type: "custom_message", customType: next.message.customType, content: next.message.content, details: next.message.details });
+
+		const context = await handlers.get("context")({
+			type: "context",
+			messages: branch.map((entry) => ({
+				role: "custom",
+				customType: entry.customType,
+				content: entry.content,
+				details: entry.details,
+			})),
+		}, ctx);
+		assert.equal(context.messages.filter((message) => message.customType === "research-project-view").length, 2);
+		assert.equal(context.messages.some((message) => message.customType === "research-project-view-delta"), false);
+	} finally {
+		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
+		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a completed Leader work turn becomes a durable cross-Session handoff without changing scientific revision", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-work-handoff-"));
+	const previousRoot = process.env.RESEARCH_PI_RUNTIME_DIR;
+	process.env.RESEARCH_PI_RUNTIME_DIR = join(root, "runtime");
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace);
+		const handlers = new Map();
+		const branch = [];
+		const pi = {
+			on(name, handler) { handlers.set(name, handler); },
+			registerCommand() {},
+			registerTool() {},
+			registerMessageRenderer() {},
+			registerEntryRenderer() {},
+			sendMessage() {},
+			appendEntry() {},
+		};
+		researchRuntimeExtension(pi);
+		const ctx = {
+			cwd: workspace,
+			hasUI: true,
+			ui: { setStatus() {}, notify() {}, setEditorText() {} },
+			sessionManager: {
+				getSessionId: () => "session-handoff",
+				getLeafId: () => "leaf-handoff",
+				getBranch: () => branch,
+			},
+			getContextUsage: () => null,
+			isIdle: () => false,
+			abort() {},
+		};
+		await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
+		const first = await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "start" }, ctx);
+		branch.push({ type: "custom_message", customType: first.message.customType, content: first.message.content, details: first.message.details });
+
+		await handlers.get("input")({ type: "input", source: "user", text: "Repair the local experiment launcher, but do not change the research route." }, ctx);
+		await handlers.get("agent_start")({ type: "agent_start" }, ctx);
+		handlers.get("tool_execution_end")({ type: "tool_execution_end", toolCallId: "edit-1", toolName: "edit", result: {}, isError: false });
+		await handlers.get("agent_end")({
+			type: "agent_end",
+			messages: [{ role: "assistant", content: [{ type: "text", text: "Launcher repaired and checked. This was infrastructure-only; the research direction is unchanged." }] }],
+		}, ctx);
+
+		const runtime = await resolveResearchRuntime(workspace);
+		const snapshot = await readRuntimeSnapshot(runtime);
+		assert.equal(snapshot.revision, 0);
+		assert.equal(snapshot.handoffs.length, 1);
+		assert.match(snapshot.handoffs[0].task, /Repair the local experiment launcher/);
+		assert.match(snapshot.handoffs[0].summary, /research direction is unchanged/);
+
+		const update = await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "new session continues" }, ctx);
+		assert.equal(update.message.details.mode, "delta");
+		assert.match(String(update.message.content), /Latest completed work handoff/);
+		assert.match(String(update.message.content), /context, not an automatic next task/);
 	} finally {
 		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
 		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;

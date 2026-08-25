@@ -5,7 +5,8 @@ import { RESEARCH_COMPACTION_KIND, RESEARCH_COMPACTION_VERSION } from "./researc
 import { runtimeResearchTrack, runtimeTrackStatus } from "./research-runtime.mjs";
 
 export const PROJECT_VIEW_KIND = "research-project-view";
-export const PROJECT_VIEW_VERSION = 1;
+export const PROJECT_VIEW_DELTA_KIND = "research-project-view-delta";
+export const PROJECT_VIEW_VERSION = 3;
 const MAX_SESSION_FILES = 24;
 const MAX_SESSION_BYTES = 64 * 1024 * 1024;
 
@@ -20,6 +21,45 @@ function list(value, limit) {
 
 function fingerprint(value) {
 	return createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 20);
+}
+
+const LIVE_ACTION_STATUSES = new Set(["starting", "running", "input_required", "cancelling", "outcome_unknown"]);
+const TERMINAL_ACTION_STATUSES = new Set(["completed", "failed", "cancelled"]);
+
+// The Runtime ledger also contains UI/session lifecycle events. Those events
+// must not churn the model-facing ProjectView or its prompt-cache suffix.
+// Research revisions, live Actions, and open mailbox messages are the only
+// snapshot fields that can change the rendered view between explicit refreshes.
+export function projectViewRefreshFingerprint(snapshot = {}) {
+	return fingerprint({
+		projectRevision: snapshot.revision ?? 0,
+		actions: (snapshot.actions ?? [])
+			.filter((action) => LIVE_ACTION_STATUSES.has(action.status))
+			.map((action) => ({
+				id: action.id,
+				status: action.status,
+				label: action.label ?? null,
+				externalId: action.externalId ?? null,
+				trackRef: action.trackRef ?? null,
+			})),
+		messages: (snapshot.messages ?? [])
+			.filter((message) => message.status === "queued" || message.status === "delivered")
+			.map((message) => ({
+				id: message.id,
+				type: message.type,
+				from: message.from,
+				status: message.status,
+				body: message.body,
+				trackRef: message.trackRef ?? null,
+			})),
+		handoffs: (snapshot.handoffs ?? []).slice(-4).map((handoff) => ({
+			id: handoff.id,
+			task: handoff.task,
+			summary: handoff.summary,
+			trackRef: handoff.trackRef ?? null,
+			recordedAt: handoff.recordedAt ?? null,
+		})),
+	});
 }
 
 export async function commitProjectState(runtime, input) {
@@ -149,14 +189,54 @@ export function buildProjectView({ runtime, snapshot, git = {}, experiments = []
 	const openMessages = snapshot.messages.filter((message) => message.status === "queued" || message.status === "delivered");
 	const currentTrack = runtimeResearchTrack(snapshot);
 	const actions = snapshot.actions.filter((action) =>
-		["starting", "running", "input_required", "cancelling", "outcome_unknown"].includes(action.status),
+		LIVE_ACTION_STATUSES.has(action.status),
 	).slice(-8).map((action) => ({ ...action, routeStatus: runtimeTrackStatus(snapshot, action.trackRef) }));
+	const handoffs = [...(snapshot.handoffs ?? [])]
+		.sort((left, right) => Date.parse(left.recordedAt ?? "") - Date.parse(right.recordedAt ?? ""))
+		.slice(-6)
+		.map((handoff) => ({ ...handoff, routeStatus: runtimeTrackStatus(snapshot, handoff.trackRef) }));
+	const terminalActions = snapshot.actions
+		.filter((action) => TERMINAL_ACTION_STATUSES.has(action.status) && action.metadata?.summary)
+		.sort((left, right) => Date.parse(left.updatedAt ?? left.createdAt ?? "") - Date.parse(right.updatedAt ?? right.createdAt ?? ""))
+		.slice(-4)
+		.map((action) => ({
+			id: action.id,
+			kind: action.kind ?? "runtime-action",
+			task: action.label,
+			summary: action.metadata.summary,
+			toolNames: [],
+			git: null,
+			trackRef: action.trackRef ?? null,
+			trackLabel: action.trackLabel ?? null,
+			routeStatus: runtimeTrackStatus(snapshot, action.trackRef),
+			recordedAt: action.updatedAt ?? action.createdAt ?? null,
+			action: action,
+		}));
+	const completedTasks = handoffs.length ? handoffs : terminalActions;
 	const stateRevision = snapshot.projectState?.revision ?? 0;
 	const stateTrackRef = snapshot.projectState?.source?.trackRef ?? "project:initial";
 	const stateTrackLabel = snapshot.projectState?.source?.trackLabel ?? snapshot.projectState?.state?.researchQuestion ?? "initial project track";
 	const stateRouteStatus = runtimeTrackStatus(snapshot, stateTrackRef);
 	const transitionAfterState = snapshot.transitions?.find((transition) => transition.revision > stateRevision);
-	const evidenceAfterState = snapshot.evidence?.filter((item) => item.revision > stateRevision) ?? [];
+	const evidenceById = new Map();
+	for (const item of experiments) if (item?.id) evidenceById.set(item.id, item);
+	for (const item of snapshot.evidence ?? []) if (item?.id) evidenceById.set(item.id, { ...evidenceById.get(item.id), ...item });
+	const recentEvidence = [...evidenceById.values()]
+		.sort((left, right) => Date.parse(left.timestamp ?? left.recordedAt ?? "") - Date.parse(right.timestamp ?? right.recordedAt ?? ""))
+		.slice(-6)
+		.map((item) => ({ ...item, routeStatus: runtimeTrackStatus(snapshot, item.trackRef) }));
+	const stateUpdatedAt = Date.parse(snapshot.projectState?.updatedAt ?? snapshot.projectState?.committedAt ?? "");
+	const evidenceAfterState = recentEvidence.filter((item) => {
+		if (!snapshot.projectState) return true;
+		if (Number.isInteger(item.revision)) return item.revision > stateRevision;
+		const recordedAt = Date.parse(item.timestamp ?? item.recordedAt ?? "");
+		return Number.isFinite(recordedAt) && Number.isFinite(stateUpdatedAt) && recordedAt > stateUpdatedAt;
+	});
+	const pendingEvidenceIds = new Set(evidenceAfterState.map((item) => item.id));
+	for (const item of snapshot.evidence ?? []) {
+		if (!snapshot.projectState || (Number.isInteger(item.revision) && item.revision > stateRevision)) pendingEvidenceIds.add(item.id);
+	}
+	const pendingEvidenceCount = pendingEvidenceIds.size;
 	const actionAfterState = snapshot.projectState
 		? actions.some((action) => Date.parse(action.updatedAt ?? action.createdAt ?? "") > Date.parse(snapshot.projectState.updatedAt ?? snapshot.projectState.committedAt ?? ""))
 		: actions.length > 0;
@@ -169,26 +249,19 @@ export function buildProjectView({ runtime, snapshot, git = {}, experiments = []
 	let freshness = "current";
 	const freshnessReasons = [];
 	if (!snapshot.projectState) {
-		freshness = snapshot.activeTransition || (snapshot.evidence?.length ?? 0) > 0 ? "transitioning" : "missing";
+		freshness = snapshot.activeTransition || pendingEvidenceCount > 0 ? "transitioning" : "missing";
 		if (snapshot.activeTransition) freshnessReasons.push("No compacted state has incorporated the active transition yet.");
-		if (snapshot.evidence?.length) freshnessReasons.push(`${snapshot.evidence.length} project experiment record(s) have not yet been synthesized into structured state.`);
-		if (!snapshot.activeTransition && !snapshot.evidence?.length) freshnessReasons.push("No structured Project State exists yet.");
-	} else if (transitionAfterState || evidenceAfterState.length) {
+		if (pendingEvidenceCount) freshnessReasons.push(`${pendingEvidenceCount} project experiment record(s) have not yet been synthesized into structured state.`);
+		if (!snapshot.activeTransition && !pendingEvidenceCount) freshnessReasons.push("No structured Project State exists yet.");
+	} else if (transitionAfterState || pendingEvidenceCount) {
 		freshness = "stale";
 		if (transitionAfterState) freshnessReasons.push(`Research transition to ${transitionAfterState.to} occurred after the last compacted state.`);
-		if (evidenceAfterState.length) freshnessReasons.push(`${evidenceAfterState.length} experiment record(s) are newer than the last compacted state.`);
+		if (pendingEvidenceCount) freshnessReasons.push(`${pendingEvidenceCount} experiment record(s) are newer than the last compacted state.`);
 	} else if (actionAfterState || gitChanged) {
 		freshness = "unconfirmed";
 		if (actionAfterState) freshnessReasons.push("Runtime activity is newer than the last compacted state.");
 		if (gitChanged) freshnessReasons.push("The Git branch or commit changed after the last compacted state.");
 	}
-	const evidenceById = new Map();
-	for (const item of experiments) if (item?.id) evidenceById.set(item.id, item);
-	for (const item of snapshot.evidence ?? []) if (item?.id) evidenceById.set(item.id, { ...evidenceById.get(item.id), ...item });
-	const recentEvidence = [...evidenceById.values()]
-		.sort((left, right) => Date.parse(left.timestamp ?? left.recordedAt ?? "") - Date.parse(right.timestamp ?? right.recordedAt ?? ""))
-		.slice(-6)
-		.map((item) => ({ ...item, routeStatus: runtimeTrackStatus(snapshot, item.trackRef) }));
 	return {
 		version: PROJECT_VIEW_VERSION,
 		projectKey: runtime.projectKey,
@@ -206,6 +279,14 @@ export function buildProjectView({ runtime, snapshot, git = {}, experiments = []
 		stateTrackLabel,
 		stateRouteStatus,
 		activeTransition: snapshot.activeTransition ?? null,
+		researchTrajectory: (snapshot.transitions ?? []).slice(-5).map((transition) => ({
+			...transition,
+			routeStatus: runtimeTrackStatus(snapshot, transition.trackRef),
+		})),
+		latestCompletedTask: completedTasks.at(-1) ?? null,
+		earlierCompletedTasks: completedTasks.slice(-4, -1),
+		pendingEvidenceCount,
+		pendingEvidence: evidenceAfterState.slice(-4),
 		transitionSupersedesState: Boolean(
 			snapshot.projectState
 			&& stateRouteStatus === "retired",
@@ -233,20 +314,79 @@ function bullets(items, formatter, empty) {
 	return items.length ? items.map((item) => `- ${formatter(item)}`) : [`- ${empty}`];
 }
 
+function evidenceBrief(item) {
+	const checks = list(item.validityChecks, 2).map((check) => compact(check, 180)).join(" | ");
+	return [
+		`- ${item.id} [${item.validityJudgment ?? "inconclusive"}] [${item.evidenceMode ?? "unspecified"}] [route=${item.routeStatus}] ${compact(item.question, 280)}`,
+		`  intervention: ${compact(item.intervention, 340) || "not recorded"}`,
+		`  observation: ${compact(item.observation, 440) || "not available in the bounded record"}`,
+		`  validity: ${checks || "no checks recorded"}`,
+		`  interpretation: ${compact(item.conclusion, 440) || "no conclusion recorded"}`,
+		item.nextStep ? `  next: ${compact(item.nextStep, 300)}` : undefined,
+		item.runId ? `  run: ${compact(item.runId, 180)}${item.runGitCommit ? ` @ ${compact(item.runGitCommit, 100)}` : ""}` : undefined,
+	].filter(Boolean);
+}
+
+function truncateSection(text, limit, marker) {
+	if (text.length <= limit) return text;
+	return `${text.slice(0, Math.max(0, limit - marker.length - 1)).trimEnd()}\n${marker}`;
+}
+
 export function renderProjectView(view) {
 	const state = view.state;
 	const lines = [
 		"<research_project_view>",
-		"Deterministic project-level working view. Compaction-derived claims are fallible; validate important claims against the cited experiment/run/artifact before acting.",
+		"Cold-start research orientation for a new Session. It preserves project direction, explains how the route reached its current frontier, and describes the latest completed work without turning that work into an automatic next task. The structured-state baseline is a fallible index; validate consequential claims against cited experiment/run/artifact evidence.",
 		`Project: ${view.projectKey} · ${view.workspaceRoot}`,
+		"=== PROJECT DIRECTION (stable orientation) ===",
+	];
+	if (state) {
+		lines.push(
+			`State provenance: ${view.stateSource?.kind === "amendment" ? "amendment " : "compaction "}S:${view.stateSource?.sessionId}/E:${view.stateSource?.entryId} hash=${view.stateSource?.contentHash ?? "unknown"}`,
+			view.stateAmendment ? `Latest state amendment: ${compact(view.stateAmendment.reason, 1_000)} | authority=${compact(view.stateAmendment.authorityRefs?.join(" | "), 1_800) || "missing"}` : undefined,
+			`Baseline research track: ${view.stateTrackRef} · ${compact(view.stateTrackLabel, 600)}`,
+			`Baseline research question: ${compact(state.researchQuestion, 1_000) || "unknown"}`,
+			`Baseline claim: ${compact(state.currentClaim, 1_000) || "no supported claim recorded"}`,
+			"Direction-setting decisions:",
+			...bullets(list(state.decisions, 4), (item) => [
+				`${compact(item.decision, 480)} (${item.reversible === false ? "frozen" : "reversible"})`,
+				item.rationale ? `why=${compact(item.rationale, 440)}` : "",
+				item.evidenceRefs?.length ? `refs=${item.evidenceRefs.join(",")}` : "",
+			].filter(Boolean).join(" | "), "none recorded"),
+			"Direction guardrails and continuation principles:",
+			...bullets(list(state.criticalContext, 5), (item) => compact(item, 520), "none recorded"),
+		);
+	} else {
+		lines.push("Structured project direction is unavailable; do not infer continuity from absence or let the most recent local task define the project. A later research compaction can establish it.");
+	}
+	lines.push(
+		"Research route trajectory (compressed history; each item explains a direction change, not a task queue):",
+		...bullets(view.researchTrajectory, (transition) => [
+			`${compact(transition.from, 240) || "previous route"} -> ${compact(transition.to, 360)}`,
+			`disposition=${transition.oldDisposition}`,
+			`reason=${compact(transition.reason, 520)}`,
+			transition.nextDecision ? `next-decision=${compact(transition.nextDecision, 360)}` : "",
+		].filter(Boolean).join(" | "), "No explicit research transition has been recorded."),
+		"Earlier completed work (compressed; historical context only):",
+		...bullets(view.earlierCompletedTasks, (handoff) => `${compact(handoff.task, 260) || handoff.id} -> ${compact(handoff.summary, 520)} [route=${handoff.routeStatus}]`, "No earlier durable task handoff is available."),
+		"--- live project delta (dynamic suffix) ---",
 		`Git: branch=${view.git.branch ?? "unknown"} commit=${view.git.commit ?? "unknown"} dirty=${view.git.dirty ?? "unknown"}`,
 		`Project revision: ${view.projectRevision} · structured state revision: ${view.stateRevision || "none"} · memory freshness: ${view.freshness}`,
 		`Current research track: ${view.currentTrack?.ref ?? "project:initial"} · ${compact(view.currentTrack?.label, 600) || "unnamed"}`,
-	];
-	if (view.freshness !== "current") {
+		state ? `Structured-state route status now: ${view.stateRouteStatus}` : undefined,
+	);
+	if (view.freshness === "current") {
+		lines.push("Baseline status: CURRENT. It may be used as the working research direction, subject to its cited evidence boundaries.");
+	} else {
 		lines.push(
-			"MEMORY FRESHNESS WARNING: do not execute the structured nextExperiment as current until the active research direction is confirmed.",
+			"MEMORY FRESHNESS WARNING: the baseline is historical or unconfirmed. Do not report its claim as current or execute its planned experiment without reconciling the live delta.",
 			...view.freshnessReasons.map((reason) => `- ${reason}`),
+		);
+	}
+	if (view.transitionSupersedesState) {
+		lines.push(
+			`Previous structured state (not current): S:${view.stateSource?.sessionId}/E:${view.stateSource?.entryId} hash=${view.stateSource?.contentHash ?? "unknown"}`,
+			"Its hypotheses and experiment details remain retrievable through research_memory_search/read; do not silently carry them into the active route.",
 		);
 	}
 	if (view.activeTransition) {
@@ -259,67 +399,169 @@ export function renderProjectView(view) {
 			transition.authorityRefs?.length ? `Transition authority: ${transition.authorityRefs.join(" | ")}` : undefined,
 		);
 	}
-	if (state) {
-		lines.push(`Structured state track: ${view.stateTrackRef} [${view.stateRouteStatus}] · ${compact(view.stateTrackLabel, 600)}`);
-		if (view.transitionSupersedesState) {
-			lines.push(
-				`Previous structured state (not current): S:${view.stateSource?.sessionId}/E:${view.stateSource?.entryId} hash=${view.stateSource?.contentHash ?? "unknown"}`,
-				`Previous research question: ${compact(state.researchQuestion, 700) || "unknown"}`,
-				`Previous claim: ${compact(state.currentClaim, 700) || "none recorded"}`,
-				"Previous hypotheses and experiment details remain retrievable through research_memory_search/read; they are not expanded into the active context.",
-			);
-		} else lines.push(
-			`State provenance: ${view.stateSource?.kind === "amendment" ? "amendment " : "compaction "}S:${view.stateSource?.sessionId}/E:${view.stateSource?.entryId} hash=${view.stateSource?.contentHash ?? "unknown"}`,
-			view.stateAmendment ? `Latest state amendment: ${compact(view.stateAmendment.reason, 1_000)} | authority=${compact(view.stateAmendment.authorityRefs?.join(" | "), 1_800) || "missing"}` : undefined,
-			`${view.freshness === "current" ? "Research question" : "Last compacted research question"}: ${compact(state.researchQuestion, 900) || "unknown"}`,
-			`${view.freshness === "current" ? "Current claim" : "Last compacted claim (verify freshness)"}: ${compact(state.currentClaim, 900) || "no supported claim recorded"}`,
-			`${view.freshness === "current" ? "Competing hypotheses" : "Last compacted hypotheses"}:`,
-			...bullets(list(state.hypotheses, 6), (item) => `${item.id} [${item.status}] ${compact(item.statement, 600)}${item.evidenceRefs?.length ? ` refs=${item.evidenceRefs.join(",")}` : ""}`, "none recorded"),
-			"Research decisions:",
-			...bullets(list(state.decisions, 4), (item) => `${compact(item.decision, 500)} (${item.reversible === false ? "frozen" : "reversible"})${item.evidenceRefs?.length ? ` refs=${item.evidenceRefs.join(",")}` : ""}`, "none recorded"),
-			"Decision-critical context:",
-			...bullets(list(state.criticalContext, 4), (item) => compact(item, 500), "none recorded"),
-			"Unresolved confounders/open questions:",
-			...bullets([...list(state.unresolvedConfounders, 3), ...list(state.openQuestions, 3)], (item) => compact(item, 500), "none recorded"),
-			`${view.freshness === "current" ? "Next experiment" : "Previous next experiment (not authoritative while memory is not current)"}: ${compact(state.nextExperiment?.question, 600) || "not determined"} | intervention=${compact(state.nextExperiment?.intervention, 700) || "not determined"}`,
+	lines.push("=== LATEST COMPLETED WORK (detailed handoff) ===");
+	if (view.latestCompletedTask) {
+		const handoff = view.latestCompletedTask;
+		lines.push(
+			`Task role: ${handoff.kind ?? "project work"} · route=${handoff.routeStatus} · source=${handoff.id}`,
+			`Task: ${compact(handoff.task, 1_000) || "not recorded"}`,
+			"What was completed and reported:",
+			truncateSection(String(handoff.summary ?? "No bounded completion summary was recorded."), 2_800, "[Latest task handoff truncated; inspect its Session, Codex job, or artifact for full detail.]"),
+			handoff.toolNames?.length ? `Tools involved: ${handoff.toolNames.join(", ")}` : undefined,
+			handoff.git ? `Handoff Git: branch=${handoff.git.branch ?? "unknown"} commit=${handoff.git.commit?.slice(0, 12) ?? "unknown"} dirty=${handoff.git.dirty ?? "unknown"}` : undefined,
+			"Directional status: this handoff is operational context, not automatic scientific evidence and not an instruction to continue the same kind of task. Update the research direction only through valid evidence, an explicit decision, amendment, transition, or checkpoint compact.",
 		);
 	} else {
-		lines.push("Structured project state: unavailable; do not infer continuity from absence. A later research compaction can establish it.");
+		lines.push("No durable completed-task handoff is available. Use the direction and current frontier; do not infer the project objective from Git dirtiness or live tools.");
+	}
+	if (view.pendingEvidence.length) {
+		lines.push(
+			`Pending evidence delta (${view.pendingEvidenceCount} record(s) newer than the structured baseline; authoritative as records but not yet synthesized into a current claim):`,
+			"Reconcile at this semantic boundary: use amend_project_state for a narrow evidence-backed state correction, record_research_transition for a real route change, or compact at a genuine checkpoint. Do not run model compaction after every experiment.",
+			...[...view.pendingEvidence].reverse().flatMap(evidenceBrief),
+		);
+	} else if (view.experiments.length) {
+		lines.push(
+			"Latest evidence briefs (already at or before the structured-state boundary; use for concise provenance, not as a replacement for exact records):",
+			...view.experiments.slice(-2).flatMap(evidenceBrief),
+		);
+	}
+	lines.push("=== CURRENT RESEARCH FRONTIER ===");
+	if (state && !view.transitionSupersedesState) {
+		lines.push(
+			"Competing hypotheses:",
+			...bullets(list(state.hypotheses, 6), (item) => [
+				`${item.id} [${item.status}] ${compact(item.statement, 520)}`,
+				item.predictions?.length ? `distinguishing=${list(item.predictions, 2).map((value) => compact(value, 260)).join(" | ")}` : "",
+				item.rationale ? `rationale=${compact(item.rationale, 340)}` : "",
+				item.evidenceRefs?.length ? `refs=${item.evidenceRefs.join(",")}` : "",
+			].filter(Boolean).join(" | "), "none recorded"),
+			"Decision-relevant observations:",
+			...bullets(list(state.observations, 4), (item) => [
+				`[${item.validity}] ${compact(item.statement, 480)}`,
+				item.interpretation ? `interpretation=${compact(item.interpretation, 420)}` : "",
+				item.evidenceRefs?.length ? `refs=${item.evidenceRefs.join(",")}` : "",
+			].filter(Boolean).join(" | "), "none recorded"),
+			"Unresolved confounders and open questions:",
+			...bullets([...list(state.unresolvedConfounders, 3), ...list(state.openQuestions, 3)], (item) => compact(item, 500), "none recorded"),
+			`Baseline planned next experiment (a candidate at this frontier, not an automatic command): ${compact(state.nextExperiment?.question, 600) || "not determined"}`,
+			`  intervention: ${compact(state.nextExperiment?.intervention, 700) || "not determined"}`,
+			...list(state.nextExperiment?.distinguishingOutcomes, 3).map((item) => `  distinguishing outcome: ${compact(item, 440)}`),
+			...list(state.nextExperiment?.validityChecks, 3).map((item) => `  validity check: ${compact(item, 440)}`),
+		);
+	} else if (state) {
+		lines.push("The structured frontier belongs to a retired route. Use the active transition and pending evidence to reconstruct the current hypotheses and next decision; do not continue the old planned experiment.");
+	} else {
+		lines.push("No structured research frontier is available yet.");
 	}
 	lines.push(
+		"=== OPERATIONAL APPENDIX (navigation, not direction) ===",
 		"Recent project evidence index (read exact records on demand):",
 		...bullets(view.experiments, (item) => `${item.id} [${item.validityJudgment ?? "inconclusive"}] [route=${item.routeStatus}] ${compact(item.question, 300)} -> ${compact(item.conclusion, 380)}${item.runId ? ` | run=${compact(item.runId, 140)}` : ""}`, "none recorded"),
 		"Live/unresolved Runtime actions:",
 		...bullets(view.actions, (item) => `${item.id} [${item.status}] [route=${item.routeStatus}] ${compact(item.label, 300)} external=${item.externalId ?? "none"}`, "none"),
 		"Open Runtime messages (queued or delivered but not consumed):",
 		...bullets(view.openMessages, (item) => `${item.id} [${item.status}] [route=${item.routeStatus}] ${item.type} from=${item.from}: ${item.body}`, "none"),
+		"=== NEW-SESSION ORIENTATION ===",
+		"The current user request selects the immediate task. Recent completed work, live Actions, dirty files, and a baseline next experiment are context, not automatic instructions.",
+		"Before acting, place the user request inside the project direction and current research frontier. Do not continue a local coding, debugging, or infrastructure loop merely because it is recent; continue it only when it still advances the research objective or the user explicitly requests it.",
+		"If recent work and project direction appear inconsistent, zoom out and reconcile the route, evidence, and intended decision before modifying code or launching experiments.",
 		"</research_project_view>",
 	);
-	const rendered = lines.filter(Boolean).join("\n");
-	return rendered.length <= 12_000 ? rendered : `${rendered.slice(0, 11_950)}\n[ProjectView truncated]\n</research_project_view>`;
+	const renderedLines = lines.filter(Boolean);
+	const rendered = renderedLines.join("\n");
+	if (rendered.length <= 12_000) return rendered;
+	const deltaIndex = renderedLines.indexOf("--- live project delta (dynamic suffix) ---");
+	const orientationIndex = renderedLines.indexOf("=== NEW-SESSION ORIENTATION ===");
+	const baseline = renderedLines.slice(1, deltaIndex).join("\n");
+	const deltaHead = renderedLines.slice(deltaIndex, orientationIndex).join("\n");
+	const orientation = renderedLines.slice(orientationIndex, -1).join("\n");
+	return [
+		"<research_project_view>",
+		truncateSection(baseline, 5_200, "[Direction and trajectory truncated; use /runtime view or research_memory_read for exact history.]"),
+		truncateSection(deltaHead, 5_000, "[Latest work/frontier delta truncated; inspect /runtime, /inbox, or exact experiment records.]"),
+		truncateSection(orientation, 1_300, "[New-Session orientation truncated.]"),
+		"</research_project_view>",
+	].join("\n");
 }
 
-export function materializeProjectView(messages, text, details = {}) {
-	const filtered = messages.filter((message) => message.role !== "custom" || message.customType !== PROJECT_VIEW_KIND);
-	if (!text) return filtered;
-	let insertAt = filtered.length;
-	for (let index = filtered.length - 1; index >= 0; index -= 1) {
-		if (filtered[index]?.role === "user") {
-			insertAt = index;
-			break;
-		}
+export function renderProjectViewDelta(view, sinceRevision = 0) {
+	const evidence = [...view.pendingEvidence]
+		.filter((item) => !Number.isInteger(item.revision) || item.revision > sinceRevision)
+		.reverse();
+	const transition = view.activeTransition && (!Number.isInteger(view.activeTransition.revision) || view.activeTransition.revision > sinceRevision)
+		? view.activeTransition
+		: null;
+	const lines = [
+		"<research_project_delta>",
+		"Append-only ProjectView update. Earlier ProjectView messages are historical baselines; this newer revision controls freshness and current-route interpretation.",
+		`Project revision: ${view.projectRevision} · structured state revision: ${view.stateRevision || "none"} · memory freshness: ${view.freshness}`,
+		`Git: branch=${view.git.branch ?? "unknown"} commit=${view.git.commit ?? "unknown"} dirty=${view.git.dirty ?? "unknown"}`,
+		`Current research track: ${view.currentTrack?.ref ?? "project:initial"} · ${compact(view.currentTrack?.label, 500) || "unnamed"}`,
+		view.freshness !== "current"
+			? "Do not report an earlier baseline claim as current or execute its planned next experiment until this delta is reconciled."
+			: "The latest structured baseline remains current.",
+		...view.freshnessReasons.map((reason) => `- ${reason}`),
+	];
+	if (transition) {
+		lines.push(
+			`Research transition: ${compact(transition.from, 300) || "previous route"} -> ${compact(transition.to, 420)} (${transition.oldDisposition})`,
+			`Reason: ${compact(transition.reason, 800)}`,
+			transition.nextDecision ? `Next decision: ${compact(transition.nextDecision, 600)}` : undefined,
+		);
 	}
-	const message = {
+	if (view.latestCompletedTask) {
+		const handoff = view.latestCompletedTask;
+		lines.push(
+			"Latest completed work handoff (operational context, not an automatic next task):",
+			`Task: ${compact(handoff.task, 700) || handoff.id}`,
+			`Reported result: ${compact(handoff.summary, 1_800)}`,
+			`Route: ${handoff.routeStatus} · source=${handoff.id}`,
+		);
+	}
+	if (evidence.length) {
+		lines.push(
+			`New evidence since Project revision ${sinceRevision} (${view.pendingEvidenceCount} total record(s) still newer than structured state):`,
+			"Treat each record's intervention, observation, validity, and interpretation separately. Reconcile with amend_project_state, record_research_transition, or a real checkpoint compact; do not compact mechanically after every experiment.",
+			...evidence.flatMap(evidenceBrief),
+		);
+	}
+	if (!transition && !evidence.length && !view.latestCompletedTask) {
+		lines.push("No new scientific evidence is embedded in this update; the change is environment or freshness metadata only.");
+	}
+	lines.push(
+		"New-Session orientation remains controlling: the current user request selects the immediate task; recent work and live Actions are context, not instructions to continue the same coding/debugging loop.",
+		"</research_project_delta>",
+	);
+	const rendered = lines.filter(Boolean).join("\n");
+	return rendered.length <= 5_800
+		? rendered
+		: `${rendered.slice(0, 5_700).trimEnd()}\n[Project delta truncated; read exact experiment records.]\n</research_project_delta>`;
+}
+
+export function materializeProjectViewDelta(messages, text, details = {}) {
+	const filtered = messages.filter((message) =>
+		message.role !== "custom"
+		|| (message.customType !== PROJECT_VIEW_DELTA_KIND
+			&& !(message.customType === PROJECT_VIEW_KIND && message.details?.transient === true)),
+	);
+	if (!text) return filtered;
+	const hasPersistentSnapshot = filtered.some((message) =>
+		message.role === "custom" && message.customType === PROJECT_VIEW_KIND,
+	);
+	return [...filtered, {
 		role: "custom",
-		customType: PROJECT_VIEW_KIND,
+		customType: hasPersistentSnapshot ? PROJECT_VIEW_DELTA_KIND : PROJECT_VIEW_KIND,
 		content: text,
 		display: false,
-		details: { version: PROJECT_VIEW_VERSION, ...details },
+		details: { version: PROJECT_VIEW_VERSION, transient: true, ...details },
 		timestamp: 0,
-	};
-	return [...filtered.slice(0, insertAt), message, ...filtered.slice(insertAt)];
+	}];
 }
 
 export function projectViewFingerprint(view) {
-	return fingerprint(view);
+	// Hash the exact model-facing bytes, not incidental Runtime timestamps or
+	// metadata that are absent from the prompt. This keeps repeated materialized
+	// messages byte-stable for provider-side prefix/KV caching.
+	return fingerprint(renderProjectView(view));
 }

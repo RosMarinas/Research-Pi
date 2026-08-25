@@ -107,7 +107,7 @@ export default function amendProjectStateExtension(pi: ExtensionAPI) {
 			}
 			const attachment = runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID, sessionId);
 			if (!attachment) {
-				throw new Error("This Session does not own the Research Leader; use /runtime takeover <reason> only if replacing the current owner is intentional.");
+				throw new Error("This is not the Leader Session; use /runtime takeover <reason> only if replacing the current owner is intentional.");
 			}
 			const git = await getGitSnapshot(ctx.cwd);
 			const amendmentId = `amend-${createHash("sha256").update(String(toolCallId)).digest("hex").slice(0, 24)}`;

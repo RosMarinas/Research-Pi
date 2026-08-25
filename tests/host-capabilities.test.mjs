@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
 	assertWslHostCommand,
+	capabilityGrantSummary,
 	createCapabilityGrant,
 	executeGrantedCapability,
 	hostBridgeEnvironment,
@@ -208,6 +209,95 @@ test("project host-command prefixes support uv-style runners and non-executable 
 			}, { env: { PATH: `${fakeBin}:${process.env.PATH}`, HOME: paths.root } }),
 			/Missing approved host-command capability/,
 		);
+	} finally {
+		rmSync(paths.root, { recursive: true, force: true });
+	}
+});
+
+test("project host-command grants restore their approved cwd by grant id or unique argv match", async () => {
+	const paths = fixture("research-pi-cap-command-cwd-");
+	try {
+		const worktree = join(paths.project, ".worktrees", "experiment-a");
+		mkdirSync(worktree, { recursive: true });
+		const script = join(paths.project, "sync.sh");
+		writeFileSync(script, "#!/bin/sh\nprintf '%s|%s' \"$PWD\" \"$1\"\n", { mode: 0o700 });
+		chmodSync(script, 0o700);
+		const firstContext = await resolveCapabilityContext(paths.project, "session-cwd-first", { stateRoot: paths.stateRoot });
+		const secondContext = await resolveCapabilityContext(paths.project, "session-cwd-second", { stateRoot: paths.stateRoot });
+		const request = await prepareCapabilityRequest(firstContext, {
+			kind: "host-command",
+			cwd: worktree,
+			argv: [script, "--once"],
+		});
+		const grant = await createCapabilityGrant(firstContext, request, "project");
+		assert.ok(capabilityGrantSummary(grant).includes(`cwd=${grant.cwd}`));
+
+		const inferred = await executeGrantedCapability(secondContext, {
+			kind: "host-command",
+			argv: [script, "--dry-run"],
+		});
+		assert.equal(inferred.grantId, grant.id);
+		assert.equal(inferred.stdout, `${grant.cwd}|--dry-run`);
+
+		const explicit = await executeGrantedCapability(secondContext, {
+			kind: "host-command",
+			grantId: grant.id,
+			argv: [script, "--once"],
+		});
+		assert.equal(explicit.grantId, grant.id);
+		assert.equal(explicit.stdout, `${grant.cwd}|--once`);
+
+		await assert.rejects(
+			executeGrantedCapability(secondContext, {
+				kind: "host-command",
+				grantId: grant.id,
+				cwd: paths.project,
+				argv: [script, "--once"],
+			}),
+			/bound to cwd=/,
+		);
+	} finally {
+		rmSync(paths.root, { recursive: true, force: true });
+	}
+});
+
+test("omitted host-command cwd refuses to guess between worktree grants", async () => {
+	const paths = fixture("research-pi-cap-command-ambiguous-");
+	try {
+		const worktreeA = join(paths.project, ".worktrees", "experiment-a");
+		const worktreeB = join(paths.project, ".worktrees", "experiment-b");
+		mkdirSync(worktreeA, { recursive: true });
+		mkdirSync(worktreeB, { recursive: true });
+		const script = join(paths.project, "sync.sh");
+		writeFileSync(script, "#!/bin/sh\nprintf '%s' \"$PWD\"\n", { mode: 0o700 });
+		chmodSync(script, 0o700);
+		const context = await resolveCapabilityContext(paths.project, "session-cwd-ambiguous", { stateRoot: paths.stateRoot });
+		const grantA = await createCapabilityGrant(
+			context,
+			await prepareCapabilityRequest(context, { kind: "host-command", cwd: worktreeA, argv: [script, "--once"] }),
+			"project",
+		);
+		const grantB = await createCapabilityGrant(
+			context,
+			await prepareCapabilityRequest(context, { kind: "host-command", cwd: worktreeB, argv: [script, "--once"] }),
+			"project",
+		);
+
+		await assert.rejects(
+			executeGrantedCapability(context, { kind: "host-command", argv: [script, "--dry-run"] }),
+			(error) => {
+				assert.match(error.message, /Multiple approved host-command capabilities/);
+				assert.match(error.message, new RegExp(grantA.id));
+				assert.match(error.message, new RegExp(grantB.id));
+				return true;
+			},
+		);
+		const selected = await executeGrantedCapability(context, {
+			kind: "host-command",
+			grantId: grantB.id,
+			argv: [script, "--dry-run"],
+		});
+		assert.equal(selected.stdout, grantB.cwd);
 	} finally {
 		rmSync(paths.root, { recursive: true, force: true });
 	}

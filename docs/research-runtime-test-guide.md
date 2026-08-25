@@ -11,7 +11,9 @@ Codex 不属于某个 Pi 对话。它在 Project 中承担一个有界、可续�
 | 对象 | 含义 | 生命周期 |
 |---|---|---|
 | Project | 长期科研边界与 Runtime 状态所有者 | 跨 Session、跨模型长期存在 |
-| Research Leader Actor | 项目负责人，当前由 Pi/DeepSeek 承载 | 身份稳定，可更换 Pi Session |
+| Leader Actor | 项目中稳定的研究领导身份，当前由 Pi/DeepSeek 承载 | 身份稳定，可更换 Leader Session |
+| Leader Session | 当前拥有执行、Project State 写入、Codex 调度和 Leader mailbox 的 Pi Session | 同一 Project 同时只有一个 |
+| Analysis Session | 继承 ProjectView 的只读讨论入口；可查本地/远端证据，但不执行 | 可与 Leader Session 并存 |
 | Codex Actor | 一个稳定的 Codex 子职责，当前由 `mission + mode` 定义 | 跨 Pi Session 存在，可反复激活 |
 | Action/job | Codex Actor 接受的一次具体委派或续接 | 有明确开始与终态 |
 | Activation | 正在运行的 worker、Codex App Server、thread/turn | 仅在 Action 运行期间存活 |
@@ -22,25 +24,28 @@ Codex 不属于某个 Pi 对话。它在 Project 中承担一个有界、可续�
 
 ```text
 Project
-├── Research Leader Actor
-│   └── 当前 attached Pi Session
+├── Leader Actor
+│   └── 当前 attached Leader Session
+├── Analysis Session 1..N (read-only, no Leader mailbox)
 └── Codex Actor: mission + mode
     ├── stable Codex thread
     ├── Action/job 1 -> completed
     └── Action/job 2 -> running
 ```
 
-“跨 Session 续接”不是把 Session A 的完整对话交给 Session B，也不是让 Session B 拥有 Session A。它表示 Session B attach 到同一个 Research Leader Actor 后，可以依据 Project Runtime 状态继续管理原 Codex Actor 和 thread。
+“跨 Session 续接”不是把 Session A 的完整对话交给 Session B，也不是让 Session B 拥有 Session A。它表示 Session B 成为 Leader Session、attach 到同一个 Leader Actor 后，可以依据 Project Runtime 状态继续管理原 Codex Actor 和 thread。Analysis Session 只读取同一 ProjectView，不发生这次 attachment 转移。
+
+Analysis Session 的最小流程是：从另一终端运行 `pi --analysis` 进入讨论；用只读工具或受限 SSH 核查结果；用 `/analysis send <message>` 将候选综合写入 Leader mailbox；只有用户执行 `/runtime promote <reason>` 后才取得执行权。analysis compact 保持 session-local，handoff 只是 proposal，不自动写入 Project State 或 Evidence。
 
 ## 2. Codex 在 Project 内负责什么
 
-Codex Actor 是执行器或独立顾问，不是科研 Leader：
+Codex Actor 是执行器或协作顾问，不是科研 Leader：
 
 - `executor`：完成有界实现、诊断、实验执行或其他工具密集任务；
-- `advisor`：只读审查、提出第二意见或挑战方案；
-- 可以在任务中向 Research Leader 或用户提出一个真正阻塞的问题；
+- `advisor`：围绕尚未成熟的问题进行只读协作，澄清共同理解、提出聚焦问题、展开候选解释并逐步形成 working synthesis；默认不充当反方评审；
+- advisor 可以在答案会明显改善讨论时向 Research Leader 提出高价值问题，不必等到完全阻塞；executor 仍只在真正阻塞时提问；
 - 可以接收纠偏、补充证据和回复；
-- 必须返回操作结果、证据、局限与未解决事项；
+- executor 必须返回操作结果、证据、局限与未解决事项；advisor 返回共同理解、候选解释、未决问题、证据、不确定性与建议的下一轮交流；
 - 不自动决定研究目标，不因 Action completed 就更新科学结论。
 
 同一 mission 的 advisor 与 executor 是两个 Actor，避免同时存在时 `/steer` 路由到错误 Activation。
@@ -78,6 +83,8 @@ starting -> running -> input_required -> running -> completed
 
 一次 suspended Actor 的新指令会通过原 thread 创建一个新 Action/job，而不是把旧终态 job 改回 running。
 
+Job lifecycle 与叶子活动是两个维度。Runtime Dock 和 `/watch` 中的 `now:`/`last:` 只描述 command、file change、search 或 `research_pi_host` 调用；叶子活动的 `completed` 不得改变 Action/job lifecycle。只有持久 job state 自身进入 `completed` 且 `finishedAt` 已记录，才表示 executor 完成。
+
 ### 3.3 Runtime message 状态
 
 ```text
@@ -88,7 +95,7 @@ queued -> delivered -> consumed
 - `queued`：已耐久写入 Project mailbox，Provider 尚未接受；
 - `delivered`：已交给目标 Adapter 或 attached Leader Session；
 - `consumed`：已进入一次 Leader 模型运行并完全 settled；之后从模型上下文过滤；
-- `superseded`：被明确的新控制消息替代；第一阶段已经支持状态，但 UI 尚未提供专用替换命令。
+- `superseded`：请求已被更新请求替代，或所属 Codex job 已进入终态；终态 ASK 会在投递前自动结算，避免跨 Session 反复出现。
 
 投递采用 at-least-once 的恢复思路：如果进程在模型看到消息后、`agent_settled` 前崩溃，消息可能在恢复时再出现一次；不会为了追求 exactly-once 而增加高频事务写入。
 
@@ -130,6 +137,16 @@ sequenceDiagram
 6. Adapter 把 reply 映射到原 request ID；同一 Codex turn 继续执行。
 
 回复不是启动另一只 Codex，也不需要把完整问题复制进新 Session。
+
+Host capability 不走上述自由文本咨询路径。Codex 调用 `research_pi_host` 且没有匹配 grant 时：
+
+1. 原 tool call 保持挂起，job 进入带 `kind=host_capability` 的 `input_required`；
+2. attached Pi TUI 自动展示精确 cwd/target、完整操作和建议持久前缀；
+3. 用户批准或拒绝；
+4. Harness 自动把决定送回原 request ID，同一个 Codex turn 继续；
+5. Runtime `ask` 在决定真正送回前保持 open，不能因为 Leader 已看到消息就提前 consumed。
+
+如果没有 attached project-aware TUI，请求应耐久留在 inbox；恢复 TUI 后再弹窗。整个过程不要求 Leader 生成 grantId，也不应额外调用 `consult_research_pi`。
 
 ### 4.3 用户纠偏
 

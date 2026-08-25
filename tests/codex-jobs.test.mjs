@@ -1,12 +1,20 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import codexDelegateExtension, { formatCodexStatus } from "../.pi/extensions/codex-delegate.ts";
+import codexDelegateExtension, {
+	codexResultMarkdown,
+	codexResultPreview,
+	formatCodexJob,
+	formatCodexJobsStatus,
+	formatCodexStatus,
+} from "../.pi/extensions/codex-delegate.ts";
 import {
+	DEFAULT_CODEX_ADVISOR_SCHEMA_PATH,
 	DEFAULT_CODEX_MODEL,
 	DEFAULT_CODEX_REASONING_EFFORT,
+	CODEX_DYNAMIC_TOOL_PROTOCOL_VERSION,
 	buildDelegationPrompt,
 	buildCodexContinuationNotice,
 	cancelCodexJob,
@@ -20,6 +28,7 @@ import {
 	sanitizeCodexEnvironment,
 	startCodexJob,
 	steerCodexJob,
+	supersedePendingCodexRequests,
 	waitForCodexJob,
 } from "../.pi/lib/codex-jobs.mjs";
 import { CODEX_ADVISOR_PROFILE, CODEX_EXECUTOR_PROFILE } from "../.pi/lib/project-boundary.mjs";
@@ -33,6 +42,33 @@ import {
 	prepareCapabilityRequest,
 	resolveCapabilityContext,
 } from "../.pi/lib/host-capabilities.mjs";
+
+test("terminal Codex jobs supersede unresolved request records without changing resolved history", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-request-settlement-"));
+	try {
+		const jobRoot = join(root, "jobs");
+		const jobId = "codex-2026-08-24T00-00-00-000Z-deadbeef";
+		const requestDir = join(jobRoot, jobId, "requests");
+		mkdirSync(requestDir, { recursive: true });
+		writeFileSync(join(requestDir, "request-pending.json"), JSON.stringify({ id: "request-pending", status: "pending", question: "old ask" }));
+		writeFileSync(join(requestDir, "request-resolved.json"), JSON.stringify({ id: "request-resolved", status: "resolved", resolvedAt: "2026-08-24T00:00:00.000Z" }));
+
+		const settled = await supersedePendingCodexRequests(jobId, { jobRoot, terminalStatus: "completed" });
+		assert.deepEqual(settled, ["request-pending"]);
+		const pending = JSON.parse(readFileSync(join(requestDir, "request-pending.json"), "utf8"));
+		const resolved = JSON.parse(readFileSync(join(requestDir, "request-resolved.json"), "utf8"));
+		assert.equal(pending.status, "superseded");
+		assert.equal(pending.resolutionReason, "codex_job_completed");
+		assert.match(pending.resolvedAt, /^\d{4}-\d{2}-\d{2}T/);
+		assert.equal(resolved.status, "resolved");
+		await assert.rejects(
+			supersedePendingCodexRequests(jobId, { jobRoot, terminalStatus: "input_required" }),
+			/non-terminal status/,
+		);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
 
 test("Pi registers one Codex delegation tool instead of a family of noisy tools", () => {
 	let registered;
@@ -49,6 +85,13 @@ test("Pi registers one Codex delegation tool instead of a family of noisy tools"
 	assert.equal(registered.name, "codex_delegate");
 	assert.equal(registered.executionMode, "sequential");
 	assert.match(registered.description, /gpt-5\.6-sol\/max/);
+	assert.match(registered.description, /collaborative research consultation/);
+	assert.doesNotMatch(registered.description, /second opinion|independent proposal or critique/i);
+	assert.match(registered.promptGuidelines.join("\n"), /research question is immature/);
+	assert.match(registered.promptGuidelines.join("\n"), /executor delegation, state a concrete objective and observable success criteria/);
+	assert.match(registered.promptGuidelines.join("\n"), /advisor consultation, start from the research uncertainty/);
+	assert.match(registered.promptGuidelines.join("\n"), /continuation of inquiry, not an automatic review or approval gate/);
+	assert.match(registered.promptGuidelines.join("\n"), /explicit critique, verdict, or adjudication language only/);
 	assert.equal(command.name, "codex");
 	assert.match(command.definition.description, /mission threads/);
 });
@@ -60,7 +103,16 @@ test("Codex delegation exposes bounded running and terminal footer states", () =
 		status: "running",
 		progress: "item.completed: command execution",
 	});
-	assert.equal(running, "⚙ Codex executor 12345678 · running · item.completed: command execution");
+	assert.equal(running, "⚙ Codex executor 12345678 · running · phase: item.completed: command execution");
+
+	const runningAfterTool = formatCodexStatus({
+		id: "codex-2026-08-11-9e62a4b5",
+		mode: "executor",
+		status: "running",
+		progress: "Codex turn running",
+		lastActivity: { summary: "research_pi_host · completed" },
+	});
+	assert.equal(runningAfterTool, "⚙ Codex executor 9e62a4b5 · running · last: research_pi_host · completed");
 
 	const completed = formatCodexStatus({
 		id: "codex-2026-08-11-abcdef12",
@@ -68,7 +120,104 @@ test("Codex delegation exposes bounded running and terminal footer states", () =
 		status: "completed",
 		progress: "completed",
 	});
-	assert.equal(completed, "✓ Codex advisor abcdef12 · completed · completed");
+	assert.equal(completed, "✓ Codex advisor abcdef12 · completed · phase: completed");
+
+	const partial = formatCodexStatus({
+		id: "codex-2026-08-11-abcddcba",
+		mode: "executor",
+		status: "completed",
+		progress: "completed",
+		result: { outcome: "partial", goal_satisfied: false },
+	});
+	assert.equal(partial, "! Codex executor abcddcba · completed/partial · phase: completed");
+
+	const parallel = formatCodexStatus({
+		id: "codex-2026-08-11-feedbeef",
+		mode: "executor",
+		status: "running",
+		progress: "child activity changed",
+		activeActivityCount: 3,
+		activeActivities: [
+			{ id: "one", summary: "first child" },
+			{ id: "two", summary: "second child" },
+		],
+	});
+	assert.equal(parallel, "⚙ Codex executor feedbeef · running · 3 parallel activities · /watch");
+
+	const aggregate = formatCodexJobsStatus([
+		{ id: "codex-b", mode: "executor", status: "running", createdAt: "2026-08-11T00:00:02Z" },
+		{ id: "codex-a", mode: "advisor", status: "input_required", createdAt: "2026-08-11T00:00:01Z" },
+	]);
+	assert.equal(aggregate, "? Codex 2 active · 1 waiting · details above editor");
+});
+
+test("a synchronous advisor ASK tells the Leader to resume the exact paused turn", () => {
+	const text = formatCodexJob({
+		id: "codex-2026-08-24T10-27-17-695Z-a19e1bec",
+		mode: "advisor",
+		status: "input_required",
+		pendingRequest: {
+			id: "request-a19e1bec-b1b04fb465a5",
+			audience: "leader",
+			question: "Which interpretation should remain live?",
+			whyBlocking: "The answer changes the comparison surface.",
+			options: ["H1", "H2"],
+		},
+	});
+	assert.match(text, /paused for input; its worker and current turn remain alive/);
+	assert.match(text, /action=respond/);
+	assert.match(text, /jobId=codex-2026-08-24T10-27-17-695Z-a19e1bec/);
+	assert.match(text, /requestId=request-a19e1bec-b1b04fb465a5/);
+	assert.match(text, /Do not cancel, restart, or replace/);
+});
+
+test("Codex structured results render as readable sections instead of raw JSON", () => {
+	const result = {
+		outcome: "succeeded",
+		goal_satisfied: true,
+		completion_basis: "All delegated acceptance criteria passed.",
+		summary: "Observation first.\n\n1. Preserve the numbered argument.\n2. Keep the second point.",
+		evidence: ["Metric A passed", "Metric B remained uncertain"],
+		actions_taken: ["Inspected the project"],
+		changed_files: ["src/probe.py"],
+		checks: [{ command: "uv run pytest", result: "12 passed" }],
+		external_effects: [],
+		uncertainties: ["One surface remains untested"],
+		remaining_work: [],
+		recommended_next_step: "Run the discriminating probe.",
+	};
+	const markdown = codexResultMarkdown(result);
+	assert.match(markdown, /^## Delegation outcome/m);
+	assert.match(markdown, /All delegated acceptance criteria passed/);
+	assert.match(markdown, /^## Summary/m);
+	assert.match(markdown, /1\. Preserve the numbered argument\./);
+	assert.match(markdown, /^## Evidence/m);
+	assert.match(markdown, /`uv run pytest`/);
+	assert.match(markdown, /^## Recommended next step/m);
+	assert.doesNotMatch(markdown, /"goal_satisfied"/);
+	assert.equal(codexResultPreview(result), "Observation first. 1. Preserve the numbered argument. 2. Keep the second point.");
+});
+
+test("Codex advisor results render as a continuation surface instead of a review verdict", () => {
+	const result = {
+		status: "working_synthesis",
+		shared_understanding: "The representation question is not yet mature enough for a verdict.",
+		points_of_agreement: ["The intervention must be explicit"],
+		candidate_explanations: ["The gain comes from memory", "The gain comes from evaluation leakage"],
+		questions_to_resolve: ["Which observation separates the two explanations?"],
+		evidence: ["The current pilot is inconclusive"],
+		uncertainties: ["No oracle result yet"],
+		working_synthesis: "Keep both explanations live and design one discriminating probe.",
+		suggested_next_exchange: "Ask Research Pi which intervention is affordable first.",
+	};
+	const markdown = codexResultMarkdown(result);
+	assert.match(markdown, /^## Shared understanding/m);
+	assert.match(markdown, /^## Candidate explanations/m);
+	assert.match(markdown, /^## Questions to resolve/m);
+	assert.match(markdown, /^## Working synthesis/m);
+	assert.match(markdown, /^## Suggested next exchange/m);
+	assert.doesNotMatch(markdown, /review score|goal_satisfied/);
+	assert.equal(codexResultPreview(result), "Keep both explanations live and design one discriminating probe.");
 });
 
 test("a stale Pi Session cannot start new Codex work after Leader ownership moves", async () => {
@@ -99,7 +248,7 @@ test("a stale Pi Session cannot start new Codex work after Leader ownership move
 		};
 		await assert.rejects(
 			registered.execute("tool-call", { action: "start", task: "must not launch" }, new AbortController().signal, undefined, ctx),
-			/no longer owns the Research Leader/,
+			/no longer the Leader Session/,
 		);
 	} finally {
 		if (previousRuntimeRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
@@ -130,6 +279,13 @@ let activeTurn = null;
 let completionTimer;
 let deltaNotificationsOptedOut = false;
 let hostToolPresent = false;
+let submissionToolPresent = false;
+let dynamicToolTypesValid = false;
+let turnOutputSchemaPresent = false;
+let consultationField = "missing-consultation-field";
+let isAdvisorSchema = false;
+let resumeParamsClean = true;
+let pendingFinalPrompt = "";
 process.stderr.write("fake app-server warning\\n");
 
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
@@ -137,20 +293,47 @@ const complete = (prompt, leaderResponse = "") => {
   if (sandbox === "${CODEX_EXECUTOR_PROFILE}") {
     writeFileSync(join(process.cwd(), "codex-executed.txt"), "executor ran\\n", "utf8");
   }
-  const result = {
-    status: "completed",
+  const evidence = [model, sandbox, prompt.includes("Research Pi") ? "role-present" : "role-missing", deltaNotificationsOptedOut ? "delta-opt-out" : "delta-not-opted-out", hostToolPresent ? "host-tool-present" : "host-tool-missing", submissionToolPresent ? "submission-tool-present" : "submission-tool-missing", dynamicToolTypesValid ? "dynamic-tool-types-valid" : "dynamic-tool-types-invalid", turnOutputSchemaPresent ? "turn-schema-present" : "turn-schema-absent", consultationField, isResume ? (resumeParamsClean ? "resume-params-clean" : "resume-dynamic-tools-invalid") : "", process.env.SSH_AUTH_SOCK ? "child-ssh-agent-present" : "child-ssh-agent-absent", leaderResponse].filter(Boolean);
+  let result = isAdvisorSchema ? {
+    status: "working_synthesis",
+    shared_understanding: "The question is still being clarified.",
+    points_of_agreement: ["Keep the research objective with Research Pi"],
+    candidate_explanations: ["candidate A", "candidate B"],
+    questions_to_resolve: ["Which observation would distinguish them?"],
+    evidence,
+    uncertainties: [],
+    working_synthesis: isResume ? "resumed consultation" : "finished collaborative consultation",
+    suggested_next_exchange: "Continue the same mission after answering the open question"
+  } : {
+    outcome: "succeeded",
     goal_satisfied: true,
+    completion_basis: "The delegated fake objective and check completed.",
     summary: isResume ? "resumed" : "finished",
-    evidence: [model, sandbox, prompt.includes("Research Pi") ? "role-present" : "role-missing", deltaNotificationsOptedOut ? "delta-opt-out" : "delta-not-opted-out", hostToolPresent ? "host-tool-present" : "host-tool-missing", process.env.SSH_AUTH_SOCK ? "child-ssh-agent-present" : "child-ssh-agent-absent", leaderResponse].filter(Boolean),
+    evidence,
     actions_taken: ["fake action"],
     changed_files: sandbox === "${CODEX_EXECUTOR_PROFILE}" ? ["codex-executed.txt"] : [],
     checks: [{ command: "fake-check", result: "passed" }],
     external_effects: [],
     uncertainties: [],
+    remaining_work: [],
     recommended_next_step: "inspect result"
   };
-  send({ method: "item/completed", params: { threadId: "thread-fake-123", turnId: activeTurn, item: { id: "message-1", type: "agentMessage", phase: "final_answer", text: JSON.stringify(result) } } });
-  send({ method: "turn/completed", params: { threadId: "thread-fake-123", turn: { id: activeTurn, status: "completed", items: [], error: null } } });
+  if (!isAdvisorSchema && prompt.includes("legacy completed false")) {
+    result = {
+      status: "completed",
+      goal_satisfied: false,
+      summary: "legacy checkpoint",
+      evidence: [],
+      actions_taken: [],
+      changed_files: [],
+      checks: [],
+      external_effects: [],
+      uncertainties: [],
+      recommended_next_step: "finish the delegated implementation"
+    };
+  }
+  pendingFinalPrompt = prompt;
+  send({ id: "server-submit-result-1", method: "item/tool/call", params: { threadId: "thread-fake-123", turnId: activeTurn, callId: "submit-call-1", tool: "submit_research_pi_result", arguments: result } });
 };
 
 createInterface({ input: process.stdin }).on("line", (line) => {
@@ -161,17 +344,34 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   } else if (message.method === "thread/start") {
     model = message.params.model;
     hostToolPresent = message.params.dynamicTools?.some((tool) => tool.name === "research_pi_host") ?? false;
+    const consultation = message.params.dynamicTools?.find((tool) => tool.name === "consult_research_pi");
+    const submission = message.params.dynamicTools?.find((tool) => tool.name === "submit_research_pi_result");
+    submissionToolPresent = Boolean(submission);
+    dynamicToolTypesValid = message.params.dynamicTools?.every((tool) => tool.type === "function") ?? false;
+    isAdvisorSchema = submission?.inputSchema?.required?.includes("shared_understanding") ?? false;
+    consultationField = consultation?.inputSchema?.required?.includes("why_it_matters") ? "why-it-matters" : consultation?.inputSchema?.required?.includes("why_blocking") ? "why-blocking" : "missing-consultation-field";
     send({ id: message.id, result: { thread: { id: "thread-fake-123", turns: [] } } });
     send({ method: "thread/started", params: { thread: { id: "thread-fake-123", turns: [] } } });
   } else if (message.method === "thread/resume") {
     model = message.params.model;
-    hostToolPresent = message.params.dynamicTools?.some((tool) => tool.name === "research_pi_host") ?? false;
+    resumeParamsClean = !Object.prototype.hasOwnProperty.call(message.params, "dynamicTools")
+      && !Object.prototype.hasOwnProperty.call(message.params, "serviceName");
+    // App Server persists dynamic tools on a compatible thread; thread/resume
+    // itself does not accept a dynamicTools field.
+    hostToolPresent = true;
+    submissionToolPresent = true;
+    dynamicToolTypesValid = true;
     isResume = true;
     send({ id: message.id, result: { thread: { id: message.params.threadId, turns: [] } } });
     send({ method: "thread/started", params: { thread: { id: message.params.threadId, turns: [] } } });
   } else if (message.method === "turn/start") {
     activeTurn = "turn-fake-456";
+    turnOutputSchemaPresent = Boolean(message.params.outputSchema);
     const prompt = message.params.input[0].text;
+    if (isResume) {
+      isAdvisorSchema = prompt.includes("read-only research advisor");
+      consultationField = isAdvisorSchema ? "why-it-matters" : "why-blocking";
+    }
     send({ id: message.id, result: { turn: { id: activeTurn, status: "inProgress", items: [], error: null } } });
     send({ method: "turn/started", params: { threadId: "thread-fake-123", turn: { id: activeTurn, status: "inProgress", items: [], error: null } } });
 	if (prompt.includes("crash after side effect barrier")) {
@@ -192,7 +392,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       send({ method: "item/completed", params: { threadId: foreignThread, turnId: foreignTurn, item: { id: "foreign-message", type: "agentMessage", phase: "final_answer", text: foreignResult } } });
       send({ method: "turn/completed", params: { threadId: foreignThread, turn: { id: foreignTurn, status: "completed", items: [], error: null } } });
     }
-    if (prompt.includes("objective activity")) {
+    if (prompt.includes("parallel objective activity")) {
+      send({ method: "item/started", params: { threadId: "thread-fake-123", turnId: activeTurn, item: { id: "parallel-one", type: "commandExecution", status: "inProgress", command: "python3 probe-a.py", cwd: process.cwd() } } });
+      send({ method: "item/started", params: { threadId: "thread-fake-123", turnId: activeTurn, item: { id: "parallel-two", type: "commandExecution", status: "inProgress", command: "python3 probe-b.py", cwd: process.cwd() } } });
+    } else if (prompt.includes("objective activity")) {
       send({ method: "item/started", params: { threadId: "thread-fake-123", turnId: activeTurn, item: { id: "command-observed", type: "commandExecution", status: "inProgress", command: "python3 probe.py", commandActions: [], cwd: process.cwd(), durationMs: null, exitCode: null, aggregatedOutput: null } } });
       send({ method: "item/completed", params: { threadId: "thread-fake-123", turnId: activeTurn, item: { id: "command-observed", type: "commandExecution", status: "completed", command: "python3 probe.py", commandActions: [], cwd: process.cwd(), durationMs: 12, exitCode: 0, aggregatedOutput: "probe-ok" } } });
       send({ method: "item/completed", params: { threadId: "thread-fake-123", turnId: activeTurn, item: { id: "collab-observed", type: "collabAgentToolCall", tool: "spawnAgent", status: "completed", senderThreadId: "thread-fake-123", receiverThreadIds: ["thread-child-1"], agentsStates: { "thread-child-1": { status: "running", message: "checking probe" } }, model: "gpt-5.6-luna", reasoningEffort: "high", prompt: "Check the probe result" } } });
@@ -204,7 +407,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       send({ id: "server-host-read-1", method: "item/tool/call", params: { threadId: "thread-fake-123", turnId: activeTurn, callId: "host-call-1", tool: "research_pi_host", arguments: { action: "read", path } } });
     } else if (prompt.includes("HOST_COMMAND_PATH=")) {
       const path = prompt.match(/HOST_COMMAND_PATH=([^\\n<]+)/)?.[1]?.trim();
-      send({ id: "server-host-command-1", method: "item/tool/call", params: { threadId: "thread-fake-123", turnId: activeTurn, callId: "host-command-1", tool: "research_pi_host", arguments: { action: "command", argv: [process.execPath, path, "from-codex"], cwd: process.cwd() } } });
+      const grantId = prompt.match(/HOST_COMMAND_GRANT=(grant-[A-Za-z0-9]{8})/)?.[1];
+      send({ id: "server-host-command-1", method: "item/tool/call", params: { threadId: "thread-fake-123", turnId: activeTurn, callId: "host-command-1", tool: "research_pi_host", arguments: { action: "command", argv: [process.execPath, path, "from-codex"], ...(grantId ? { grantId } : { cwd: process.cwd() }) } } });
     } else {
       completionTimer = setTimeout(() => complete(prompt), ${delayMs});
     }
@@ -217,6 +421,12 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   } else if (message.id === "server-host-command-1") {
     const answer = message.result?.contentItems?.[0]?.text ?? message.error?.message ?? "missing host response";
     complete("Research Pi", answer);
+  } else if (message.id === "server-submit-result-1") {
+    send({ method: "item/completed", params: { threadId: "thread-fake-123", turnId: activeTurn, item: { id: "message-1", type: "agentMessage", phase: "final_answer", text: "Structured handoff submitted." } } });
+    if (pendingFinalPrompt.includes("late commentary after final")) {
+      send({ method: "item/completed", params: { threadId: "thread-fake-123", turnId: activeTurn, item: { id: "message-commentary", type: "agentMessage", phase: "commentary", text: "late commentary must not replace the submitted result" } } });
+    }
+    send({ method: "turn/completed", params: { threadId: "thread-fake-123", turn: { id: activeTurn, status: "completed", items: [], error: null } } });
   } else if (message.method === "turn/steer") {
     send({ id: message.id, result: { turnId: activeTurn } });
   } else if (message.method === "turn/interrupt") {
@@ -232,9 +442,14 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 	return path;
 }
 
-test("delegation prompt encodes distinct advisor and project-bounded executor roles", () => {
+test("delegation prompt makes advisor collaborative while preserving executor authority", () => {
 	const advisor = buildDelegationPrompt({ mode: "advisor", task: "inspect", successCriteria: [], context: "" });
-	assert.match(advisor, /read-only advisor/);
+	assert.match(advisor, /read-only research advisor collaborating with Research Pi/);
+	assert.match(advisor, /question may be incomplete/);
+	assert.match(advisor, /jointly expand substantively different candidate explanations/);
+	assert.match(advisor, /do not need to wait until progress is completely blocked/);
+	assert.match(advisor, /continuation surface, not a verdict or review score/);
+	assert.doesNotMatch(advisor, /challenge weak assumptions|return a concrete proposal|independent critique/);
 	assert.doesNotMatch(advisor, /committing or pushing Git changes/);
 
 	const executor = buildDelegationPrompt({
@@ -249,6 +464,9 @@ test("delegation prompt encodes distinct advisor and project-bounded executor ro
 	assert.match(executor, /research_pi_host/);
 	assert.match(executor, /credential contents never enter/);
 	assert.match(executor, /record the run id/);
+	assert.match(executor, /phase=commentary/);
+	assert.match(executor, /phase=final_answer/);
+	assert.match(executor, /never encode a plan, preamble, checkpoint/);
 	assert.match(executor, /hypothesis H1/);
 	const wslExecutor = buildDelegationPrompt({
 		mode: "executor",
@@ -281,14 +499,16 @@ test("continuation notice detects stale Git state without copying filenames", ()
 	assert.doesNotMatch(notice, /secret-looking-filename/);
 });
 
-test("Codex environment removes the DeepSeek credential without dropping execution access", () => {
+test("Codex environment removes provider credentials without dropping execution access", () => {
 	const env = sanitizeCodexEnvironment({
 		PATH: "/bin",
 		HOME: "/tmp/example-home",
 		SSH_AUTH_SOCK: "/tmp/ssh.sock",
 		DEEPSEEK_API_KEY: "secret",
+		OPENCODE_API_KEY: "secret-too",
 	});
 	assert.equal(env.DEEPSEEK_API_KEY, undefined);
+	assert.equal(env.OPENCODE_API_KEY, undefined);
 	assert.equal(env.PATH, "/bin");
 	assert.equal(env.HOME, "/tmp/example-home");
 	assert.equal(env.SSH_AUTH_SOCK, "/tmp/ssh.sock");
@@ -334,9 +554,15 @@ test("advisor, executor, and explicit resume produce durable structured jobs", a
 		assert.equal(advisor.model, DEFAULT_CODEX_MODEL);
 		assert.equal(advisor.reasoningEffort, DEFAULT_CODEX_REASONING_EFFORT);
 		assert.equal(advisor.sandbox, CODEX_ADVISOR_PROFILE);
-		assert.equal(advisor.result.goal_satisfied, true);
+		assert.equal(advisor.result.status, "working_synthesis");
+		assert.equal(advisor.result.working_synthesis, "finished collaborative consultation");
 		assert.equal(advisor.threadId, "thread-fake-123");
 		assert.match(advisor.result.evidence.join("\n"), /child-ssh-agent-absent/);
+		assert.match(advisor.result.evidence.join("\n"), /why-it-matters/);
+		assert.equal(
+			JSON.parse(readFileSync(join(jobRoot, advisorStart.id, "request.json"), "utf8")).schemaPath,
+			DEFAULT_CODEX_ADVISOR_SCHEMA_PATH,
+		);
 
 		const executorStart = await startCodexJob({
 			cwd: workspace,
@@ -350,6 +576,15 @@ test("advisor, executor, and explicit resume produce durable structured jobs", a
 		assert.equal(executor.model, DEFAULT_CODEX_MODEL);
 		assert.equal(executor.reasoningEffort, DEFAULT_CODEX_REASONING_EFFORT);
 		assert.equal(executor.sandbox, CODEX_EXECUTOR_PROFILE);
+		assert.equal(executor.result.outcome, "succeeded");
+		assert.equal(executor.result.goal_satisfied, true);
+		assert.equal(executor.result.status, undefined);
+		assert.deepEqual(executor.result.remaining_work, []);
+		assert.equal(executor.resultSource, "submit_research_pi_result");
+		assert.match(executor.result.evidence.join("\n"), /why-blocking/);
+		assert.match(executor.result.evidence.join("\n"), /submission-tool-present/);
+		assert.match(executor.result.evidence.join("\n"), /dynamic-tool-types-valid/);
+		assert.match(executor.result.evidence.join("\n"), /turn-schema-absent/);
 		assert.equal(readFileSync(join(workspace, "codex-executed.txt"), "utf8"), "executor ran\n");
 
 		const resumedStart = await resumeCodexJob(executor.id, {
@@ -361,6 +596,76 @@ test("advisor, executor, and explicit resume produce durable structured jobs", a
 		assert.equal(resumed.status, "completed");
 		assert.equal(resumed.continuationOf, executor.id);
 		assert.equal(resumed.result.summary, "resumed");
+		assert.match(resumed.result.evidence.join("\n"), /resume-params-clean/);
+
+		const legacyJobPath = join(jobRoot, resumed.id, "job.json");
+		const legacyJob = JSON.parse(readFileSync(legacyJobPath, "utf8"));
+		delete legacyJob.dynamicToolProtocolVersion;
+		writeFileSync(legacyJobPath, `${JSON.stringify(legacyJob, null, 2)}\n`, "utf8");
+		const refreshedStart = await resumeCodexJob(resumed.id, {
+			jobRoot,
+			codexBin,
+			followUp: "refresh a thread created before the current dynamic tools",
+		});
+		const refreshed = await waitForCodexJob(refreshedStart.id, { jobRoot });
+		assert.equal(refreshed.status, "completed");
+		assert.equal(refreshed.continuationOf, resumed.id);
+		assert.equal(refreshed.dynamicToolProtocolVersion, CODEX_DYNAMIC_TOOL_PROTOCOL_VERSION);
+		assert.equal(refreshed.threadRefresh?.reason, "dynamic_tool_protocol_upgrade");
+		assert.equal(refreshed.threadRefresh?.previousThreadId, resumed.threadId);
+		assert.equal(refreshed.resultSource, "submit_research_pi_result");
+		assert.match(refreshed.result.evidence.join("\n"), /submission-tool-present/);
+		const refreshedRequest = JSON.parse(readFileSync(join(jobRoot, refreshed.id, "request.json"), "utf8"));
+		assert.equal(refreshedRequest.continuationThreadId, null);
+		assert.match(refreshedRequest.prompt, /LEGACY THREAD REFRESH/);
+		assert.match(refreshedRequest.prompt, new RegExp(resumed.id));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("submitted executor result cannot be replaced by a later commentary item", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-phase-result-"));
+	try {
+		const workspace = join(root, "workspace");
+		const jobRoot = join(root, "codex", "jobs");
+		mkdirSync(workspace, { recursive: true });
+		const completed = await waitForCodexJob((await startCodexJob({
+			cwd: workspace,
+			jobRoot,
+			codexBin: makeFakeCodex(root),
+			mode: "executor",
+			task: "late commentary after final protocol smoke",
+		})).id, { jobRoot });
+		assert.equal(completed.status, "completed");
+		assert.equal(completed.result.outcome, "succeeded");
+		assert.equal(completed.result.goal_satisfied, true);
+		assert.equal(completed.result.summary, "finished");
+		assert.doesNotMatch(completed.result.summary, /late commentary/);
+		assert.equal(completed.resultSource, "submit_research_pi_result");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("legacy completed plus goal_satisfied false normalizes to a partial outcome", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-legacy-outcome-"));
+	try {
+		const workspace = join(root, "workspace");
+		const jobRoot = join(root, "codex", "jobs");
+		mkdirSync(workspace, { recursive: true });
+		const completed = await waitForCodexJob((await startCodexJob({
+			cwd: workspace,
+			jobRoot,
+			codexBin: makeFakeCodex(root),
+			mode: "executor",
+			task: "legacy completed false protocol smoke",
+		})).id, { jobRoot });
+		assert.equal(completed.status, "completed");
+		assert.equal(completed.result.status, undefined);
+		assert.equal(completed.result.outcome, "partial");
+		assert.equal(completed.result.goal_satisfied, false);
+		assert.deepEqual(completed.result.remaining_work, ["finish the delegated implementation"]);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -436,8 +741,8 @@ test("unrelated app-server threads cannot replace or complete the owned Codex tu
 		const completed = await waitForCodexJob(started.id, { jobRoot });
 		assert.equal(completed.status, "completed");
 		assert.equal(completed.threadId, "thread-fake-123");
-		assert.equal(completed.result.goal_satisfied, true);
-		assert.equal(completed.result.summary, "finished");
+		assert.equal(completed.result.status, "working_synthesis");
+		assert.equal(completed.result.working_synthesis, "finished collaborative consultation");
 		assert.ok(completed.workerIo.foreignMessagesIgnored >= 4, JSON.stringify(completed.workerIo));
 	} finally {
 		rmSync(root, { recursive: true, force: true });
@@ -834,19 +1139,15 @@ test("app-server delegation supports live leader requests and durable session re
 		assert.equal(started.leaderSessionId, "pi-session-live");
 		assert.equal((await listCodexJobs({ jobRoot })).length, 1);
 
-		let waiting;
-		let observed;
-		for (let attempt = 0; attempt < 200; attempt++) {
-			const [job] = await listCodexJobs({ jobRoot, leaderSessionId: "pi-session-live", cwd: workspace });
-			if (job) observed = job;
-			if (job?.status === "input_required") {
-				waiting = job;
-				break;
-			}
-			await new Promise((resolve) => setTimeout(resolve, 25));
-		}
-		assert.equal(waiting?.pendingRequest?.question, "Choose H1 or H2", JSON.stringify(observed));
+		const waiting = await waitForCodexJob(started.id, {
+			jobRoot,
+			returnOnInputRequired: (job) => job.pendingRequest?.kind === "leader_consultation",
+		});
+		assert.equal(waiting.status, "input_required");
+		assert.equal(waiting.pendingRequest?.question, "Choose H1 or H2", JSON.stringify(waiting));
 		assert.equal(waiting?.activeTurnId, "turn-fake-456");
+		const pausedWorkerPid = waiting.workerPid;
+		const pausedThreadId = waiting.threadId;
 
 		const steering = await steerCodexJob(started.id, {
 			jobRoot,
@@ -871,6 +1172,8 @@ test("app-server delegation supports live leader requests and durable session re
 		});
 		const completed = await waitForCodexJob(started.id, { jobRoot });
 		assert.equal(completed.status, "completed");
+		assert.equal(completed.workerPid, pausedWorkerPid, "Leader response must continue the same Codex worker");
+		assert.equal(completed.threadId, pausedThreadId, "Leader response must continue the same Codex thread");
 		assert.match(completed.result.evidence.join("\n"), /Use H2/);
 
 		const commandName = readdirSync(join(jobRoot, started.id, "commands")).find((name) =>
@@ -923,7 +1226,7 @@ test("App Server objective command and subagent events reach the bounded audit p
 		const workspace = join(root, "workspace");
 		const jobRoot = join(root, "codex", "jobs");
 		mkdirSync(workspace, { recursive: true });
-		const codexBin = makeFakeCodex(root);
+		const codexBin = makeFakeCodex(root, 500);
 		const started = await startCodexJob({
 			cwd: workspace,
 			jobRoot,
@@ -931,6 +1234,19 @@ test("App Server objective command and subagent events reach the bounded audit p
 			mode: "advisor",
 			task: "emit objective activity for the TUI",
 		});
+		let active;
+		for (let attempt = 0; attempt < 100; attempt++) {
+			const current = await readCodexJob(started.id, { jobRoot });
+			if (current.lastActivity?.category === "subagent") {
+				active = current;
+				break;
+			}
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		assert.equal(active?.status, "running", JSON.stringify(active));
+		assert.equal(active?.progress, "Codex turn running");
+		assert.equal(active?.currentActivity, null);
+		assert.equal(active?.lastActivity?.status, "completed");
 		const completed = await waitForCodexJob(started.id, { jobRoot });
 		assert.equal(completed.status, "completed");
 		const events = readFileSync(join(jobRoot, started.id, "events.jsonl"), "utf8")
@@ -943,6 +1259,40 @@ test("App Server objective command and subagent events reach the bounded audit p
 		const subagent = events.find((event) => event.category === "subagent");
 		assert.deepEqual(subagent.receiverThreadIds, ["thread-child-1"]);
 		assert.equal(subagent.model, "gpt-5.6-luna");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("parallel objective activities remain separately visible in live job state", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-parallel-ui-"));
+	try {
+		const workspace = join(root, "workspace");
+		const jobRoot = join(root, "codex", "jobs");
+		mkdirSync(workspace, { recursive: true });
+		const started = await startCodexJob({
+			cwd: workspace,
+			jobRoot,
+			codexBin: makeFakeCodex(root, 500),
+			mode: "advisor",
+			task: "emit parallel objective activity for the TUI",
+		});
+		let active;
+		for (let attempt = 0; attempt < 100; attempt++) {
+			const current = await readCodexJob(started.id, { jobRoot });
+			if (current.activeActivityCount === 2) {
+				active = current;
+				break;
+			}
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		assert.equal(active?.status, "running", JSON.stringify(active));
+		assert.equal(active?.activeActivityCount, 2);
+		assert.deepEqual(active?.activeActivities.map((activity) => activity.id), ["parallel-one", "parallel-two"]);
+		assert.ok(active?.activeActivities.every((activity) => activity.threadId === "thread-fake-123"));
+		const completed = await waitForCodexJob(started.id, { jobRoot });
+		assert.equal(completed.activeActivityCount, 0);
+		assert.deepEqual(completed.activeActivities, []);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -990,31 +1340,95 @@ test("Codex executor reuses a project-trusted host-command prefix", async () => 
 		const workspace = join(root, "workspace");
 		const jobRoot = join(root, "codex", "jobs");
 		mkdirSync(join(workspace, ".git"), { recursive: true });
+		const worktree = join(workspace, ".worktrees", "experiment-a");
+		mkdirSync(worktree, { recursive: true });
 		const commandScript = join(workspace, "host-command.mjs");
-		writeFileSync(commandScript, "process.stdout.write(`host-command:${process.argv[2]}`);\n", { mode: 0o600 });
+		writeFileSync(commandScript, "process.stdout.write(`host-command:${process.argv[2]}:cwd=${process.cwd()}`);\n", { mode: 0o600 });
 		const hostCapabilityContext = await resolveCapabilityContext(workspace, "pi-session-host-command", {
 			stateRoot: join(root, "capabilities"),
 			wslVersion: undefined,
 		});
 		const request = await prepareCapabilityRequest(hostCapabilityContext, {
 			kind: "host-command",
-			cwd: workspace,
+			cwd: worktree,
 			argv: [process.execPath, commandScript, "seed"],
 		});
-		await createCapabilityGrant(hostCapabilityContext, request, "project");
+		const grant = await createCapabilityGrant(hostCapabilityContext, request, "project");
 		const codexBin = makeFakeCodex(root);
 		const started = await startCodexJob({
 			cwd: workspace,
 			jobRoot,
 			codexBin,
 			mode: "executor",
-			task: `Execute the trusted project command. HOST_COMMAND_PATH=${commandScript}`,
+			task: `Execute the trusted project command. HOST_COMMAND_PATH=${commandScript}\nHOST_COMMAND_GRANT=${grant.id}`,
 			leaderSessionId: "pi-session-host-command",
 			hostCapabilityContext,
 		});
 		const completed = await waitForCodexJob(started.id, { jobRoot });
 		assert.equal(completed.status, "completed");
 		assert.match(completed.result.evidence.join("\n"), /host-command:from-codex/);
+		assert.match(completed.result.evidence.join("\n"), new RegExp(`cwd=${grant.cwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a missing Codex host grant becomes structured input and resumes the same tool call after approval", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-host-approval-"));
+	try {
+		const workspace = join(root, "workspace");
+		const jobRoot = join(root, "codex", "jobs");
+		mkdirSync(join(workspace, ".git"), { recursive: true });
+		const commandScript = join(workspace, "host-command.mjs");
+		writeFileSync(commandScript, "process.stdout.write(`approved-host-command:${process.argv[2]}:cwd=${process.cwd()}`);\n", { mode: 0o600 });
+		const hostCapabilityContext = await resolveCapabilityContext(workspace, "pi-session-host-approval", {
+			stateRoot: join(root, "capabilities"),
+		});
+		const codexBin = makeFakeCodex(root);
+		const started = await startCodexJob({
+			cwd: workspace,
+			jobRoot,
+			codexBin,
+			mode: "executor",
+			task: `Request a new host command. HOST_COMMAND_PATH=${commandScript}`,
+			leaderSessionId: "pi-session-host-approval",
+			hostCapabilityContext,
+		});
+
+		let waiting;
+		for (let attempt = 0; attempt < 200; attempt += 1) {
+			const current = await readCodexJob(started.id, { jobRoot });
+			if (current.status === "input_required") {
+				waiting = current;
+				break;
+			}
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		assert.equal(waiting?.pendingRequest?.kind, "host_capability", JSON.stringify(waiting));
+		assert.equal(waiting?.pendingRequest?.audience, "user");
+		assert.deepEqual(waiting?.pendingRequest?.capability?.input?.argv, [process.execPath, commandScript, "from-codex"]);
+		assert.equal(waiting?.pendingRequest?.capability?.input?.cwd, realpathSync(workspace));
+
+		const approvalRequest = await prepareCapabilityRequest(
+			hostCapabilityContext,
+			waiting.pendingRequest.capability.input,
+		);
+		const grant = await createCapabilityGrant(hostCapabilityContext, approvalRequest, "project");
+		await respondToCodexJob(started.id, {
+			jobRoot,
+			requestId: waiting.pendingRequest.id,
+			response: `Approved ${grant.id}`,
+		});
+		const completed = await waitForCodexJob(started.id, { jobRoot });
+		assert.equal(completed.status, "completed");
+		assert.match(completed.result.evidence.join("\n"), /approved-host-command:from-codex/);
+		const requestRecord = JSON.parse(readFileSync(
+			join(jobRoot, started.id, "requests", `${waiting.pendingRequest.id}.json`),
+			"utf8",
+		));
+		assert.equal(requestRecord.status, "resolved");
+		assert.equal(requestRecord.responseSha256.length, 64);
+		assert.equal(completed.pendingRequest, null);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

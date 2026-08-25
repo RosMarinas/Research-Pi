@@ -5,12 +5,15 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import researchConfigExtension, { compactConfigPath, formatProfileStatus, profileSelectItems, themeSelectItems } from "../.pi/extensions/research-config.ts";
+import researchConfigExtension, { compactConfigPath, formatProfileStatus, hideLowLevelModelCommands, themeSelectItems } from "../.pi/extensions/research-config.ts";
 import {
 	defaultResearchPiConfig,
 	ensureResearchPiConfig,
 	readResearchPiConfig,
+	researchPiCredentialEnvironmentNames,
+	researchPiDeepSeekSearchEnabled,
 	researchPiEnvironment,
+	researchPiProfileCredential,
 	resolveResearchPiConfig,
 	writeResearchPiAgentConfig,
 	writeResearchPiConfig,
@@ -22,7 +25,19 @@ test("one Research Pi config resolves leader, Codex, compact, search, and UI def
 	assert.equal(config.profiles[config.activeProfile].model, "deepseek-v4-pro");
 	assert.equal(config.codex.executor.model, "gpt-5.6-sol");
 	assert.equal(config.research.compaction.hardTokens, 384 * 1024);
+	assert.deepEqual(config.research.compaction.recentTailTokens, [24 * 1024, 32 * 1024, 40 * 1024]);
+	assert.equal(config.research.compaction.summaryTargetTokens, 8 * 1024);
+	assert.equal(config.research.compaction.summaryMaxTokens, 16 * 1024);
 	assert.equal(config.research.search.model, "deepseek-v4-flash");
+	assert.equal(config.research.search.enabled, "auto");
+	assert.equal(config.profiles["opencode-go-flash"].provider, "opencode-go");
+	assert.equal(config.profiles["opencode-go-ox-alpha"].model, "ox-alpha-free");
+	assert.equal(config.profiles["opencode-go-ox-alpha"].thinking, "max");
+	assert.equal(config.profiles["opencode-go-luna"].model, "gpt-5.6-luna");
+	assert.equal(config.profiles["opencode-go-qwen"].model, "qwen3.7-plus");
+	assert.equal(config.profiles["opencode-go-mimo"].model, "mimo-v2.5");
+	assert.equal(config.profiles["opencode-go-kimi"].thinking, "max");
+	assert.equal(Object.values(config.profiles).filter((profile) => profile.provider === "opencode-go").length, 12);
 	assert.equal(config.ui.density, "balanced");
 	assert.equal(config.ui.runtimeStrip, "auto");
 	assert.equal(config.ui.showProfileStatus, false);
@@ -40,6 +55,11 @@ test("partial user config merges over defaults and rejects dangerous ambiguity",
 	assert.throws(() => resolveResearchPiConfig({ activeProfile: "missing" }), /does not exist/);
 	assert.throws(() => resolveResearchPiConfig({ typoSetting: true }), /Unknown Research Pi config key/);
 	assert.throws(() => resolveResearchPiConfig({ research: { compaction: { softTokens: 500_000 } } }), /below hardTokens/);
+	assert.throws(
+		() => resolveResearchPiConfig({ research: { compaction: { summaryTargetTokens: 20_000, summaryMaxTokens: 10_000 } } }),
+		/below summaryMaxTokens/,
+	);
+	assert.throws(() => resolveResearchPiConfig({ research: { search: { enabled: "sometimes" } } }), /auto, on, or off/);
 	assert.throws(() => resolveResearchPiConfig({ pi: { settings: { api_key: "do-not-store-here" } } }), /credential-like/);
 });
 
@@ -53,13 +73,55 @@ test("config persistence creates a private file, schema, and generated Pi adapte
 		const changed = writeResearchPiConfig(path, { ...config, activeProfile: "deepseek-flash" });
 		assert.equal(readResearchPiConfig(path).activeProfile, "deepseek-flash");
 		const agentDir = join(root, "generated-agent");
-		writeResearchPiAgentConfig(agentDir, changed, { coreVersion: "0.84.1" });
+		writeResearchPiAgentConfig(agentDir, changed, { coreVersion: "0.84.2" });
 		const settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"));
 		const models = JSON.parse(readFileSync(join(agentDir, "models.json"), "utf8"));
 		assert.equal(settings.defaultModel, "deepseek-v4-flash");
 		assert.equal(settings.defaultThinkingLevel, "max");
-		assert.deepEqual(settings.enabledModels.sort(), ["deepseek/deepseek-v4-flash:max", "deepseek/deepseek-v4-pro:max"]);
+		assert.deepEqual(settings.enabledModels.sort(), [
+			"deepseek/deepseek-v4-flash:max",
+			"deepseek/deepseek-v4-pro:max",
+			"opencode-go/deepseek-v4-flash:max",
+			"opencode-go/deepseek-v4-pro:max",
+			"opencode-go/glm-5.2:high",
+			"opencode-go/gpt-5.6-luna:high",
+			"opencode-go/grok-4.5:high",
+			"opencode-go/hy3:high",
+			"opencode-go/kimi-k3:max",
+			"opencode-go/mimo-v2.5:high",
+			"opencode-go/minimax-m3:high",
+			"opencode-go/ox-alpha-free:max",
+			"opencode-go/qwen3.7-plus:high",
+			"opencode-go/qwen3.8-max:high",
+		]);
 		assert.equal(models.providers.deepseek.modelOverrides["deepseek-v4-flash"].compat.maxTokensField, "max_tokens");
+		const ox = models.providers["opencode-go"].models.find((model) => model.id === "ox-alpha-free");
+		assert.equal(ox.contextWindow, 1_000_000);
+		assert.equal(ox.maxTokens, 131_072);
+		assert.equal(ox.reasoning, true);
+		assert.equal(ox.thinkingLevelMap.high, "high");
+		assert.equal(ox.thinkingLevelMap.max, "max");
+		assert.equal(JSON.stringify(models).includes("configured"), false, "generated model metadata must not contain credentials");
+
+		writeResearchPiAgentConfig(agentDir, resolveResearchPiConfig({ activeProfile: "opencode-go-flash" }), {
+			coreVersion: "0.84.2",
+			environment: { OPENCODE_API_KEY: "configured" },
+		});
+		const goOnlySettings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"));
+		assert.deepEqual(goOnlySettings.enabledModels.sort(), [
+			"opencode-go/deepseek-v4-flash:max",
+			"opencode-go/deepseek-v4-pro:max",
+			"opencode-go/glm-5.2:high",
+			"opencode-go/gpt-5.6-luna:high",
+			"opencode-go/grok-4.5:high",
+			"opencode-go/hy3:high",
+			"opencode-go/kimi-k3:max",
+			"opencode-go/mimo-v2.5:high",
+			"opencode-go/minimax-m3:high",
+			"opencode-go/ox-alpha-free:max",
+			"opencode-go/qwen3.7-plus:high",
+			"opencode-go/qwen3.8-max:high",
+		]);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -71,10 +133,28 @@ test("config exports one deterministic environment for runtime consumers", () =>
 	assert.equal(environment.RESEARCH_PI_ACTIVE_PROFILE, "deepseek-flash");
 	assert.equal(environment.RESEARCH_PI_CODEX_ADVISOR_MODEL, "gpt-5.6-sol");
 	assert.equal(environment.RESEARCH_PI_COMPACT_HARD_TOKENS, String(384 * 1024));
+	assert.equal(environment.RESEARCH_PI_COMPACT_SUMMARY_TARGET_TOKENS, String(8 * 1024));
+	assert.equal(environment.RESEARCH_PI_COMPACT_SUMMARY_MAX_TOKENS, String(16 * 1024));
 	assert.equal(environment.RESEARCH_PI_SEARCH_MODEL, "deepseek-v4-flash");
+	assert.equal(environment.RESEARCH_PI_SEARCH_ENABLED, "auto");
 	assert.equal(environment.RESEARCH_PI_UI_DENSITY, "balanced");
 	assert.equal(environment.RESEARCH_PI_UI_RUNTIME_STRIP, "auto");
 	assert.equal(environment.RESEARCH_PI_UI_SHOW_PROFILE_STATUS, "0");
+});
+
+test("provider credentials and native search are independent", () => {
+	const official = resolveResearchPiConfig({ activeProfile: "deepseek-flash" });
+	const go = resolveResearchPiConfig({ activeProfile: "opencode-go-flash" });
+	assert.equal(researchPiProfileCredential(official).environmentVariable, "DEEPSEEK_API_KEY");
+	assert.equal(researchPiProfileCredential(go).environmentVariable, "OPENCODE_API_KEY");
+	assert.deepEqual(researchPiCredentialEnvironmentNames(go).sort(), ["DEEPSEEK_API_KEY", "OPENCODE_API_KEY"]);
+	assert.equal(researchPiDeepSeekSearchEnabled(go, { OPENCODE_API_KEY: "go-key" }), false);
+	assert.equal(researchPiDeepSeekSearchEnabled(go, { OPENCODE_API_KEY: "go-key", DEEPSEEK_API_KEY: "ds-key" }), true);
+	assert.equal(researchPiDeepSeekSearchEnabled(resolveResearchPiConfig({ research: { search: { enabled: "off" } } }), {}), false);
+	assert.throws(
+		() => researchPiDeepSeekSearchEnabled(resolveResearchPiConfig({ research: { search: { enabled: "on" } } }), {}),
+		/DEEPSEEK_API_KEY is missing/,
+	);
 });
 
 test("Codex, compact, and search modules consume the configured environment", () => {
@@ -87,7 +167,7 @@ test("Codex, compact, and search modules consume the configured environment", ()
 		const compact = await import(${JSON.stringify(compact)});
 		const search = await import(${JSON.stringify(search)});
 		const parsed = search.parseDeepSeekWebSearchResponse({content:[{type:"web_search_tool_result",content:[1,2,3].map(i=>({type:"web_search_result",url:"https://example.com/"+i,title:"S"+i}))}]});
-		console.log(JSON.stringify({advisor:codex.defaultCodexModel("advisor"),executor:codex.defaultCodexModel("executor"),effort:codex.defaultCodexReasoningEffort("advisor"),soft:compact.RESEARCH_SOFT_COMPACT_TOKENS,hard:compact.RESEARCH_HARD_COMPACT_TOKENS,tail:compact.RESEARCH_RECENT_TAIL_SCHEDULE,sources:parsed.sources.length}));
+		console.log(JSON.stringify({advisor:codex.defaultCodexModel("advisor"),executor:codex.defaultCodexModel("executor"),effort:codex.defaultCodexReasoningEffort("advisor"),soft:compact.RESEARCH_SOFT_COMPACT_TOKENS,hard:compact.RESEARCH_HARD_COMPACT_TOKENS,tail:compact.RESEARCH_RECENT_TAIL_SCHEDULE,summaryTarget:compact.RESEARCH_SUMMARY_TARGET_TOKENS,summaryMax:compact.RESEARCH_SUMMARY_MAX_TOKENS,sources:parsed.sources.length}));
 	`;
 	const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
 		encoding: "utf8",
@@ -99,6 +179,8 @@ test("Codex, compact, and search modules consume the configured environment", ()
 			RESEARCH_PI_COMPACT_SOFT_TOKENS: "111",
 			RESEARCH_PI_COMPACT_HARD_TOKENS: "222",
 			RESEARCH_PI_COMPACT_RECENT_TAIL_TOKENS: "7,8",
+			RESEARCH_PI_COMPACT_SUMMARY_TARGET_TOKENS: "9",
+			RESEARCH_PI_COMPACT_SUMMARY_MAX_TOKENS: "18",
 			RESEARCH_PI_SEARCH_MAX_SOURCES: "2",
 		},
 	});
@@ -110,23 +192,32 @@ test("Codex, compact, and search modules consume the configured environment", ()
 		soft: 111,
 		hard: 222,
 		tail: [7, 8],
+		summaryTarget: 9,
+		summaryMax: 18,
 		sources: 2,
 	});
 });
 
-test("model profile UI is concise, descriptive, and reflects live session overrides", () => {
+test("model scope and status come from the single Research Pi profile catalog", async () => {
 	const config = defaultResearchPiConfig();
-	const items = profileSelectItems(config);
-	assert.equal(items.length, 2);
-	assert.match(items[0].label, /^● /);
-	assert.match(items[0].description, /deepseek-v4-pro/);
-	assert.match(items[1].description, /Lower latency/);
+	assert.equal(Object.keys(config.profiles).length, 14);
 	assert.equal(compactConfigPath("/Users/polaris/Documents/Utils/Pi/.worktrees/runtime-next/.pi/config.json"), "…/.worktrees/runtime-next/.pi/config.json");
 	const status = formatProfileStatus(config, {
 		model: { provider: "deepseek", id: "deepseek-v4-flash" },
 		thinkingLevel: "max",
 	});
 	assert.equal(status, "◇ deepseek-flash");
+	const base = {
+		async getSuggestions() {
+			return { prefix: "/", items: [
+				{ value: "model", label: "model" },
+				{ value: "scoped-models", label: "scoped-models" },
+			] };
+		},
+		applyCompletion() { return { lines: ["/model"], cursorLine: 0, cursorCol: 6 }; },
+	};
+	const filtered = await hideLowLevelModelCommands(base).getSuggestions(["/"], 0, 1, { signal: new AbortController().signal });
+	assert.deepEqual(filtered.items.map((item) => item.value), ["model"]);
 	const themes = themeSelectItems(config);
 	assert.match(themes[0].label, /^● Ocean/);
 	assert.ok(themes.some((item) => item.value === "research-graphite"));
@@ -137,7 +228,7 @@ test("model profile UI is concise, descriptive, and reflects live session overri
 	);
 });
 
-test("/config renders a bordered native overlay with current-model context and keyboard hints", async () => {
+test("/model selections persist profiles while /config remains the non-model settings entry", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-config-ui-"));
 	const previousPath = process.env.RESEARCH_PI_CONFIG_FILE;
 	try {
@@ -145,15 +236,16 @@ test("/config renders a bordered native overlay with current-model context and k
 		process.env.RESEARCH_PI_CONFIG_FILE = configPath;
 		ensureResearchPiConfig(configPath);
 		const commands = new Map();
-		let rendered = [];
-		let overlayOptions;
+		const handlers = new Map();
+		const notices = [];
 		let selectedModel;
 		let selectedThinking;
 		let selectedTheme;
+		let autocompleteFactory;
 		const pi = {
-			on() {},
+			on(name, handler) { handlers.set(name, handler); },
 			registerCommand(name, command) { commands.set(name, command); },
-			getThinkingLevel: () => "max",
+			getThinkingLevel: () => selectedThinking ?? "max",
 			setThinkingLevel(value) { selectedThinking = value; },
 			setModel: async (model) => { selectedModel = model; return true; },
 		};
@@ -172,24 +264,27 @@ test("/config renders a bordered native overlay with current-model context and k
 				getAllThemes: () => ["research-pi", "research-graphite", "research-ember", "dark", "light"].map((name) => ({ name })),
 				setTheme(name) { selectedTheme = name; return { success: true }; },
 				setStatus() {},
-				notify() {},
-				custom: async (factory, options) => {
-					overlayOptions = options;
-					const component = factory({ requestRender() {} }, theme, {}, () => {});
-					rendered = component.render(80);
-					return null;
-				},
+				notify(message) { notices.push(message); },
+				addAutocompleteProvider(factory) { autocompleteFactory = factory; },
 			},
 		};
+		await handlers.get("session_start")({ reason: "startup" }, ctx);
+		assert.equal(autocompleteFactory, hideLowLevelModelCommands);
 		await commands.get("config").handler("", ctx);
-		const text = rendered.join("\n");
-		assert.equal(overlayOptions.overlay, true);
-		assert.equal(overlayOptions.overlayOptions.anchor, "center");
-		assert.equal(overlayOptions.overlayOptions.width, "88%");
-		assert.match(text, /Research Pi \/ Model Profiles/);
-		assert.match(text, /current deepseek-v4-pro/);
-		assert.match(text, /enter apply \+ persist/);
-		assert.match(text, /[─╭╮]/);
+		assert.match(notices.at(-1), /Use \/model for the persistent Leader model/);
+
+		ctx.model = { provider: "opencode-go", id: "gpt-5.6-luna" };
+		await handlers.get("model_select")({ model: ctx.model, previousModel: null, source: "set" }, ctx);
+		assert.equal(readResearchPiConfig(configPath).activeProfile, "opencode-go-luna");
+		assert.equal(selectedThinking, "high");
+		await handlers.get("thinking_level_select")({ level: "max", previousLevel: "high" }, ctx);
+		assert.equal(readResearchPiConfig(configPath).profiles["opencode-go-luna"].thinking, "max");
+
+		ctx.model = { provider: "opencode-go", id: "qwen3.7-plus" };
+		await handlers.get("model_select")({ model: ctx.model, previousModel: null, source: "restore" }, ctx);
+		assert.equal(readResearchPiConfig(configPath).activeProfile, "opencode-go-luna", "session restore must not rewrite the default profile");
+
+		ctx.model = { provider: "deepseek", id: "deepseek-v4-pro" };
 		await commands.get("config").handler("use deepseek-flash", ctx);
 		assert.equal(selectedModel.id, "deepseek-v4-flash");
 		assert.equal(selectedThinking, "max");

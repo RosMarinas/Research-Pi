@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { getWslVersion, SandboxManager } from "@anthropic-ai/sandbox-runtime";
+import { dirname, join } from "node:path";
 import type { ExtensionAPI, BashOperations } from "@earendil-works/pi-coding-agent";
 import { createBashTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -10,19 +11,21 @@ import {
 	capabilityGrantSummary,
 	createCapabilityGrant,
 	executeGrantedCapability,
-	findCapabilityGrant,
+	inspectCapabilityAuthorization,
 	isForbiddenCredentialRead,
 	listCapabilityGrants,
 	prepareCapabilityRequest,
 	resolveCapabilityContext,
 	revokeCapabilityGrant,
 } from "../lib/host-capabilities.mjs";
+import { registerHostCapabilityUiAdapter } from "../lib/research-runtime-adapters.mjs";
 import {
 	boundaryWarning,
 	buildSandboxRuntimeConfig,
 	directToolPath,
 	assertWslSandboxDependencies,
 	isProtectedProjectMutation,
+	isAnalysisReadOnlySshCommand,
 	likelySandboxDenial,
 	prepareBoundaryRuntime,
 	readGitIdentity,
@@ -30,11 +33,21 @@ import {
 	runCodexSandboxPreflight,
 	sanitizeBoundaryEnvironment,
 } from "../lib/project-boundary.mjs";
+import { runtimeSessionInheritancePolicy } from "../lib/research-runtime.mjs";
 import { resolveSystemRuntimePolicy } from "../lib/security-policy.mjs";
 
 type BoundaryRuntime = Awaited<ReturnType<typeof prepareBoundaryRuntime>>;
 type CapabilityContext = Awaited<ReturnType<typeof resolveCapabilityContext>>;
 type SystemRuntimePolicy = Awaited<ReturnType<typeof resolveSystemRuntimePolicy>>;
+
+function sameCapabilityProject(left: CapabilityContext, right: CapabilityContext): boolean {
+	if (left.projectRoot !== right.projectRoot || left.projectLedgerPath !== right.projectLedgerPath) return false;
+	const stateDir = dirname(left.projectLedgerPath);
+	return (
+		right.ledgerPath === join(stateDir, "sessions", `${right.sessionId}.json`)
+		&& right.legacyLedgerPath === join(stateDir, `${right.sessionId}.json`)
+	);
+}
 
 function parseCommandWords(input: string): string[] {
 	const words: string[] = [];
@@ -94,12 +107,23 @@ function capabilityInput(params: any) {
 	if (params.action === "command") {
 		return {
 			kind: "host-command",
+			grantId: params.grantId,
 			argv: params.argv ?? [],
 			cwd: params.cwd,
 			timeoutSeconds: params.timeoutSeconds,
 		};
 	}
 	throw new Error(`Unsupported host capability action: ${params.action}`);
+}
+
+function analysisCapabilityBlockReason(ctx: any, params: any): string | null {
+	if (runtimeSessionInheritancePolicy(ctx.sessionManager.getBranch()) !== "analysis") return null;
+	if (params.action === "list" || params.action === "read") return null;
+	if (params.action === "ssh" && isAnalysisReadOnlySshCommand(params.remoteCommand)) return null;
+	if (params.action === "ssh") {
+		return "Analysis Session SSH is inspection-only. Use one read-only command or pipeline such as cat/head/tail/grep/rg/find/ls/stat/git status|log|show|diff, scheduler queries, or nvidia-smi queries. Shell chaining, redirection, interpreters, credential paths, writes, process control, and experiment launch commands are blocked.";
+	}
+	return `Analysis Session cannot use host_capability action=${String(params.action)}. External exact-file reads and conservatively validated SSH inspection are allowed; host commands and scripts require promotion to the Leader Session.`;
 }
 
 function describeCapabilityRequest(request: any, operation?: any): string {
@@ -284,9 +308,15 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 		return capabilityContext;
 	};
 
-	const requestInteractiveGrant = async (request: any, ctx: any, operation?: any) => {
+	const requestInteractiveGrant = async (
+		request: any,
+		ctx: any,
+		operation?: any,
+		approvalContext: CapabilityContext = requireCapabilityContext(),
+		announce = true,
+	) => {
 		if (!ctx.hasUI) return undefined;
-		const wslOneShot = capabilityContext?.wslVersion !== undefined &&
+		const wslOneShot = approvalContext.wslVersion !== undefined &&
 			(request.kind === "host-command" || request.kind === "project-script");
 		const projectTrustLabel = request.kind === "ssh-target"
 			? "Trust this SSH target for the project"
@@ -305,14 +335,40 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 		);
 		if (choice !== "Approve once" && choice !== "Approve this Pi session (24h)" && choice !== projectTrustLabel) return undefined;
 		const grant = await createCapabilityGrant(
-			requireCapabilityContext(),
+			approvalContext,
 			request,
 			choice === "Approve once" ? "once" : choice === "Approve this Pi session (24h)" ? "session" : "project",
 		);
-		ctx.ui.notify(`Approved ${capabilityGrantSummary(grant)}`, "warning");
-		await refreshBoundaryStatus(ctx);
+		if (announce) {
+			ctx.ui.notify(`Approved ${capabilityGrantSummary(grant)}`, "warning");
+			await refreshBoundaryStatus(ctx);
+		}
 		return grant;
 	};
+
+	registerHostCapabilityUiAdapter({
+		review: async ({ pendingRequest, ctx }: { pendingRequest: any; ctx: any }) => {
+			const capability = pendingRequest?.capability;
+			if (pendingRequest?.kind !== "host_capability" || !capability?.input || !capability?.context) {
+				return { status: "unsupported" as const };
+			}
+			if (!ctx.hasUI) return { status: "unavailable" as const };
+			const activeContext = requireCapabilityContext();
+			const sourceContext = capability.context as CapabilityContext;
+			if (!sameCapabilityProject(activeContext, sourceContext)) {
+				throw new Error("Codex host-capability request belongs to another project capability ledger");
+			}
+			const inspected = await inspectCapabilityAuthorization(sourceContext, capability.input);
+			if (inspected.grant) {
+				return { status: "approved" as const, grant: inspected.grant, existing: true };
+			}
+			const grant = await requestInteractiveGrant(inspected.request, ctx, capability.input, sourceContext, false);
+			if (grant) await refreshBoundaryStatus(ctx).catch(() => undefined);
+			return grant
+				? { status: "approved" as const, grant, existing: false }
+				: { status: "denied" as const };
+		},
+	});
 
 	pi.registerTool({
 		name: "host_capability",
@@ -320,14 +376,17 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 		description: [
 			"Use a host capability when a justified project operation needs SSH credentials or host-user authority.",
 			"read accesses an approved external file; ssh uses an approved exact target with opaque credentials; command runs an argv inside the project cwd with host authority; script is the legacy strict exact-script mode.",
+			"In an Analysis Session, only list, exact external reads, and conservatively validated read-only SSH inspection commands are available.",
 			"Project-trusted SSH targets and command prefixes run without repeated approval. Never use this tool to inspect private keys, tokens, or credential stores.",
 			"Under WSL2, SSH target trust may persist, but host commands and project scripts require one-shot approval and cannot invoke Windows interop.",
 		].join(" "),
 		promptSnippet: "Use project-trusted SSH or host-command capabilities instead of handing executable commands back to the user",
 		promptGuidelines: [
-			"Run arbitrary uv, Python, shell, Node, Git, and test commands normally inside the project sandbox. Command syntax such as sh -c or python -c is not itself a reason to refuse.",
-			"When a justified command needs host SSH access or another host-user capability, call host_capability command with an exact argv. If a project trust rule already matches, execution is automatic.",
+			"In a Leader Session, run arbitrary uv, Python, shell, Node, Git, and test commands normally inside the project sandbox. In an Analysis Session, use read tools or read-only SSH inspection instead.",
+			"For Analysis Session SSH inspection, use absolute remote paths and a single read command or read-only pipeline; do not use cd, shell chaining, redirection, an interpreter, or a process-changing command.",
+			"When a justified command needs host SSH access or another host-user capability, call host_capability command with an exact argv. Reuse a listed grantId when possible; its approved cwd is then restored automatically.",
 			"Direct SSH uses opaque credentials. Host-command has broader user authority and must match an approved exact command or project prefix; never request, read, print, copy, or transmit private keys or tokens.",
+			"If a command grant reports a cwd mismatch, retry the same command action with that grantId. Do not switch to script or wrap it in a new shell command merely to obtain another grant.",
 			"A missing capability is a user authorization boundary. Do not route around it with bash, symlinks, proxy commands, copied credentials, or another agent.",
 			"Under WSL2, never access /mnt or launch Windows/PowerShell executables through host-command; those operations remain direct human authority.",
 		],
@@ -337,6 +396,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			target: Type.Optional(Type.String({ description: "Exact SSH alias or [user@]host[:port]" })),
 			port: Type.Optional(Type.Integer({ minimum: 1, maximum: 65535 })),
 			remoteCommand: Type.Optional(Type.String({ description: "Exact remote shell command for ssh" })),
+			grantId: Type.Optional(Type.String({ description: "Exact existing grant-XXXXXXXX id; restores its approved cwd without broadening authority" })),
 			argv: Type.Optional(Type.Array(Type.String(), { maxItems: 128, description: "Exact host command argv, for example [\"uv\",\"run\",\"remote_run.py\",\"bash\",\"experiment.sh\"]" })),
 			cwd: Type.Optional(Type.String({ description: "Working directory inside the current project; defaults to the project root" })),
 			args: Type.Optional(Type.Array(Type.String(), { maxItems: 64, description: "Legacy exact argv for project-script" })),
@@ -345,14 +405,17 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 		executionMode: "sequential",
 		async execute(_id, params, signal, onUpdate, ctx) {
 			try {
+				const analysisBlock = analysisCapabilityBlockReason(ctx, params);
+				if (analysisBlock) throw new Error(analysisBlock);
 				const context = requireCapabilityContext();
 				if (params.action === "list") {
 					const grants = await listCapabilityGrants(context);
 					return { content: [{ type: "text", text: grants.length ? grants.map(capabilityGrantSummary).join("\n") : "No active host capabilities." }] };
 				}
 				const input = capabilityInput(params);
-				const request = await prepareCapabilityRequest(context, input);
-				if (!(await findCapabilityGrant(context, request))) {
+				const inspected = await inspectCapabilityAuthorization(context, input);
+				const request = inspected.request;
+				if (!inspected.grant) {
 					const grant = await requestInteractiveGrant(request, ctx, input);
 					if (!grant) throw new Error("Host capability was not approved by the user");
 				}
@@ -391,6 +454,12 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			"Do not attempt an indirect boundary bypass. Request the exact brokered target or argv and continue after approval; use ! only if the broker cannot express the operation.",
 		],
 		async execute(id, params, signal, onUpdate, ctx) {
+			if (runtimeSessionInheritancePolicy(ctx.sessionManager.getBranch()) === "analysis") {
+				return {
+					content: [{ type: "text", text: "Analysis Session cannot use project bash because an arbitrary command could modify code or start work. Use read/grep/find/ls, approved external reads, or host_capability ssh with a read-only inspection command." }],
+					isError: true,
+				};
+			}
 			if (!runtime) {
 				return {
 					content: [
@@ -609,15 +678,15 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 						: action === "grant-command" || action === "trust-command"
 							? { kind: "host-command", argv: words, cwd: ctx.cwd }
 							: { kind: "project-script", path: words[0], args: words.slice(1) };
-					const request = await prepareCapabilityRequest(requireCapabilityContext(), input);
-					const projectScope = action === "trust-ssh" || action === "trust-command";
-					if (action === "trust-command" && request.kind === "host-command") {
-						// An explicit user command defines the persistent prefix verbatim. Automatic
-						// model requests still receive the conservative recommended prefix.
-						request.suggestedPrefix = [...request.argv];
-					}
-					const wslOneShot = capabilityContext?.wslVersion !== undefined &&
-						(request.kind === "host-command" || request.kind === "project-script");
+				const request = await prepareCapabilityRequest(requireCapabilityContext(), input);
+				const projectScope = action === "trust-ssh" || action === "trust-command";
+				if (action === "trust-command" && request.kind === "host-command") {
+					// An explicit user command defines the persistent prefix verbatim. Automatic
+					// model requests still receive the conservative recommended prefix.
+					request.suggestedPrefix = [...request.argv];
+				}
+				const wslOneShot = capabilityContext?.wslVersion !== undefined &&
+					(request.kind === "host-command" || request.kind === "project-script");
 				const approved = await ctx.ui.confirm(
 					wslOneShot
 						? "Approve this one WSL host execution?"

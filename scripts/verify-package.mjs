@@ -27,6 +27,7 @@ for (const required of [
 	"bin/pi.mjs",
 	".pi/APPEND_SYSTEM.md",
 	".pi/config.defaults.json",
+	".pi/schemas/codex-advisor-result.json",
 	".pi/schemas/research-pi-config.schema.json",
 	".pi/themes/research-pi.json",
 	".pi/extensions/research-config.ts",
@@ -35,6 +36,11 @@ for (const required of [
 	".pi/extensions/project-boundary.ts",
 	".pi/lib/project-boundary.mjs",
 	"docs/windows-wsl-guide.md",
+	".pi/skills/research-briefing/SKILL.md",
+	"LICENSE",
+	"SECURITY.md",
+	"THIRD_PARTY_NOTICES.md",
+	"docs/security-model.md",
 ]) {
 	assert.ok(files.includes(required), `npm package is missing ${required}`);
 }

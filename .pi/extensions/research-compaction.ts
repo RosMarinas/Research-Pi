@@ -12,12 +12,14 @@ import {
 	collectResearchEvidence,
 	mergeProjectRuntimeEvidence,
 	normalizeResearchState,
-	parseResearchState,
+	parseResearchCompactionResponse,
 	RESEARCH_HARD_COMPACT_TOKENS,
+	RESEARCH_SUMMARY_MAX_TOKENS,
 	renderResearchSummary,
 	RESEARCH_COMPACTION_KIND,
 	RESEARCH_COMPACTION_VERSION,
 	RESEARCH_SOFT_COMPACT_TOKENS,
+	RESEARCH_STATE_TOOL,
 	selectResearchCompactionPolicy,
 } from "../lib/research-compact.mjs";
 import { readRuntimeSnapshot, resolveResearchRuntime, runtimeSessionInheritancePolicy } from "../lib/research-runtime.mjs";
@@ -83,6 +85,18 @@ function prepareWithDynamicTail(event: SessionBeforeCompactEvent, keepRecentToke
 	};
 }
 
+export function researchCompactionThresholds(model?: { contextWindow?: number } | null) {
+	const contextWindow = Number(model?.contextWindow);
+	if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
+		return { softTokens: RESEARCH_SOFT_COMPACT_TOKENS, hardTokens: RESEARCH_HARD_COMPACT_TOKENS };
+	}
+	const reserved = Math.max(32 * 1024, Math.floor(contextWindow * 0.1));
+	const modelSafeHard = Math.max(64 * 1024, contextWindow - reserved);
+	const hardTokens = Math.min(RESEARCH_HARD_COMPACT_TOKENS, modelSafeHard);
+	const softTokens = Math.min(RESEARCH_SOFT_COMPACT_TOKENS, Math.floor(hardTokens * 0.75));
+	return { softTokens, hardTokens };
+}
+
 export default function (pi: ExtensionAPI) {
 	let compactionRunning = false;
 	let scheduledCompaction: { trigger: "soft" | "hard"; tokens: number } | undefined;
@@ -99,9 +113,10 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("turn_end", (_event, ctx) => {
 		const usage = ctx.getContextUsage();
-		if (!usage || usage.tokens < RESEARCH_SOFT_COMPACT_TOKENS || compactionRunning || scheduledCompaction) return;
+		const thresholds = researchCompactionThresholds(ctx.model);
+		if (!usage || usage.tokens < thresholds.softTokens || compactionRunning || scheduledCompaction) return;
 
-		const trigger = usage.tokens >= RESEARCH_HARD_COMPACT_TOKENS ? "hard" : "soft";
+		const trigger = usage.tokens >= thresholds.hardTokens ? "hard" : "soft";
 		scheduledCompaction = { trigger, tokens: usage.tokens };
 		if (ctx.hasUI) {
 			ctx.ui.notify(
@@ -152,7 +167,7 @@ export default function (pi: ExtensionAPI) {
 		);
 		const independentSessionSummary = inheritancePolicy === "project"
 			&& latestResearchCompaction?.type === "compaction"
-			&& latestResearchCompaction.details?.inheritancePolicy === "clean"
+			&& ["clean", "analysis"].includes(latestResearchCompaction.details?.inheritancePolicy)
 				? preparation.previousSummary
 				: undefined;
 		const conversationText = serializeConversation(
@@ -171,43 +186,67 @@ export default function (pi: ExtensionAPI) {
 		});
 
 		ctx.ui.notify(
-			`Research compaction #${policy.ordinal}${inheritancePolicy === "clean" ? " (clean Session, no Project inheritance)" : ""}: ${preparation.tokensBefore.toLocaleString()} tokens, keeping ~${policy.keepRecentTokens.toLocaleString()} recent tokens, ${evidence.experiments.length} experiment record(s).`,
+			`Research compaction #${policy.ordinal}${inheritancePolicy === "clean" ? " (clean Session, no Project inheritance)" : inheritancePolicy === "analysis" ? " (Analysis Session, Project read-only)" : ""}: ${preparation.tokensBefore.toLocaleString()} tokens, keeping ~${policy.keepRecentTokens.toLocaleString()} recent tokens, ${evidence.experiments.length} experiment record(s).`,
 			"info",
 		);
 
 		try {
-			const response = await ctx.modelRegistry.complete(
+			const requestState = async (requestPrompt: string) => await ctx.modelRegistry.complete(
 				ctx.model,
 				{
 					messages: [
 						{
 							role: "user",
-							content: [{ type: "text", text: prompt }],
+							content: [{ type: "text", text: requestPrompt }],
 							timestamp: Date.now(),
 						},
 					],
+					tools: [RESEARCH_STATE_TOOL],
 				},
 				{
-					maxTokens: Math.min(12_000, ctx.model.maxTokens || 12_000),
+					maxTokens: Math.min(RESEARCH_SUMMARY_MAX_TOKENS, ctx.model.maxTokens || RESEARCH_SUMMARY_MAX_TOKENS),
+					toolChoice: ctx.model.api === "openai-completions"
+						? { type: "function", function: { name: RESEARCH_STATE_TOOL.name } }
+						: undefined,
 					signal,
 					cacheRetention: "none",
 					sessionId: randomUUID(),
 				},
 			);
-			const raw = response.content
-				.filter((part): part is { type: "text"; text: string } => part.type === "text")
-				.map((part) => part.text)
-				.join("\n");
-			if (!raw.trim()) throw new Error(`summarizer returned no text (stopReason=${response.stopReason})`);
-
-			const candidate = parseResearchState(raw);
-			const normalized = normalizeResearchState(candidate, evidence);
+			let response = await requestState(prompt);
+			let parsed;
+			try {
+				parsed = parseResearchCompactionResponse(response.content);
+			} catch (firstError) {
+				if (response.stopReason !== "length") {
+					throw new Error(`${firstError instanceof Error ? firstError.message : String(firstError)} (stopReason=${response.stopReason})`);
+				}
+				if (ctx.hasUI) {
+					ctx.ui.notify(
+						`Research compaction output reached its ${RESEARCH_SUMMARY_MAX_TOKENS.toLocaleString()}-token cap; retrying once with a minimal-state instruction.`,
+						"warning",
+					);
+				}
+				response = await requestState(
+					`${prompt}\n\nRECOVERY: The previous structured response was truncated. Return a minimal state well below the target budget. Keep only decision-relevant hypotheses, observations, provenance, and the next discriminating experiment; do not elaborate.`,
+				);
+				try {
+					parsed = parseResearchCompactionResponse(response.content);
+				} catch (retryError) {
+					throw new Error(`${retryError instanceof Error ? retryError.message : String(retryError)} (stopReason=${response.stopReason}, after one bounded retry)`);
+				}
+			}
+			const normalized = normalizeResearchState(parsed.state, evidence);
+			const validationWarnings = [
+				...parsed.repairs.map((repair) => `Conservatively repaired compaction JSON syntax: ${repair}.`),
+				...normalized.warnings,
+			];
 			const files = fileLists(preparation.fileOps);
 			const summary = renderResearchSummary(normalized.state, evidence, files);
 			const details = buildResearchCompactionDetails({
 				state: normalized.state,
 				evidence,
-				warnings: normalized.warnings,
+				warnings: validationWarnings,
 				sessionId,
 				reason,
 				tokensBefore: preparation.tokensBefore,
@@ -217,9 +256,9 @@ export default function (pi: ExtensionAPI) {
 				inheritancePolicy,
 			});
 
-			if (normalized.warnings.length) {
+			if (validationWarnings.length) {
 				ctx.ui.notify(
-					`Research compaction retained the summary with ${normalized.warnings.length} validation warning(s).`,
+					`Research compaction retained the summary with ${validationWarnings.length} validation warning(s).`,
 					"warning",
 				);
 			}

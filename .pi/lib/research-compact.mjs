@@ -3,6 +3,99 @@ import { createHash } from "node:crypto";
 export const RESEARCH_COMPACTION_KIND = "research-pi-compaction";
 export const RESEARCH_COMPACTION_VERSION = 1;
 export const RESEARCH_COMPACTION_POLICY_VERSION = 1;
+export const RESEARCH_STATE_TOOL_NAME = "submit_research_state";
+
+const STRING_ARRAY_SCHEMA = Object.freeze({
+	type: "array",
+	maxItems: 16,
+	items: { type: "string", maxLength: 1_000 },
+});
+
+export const RESEARCH_STATE_TOOL = Object.freeze({
+	name: RESEARCH_STATE_TOOL_NAME,
+	description: "Submit the final structured research state exactly once after synthesizing the compaction evidence.",
+	parameters: {
+		type: "object",
+		additionalProperties: false,
+		required: [
+			"researchQuestion",
+			"currentClaim",
+			"hypotheses",
+			"observations",
+			"decisions",
+			"unresolvedConfounders",
+			"openQuestions",
+			"nextExperiment",
+			"criticalContext",
+		],
+		properties: {
+			researchQuestion: { type: "string", maxLength: 2_000, description: "Project-level research direction and current scientific frontier; never replace it with the latest coding/debugging task unless the research objective truly changed" },
+			currentClaim: { type: "string", maxLength: 2_000, description: "Current evidence-bounded scientific position, not a software progress statement" },
+			hypotheses: {
+				type: "array",
+				maxItems: 24,
+				items: {
+					type: "object",
+					additionalProperties: false,
+					required: ["id", "statement", "status", "predictions", "rationale", "evidenceRefs"],
+					properties: {
+						id: { type: "string", maxLength: 80 },
+						statement: { type: "string", maxLength: 1_200 },
+						status: { type: "string", enum: ["active", "supported", "weakened", "rejected", "inconclusive"] },
+						predictions: STRING_ARRAY_SCHEMA,
+						rationale: { type: "string", maxLength: 1_200 },
+						evidenceRefs: STRING_ARRAY_SCHEMA,
+					},
+				},
+			},
+			observations: {
+				type: "array",
+				maxItems: 24,
+				items: {
+					type: "object",
+					additionalProperties: false,
+					required: ["statement", "interpretation", "validity", "evidenceRefs"],
+					properties: {
+						statement: { type: "string", maxLength: 1_200 },
+						interpretation: { type: "string", maxLength: 1_200 },
+						validity: { type: "string", enum: ["valid", "invalid", "inconclusive", "unverified"] },
+						evidenceRefs: STRING_ARRAY_SCHEMA,
+					},
+				},
+			},
+			decisions: {
+				type: "array",
+				maxItems: 16,
+				items: {
+					type: "object",
+					additionalProperties: false,
+					required: ["decision", "rationale", "reversible", "evidenceRefs"],
+					properties: {
+						decision: { type: "string", maxLength: 1_200 },
+						rationale: { type: "string", maxLength: 1_200 },
+						reversible: { type: "boolean" },
+						evidenceRefs: STRING_ARRAY_SCHEMA,
+					},
+				},
+			},
+			unresolvedConfounders: STRING_ARRAY_SCHEMA,
+			openQuestions: STRING_ARRAY_SCHEMA,
+			nextExperiment: {
+				type: "object",
+				additionalProperties: false,
+				required: ["question", "intervention", "distinguishingOutcomes", "validityChecks"],
+				properties: {
+					question: { type: "string", maxLength: 1_200 },
+					intervention: { type: "string", maxLength: 2_000 },
+					distinguishingOutcomes: STRING_ARRAY_SCHEMA,
+					validityChecks: STRING_ARRAY_SCHEMA,
+				},
+			},
+			criticalContext: { ...STRING_ARRAY_SCHEMA, description: "Direction-setting stage, route constraints, non-goals, and continuation principles that a new Session needs to avoid local task inertia" },
+		},
+	},
+	constrainedSampling: { type: "json_schema", strict: "prefer" },
+});
 
 function configuredPositiveInteger(name, fallback) {
 	const value = Number(process.env[name]);
@@ -14,12 +107,14 @@ function configuredTailSchedule() {
 		.split(",")
 		.map((value) => Number(value.trim()))
 		.filter((value) => Number.isInteger(value) && value > 0);
-	return values.length ? values : [32 * 1024, 40 * 1024, 48 * 1024];
+	return values.length ? values : [24 * 1024, 32 * 1024, 40 * 1024];
 }
 
 export const RESEARCH_SOFT_COMPACT_TOKENS = configuredPositiveInteger("RESEARCH_PI_COMPACT_SOFT_TOKENS", 272 * 1024);
 export const RESEARCH_HARD_COMPACT_TOKENS = configuredPositiveInteger("RESEARCH_PI_COMPACT_HARD_TOKENS", 384 * 1024);
 export const RESEARCH_RECENT_TAIL_SCHEDULE = Object.freeze(configuredTailSchedule());
+export const RESEARCH_SUMMARY_TARGET_TOKENS = configuredPositiveInteger("RESEARCH_PI_COMPACT_SUMMARY_TARGET_TOKENS", 8 * 1024);
+export const RESEARCH_SUMMARY_MAX_TOKENS = configuredPositiveInteger("RESEARCH_PI_COMPACT_SUMMARY_MAX_TOKENS", 16 * 1024);
 
 const MAX_HYPOTHESES = 24;
 const MAX_OBSERVATIONS = 32;
@@ -83,7 +178,35 @@ function refFor(sessionId, entryId) {
 	return `S:${sessionId}/E:${entryId}`;
 }
 
+function normalizePredictionStatus(data) {
+	return ["preregistered", "recorded_before_observation", "not_recorded", "not_applicable", "unspecified"].includes(data?.predictionStatus)
+		? data.predictionStatus
+		: data?.prediction
+			? "unspecified"
+			: "not_recorded";
+}
+
+function normalizeEvidenceMode(data, predictionStatus) {
+	if (["confirmatory", "exploratory", "diagnostic", "validity_failure"].includes(data?.evidenceMode)) {
+		return data.evidenceMode;
+	}
+	if (data?.validityJudgment === "invalid") return "validity_failure";
+	if (data?.prediction && ["preregistered", "recorded_before_observation"].includes(predictionStatus)) {
+		return "confirmatory";
+	}
+	return "exploratory";
+}
+
+function normalizeGitIdentity(data) {
+	if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
+	const root = text(data.root, 4_000) || undefined;
+	const commit = text(data.commit, 160) || undefined;
+	const dirty = typeof data.dirty === "boolean" ? data.dirty : undefined;
+	return root || commit || dirty !== undefined ? { root, commit, dirty } : undefined;
+}
+
 function normalizeExperiment(data, ref, entryId) {
+	const predictionStatus = normalizePredictionStatus(data);
 	return {
 		ref,
 		entryId,
@@ -93,6 +216,9 @@ function normalizeExperiment(data, ref, entryId) {
 		hypothesis: text(data?.hypothesis),
 		intervention: text(data?.intervention),
 		prediction: text(data?.prediction),
+		predictionStatus,
+		evidenceMode: normalizeEvidenceMode(data, predictionStatus),
+		registrationRef: text(data?.registrationRef, 1_000) || undefined,
 		validityChecks: list(data?.validityChecks, 20, 700),
 		observation: text(data?.observation, 4_000),
 		validityJudgment: ["valid", "invalid", "inconclusive"].includes(data?.validityJudgment)
@@ -101,7 +227,11 @@ function normalizeExperiment(data, ref, entryId) {
 		conclusion: text(data?.conclusion, 4_000),
 		nextStep: text(data?.nextStep, 2_000),
 		runId: text(data?.runId, 300) || undefined,
+		runGitCommit: text(data?.runGitCommit, 160) || undefined,
+		recordedAtGit: normalizeGitIdentity(data?.recordedAtGit ?? data?.git),
 		artifacts: list(data?.artifacts, 20, 1_000),
+		trackRef: text(data?.trackRef, 300) || undefined,
+		trackLabel: text(data?.trackLabel, 600) || undefined,
 		contentHash: hash(JSON.stringify(data ?? {})),
 	};
 }
@@ -140,13 +270,15 @@ export function collectResearchEvidence(branchEntries, sessionId, firstKeptEntry
 			entry?.type === "compaction" &&
 			entry.details?.kind === RESEARCH_COMPACTION_KIND &&
 			entry.details?.version === RESEARCH_COMPACTION_VERSION &&
-			entry.details?.researchState &&
-			(
-				options.inheritancePolicy === "clean"
-					? entry.details.inheritancePolicy === "clean"
-					: entry.details.inheritancePolicy !== "clean"
-			)
+			entry.details?.researchState
 		) {
+			const entryPolicy = ["clean", "analysis"].includes(entry.details.inheritancePolicy)
+				? entry.details.inheritancePolicy
+				: "project";
+			const requestedPolicy = ["clean", "analysis"].includes(options.inheritancePolicy)
+				? options.inheritancePolicy
+				: "project";
+			if (entryPolicy !== requestedPolicy) continue;
 			previousState = entry.details.researchState;
 			previousCompactionEntryId = entry.id;
 			previousProjectRevision = Number.isInteger(entry.details.projectRevision)
@@ -193,21 +325,36 @@ export function mergeProjectRuntimeEvidence(evidence, runtimeSnapshot) {
 		evidence.previousProjectRevision = runtimeSnapshot.projectState.revision ?? 0;
 		evidence.previousProjectStateEntryId = runtimeSnapshot.projectState.source?.entryId ?? evidence.previousProjectStateEntryId;
 	}
-	const seen = new Set(evidence.experiments.map((item) => item.id));
+	const seen = new Map(evidence.experiments.map((item) => [item.id, item]));
 	for (const record of runtimeSnapshot?.evidence ?? []) {
-		if (!record?.id || seen.has(record.id)) continue;
+		if (!record?.id) continue;
+		const existing = seen.get(record.id);
+		if (existing) {
+			existing.trackRef = text(record.trackRef, 300) || existing.trackRef;
+			existing.trackLabel = text(record.trackLabel, 600) || existing.trackLabel;
+			if (record.evidenceMode) existing.evidenceMode = normalizeEvidenceMode(record, existing.predictionStatus);
+			if (record.predictionStatus) existing.predictionStatus = normalizePredictionStatus(record);
+			existing.registrationRef = text(record.registrationRef, 1_000) || existing.registrationRef;
+			existing.runGitCommit = text(record.runGitCommit, 160) || existing.runGitCommit;
+			existing.recordedAtGit = normalizeGitIdentity(record.recordedAtGit) || existing.recordedAtGit;
+			continue;
+		}
 		const sessionId = text(record.source?.sessionId, 200) || "project-runtime";
 		const ref = refFor(sessionId, record.id);
+		const predictionStatus = normalizePredictionStatus(record);
 		evidence.experiments.push({
 			ref,
 			entryId: record.id,
 			id: record.id,
 			timestamp: text(record.timestamp, 80),
 			question: text(record.question),
-			hypothesis: "",
-			intervention: "",
-			prediction: "",
-			validityChecks: [],
+			hypothesis: text(record.hypothesis),
+			intervention: text(record.intervention),
+			prediction: text(record.prediction),
+			predictionStatus,
+			evidenceMode: normalizeEvidenceMode(record, predictionStatus),
+			registrationRef: text(record.registrationRef, 1_000) || undefined,
+			validityChecks: list(record.validityChecks, 20, 700),
 			observation: "",
 			validityJudgment: ["valid", "invalid", "inconclusive"].includes(record.validityJudgment)
 				? record.validityJudgment
@@ -215,6 +362,8 @@ export function mergeProjectRuntimeEvidence(evidence, runtimeSnapshot) {
 			conclusion: text(record.conclusion, 4_000),
 			nextStep: text(record.nextStep, 2_000),
 			runId: text(record.runId, 300) || undefined,
+			runGitCommit: text(record.runGitCommit, 160) || undefined,
+			recordedAtGit: normalizeGitIdentity(record.recordedAtGit),
 			artifacts: list(record.artifacts, 12, 1_000),
 			trackRef: text(record.trackRef, 300) || "project:initial",
 			trackLabel: text(record.trackLabel, 600) || "initial project track",
@@ -222,7 +371,7 @@ export function mergeProjectRuntimeEvidence(evidence, runtimeSnapshot) {
 			projectRuntimeSource: true,
 		});
 		evidence.validRefs.add(ref);
-		seen.add(record.id);
+		seen.set(record.id, evidence.experiments.at(-1));
 	}
 	const transition = runtimeSnapshot?.activeTransition;
 	evidence.activeTransition = transition ?? null;
@@ -234,14 +383,161 @@ export function mergeProjectRuntimeEvidence(evidence, runtimeSnapshot) {
 	return evidence;
 }
 
-export function parseResearchState(value) {
-	if (value && typeof value === "object" && !Array.isArray(value)) return value;
+function extractFirstJsonObject(value) {
 	const raw = String(value ?? "").trim();
 	const unfenced = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
 	const start = unfenced.indexOf("{");
-	const end = unfenced.lastIndexOf("}");
-	if (start < 0 || end <= start) throw new Error("Compaction model did not return a JSON object.");
-	return JSON.parse(unfenced.slice(start, end + 1));
+	if (start < 0) throw new Error("Compaction model did not return a JSON object.");
+	let depth = 0;
+	let inString = false;
+	let escaped = false;
+	for (let index = start; index < unfenced.length; index += 1) {
+		const char = unfenced[index];
+		if (inString) {
+			if (escaped) escaped = false;
+			else if (char === "\\") escaped = true;
+			else if (char === '"') inString = false;
+			continue;
+		}
+		if (char === '"') inString = true;
+		else if (char === "{") depth += 1;
+		else if (char === "}") {
+			depth -= 1;
+			if (depth === 0) return unfenced.slice(start, index + 1);
+		}
+	}
+	throw new Error("Compaction model returned an unterminated JSON object.");
+}
+
+function escapeRawStringControls(value) {
+	let result = "";
+	let inString = false;
+	let escaped = false;
+	let repaired = 0;
+	for (const char of value) {
+		if (!inString) {
+			result += char;
+			if (char === '"') inString = true;
+			continue;
+		}
+		if (escaped) {
+			result += char;
+			escaped = false;
+			continue;
+		}
+		if (char === "\\") {
+			result += char;
+			escaped = true;
+			continue;
+		}
+		if (char === '"') {
+			result += char;
+			inString = false;
+			continue;
+		}
+		const code = char.codePointAt(0);
+		if (code < 0x20) {
+			result += char === "\n" ? "\\n" : char === "\r" ? "\\r" : char === "\t" ? "\\t" : `\\u${code.toString(16).padStart(4, "0")}`;
+			repaired += 1;
+		} else {
+			result += char;
+		}
+	}
+	return { value: result, repaired };
+}
+
+function removeTrailingCommas(value) {
+	let result = "";
+	let inString = false;
+	let escaped = false;
+	let repaired = 0;
+	for (let index = 0; index < value.length; index += 1) {
+		const char = value[index];
+		if (inString) {
+			result += char;
+			if (escaped) escaped = false;
+			else if (char === "\\") escaped = true;
+			else if (char === '"') inString = false;
+			continue;
+		}
+		if (char === '"') {
+			inString = true;
+			result += char;
+			continue;
+		}
+		if (char === ",") {
+			let next = index + 1;
+			while (/\s/.test(value[next] ?? "")) next += 1;
+			if (value[next] === "]" || value[next] === "}") {
+				repaired += 1;
+				continue;
+			}
+		}
+		result += char;
+	}
+	return { value: result, repaired };
+}
+
+function missingCommaPosition(error) {
+	if (!(error instanceof SyntaxError)) return undefined;
+	const match = error.message.match(/^Expected ',' or '.+' after (?:array element|property value) in JSON at position (\d+)/);
+	return match ? Number(match[1]) : undefined;
+}
+
+export function parseResearchStateWithDiagnostics(value) {
+	if (value && typeof value === "object" && !Array.isArray(value)) {
+		return { state: value, repairs: [] };
+	}
+	const extracted = extractFirstJsonObject(value);
+	try {
+		return { state: JSON.parse(extracted), repairs: [] };
+	} catch (strictError) {
+		const repairs = [];
+		const controls = escapeRawStringControls(extracted);
+		let candidate = controls.value;
+		if (controls.repaired) repairs.push(`escaped ${controls.repaired} raw control character(s) inside JSON strings`);
+		const trailing = removeTrailingCommas(candidate);
+		candidate = trailing.value;
+		if (trailing.repaired) repairs.push(`removed ${trailing.repaired} trailing comma(s)`);
+
+		let insertedCommas = 0;
+		for (let attempt = 0; attempt < 16; attempt += 1) {
+			try {
+				const state = JSON.parse(candidate);
+				if (insertedCommas) repairs.push(`inserted ${insertedCommas} missing comma(s)`);
+				return { state, repairs };
+			} catch (error) {
+				const position = missingCommaPosition(error);
+				const next = position === undefined ? "" : candidate[position];
+				if (position === undefined || !/["{\[\d\-tfn]/.test(next)) {
+					throw strictError;
+				}
+				candidate = `${candidate.slice(0, position)},${candidate.slice(position)}`;
+				insertedCommas += 1;
+			}
+		}
+		throw strictError;
+	}
+}
+
+export function parseResearchState(value) {
+	return parseResearchStateWithDiagnostics(value).state;
+}
+
+export function parseResearchCompactionResponse(content) {
+	const parts = Array.isArray(content) ? content : [];
+	const toolCalls = parts.filter((part) => part?.type === "toolCall" && part.name === RESEARCH_STATE_TOOL_NAME);
+	if (toolCalls.length > 1) throw new Error(`Compaction model called ${RESEARCH_STATE_TOOL_NAME} more than once.`);
+	if (toolCalls.length === 1) {
+		const parsed = parseResearchStateWithDiagnostics(toolCalls[0].arguments);
+		return { ...parsed, source: "tool" };
+	}
+	const raw = parts
+		.filter((part) => part?.type === "text" && typeof part.text === "string")
+		.map((part) => part.text)
+		.join("\n");
+	if (!raw.trim()) throw new Error("Compaction model returned neither structured state nor text JSON.");
+	return { ...parseResearchStateWithDiagnostics(raw), source: "text" };
 }
 
 function refs(value, validRefs, maxItems = 16) {
@@ -379,7 +675,16 @@ export function applyResearchStatePatch(current, patch) {
 	return state;
 }
 
-function mergePreviousHypotheses(current, previous, warnings, validRefs, validExperimentRefs) {
+function experimentRefsForStrongStatus(status, evidenceSets) {
+	return status === "supported" ? evidenceSets.confirmatory : evidenceSets.challenge;
+}
+
+function hasStrongExperimentEvidence(status, evidenceRefs, evidenceSets) {
+	const allowedRefs = experimentRefsForStrongStatus(status, evidenceSets);
+	return evidenceRefs.some((ref) => allowedRefs.has(ref));
+}
+
+function mergePreviousHypotheses(current, previous, warnings, validRefs, evidenceSets) {
 	if (!Array.isArray(previous?.hypotheses)) return current;
 	const ids = new Set(current.map((item) => item.id));
 	for (const old of previous.hypotheses) {
@@ -391,8 +696,8 @@ function mergePreviousHypotheses(current, previous, warnings, validRefs, validEx
 		let status = ["active", "supported", "weakened", "rejected", "inconclusive"].includes(old?.status)
 			? old.status
 			: "inconclusive";
-		if (["supported", "weakened", "rejected"].includes(status) && !evidenceRefs.some((ref) => validExperimentRefs.has(ref))) {
-			warnings.push(`Downgraded preserved hypothesis ${id} from ${status}: its valid experiment provenance is no longer available.`);
+		if (["supported", "weakened", "rejected"].includes(status) && !hasStrongExperimentEvidence(status, evidenceRefs, evidenceSets)) {
+			warnings.push(`Downgraded preserved hypothesis ${id} from ${status}: its evidence mode/provenance is not sufficient for that strong update.`);
 			status = "inconclusive";
 		}
 		current.push({
@@ -415,6 +720,26 @@ export function normalizeResearchState(candidate, evidence) {
 	const validExperimentRefs = new Set(
 		evidence.experiments.filter((item) => item.validityJudgment === "valid").map((item) => item.ref),
 	);
+	const confirmatoryExperimentRefs = new Set(
+		evidence.experiments
+			.filter((item) =>
+				item.validityJudgment === "valid"
+				&& item.evidenceMode === "confirmatory"
+				&& Boolean(item.prediction)
+				&& ["preregistered", "recorded_before_observation"].includes(item.predictionStatus)
+				&& (item.predictionStatus !== "preregistered" || Boolean(item.registrationRef)),
+			)
+			.map((item) => item.ref),
+	);
+	const challengeExperimentRefs = new Set(
+		evidence.experiments
+			.filter((item) =>
+				item.validityJudgment === "valid"
+				&& ["confirmatory", "diagnostic"].includes(item.evidenceMode),
+			)
+			.map((item) => item.ref),
+	);
+	const evidenceSets = { confirmatory: confirmatoryExperimentRefs, challenge: challengeExperimentRefs };
 	const allowedStatuses = new Set(["active", "supported", "weakened", "rejected", "inconclusive"]);
 	const seenIds = new Set();
 	const hypotheses = [];
@@ -427,8 +752,11 @@ export function normalizeResearchState(candidate, evidence) {
 		seenIds.add(id);
 		const evidenceRefs = refs(item.evidenceRefs, evidence.validRefs);
 		let status = allowedStatuses.has(item.status) ? item.status : "inconclusive";
-		if (["supported", "weakened", "rejected"].includes(status) && !evidenceRefs.some((ref) => validExperimentRefs.has(ref))) {
-			warnings.push(`Downgraded ${id} from ${status}: no cited valid experiment record supports a strong update.`);
+		if (["supported", "weakened", "rejected"].includes(status) && !hasStrongExperimentEvidence(status, evidenceRefs, evidenceSets)) {
+			const requirement = status === "supported"
+				? "no cited valid confirmatory record has an observation-before prediction"
+				: "no cited valid confirmatory or diagnostic record supports that challenge";
+			warnings.push(`Downgraded ${id} from ${status}: ${requirement}.`);
 			status = "inconclusive";
 		}
 		hypotheses.push({
@@ -443,7 +771,7 @@ export function normalizeResearchState(candidate, evidence) {
 	if (evidence.preservePreviousHypotheses === false) {
 		warnings.push("Did not carry previous hypotheses into the active state because a superseding research transition was recorded.");
 	} else {
-		mergePreviousHypotheses(hypotheses, evidence.previousState, warnings, evidence.validRefs, validExperimentRefs);
+		mergePreviousHypotheses(hypotheses, evidence.previousState, warnings, evidence.validRefs, evidenceSets);
 	}
 
 	const observations = [];
@@ -507,20 +835,26 @@ export function buildResearchCompactionPrompt({
 	projectTransitions = [],
 	customInstructions,
 }) {
-	return `You maintain working state for computational AI/communications research. Produce one JSON object only.
+	return `You maintain working state for computational AI/communications research. Submit the result by calling ${RESEARCH_STATE_TOOL_NAME} exactly once. Do not emit the state as prose. If tool calling is unavailable, return one JSON object only.
 
 This is not a software-development progress summary. Preserve competing hypotheses, distinguishing predictions, observations versus interpretations, negative-result validity, unresolved confounders, reversibility, and the next highest-information experiment. Exploratory code is disposable unless it affects interpretation or continuation.
 
+The structured state is an index, not a replacement transcript. Target at most ${RESEARCH_SUMMARY_TARGET_TOKENS.toLocaleString()} output tokens. Prefer concise evidence references and omit low-value operational detail; do not consume the full output allowance merely because it is available.
+
 Rules:
 1. Never turn an invalid or inconclusive experiment into evidence against a hypothesis.
-2. A strong hypothesis status (supported, weakened, rejected) must cite at least one recorded experiment whose validityJudgment is valid.
-3. Use only provenance references present below. Do not invent run IDs, paths, results, or references.
-4. Preserve previous hypothesis IDs. If a previous hypothesis changed, include it with the new status and evidence; do not silently omit it.
-5. Separate what was observed from how it was interpreted.
-6. Match the dominant language of the conversation.
-7. A recorded project transition with archived/superseded disposition changes the active research route. Keep the old route as retrievable history, but do not present its claim or next experiment as current. A parallel disposition does not retire it.
-8. Experiment trackRef/trackLabel identify route provenance. Evidence from a retired route may remain scientifically relevant, but do not silently use it as evidence that the current route's intervention occurred.
-9. An independent clean-Session summary is a candidate synthesis, not Project authority or experimental evidence. Retain useful hypotheses, but require normal provenance before making strong updates.
+2. Mark a hypothesis supported only from a valid confirmatory experiment with a real observation-before prediction. A preregistered prediction must also have registrationRef.
+3. Mark a hypothesis weakened or rejected only from a valid confirmatory or diagnostic experiment. Exploratory observations may motivate hypotheses, decisions, and confirmation runs, but cannot alone create a strong hypothesis status. validity_failure records cannot update a hypothesis.
+4. Use only provenance references present below. Do not invent run IDs, paths, results, predictions, registration references, or evidence modes.
+5. Preserve previous hypothesis IDs. If a previous hypothesis changed, include it with the new status and evidence; do not silently omit it.
+6. Separate what was observed from how it was interpreted.
+7. Match the dominant language of the conversation.
+8. A recorded project transition with archived/superseded disposition changes the active research route. Keep the old route as retrievable history, but do not present its claim or next experiment as current. A parallel disposition does not retire it.
+9. Experiment trackRef/trackLabel identify route provenance. Evidence from a retired route may remain scientifically relevant, but do not silently use it as evidence that the current route's intervention occurred.
+10. runGitCommit identifies code that produced a run; recordedAtGit only identifies the workspace when the memo was written. Never substitute one for the other.
+11. An independent clean or Analysis Session summary is a candidate synthesis, not Project authority or experimental evidence. Retain useful hypotheses, but require normal provenance before making strong updates.
+12. researchQuestion anchors the project-level direction and current scientific frontier. Do not replace it with the most recent coding, debugging, infrastructure, or documentation task unless that task truly changed the research objective.
+13. criticalContext should preserve the current stage, route guardrails, meaningful non-goals, and continuation principles needed by a new Session. nextExperiment is a research intervention selected for information gain, not an inherited coding TODO.
 
 Required schema:
 {
@@ -563,7 +897,7 @@ ${JSON.stringify(previousState ?? null)}
 Legacy Pi summary (fallible migration input; present only when no structured research state exists):
 ${text(legacyPreviousSummary, 40_000) || "None"}
 
-Independent clean-Session summary (fallible session-local input, never Project authority by itself):
+Independent non-Leader Session summary (fallible clean/analysis input, never Project authority by itself):
 ${text(independentSessionSummary, 40_000) || "None"}
 
 Recorded experiments (authoritative for their exact fields, but interpret according to validityJudgment):
@@ -643,7 +977,7 @@ export function renderResearchSummary(state, evidence, fileOps = {}) {
 	if (!recentExperiments.length) lines.push("- 当前分支没有 record_experiment 记录。");
 	for (const item of recentExperiments) {
 		lines.push(
-			`- ${item.ref} [${item.validityJudgment}] track=${item.trackRef ?? "project:initial"}${item.runId ? ` run=${item.runId}` : ""}: ${item.conclusion || item.observation || item.hypothesis}`,
+			`- ${item.ref} [${item.validityJudgment}; ${item.evidenceMode ?? "exploratory"}; prediction=${item.predictionStatus ?? "not_recorded"}] track=${item.trackRef ?? "unknown"}${item.runId ? ` run=${item.runId}` : ""}${item.runGitCommit ? ` runGit=${item.runGitCommit}` : ""}: ${item.conclusion || item.observation || item.hypothesis}`,
 		);
 	}
 	for (const item of evidence.checkpoints.slice(-12)) {
@@ -682,7 +1016,7 @@ export function buildResearchCompactionDetails({
 		tokensBefore,
 		compactionPolicy: policy,
 		projectRevision: Number.isInteger(projectRevision) ? projectRevision : 0,
-		inheritancePolicy: inheritancePolicy === "clean" ? "clean" : "project",
+		inheritancePolicy: ["clean", "analysis"].includes(inheritancePolicy) ? inheritancePolicy : "project",
 		researchState: state,
 		evidenceLedger: {
 			experiments: evidence.experiments,

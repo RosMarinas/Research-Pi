@@ -53,12 +53,17 @@ function experimentText(record) {
 		`Hypothesis: ${scalar(record.hypothesis)}`,
 		`Intervention: ${scalar(record.intervention)}`,
 		`Prediction: ${scalar(record.prediction)}`,
+		`Prediction status: ${scalar(record.predictionStatus, 80)}`,
+		`Evidence mode: ${scalar(record.evidenceMode, 80)}`,
+		`Registration reference: ${scalar(record.registrationRef, 1_000)}`,
 		`Validity checks: ${Array.isArray(record.validityChecks) ? record.validityChecks.map((v) => scalar(v, 500)).join("; ") : ""}`,
 		`Observation: ${scalar(record.observation, 4_000)}`,
 		`Validity: ${scalar(record.validityJudgment, 80)}`,
 		`Conclusion: ${scalar(record.conclusion, 4_000)}`,
 		`Next step: ${scalar(record.nextStep, 2_000)}`,
 		`Run ID: ${scalar(record.runId, 300)}`,
+		`Run Git commit: ${scalar(record.runGitCommit, 160)}`,
+		`Recorded-at Git commit: ${scalar(record.recordedAtGit?.commit ?? record.git?.commit, 160)}`,
 		`Artifacts: ${Array.isArray(record.artifacts) ? record.artifacts.map((v) => scalar(v, 500)).join("; ") : ""}`,
 	]
 		.filter((line) => !line.endsWith(": "))

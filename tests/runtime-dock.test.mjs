@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { RuntimeDockComponent, runtimeDockVisible } from "../.pi/lib/runtime-dock-ui.mjs";
+import {
+	createRuntimeDockClock,
+	RUNTIME_DOCK_CLOCK_MS,
+	RuntimeDockComponent,
+	runtimeDockNeedsClock,
+	runtimeDockVisible,
+} from "../.pi/lib/runtime-dock-ui.mjs";
 
 function theme() {
 	return {
@@ -26,6 +32,40 @@ test("Runtime Dock auto-hides healthy idle state and surfaces actionable state",
 	assert.equal(runtimeDockVisible(model({ counts: { active: 1 } }), "off"), false);
 });
 
+test("Runtime Dock clock redraws once per second only while a live Codex job exists", () => {
+	let callback;
+	let scheduled = 0;
+	let cancelled = 0;
+	let renders = 0;
+	const handle = { unrefCalled: false, unref() { this.unrefCalled = true; } };
+	const clock = createRuntimeDockClock(() => { renders += 1; }, {
+		setInterval(next, intervalMs) {
+			callback = next;
+			scheduled += 1;
+			assert.equal(intervalMs, RUNTIME_DOCK_CLOCK_MS);
+			return handle;
+		},
+		clearInterval(value) {
+			assert.equal(value, handle);
+			cancelled += 1;
+		},
+	});
+
+	assert.equal(runtimeDockNeedsClock([]), false);
+	assert.equal(runtimeDockNeedsClock([{ status: "completed" }]), false);
+	assert.equal(runtimeDockNeedsClock([{ status: "running" }]), true);
+	assert.equal(runtimeDockNeedsClock([{ status: "input_required" }]), true);
+	clock.setActive(true);
+	clock.setActive(true);
+	assert.equal(scheduled, 1, "repeated state refreshes must not create timer storms");
+	assert.equal(handle.unrefCalled, true);
+	callback();
+	assert.equal(renders, 1);
+	clock.setActive(false);
+	assert.equal(cancelled, 1);
+	assert.equal(clock.isActive(), false);
+});
+
 test("Runtime Dock is responsive and renders objective Codex progress", () => {
 	const active = model({ counts: { active: 1 }, project: { freshness: "missing" } });
 	const jobs = [{ id: "codex-demo-12345678", status: "running", mode: "advisor", progress: "reading preregistration", startedAt: new Date().toISOString() }];
@@ -36,6 +76,62 @@ test("Runtime Dock is responsive and renders objective Codex progress", () => {
 		if (width >= 48) {
 			assert.match(lines.join("\n"), /EmbeddingWorld/);
 			assert.match(lines.join("\n"), /advisor/);
+			assert.match(lines.join("\n"), /RUNNING/);
 		}
 	}
+});
+
+test("Runtime Dock never presents a completed leaf tool as a completed executor", () => {
+	const active = model({ counts: { active: 1 } });
+	const jobs = [{
+		id: "codex-demo-9e62a4b5",
+		status: "running",
+		mode: "executor",
+		progress: "research_pi_host · completed",
+		lastActivity: {
+			id: "tool-1",
+			category: "tool",
+			status: "completed",
+			summary: "research_pi_host · completed",
+			at: new Date().toISOString(),
+		},
+		startedAt: new Date(Date.now() - 90 * 60_000).toISOString(),
+	}];
+	const lines = new RuntimeDockComponent(active, jobs, theme(), { density: "balanced" }).render(160).join("\n");
+	assert.match(lines, /executor 9e62a4b5 · RUNNING/);
+	assert.match(lines, /last: research_pi_host · completed/);
+	assert.doesNotMatch(lines, /executor 9e62a4b5 · COMPLETED/);
+});
+
+test("Runtime Dock gives concurrent Codex work stable multi-line rows", () => {
+	const active = model({ counts: { active: 2 } });
+	const jobs = [
+		{
+			id: "codex-demo-bbbbbbbb",
+			status: "running",
+			mode: "executor",
+			createdAt: "2026-08-21T00:00:02.000Z",
+			activeActivityCount: 2,
+			activeActivities: [
+				{ id: "two", threadId: "thread-child-2", category: "command", summary: "run probe B" },
+				{ id: "three", threadId: "thread-child-3", category: "subagent", summary: "review evidence" },
+			],
+		},
+		{
+			id: "codex-demo-aaaaaaaa",
+			status: "running",
+			mode: "advisor",
+			createdAt: "2026-08-21T00:00:01.000Z",
+			currentActivity: { id: "one", category: "search", summary: "checking docs" },
+		},
+	];
+	const forward = new RuntimeDockComponent(active, jobs, theme(), { density: "balanced" }).render(120);
+	const reversed = new RuntimeDockComponent(active, [...jobs].reverse(), theme(), { density: "balanced" }).render(120);
+	const text = forward.join("\n");
+	assert.ok(text.indexOf("advisor aaaaaaaa") < text.indexOf("executor bbbbbbbb"));
+	assert.match(text, /parallel: 2 active activities/);
+	assert.match(text, /command hild-2 · run probe B/);
+	assert.match(text, /subagent hild-3 · review evidence/);
+	assert.deepEqual(forward, reversed, "poll completion order must not reorder Codex rows");
+	assert.ok(forward.every((line) => visibleWidth(line) <= 120));
 });

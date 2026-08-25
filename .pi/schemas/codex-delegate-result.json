@@ -4,8 +4,9 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "status",
+    "outcome",
     "goal_satisfied",
+    "completion_basis",
     "summary",
     "evidence",
     "actions_taken",
@@ -13,15 +14,23 @@
     "checks",
     "external_effects",
     "uncertainties",
+    "remaining_work",
     "recommended_next_step"
   ],
   "properties": {
-    "status": {
+    "outcome": {
       "type": "string",
-      "enum": ["completed", "inconclusive", "blocked"]
+      "enum": ["succeeded", "partial", "blocked", "failed"],
+      "description": "Semantic outcome of the delegated objective, not the transport status of the Codex turn."
     },
     "goal_satisfied": {
-      "type": "boolean"
+      "type": "boolean",
+      "description": "True only when the delegated objective and its success criteria are complete."
+    },
+    "completion_basis": {
+      "type": "string",
+      "maxLength": 4000,
+      "description": "Why this is a legitimate final handoff rather than an intermediate progress update."
     },
     "summary": {
       "type": "string",
@@ -75,9 +84,16 @@
       "maxItems": 32,
       "items": { "type": "string", "maxLength": 4000 }
     },
+    "remaining_work": {
+      "type": "array",
+      "maxItems": 32,
+      "description": "Work still inside the delegated objective. Empty when goal_satisfied is true.",
+      "items": { "type": "string", "maxLength": 4000 }
+    },
     "recommended_next_step": {
       "type": "string",
-      "maxLength": 8000
+      "maxLength": 8000,
+      "description": "The next decision or task after this delegation ends; do not use it for work that should still be completed in the current turn."
     }
   }
 }

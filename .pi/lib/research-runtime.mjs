@@ -32,7 +32,7 @@ const MESSAGE_STATES = new Set(["delivered", "consumed", "superseded"]);
 const TERMINAL_MESSAGE_STATES = new Set(["consumed", "superseded"]);
 const FINAL_ACTION_STATES = new Set(["completed", "failed", "cancelled"]);
 const ROTATION_STATES = new Set(["completed", "cancelled"]);
-const SESSION_INHERITANCE_POLICIES = new Set(["project", "clean"]);
+const SESSION_INHERITANCE_POLICIES = new Set(["project", "clean", "analysis"]);
 const SESSION_INHERITANCE_STATES = new Set(["applied", "cancelled"]);
 const MAX_MESSAGE_LENGTH = 16_000;
 const LEDGER_LOCK_STALE_MS = 30_000;
@@ -69,6 +69,10 @@ function createEventId(prefix) {
 
 function createMessageId() {
 	return createEventId("msg");
+}
+
+export function analysisSessionActorId(sessionId) {
+	return `analysis:${shortHash(String(sessionId ?? "unknown"), 24)}`;
 }
 
 function delay(ms) {
@@ -261,6 +265,7 @@ export async function readRuntimeSnapshot(runtime) {
 	const actions = new Map();
 	const evidence = new Map();
 	const transitions = [];
+	const handoffs = new Map();
 	const rotations = new Map();
 	const inheritanceRequests = new Map();
 	const activations = new Map();
@@ -343,6 +348,9 @@ export async function readRuntimeSnapshot(runtime) {
 				evidence.set(data.id, { ...current, ...data, recordedAt: event.at, revision });
 				break;
 			}
+			case "work.handoff.recorded":
+				handoffs.set(data.id, { ...handoffs.get(data.id), ...data, recordedAt: event.at });
+				break;
 			case "session.rotation.requested":
 				rotations.set(data.id, { ...data, status: "pending", requestedAt: event.at });
 				break;
@@ -389,6 +397,7 @@ export async function readRuntimeSnapshot(runtime) {
 		actions: [...actions.values()],
 		evidence: [...evidence.values()],
 		transitions,
+		handoffs: [...handoffs.values()],
 		activeTransition: transitions.at(-1) ?? null,
 		rejectedStates,
 		rotations: rotationList,
@@ -461,6 +470,18 @@ function runtimeTrackLabel(snapshot, trackRef) {
 		(item.trackRef ?? `transition:${item.id}`) === trackRef,
 	);
 	return transition?.to ?? null;
+}
+
+export function resolveRuntimeResearchTrack(snapshot, requestedTrackRef) {
+	const current = runtimeResearchTrack(snapshot);
+	const trackRef = String(requestedTrackRef ?? "").trim() || current.ref;
+	const trackLabel = trackRef === current.ref ? current.label : runtimeTrackLabel(snapshot, trackRef);
+	if (!trackLabel) throw new Error(`Unknown research track provenance: ${trackRef}`);
+	return {
+		trackRef,
+		trackLabel,
+		status: runtimeTrackStatus(snapshot, trackRef),
+	};
 }
 
 export async function ensureRuntimeActor(runtime, actor) {
@@ -582,7 +603,7 @@ export async function initializeResearchRuntime(cwd, session, options = {}) {
 	await ensureRuntimeActor(runtime, {
 		id: RESEARCH_LEADER_ACTOR_ID,
 		kind: "leader",
-		label: "Research Leader",
+		label: "Leader Session",
 		provider: "pi",
 	});
 	if (options.attach !== false) await attachRuntimeActor(runtime, RESEARCH_LEADER_ACTOR_ID, session);
@@ -629,23 +650,51 @@ function boundedRuntimeText(value, max) {
 	return text.length <= max ? text : `${text.slice(0, max - 3)}...`;
 }
 
+function boundedRuntimeBlock(value, max) {
+	const text = String(value ?? "")
+		.replace(/\r\n/g, "\n")
+		.replace(/[\t ]+/g, " ")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
+	return text.length <= max ? text : `${text.slice(0, max - 3)}...`;
+}
+
 export async function recordRuntimeEvidence(runtime, record) {
 	if (!record?.id) throw new Error("Project evidence id is required");
 	const snapshot = await readRuntimeSnapshot(runtime);
-	const track = runtimeResearchTrack(snapshot);
-	const trackRef = record.trackRef ?? track.ref;
-	const trackLabel = record.trackLabel ?? (trackRef === track.ref ? track.label : runtimeTrackLabel(snapshot, trackRef));
-	if (!trackLabel) throw new Error(`Unknown research track provenance: ${trackRef}`);
+	const resolvedTrack = resolveRuntimeResearchTrack(snapshot, record.trackRef);
+	const trackRef = resolvedTrack.trackRef;
+	const trackLabel = record.trackLabel ?? resolvedTrack.trackLabel;
 	const data = {
 		id: String(record.id),
 		timestamp: record.timestamp ?? now(),
 		question: boundedRuntimeText(record.question, 1200),
+		hypothesis: boundedRuntimeText(record.hypothesis, 1200),
+		intervention: boundedRuntimeText(record.intervention, 1200),
+		prediction: boundedRuntimeText(record.prediction, 1200),
+		predictionStatus: ["preregistered", "recorded_before_observation", "not_recorded", "not_applicable", "unspecified"].includes(record.predictionStatus)
+			? record.predictionStatus
+			: record.prediction ? "unspecified" : "not_recorded",
+		evidenceMode: ["confirmatory", "exploratory", "diagnostic", "validity_failure"].includes(record.evidenceMode)
+			? record.evidenceMode
+			: "exploratory",
+		registrationRef: boundedRuntimeText(record.registrationRef, 1000) || null,
+		validityChecks: Array.isArray(record.validityChecks)
+			? record.validityChecks.map((item) => boundedRuntimeText(item, 700)).filter(Boolean).slice(0, 20)
+			: [],
 		validityJudgment: ["valid", "invalid", "inconclusive"].includes(record.validityJudgment)
 			? record.validityJudgment
 			: "inconclusive",
+		observation: boundedRuntimeText(record.observation, 2400),
 		conclusion: boundedRuntimeText(record.conclusion, 2000),
 		nextStep: boundedRuntimeText(record.nextStep, 1200),
 		runId: boundedRuntimeText(record.runId, 300) || null,
+		runGitCommit: boundedRuntimeText(record.runGitCommit, 160) || null,
+		recordedAtGit: record.recordedAtGit ? {
+			root: boundedRuntimeText(record.recordedAtGit.root, 4000) || null,
+			commit: boundedRuntimeText(record.recordedAtGit.commit, 160) || null,
+			dirty: record.recordedAtGit.dirty ?? null,
+		} : null,
 		artifacts: Array.isArray(record.artifacts) ? record.artifacts.map((item) => boundedRuntimeText(item, 1000)).filter(Boolean).slice(0, 12) : [],
 		source: {
 			workspaceRoot: boundedRuntimeText(record.source?.workspaceRoot, 4000) || null,
@@ -657,6 +706,32 @@ export async function recordRuntimeEvidence(runtime, record) {
 		trackLabel,
 	};
 	return await appendRuntimeEvent(runtime, "evidence.recorded", data, { id: `evidence:${data.id}` });
+}
+
+export async function recordRuntimeHandoff(runtime, input) {
+	const snapshot = await readRuntimeSnapshot(runtime);
+	const resolvedTrack = resolveRuntimeResearchTrack(snapshot, input.trackRef);
+	const id = validateMessageId(input.id ?? createEventId("handoff"));
+	const data = {
+		id,
+		kind: boundedRuntimeText(input.kind, 80) || "leader-task",
+		task: boundedRuntimeText(input.task, 1600),
+		summary: boundedRuntimeBlock(input.summary, 6000),
+		sessionId: boundedRuntimeText(input.sessionId, 200) || null,
+		actorId: boundedRuntimeText(input.actorId, 200) || RESEARCH_LEADER_ACTOR_ID,
+		toolNames: Array.isArray(input.toolNames)
+			? input.toolNames.map((item) => boundedRuntimeText(item, 120)).filter(Boolean).slice(0, 24)
+			: [],
+		git: input.git ? {
+			branch: boundedRuntimeText(input.git.branch, 300) || null,
+			commit: boundedRuntimeText(input.git.commit, 160) || null,
+			dirty: input.git.dirty ?? null,
+		} : null,
+		trackRef: resolvedTrack.trackRef,
+		trackLabel: input.trackLabel ?? resolvedTrack.trackLabel,
+	};
+	if (!data.task && !data.summary) throw new Error("Runtime work handoff requires a task or summary");
+	return await appendRuntimeEvent(runtime, "work.handoff.recorded", data, { id: `work-handoff:${id}` });
 }
 
 export async function recordResearchTransition(runtime, transition) {
@@ -871,6 +946,30 @@ export function unconsumedRuntimeMessages(snapshot, options = {}) {
 	});
 }
 
+export async function reconcileCodexRuntimeAsks(runtime, job) {
+	const jobId = String(job?.id ?? "");
+	if (!jobId) return [];
+	const activeRequestId = job.status === "input_required" ? String(job.pendingRequest?.id ?? "") : "";
+	const snapshot = await readRuntimeSnapshot(runtime);
+	const superseded = [];
+	for (const message of snapshot.messages) {
+		if (
+			message.type !== "ask"
+			|| message.metadata?.jobId !== jobId
+			|| (message.status !== "queued" && message.status !== "delivered")
+		) continue;
+		const requestId = String(message.metadata?.requestId ?? message.relatesTo ?? "");
+		if (activeRequestId && requestId === activeRequestId) continue;
+		await settleRuntimeMessage(runtime, message.id, "superseded", {
+			jobId,
+			requestId: requestId || null,
+			reason: activeRequestId ? "codex_request_replaced" : `codex_job_${String(job.status ?? "not_waiting")}`,
+		});
+		superseded.push(message.id);
+	}
+	return superseded;
+}
+
 export async function requestRuntimeSessionRotation(runtime, input) {
 	const fromSessionId = boundedRuntimeText(input.fromSessionId, 200);
 	if (!fromSessionId) throw new Error("Runtime Session rotation requires a source Session id");
@@ -1030,7 +1129,22 @@ export async function registerCodexRuntimeJob(runtime, job) {
 		status: job.status,
 		label: job.mission ?? `${job.mode} ${String(job.id).slice(-8)}`,
 		externalId: job.id,
-		metadata: { threadId: job.threadId ?? null, mode: job.mode, model: job.model },
+		metadata: {
+			threadId: job.threadId ?? null,
+			mode: job.mode,
+			model: job.model,
+			outcome: job.result?.outcome ?? null,
+			goalSatisfied: job.result?.goal_satisfied ?? null,
+			summary: boundedRuntimeText(job.result?.summary ?? job.result?.working_synthesis, 4000) || null,
+			completionBasis: boundedRuntimeText(job.result?.completion_basis, 2400) || null,
+			changedFiles: Array.isArray(job.result?.changed_files)
+				? job.result.changed_files.map((item) => boundedRuntimeText(item, 600)).filter(Boolean).slice(0, 12)
+				: [],
+			remainingWork: Array.isArray(job.result?.remaining_work)
+				? job.result.remaining_work.map((item) => boundedRuntimeText(item, 700)).filter(Boolean).slice(0, 8)
+				: [],
+			recommendedNextStep: boundedRuntimeText(job.result?.recommended_next_step ?? job.result?.suggested_next_exchange, 1800) || null,
+		},
 		projectRevision: Number.isInteger(job.projectRevision) ? job.projectRevision : snapshot.revision,
 		trackRef,
 		trackLabel,

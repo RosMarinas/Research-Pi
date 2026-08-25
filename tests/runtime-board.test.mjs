@@ -106,6 +106,21 @@ test("Runtime Board makes clean Session isolation visible", () => {
 	assert.match(overlay.render(78).join("\n"), /clean context/);
 });
 
+test("Runtime Board distinguishes an Analysis Session from the attached Leader Session", () => {
+	const model = buildRuntimeBoardModel({
+		...fixture(),
+		sessionId: "session-analysis-87654321",
+		inheritancePolicy: "analysis",
+	});
+	assert.equal(model.leader.isCurrentSessionAttached, false);
+	const overlay = new RuntimeBoardOverlay({ requestRender() {} }, plainTheme(), () => {}, model, async () => model);
+	overlay.handleInput("4");
+	const rendered = overlay.render(90).join("\n");
+	assert.match(rendered, /current TUI is an Analysis Session/);
+	assert.match(rendered, /current session 87654321/);
+	assert.match(rendered, /Leader attachment 12345678/);
+});
+
 test("Runtime Board renders within terminal width and exposes keyboard sections without polling", async () => {
 	const model = buildRuntimeBoardModel(fixture());
 	let renders = 0;

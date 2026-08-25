@@ -218,6 +218,8 @@ class CodexWatchOverlay {
 				current.id,
 				current.status,
 				current.progress,
+				current.currentActivity,
+				current.lastActivity,
 				current.lastActivityAt,
 				current.pendingRequest?.id ?? null,
 				events.length,
@@ -295,7 +297,14 @@ class CodexWatchOverlay {
 		const counts = new Map<string, number>();
 		for (const event of events) counts.set(event.category, (counts.get(event.category) ?? 0) + 1);
 		return [
-			` ${th.fg("dim", "Progress")}  ${compact(job.progress, 500) || "waiting for the first App Server event"}`,
+			` ${th.fg("dim", "Job state")}  ${job.status}`,
+			` ${th.fg("dim", "Phase")}      ${compact(job.progress, 500) || "waiting for the first App Server event"}`,
+			...(job.currentActivity?.summary
+				? [` ${th.fg("dim", "Current")}    ${compact(job.currentActivity.summary, 500)}`]
+				: []),
+			...(job.lastActivity?.summary
+				? [` ${th.fg("dim", "Last")}       ${compact(job.lastActivity.summary, 500)}`]
+				: []),
 			` ${th.fg("dim", "Observed")}  ${events.length} events · ${counts.get("command") ?? 0} commands · ${counts.get("file") ?? 0} file changes · ${agents.length} subagents`,
 			"",
 			` ${th.fg("dim", "Recent objective activity")}`,
@@ -334,11 +343,13 @@ class CodexWatchOverlay {
 		const events = this.eventsByJob.get(job.id) ?? [];
 		const mode: ViewMode = VIEW_MODES[this.modeIndex]!;
 		const selectedMode = VIEW_MODES.map((candidate) => candidate === mode ? th.fg("accent", th.bold(`[${candidate}]`)) : th.fg("dim", candidate)).join("  ");
-		const stateColor = ["failed", "cancelled"].includes(job.status) ? "error" : job.status === "completed" ? "success" : ["input_required", "outcome_unknown"].includes(job.status) ? "warning" : "accent";
+		const outcome = job.status === "completed" ? String(job.result?.outcome ?? "") : "";
+		const semanticIncomplete = Boolean(outcome && outcome !== "succeeded");
+		const stateColor = ["failed", "cancelled"].includes(job.status) ? "error" : job.status === "completed" ? semanticIncomplete ? "warning" : "success" : ["input_required", "outcome_unknown"].includes(job.status) ? "warning" : "accent";
 		const title = `◈ CODEX WATCH ${this.selected + 1}/${this.jobs.length}`;
 		const mission = compact(job.mission ?? "unlabelled", 90);
 		const header = [
-			` ${th.fg(stateColor as any, `${statusIcon(job.status)} ${job.status}`)} · ${th.fg("accent", mission)} · ${job.mode} · ${elapsed(job)}`,
+			` ${th.fg(stateColor as any, `${semanticIncomplete ? "!" : statusIcon(job.status)} ${job.status}${outcome ? `/${outcome}` : ""}`)} · ${th.fg("accent", mission)} · ${job.mode} · ${elapsed(job)}`,
 			` ${th.fg("dim", `@${actorTarget(job)} · job ${shortId(job.id)} · ${job.model}/${job.reasoningEffort}`)}`,
 			` ${selectedMode}`,
 			"",

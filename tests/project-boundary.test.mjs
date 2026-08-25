@@ -12,6 +12,7 @@ import {
 	buildSandboxRuntimeConfig,
 	codexPermissionConfigArguments,
 	directToolPath,
+	isAnalysisReadOnlySshCommand,
 	isProtectedProjectMutation,
 	isWslHostMount,
 	permissionProfileDefinition,
@@ -20,6 +21,7 @@ import {
 	sanitizeBoundaryEnvironment,
 	sanitizeWslInteropEnvironment,
 } from "../.pi/lib/project-boundary.mjs";
+import { getHostCapabilityUiAdapter } from "../.pi/lib/research-runtime-adapters.mjs";
 
 test("project boundary exposes one opaque host-capability tool", () => {
 	const tools = [];
@@ -38,7 +40,9 @@ test("project boundary exposes one opaque host-capability tool", () => {
 	assert.match(hostTool.description, /command runs an argv/);
 	assert.match(JSON.stringify(hostTool.parameters), /host command argv/);
 	assert.match(JSON.stringify(hostTool.parameters), /"command"/);
+	assert.match(JSON.stringify(hostTool.parameters), /grantId/);
 	assert.deepEqual(commands, ["boundary"]);
+	assert.equal(typeof getHostCapabilityUiAdapter()?.review, "function");
 });
 
 test("path resolution accepts project paths and detects traversal plus symlink escapes", async () => {
@@ -84,6 +88,7 @@ test("Pi sandbox runtime is project-write, host-region-read-denied, and network-
 	const config = buildSandboxRuntimeConfig(root, {
 		PATH: "/bin",
 		DEEPSEEK_API_KEY: "secret",
+		OPENCODE_API_KEY: "go-secret",
 		HF_TOKEN: "secret-too",
 	});
 	assert.deepEqual(config.network.allowedDomains, []);
@@ -96,7 +101,7 @@ test("Pi sandbox runtime is project-write, host-region-read-denied, and network-
 	assert.equal(config.filesystem.allowGitConfig, true);
 	assert.deepEqual(
 		config.credentials.envVars.map((item) => item.name).sort(),
-		["DEEPSEEK_API_KEY", "HF_TOKEN"],
+		["DEEPSEEK_API_KEY", "HF_TOKEN", "OPENCODE_API_KEY"],
 	);
 });
 
@@ -161,6 +166,28 @@ test("WSL child environments cannot discover Windows executables or the host bri
 	const native = sanitizeWslInteropEnvironment({ PATH: "/bin:/mnt/c/tools", WSL_INTEROP: "kept" }, undefined);
 	assert.equal(native.PATH, "/bin:/mnt/c/tools");
 	assert.equal(native.WSL_INTEROP, "kept");
+});
+
+test("Analysis Session SSH accepts inspection commands and rejects remote side effects", () => {
+	for (const command of [
+		"cat /home/research/runs/r1/summary.json",
+		"rg 'loss|accuracy' /home/research/runs/r1 | head -50",
+		"git -C /home/research/project log -5 --oneline",
+		"nvidia-smi --query-gpu=name,memory.used --format=csv,noheader",
+		"squeue -u researcher",
+	]) assert.equal(isAnalysisReadOnlySshCommand(command), true, command);
+
+	for (const command of [
+		"python3 -c 'print(1)'",
+		"cat result.json > copied.json",
+		"find /home/research/runs -delete",
+		"git reset --hard HEAD~1",
+		"git diff --output=/tmp/result.diff",
+		"cat ~/.ssh/id_ed25519",
+		"cat result.json; rm result.json",
+		"journalctl --vacuum-time=1s",
+		"nvidia-smi -pm 1",
+	]) assert.equal(isAnalysisReadOnlySshCommand(command), false, command);
 });
 
 test("Codex executor profile keeps project and Git writable with public network", () => {

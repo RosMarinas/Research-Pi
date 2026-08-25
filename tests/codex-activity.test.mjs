@@ -7,6 +7,7 @@ import codexWatchExtension from "../.pi/extensions/codex-watch.ts";
 import {
 	CodexActivityCursor,
 	compactCodexAuditEvent,
+	projectCodexActivityUpdate,
 	projectCodexAgents,
 } from "../.pi/lib/codex-activity.mjs";
 
@@ -44,6 +45,30 @@ test("objective Codex activity keeps bounded command evidence and protects sensi
 	assert.equal(command.durationMs, 1234);
 	assert.match(command.summary, /remote_run\.py status/);
 	assert.equal(command.outputTail, "[protected command output]");
+});
+
+test("leaf completion projects as last activity, not job lifecycle completion", () => {
+	const update = projectCodexActivityUpdate({
+		method: "item/completed",
+		params: {
+			threadId: "thread-root",
+			turnId: "turn-root",
+			item: {
+				id: "tool-1",
+				type: "dynamicToolCall",
+				tool: "research_pi_host",
+				status: "completed",
+				success: true,
+			},
+		},
+	}, { timestamp: "2026-08-20T00:00:00.000Z" });
+	assert.equal(update.phase, "completed");
+	assert.equal(update.activity.id, "tool-1");
+	assert.equal(update.activity.threadId, "thread-root");
+	assert.equal(update.activity.category, "tool");
+	assert.equal(update.activity.status, "completed");
+	assert.equal(update.activity.summary, "research_pi_host · completed");
+	assert.equal(Object.hasOwn(update.activity, "jobStatus"), false);
 });
 
 test("Codex collaboration events project internal subagents without creating Runtime Actors", () => {

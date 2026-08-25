@@ -7,8 +7,10 @@ import {
 	PROJECT_VIEW_KIND,
 	buildProjectView,
 	commitProjectState,
-	materializeProjectView,
+	materializeProjectViewDelta,
 	migrateLatestProjectState,
+	projectViewFingerprint,
+	projectViewRefreshFingerprint,
 	renderProjectView,
 } from "../.pi/lib/project-view.mjs";
 import { RESEARCH_COMPACTION_KIND, RESEARCH_COMPACTION_VERSION } from "../.pi/lib/research-compact.mjs";
@@ -18,6 +20,7 @@ import {
 	appendRuntimeEventAtRevision,
 	initializeResearchRuntime,
 	readRuntimeSnapshot,
+	recordRuntimeHandoff,
 	recordResearchTransition,
 	runtimeActorAttachment,
 	runtimeTrackStatus,
@@ -159,7 +162,7 @@ test("a parallel research transition keeps the previous route current while addi
 		assert.equal(transition.fromTrackRef, "project:initial");
 		assert.equal(view.transitionSupersedesState, false);
 		assert.match(text, /Active research track: route B/);
-		assert.match(text, /Last compacted research question: Does intervention A/);
+		assert.match(text, /Baseline research question: Does intervention A/);
 		assert.doesNotMatch(text, /Previous compacted state \(not current\)/);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
@@ -388,7 +391,7 @@ test("research transitions use Project revision compare-and-append", async () =>
 	}
 });
 
-test("ProjectView is concise, validity-labelled, and inserted before the latest user prompt", () => {
+test("ProjectView is concise, validity-labelled, and transient fallback updates stay at the prompt tail", () => {
 	const view = buildProjectView({
 		runtime: { projectKey: "project-fixture", workspaceRoot: "/workspace" },
 			snapshot: {
@@ -407,15 +410,15 @@ test("ProjectView is concise, validity-labelled, and inserted before the latest 
 	assert.match(text, /\[invalid\]/);
 	assert.match(text, /outcome_unknown/);
 	assert.match(text, /fallible/);
-	assert.doesNotMatch(text, /observation=metric moved/);
-	const messages = materializeProjectView([
+	assert.match(text, /observation: metric moved/);
+	const messages = materializeProjectViewDelta([
 		{ role: "assistant", content: "old" },
 		{ role: "user", content: "new question" },
 	], text, { fingerprint: "fixture" });
 	assert.equal(messages.length, 3);
-	assert.equal(messages[1].customType, PROJECT_VIEW_KIND);
-	assert.equal(messages[2].role, "user");
-	assert.equal(materializeProjectView(messages, text).filter((message) => message.customType === PROJECT_VIEW_KIND).length, 1);
+	assert.equal(messages[2].customType, PROJECT_VIEW_KIND);
+	assert.equal(messages[2].details.transient, true);
+	assert.equal(materializeProjectViewDelta(messages, text).filter((message) => message.customType === PROJECT_VIEW_KIND).length, 1);
 });
 
 test("newer Runtime activity prevents an old next experiment from being presented as current", () => {
@@ -443,6 +446,163 @@ test("newer Runtime activity prevents an old next experiment from being presente
 	const text = renderProjectView(view);
 	assert.equal(view.freshness, "unconfirmed");
 	assert.match(text, /Runtime activity is newer/);
-	assert.match(text, /Previous next experiment \(not authoritative/);
+	assert.match(text, /baseline is historical or unconfirmed/);
+	assert.match(text, /Baseline planned next experiment .*Run the oracle/);
 	assert.match(text, /csb-param-v0-q1/);
+});
+
+test("new evidence becomes an immediate semantic delta while the old claim stays a labelled baseline", () => {
+	const state = compaction().details.researchState;
+	const view = buildProjectView({
+		runtime: { projectKey: "project-delta", workspaceRoot: "/workspace" },
+		snapshot: {
+			projectState: {
+				state,
+				source: { sessionId: "s1", entryId: "compact-1", contentHash: "baseline" },
+				committedAt: "2026-08-20T00:00:00Z",
+				updatedAt: "2026-08-20T00:00:00Z",
+				revision: 1,
+			},
+			actors: [],
+			actions: [],
+			messages: [],
+			transitions: [],
+			activeTransition: null,
+			evidence: [{
+				id: "exp-new",
+				revision: 2,
+				timestamp: "2026-08-21T00:00:00Z",
+				question: "Did the oracle expose the mechanism?",
+				intervention: "Bypassed the learned encoder.",
+				observation: "The action margin recovered from 0.01 to 0.42.",
+				validityChecks: ["The bypass path was active."],
+				validityJudgment: "valid",
+				evidenceMode: "diagnostic",
+				conclusion: "The learned encoder, not the decoder, loses the signal.",
+				nextStep: "Test whether staged training preserves the margin.",
+				trackRef: "project:initial",
+			}],
+			revision: 2,
+		},
+		git: {},
+		experiments: [],
+	});
+	const text = renderProjectView(view);
+	assert.equal(view.freshness, "stale");
+	assert.equal(view.pendingEvidenceCount, 1);
+	assert.match(text, /Baseline claim: No strong update yet/);
+	assert.doesNotMatch(text, /^Current claim:/m);
+	assert.match(text, /Pending evidence delta \(1 record/);
+	assert.match(text, /observation: The action margin recovered from 0.01 to 0.42/);
+	assert.match(text, /interpretation: The learned encoder, not the decoder/);
+	assert.match(text, /Do not run model compaction after every experiment/);
+});
+
+test("ProjectView refresh and prompt fingerprints ignore lifecycle-only churn", () => {
+	const base = {
+		revision: 4,
+		actions: [{ id: "a1", status: "running", label: "probe", externalId: "job-1", trackRef: "project:initial" }],
+		messages: [],
+	};
+	assert.equal(
+		projectViewRefreshFingerprint({ ...base, activations: [{ id: "activation-1", status: "active" }], ledgerEventCount: 10 }),
+		projectViewRefreshFingerprint({ ...base, activations: [{ id: "activation-2", status: "settled" }], ledgerEventCount: 12 }),
+	);
+	assert.notEqual(
+		projectViewRefreshFingerprint(base),
+		projectViewRefreshFingerprint({ ...base, messages: [{ id: "m1", status: "queued", type: "result", from: "codex", body: "done" }] }),
+	);
+
+	const first = buildProjectView({
+		runtime: { projectKey: "cache", workspaceRoot: "/workspace" },
+		snapshot: { projectState: null, actors: [], actions: [], messages: [], evidence: [], transitions: [], revision: 0 },
+		git: {},
+		experiments: [],
+	});
+	const second = { ...first, generatedFrom: { actors: 99, actions: 99, messages: 99 } };
+	assert.equal(projectViewFingerprint(first), projectViewFingerprint(second));
+});
+
+test("ProjectView keeps the newest live evidence when a large baseline must be truncated", () => {
+	const repeated = "decision-critical detail ".repeat(80);
+	const state = {
+		...compaction().details.researchState,
+		researchQuestion: repeated,
+		currentClaim: repeated,
+		hypotheses: Array.from({ length: 6 }, (_, index) => ({ id: `H${index}`, status: "active", statement: repeated })),
+		decisions: Array.from({ length: 4 }, () => ({ decision: repeated, reversible: true })),
+		criticalContext: Array.from({ length: 4 }, () => repeated),
+		unresolvedConfounders: Array.from({ length: 4 }, () => repeated),
+		openQuestions: Array.from({ length: 4 }, () => repeated),
+	};
+	const evidence = Array.from({ length: 4 }, (_, index) => ({
+		id: `exp-${index}`,
+		revision: index + 2,
+		timestamp: `2026-08-2${index + 1}T00:00:00Z`,
+		question: repeated,
+		intervention: repeated,
+		observation: index === 3 ? "NEWEST_OBSERVATION_MUST_SURVIVE" : repeated,
+		validityChecks: [repeated, repeated],
+		validityJudgment: "valid",
+		conclusion: repeated,
+		trackRef: "project:initial",
+	}));
+	const view = buildProjectView({
+		runtime: { projectKey: "large", workspaceRoot: "/workspace" },
+		snapshot: {
+			projectState: { state, source: { sessionId: "s", entryId: "e" }, revision: 1, updatedAt: "2026-08-20T00:00:00Z" },
+			actors: [], actions: [], messages: [], transitions: [], evidence, revision: 5,
+		},
+		git: {},
+		experiments: [],
+	});
+	const text = renderProjectView(view);
+	assert.ok(text.length <= 12_000);
+	assert.match(text, /Direction and trajectory truncated/);
+	assert.match(text, /--- live project delta/);
+	assert.match(text, /NEWEST_OBSERVATION_MUST_SURVIVE/);
+});
+
+test("ProjectView compresses earlier work but expands the latest handoff under project direction", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-project-handoff-"));
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace);
+		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a" }, { runtimeRoot: join(root, "runtime") });
+		await commitProjectState(runtime, {
+			compactionEntry: compaction("direction-state"),
+			sessionId: "session-a",
+			appendRuntimeEvent,
+			appendRuntimeEventAtRevision,
+			readRuntimeSnapshot,
+		});
+		await recordRuntimeHandoff(runtime, {
+			id: "handoff-earlier",
+			task: "Repair the experiment launcher",
+			summary: "The launcher now preserves the registered run identity.",
+			sessionId: "session-a",
+			toolNames: ["edit"],
+		});
+		await recordRuntimeHandoff(runtime, {
+			id: "handoff-latest",
+			kind: "research-evidence",
+			task: "Run the oracle bypass diagnostic",
+			summary: "The action margin recovered from 0.02 to 0.31.\n\nThis localizes the loss before the decoder but does not qualify the full route.",
+			sessionId: "session-b",
+			toolNames: ["record_experiment"],
+			git: { branch: "main", commit: "b".repeat(40), dirty: false },
+		});
+		const snapshot = await readRuntimeSnapshot(runtime);
+		assert.equal(snapshot.revision, 1, "operational handoffs must not advance scientific Project revision");
+		const view = buildProjectView({ runtime, snapshot, git: {}, experiments: [] });
+		const text = renderProjectView(view);
+		assert.ok(text.indexOf("=== PROJECT DIRECTION") < text.indexOf("=== LATEST COMPLETED WORK"));
+		assert.match(text, /Repair the experiment launcher -> The launcher now preserves/);
+		assert.match(text, /Task: Run the oracle bypass diagnostic/);
+		assert.match(text, /The action margin recovered from 0.02 to 0.31/);
+		assert.match(text, /not an instruction to continue the same kind of task/);
+		assert.match(text, /The current user request selects the immediate task/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });

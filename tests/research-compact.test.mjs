@@ -1,15 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import researchCompactionExtension from "../.pi/extensions/research-compaction.ts";
+import researchCompactionExtension, { researchCompactionThresholds } from "../.pi/extensions/research-compaction.ts";
 import {
 	applyResearchStatePatch,
 	buildResearchCompactionDetails,
+	buildResearchCompactionPrompt,
 	collectResearchEvidence,
 	mergeProjectRuntimeEvidence,
 	normalizeResearchState,
+	parseResearchCompactionResponse,
 	parseResearchState,
+	parseResearchStateWithDiagnostics,
 	RESEARCH_HARD_COMPACT_TOKENS,
 	RESEARCH_SOFT_COMPACT_TOKENS,
+	RESEARCH_STATE_TOOL,
+	RESEARCH_SUMMARY_MAX_TOKENS,
+	RESEARCH_SUMMARY_TARGET_TOKENS,
 	renderResearchSummary,
 	selectResearchCompactionPolicy,
 } from "../.pi/lib/research-compact.mjs";
@@ -99,6 +105,17 @@ test("clean compaction state stays local when the Session later restores Project
 				researchState: { currentClaim: "independent clean-session synthesis" },
 			},
 		},
+		{
+			type: "compaction",
+			id: "analysis-compact",
+			details: {
+				kind: "research-pi-compaction",
+				version: 1,
+				inheritancePolicy: "analysis",
+				projectRevision: 3,
+				researchState: { currentClaim: "independent analysis-session synthesis" },
+			},
+		},
 	];
 	assert.equal(
 		collectResearchEvidence(branch, "session-clean", undefined, { inheritancePolicy: "clean" }).previousState.currentClaim,
@@ -107,6 +124,10 @@ test("clean compaction state stays local when the Session later restores Project
 	assert.equal(
 		collectResearchEvidence(branch, "session-clean", undefined, { inheritancePolicy: "project" }).previousState.currentClaim,
 		"canonical Project claim",
+	);
+	assert.equal(
+		collectResearchEvidence(branch, "session-analysis", undefined, { inheritancePolicy: "analysis" }).previousState.currentClaim,
+		"independent analysis-session synthesis",
 	);
 });
 
@@ -149,6 +170,17 @@ test("research threshold compaction waits until the agent run settles", () => {
 	assert.equal(compactOptions, firstOptions, "a running compaction must not be duplicated");
 });
 
+test("short-context Leader models compact before their model window", () => {
+	assert.deepEqual(researchCompactionThresholds({ contextWindow: 1_000_000 }), {
+		softTokens: RESEARCH_SOFT_COMPACT_TOKENS,
+		hardTokens: RESEARCH_HARD_COMPACT_TOKENS,
+	});
+	const hy3 = researchCompactionThresholds({ contextWindow: 256_000 });
+	assert.equal(hy3.hardTokens, 256_000 - 32 * 1024);
+	assert.equal(hy3.softTokens, Math.floor(hy3.hardTokens * 0.75));
+	assert.ok(hy3.softTokens < hy3.hardTokens);
+});
+
 function experimentEntry(id, parentId, validityJudgment) {
 	return {
 		type: "custom",
@@ -162,6 +194,9 @@ function experimentEntry(id, parentId, validityJudgment) {
 			hypothesis: id === "e1" ? "无效运行不应拒绝 H1" : "有效运行支持 H2",
 			intervention: "运行探针",
 			prediction: "观察区分结果",
+			predictionStatus: "preregistered",
+			evidenceMode: "confirmatory",
+			registrationRef: `registration.yaml#${id}`,
 			validityChecks: ["确认介入"],
 			observation: id === "e1" ? "环境失败" : "结果符合预测",
 			validityJudgment,
@@ -232,7 +267,7 @@ test("structured compaction preserves prior hypotheses and downgrades unsupporte
 
 	const summary = renderResearchSummary(normalized.state, evidence, { read: ["a.py"], modified: ["b.py"] });
 	assert.match(summary, /H1 \[inconclusive\]/);
-	assert.match(summary, /S:session-x\/E:e2 \[valid\]/);
+	assert.match(summary, /S:session-x\/E:e2 \[valid; confirmatory; prediction=preregistered\]/);
 	assert.match(summary, /本摘要不是事实源/);
 
 	const details = buildResearchCompactionDetails({
@@ -247,6 +282,87 @@ test("structured compaction preserves prior hypotheses and downgrades unsupporte
 	assert.equal(details.kind, "research-pi-compaction");
 	assert.equal(details.evidenceLedger.experiments.length, 2);
 	assert.ok(details.validationWarnings.length >= 2);
+});
+
+test("Runtime merge restores route provenance for an experiment already present in the Session", () => {
+	const evidence = collectResearchEvidence([{
+		type: "custom",
+		customType: "research-experiment",
+		id: "entry-route",
+		data: {
+			id: "record-route",
+			question: "Which route produced the delayed result?",
+			intervention: "Read the delayed assay.",
+			evidenceMode: "diagnostic",
+			predictionStatus: "not_applicable",
+			validityChecks: ["run identity matched"],
+			observation: "The old-route assay completed.",
+			validityJudgment: "valid",
+			conclusion: "Attribute it to the old route.",
+			trackRef: "transition:old-route",
+		},
+	}], "session-route");
+	mergeProjectRuntimeEvidence(evidence, {
+		evidence: [{
+			id: "record-route",
+			trackRef: "transition:old-route",
+			trackLabel: "old contract route",
+			evidenceMode: "diagnostic",
+			predictionStatus: "not_applicable",
+		}],
+	});
+	assert.equal(evidence.experiments.length, 1);
+	assert.equal(evidence.experiments[0].trackRef, "transition:old-route");
+	assert.equal(evidence.experiments[0].trackLabel, "old contract route");
+});
+
+test("compact claim strength respects confirmatory, exploratory, and diagnostic evidence modes", () => {
+	const makeEntry = (id, evidenceMode, predictionStatus, prediction = "") => ({
+		type: "custom",
+		customType: "research-experiment",
+		id,
+		data: {
+			id: `record-${id}`,
+			question: "Which claim update is licensed?",
+			hypothesis: evidenceMode === "confirmatory" ? "The intervention succeeds." : "",
+			intervention: "Run one discriminating assay.",
+			prediction,
+			predictionStatus,
+			evidenceMode,
+			registrationRef: predictionStatus === "preregistered" ? `registration.yaml#${id}` : undefined,
+			validityChecks: ["the intended intervention occurred"],
+			observation: "The assay produced interpretable evidence.",
+			validityJudgment: "valid",
+			conclusion: "Update only to the strength licensed by provenance.",
+		},
+	});
+	const evidence = collectResearchEvidence([
+		makeEntry("exploratory", "exploratory", "not_recorded"),
+		makeEntry("diagnostic", "diagnostic", "not_applicable"),
+		makeEntry("confirmatory", "confirmatory", "preregistered", "The registered gate passes."),
+	], "session-modes");
+	const ref = (id) => `S:session-modes/E:${id}`;
+	const normalized = normalizeResearchState({
+		researchQuestion: "Which claim update is licensed?",
+		currentClaim: "Use evidence provenance, not validity alone.",
+		hypotheses: [
+			{ id: "H-explore", statement: "Exploratory support", status: "supported", evidenceRefs: [ref("exploratory")] },
+			{ id: "H-diag-support", statement: "Diagnostic positive support", status: "supported", evidenceRefs: [ref("diagnostic")] },
+			{ id: "H-diag-reject", statement: "Diagnostic challenge", status: "rejected", evidenceRefs: [ref("diagnostic")] },
+			{ id: "H-confirm", statement: "Confirmatory support", status: "supported", evidenceRefs: [ref("confirmatory")] },
+		],
+		observations: [],
+		decisions: [],
+		unresolvedConfounders: [],
+		openQuestions: [],
+		nextExperiment: {},
+		criticalContext: [],
+	}, evidence);
+	const status = Object.fromEntries(normalized.state.hypotheses.map((item) => [item.id, item.status]));
+	assert.equal(status["H-explore"], "inconclusive");
+	assert.equal(status["H-diag-support"], "inconclusive");
+	assert.equal(status["H-diag-reject"], "rejected");
+	assert.equal(status["H-confirm"], "supported");
 });
 
 test("a superseding Project transition retires automatic carry-over of old hypotheses", () => {
@@ -283,6 +399,49 @@ test("parses fenced JSON output", () => {
 	assert.deepEqual(parseResearchState("```json\n{\"researchQuestion\":\"q\"}\n```"), { researchQuestion: "q" });
 });
 
+test("research compaction prefers one constrained structured-state tool call", () => {
+	assert.equal(RESEARCH_STATE_TOOL.name, "submit_research_state");
+	assert.deepEqual(RESEARCH_STATE_TOOL.constrainedSampling, { type: "json_schema", strict: "prefer" });
+	assert.ok(RESEARCH_STATE_TOOL.parameters.required.includes("nextExperiment"));
+	const result = parseResearchCompactionResponse([
+		{ type: "text", text: "This text must not replace the structured state." },
+		{ type: "toolCall", name: RESEARCH_STATE_TOOL.name, arguments: { researchQuestion: "Which route survives?" } },
+	]);
+	assert.equal(result.source, "tool");
+	assert.deepEqual(result.state, { researchQuestion: "Which route survives?" });
+	assert.deepEqual(result.repairs, []);
+	assert.throws(
+		() => parseResearchCompactionResponse([
+			{ type: "toolCall", name: RESEARCH_STATE_TOOL.name, arguments: {} },
+			{ type: "toolCall", name: RESEARCH_STATE_TOOL.name, arguments: {} },
+		]),
+		/more than once/,
+	);
+});
+
+test("repairs only conservative model JSON syntax failures", () => {
+	const missingCommas = parseResearchStateWithDiagnostics(`{
+		"hypotheses": ["H1"
+		"H2"],
+		"currentClaim": "screen passed"
+		"openQuestions": []
+	}`);
+	assert.deepEqual(missingCommas.state, {
+		hypotheses: ["H1", "H2"],
+		currentClaim: "screen passed",
+		openQuestions: [],
+	});
+	assert.deepEqual(missingCommas.repairs, ["inserted 2 missing comma(s)"]);
+
+	const trailingAndControl = parseResearchStateWithDiagnostics("{\"criticalContext\":[\"line one\nline two\",],}");
+	assert.deepEqual(trailingAndControl.state, { criticalContext: ["line one\nline two"] });
+	assert.deepEqual(trailingAndControl.repairs, [
+		"escaped 1 raw control character(s) inside JSON strings",
+		"removed 2 trailing comma(s)",
+	]);
+	assert.throws(() => parseResearchState('{"hypotheses":["H1"'), /unterminated JSON object/);
+});
+
 test("research compaction uses bounded staged recent tails", () => {
 	const compact = (id) => ({
 		type: "compaction",
@@ -294,11 +453,19 @@ test("research compaction uses bounded staged recent tails", () => {
 		ordinal: 1,
 		softTriggerTokens: RESEARCH_SOFT_COMPACT_TOKENS,
 		hardTriggerTokens: RESEARCH_HARD_COMPACT_TOKENS,
-		keepRecentTokens: 32 * 1024,
+		keepRecentTokens: 24 * 1024,
 	});
-	assert.equal(selectResearchCompactionPolicy([compact("c1")]).keepRecentTokens, 40 * 1024);
-	assert.equal(selectResearchCompactionPolicy([compact("c1"), compact("c2")]).keepRecentTokens, 48 * 1024);
-	assert.equal(selectResearchCompactionPolicy([compact("c1"), compact("c2"), compact("c3")]).keepRecentTokens, 48 * 1024);
+	assert.equal(selectResearchCompactionPolicy([compact("c1")]).keepRecentTokens, 32 * 1024);
+	assert.equal(selectResearchCompactionPolicy([compact("c1"), compact("c2")]).keepRecentTokens, 40 * 1024);
+	assert.equal(selectResearchCompactionPolicy([compact("c1"), compact("c2"), compact("c3")]).keepRecentTokens, 40 * 1024);
 	assert.equal(RESEARCH_SOFT_COMPACT_TOKENS, 272 * 1024);
 	assert.equal(RESEARCH_HARD_COMPACT_TOKENS, 384 * 1024);
+	assert.equal(RESEARCH_SUMMARY_TARGET_TOKENS, 8 * 1024);
+	assert.equal(RESEARCH_SUMMARY_MAX_TOKENS, 16 * 1024);
+	assert.match(buildResearchCompactionPrompt({
+		conversationText: "recent work",
+		experiments: [],
+		checkpoints: [],
+		sourceCatalog: [],
+	}), /Target at most 8,192 output tokens/);
 });

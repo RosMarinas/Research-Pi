@@ -35,7 +35,39 @@
       "additionalProperties": false
     },
     "codex": { "type": "object" },
-    "research": { "type": "object" },
+    "research": {
+      "type": "object",
+      "properties": {
+        "compaction": {
+          "type": "object",
+          "required": ["softTokens", "hardTokens", "recentTailTokens", "summaryTargetTokens", "summaryMaxTokens"],
+          "properties": {
+            "softTokens": { "type": "integer", "minimum": 1 },
+            "hardTokens": { "type": "integer", "minimum": 1 },
+            "recentTailTokens": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "integer", "minimum": 1 }
+            },
+            "summaryTargetTokens": { "type": "integer", "minimum": 1 },
+            "summaryMaxTokens": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false
+        },
+        "search": {
+          "type": "object",
+          "properties": {
+            "enabled": { "enum": ["auto", "on", "off"] },
+            "model": { "type": "string", "minLength": 1 },
+            "thinkingBudgetTokens": { "type": "integer", "minimum": 1 },
+            "maxSources": { "type": "integer", "minimum": 1, "maximum": 50 },
+            "defaultMaxUses": { "type": "integer", "minimum": 1, "maximum": 5 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "resources": { "type": "object" },
     "ui": {
       "type": "object",

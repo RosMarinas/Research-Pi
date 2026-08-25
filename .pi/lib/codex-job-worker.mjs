@@ -3,14 +3,15 @@ import { createHash } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import { appendFile, mkdir, readdir } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import { executeGrantedCapability } from "./host-capabilities.mjs";
-import { compactCodexAuditEvent, describeCodexNotification } from "./codex-activity.mjs";
+import { executeGrantedCapability, inspectCapabilityAuthorization } from "./host-capabilities.mjs";
+import { compactCodexAuditEvent, describeCodexNotification, projectCodexActivityUpdate } from "./codex-activity.mjs";
 import { configureCodexSqliteLogs } from "./codex-sqlite-logs.mjs";
 import {
 	getGitSnapshot,
 	readJson,
 	releaseWriterLock,
 	sanitizeCodexEnvironment,
+	supersedePendingCodexRequests,
 	updateJobFile,
 	writeJsonAtomic,
 } from "./codex-jobs.mjs";
@@ -36,31 +37,92 @@ function truncate(text, max = 12000) {
 	return text.length <= max ? text : `${text.slice(0, max)}\n[truncated]`;
 }
 
-function parseStructuredResult(text, error) {
-	const fallback = {
-		status: error ? "blocked" : "inconclusive",
+function fallbackStructuredResult(text, error, mode) {
+	if (mode === "advisor") {
+		return {
+			status: error ? "blocked" : "needs_clarification",
+			shared_understanding: truncate(text || error || "Codex returned no structured final message."),
+			points_of_agreement: [],
+			candidate_explanations: [],
+			questions_to_resolve: [],
+			evidence: [],
+			uncertainties: [error || "The final response did not parse as the required advisor schema."],
+			working_synthesis: "No validated working synthesis was returned.",
+			suggested_next_exchange: "Research Pi should inspect the job log and decide whether to resume the consultation.",
+		};
+	}
+	return {
+		outcome: error ? "blocked" : "partial",
 		goal_satisfied: false,
+		completion_basis: error ? "The Codex turn encountered a blocking protocol or execution error." : "No valid structured final handoff was returned.",
 		summary: truncate(text || error || "Codex returned no structured final message."),
 		evidence: [],
 		actions_taken: [],
 		changed_files: [],
 		checks: [],
 		external_effects: [],
-		uncertainties: [error || "The final response did not parse as the required JSON schema."],
+		uncertainties: [error || "The final response did not parse as the required executor schema."],
+		remaining_work: ["Inspect the job log and determine whether the same Codex thread should resume."],
 		recommended_next_step: "Research Pi should inspect the job log and decide whether to steer, resume, or rerun the delegation.",
 	};
+}
+
+function normalizeExecutorResult(value) {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return fallbackStructuredResult("", "Codex returned a non-object executor result.", "executor");
+	const legacyStatus = String(value.status ?? "");
+	let outcome = ["succeeded", "partial", "blocked", "failed"].includes(value.outcome)
+		? value.outcome
+		: legacyStatus === "completed"
+			? value.goal_satisfied === true ? "succeeded" : "partial"
+			: legacyStatus === "blocked"
+				? "blocked"
+				: legacyStatus === "inconclusive"
+					? "partial"
+					: "partial";
+	let goalSatisfied = value.goal_satisfied === true;
+	const uncertainties = Array.isArray(value.uncertainties) ? [...value.uncertainties] : [];
+	if (outcome === "succeeded" && !goalSatisfied) {
+		outcome = "partial";
+		uncertainties.push("Normalized contradictory executor result: outcome=succeeded while goal_satisfied=false.");
+	} else if (outcome !== "succeeded" && goalSatisfied) {
+		goalSatisfied = false;
+		uncertainties.push(`Normalized contradictory executor result: outcome=${outcome} while goal_satisfied=true.`);
+	}
+	const remainingWork = Array.isArray(value.remaining_work)
+		? value.remaining_work
+		: !goalSatisfied && value.recommended_next_step
+			? [value.recommended_next_step]
+			: [];
+	const normalized = {
+		...value,
+		outcome,
+		goal_satisfied: goalSatisfied,
+		completion_basis: String(value.completion_basis ?? (goalSatisfied
+			? "Codex reported that the delegated objective and success criteria were completed."
+			: "Codex ended the turn with delegated work or a blocker still remaining.")),
+		uncertainties,
+		remaining_work: goalSatisfied ? [] : remainingWork,
+	};
+	delete normalized.status;
+	return normalized;
+}
+
+function parseStructuredResult(text, error, mode) {
+	const fallback = fallbackStructuredResult(text, error, mode);
 	if (!text) return fallback;
+	let parsed;
 	try {
-		return JSON.parse(text);
+		parsed = JSON.parse(text);
 	} catch {
 		const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
 		if (!fenced) return fallback;
 		try {
-			return JSON.parse(fenced);
+			parsed = JSON.parse(fenced);
 		} catch {
 			return fallback;
 		}
 	}
+	return mode === "advisor" ? parsed : normalizeExecutorResult(parsed);
 }
 
 function requestId(jobId, rpcId, method) {
@@ -77,15 +139,32 @@ function publicPendingRequest(record) {
 		whyBlocking: record.whyBlocking,
 		options: record.options,
 		questions: record.questions,
+		capability: record.capability,
 		secret: record.secret,
 		createdAt: record.createdAt,
 	};
+}
+
+function hostCapabilityQuestion(request, input = {}) {
+	if (request.kind === "host-command") {
+		return [
+			`Authorize host command in cwd=${request.cwd}.`,
+			`Exact argv: ${request.argv.map((part) => JSON.stringify(part)).join(" ")}`,
+			`Suggested project prefix: ${(request.suggestedPrefix ?? request.argv).map((part) => JSON.stringify(part)).join(" ")}`,
+		].join("\n");
+	}
+	if (request.kind === "ssh-target") {
+		return `Authorize project SSH target: ${request.target}\nCurrent remote command: ${String(input.remoteCommand ?? "[missing]")}`;
+	}
+	if (request.kind === "external-read") return `Authorize external ${request.directory ? "directory" : "file"} read: ${request.target}`;
+	return `Authorize project host script: ${request.target}\nExact args: ${(request.args ?? []).map((part) => JSON.stringify(part)).join(" ") || "[none]"}`;
 }
 
 async function main() {
 	const jobDir = parseArguments(process.argv.slice(2));
 	const request = await readJson(join(jobDir, "request.json"));
 	const outputSchema = await readJson(request.schemaPath);
+	const { $schema: _schemaDialect, title: _schemaTitle, ...resultInputSchema } = outputSchema;
 	const eventsStream = createWriteStream(join(jobDir, "events.jsonl"), { flags: "a", mode: 0o600 });
 	const stderrStream = createWriteStream(join(jobDir, "stderr.log"), { flags: "a", mode: 0o600 });
 	const rawEventTrace = process.env.PI_CODEX_TRACE === "1";
@@ -98,7 +177,10 @@ async function main() {
 	let child;
 	let stdoutBuffer = "";
 	let stderrTail = "";
-	let lastAgentText = "";
+	let finalAgentText = "";
+	let unphasedAgentText = "";
+	let lastCommentaryText = "";
+	let submittedResult = null;
 	let lastError = "";
 	let threadId = request.continuationThreadId ?? null;
 	let activeTurnId = null;
@@ -112,6 +194,8 @@ async function main() {
 	let notificationUpdateTimer;
 	let pendingNotificationUpdate = null;
 	let lastNotificationProgress = null;
+	let currentObjectiveActivity = null;
+	const activeObjectiveActivities = new Map();
 	let rpcSequence = 1;
 	let updateQueue = Promise.resolve();
 	let resolveTurn;
@@ -240,6 +324,11 @@ async function main() {
 		}
 	};
 
+	const activeActivityProjection = () => ({
+		activeActivities: [...activeObjectiveActivities.values()].slice(0, 8),
+		activeActivityCount: activeObjectiveActivities.size,
+	});
+
 	const send = (message) => {
 		if (!child?.stdin?.writable) throw new Error("Codex app-server stdin is not writable");
 		child.stdin.write(`${JSON.stringify(message)}\n`);
@@ -290,6 +379,26 @@ async function main() {
 		const params = message.params ?? {};
 		const id = requestId(request.jobId, message.id, method);
 		try {
+			if (method === "item/tool/call" && params.tool === "submit_research_pi_result") {
+				const candidate = request.mode === "advisor"
+					? params.arguments
+					: normalizeExecutorResult(params.arguments);
+				if (submittedResult) {
+					if (JSON.stringify(submittedResult) !== JSON.stringify(candidate)) {
+						throw new Error("Codex attempted to replace an already submitted final result");
+					}
+				} else {
+					submittedResult = candidate;
+				}
+				send({
+					id: message.id,
+					result: {
+						success: true,
+						contentItems: [{ type: "inputText", text: "Research Pi accepted the structured final handoff. End the turn with a brief acknowledgement and no further work." }],
+					},
+				});
+				return;
+			}
 			if (method === "item/tool/call" && params.tool === "research_pi_host") {
 				if (!request.hostCapabilityContext) throw new Error("This Codex job has no Pi session capability ledger");
 				const args = params.arguments ?? {};
@@ -309,6 +418,7 @@ async function main() {
 						: args.action === "command"
 							? {
 								kind: "host-command",
+								grantId: args.grantId,
 								argv: args.argv ?? [],
 								cwd: args.cwd,
 								timeoutSeconds: args.timeoutSeconds,
@@ -319,12 +429,45 @@ async function main() {
 							args: args.args ?? [],
 							timeoutSeconds: args.timeoutSeconds,
 						};
-				await enqueueJobUpdate({ progress: `host capability ${args.action ?? "unknown"} running` });
+				let inspected = await inspectCapabilityAuthorization(request.hostCapabilityContext, input);
+				if (!inspected.grant) {
+					const record = {
+						version: 1,
+						id,
+						jobId: request.jobId,
+						threadId: params.threadId ?? threadId,
+						turnId: params.turnId ?? activeTurnId,
+						kind: "host_capability",
+						audience: "user",
+						question: truncate(hostCapabilityQuestion(inspected.request, input), 4000),
+						whyBlocking: "Codex requested host-user authority that is not covered by an active project or Pi-session grant.",
+						options: ["Approve once", "Approve this Pi session (24h)", "Trust for this project", "Deny"],
+						capability: {
+							input,
+							context: request.hostCapabilityContext,
+						},
+						secret: false,
+						status: "pending",
+						createdAt: now(),
+					};
+					const response = await waitForHumanResponse(record);
+					await settleHumanRequest(record, response);
+					inspected = await inspectCapabilityAuthorization(request.hostCapabilityContext, input);
+					if (!inspected.grant) {
+						send({
+							id: message.id,
+							result: {
+								success: false,
+								contentItems: [{ type: "inputText", text: "Research Pi did not approve the requested host capability." }],
+							},
+						});
+						return;
+					}
+				}
 				const result = await executeGrantedCapability(request.hostCapabilityContext, input, {
 					signal: hostCapabilityAbort.signal,
 					env: process.env,
 				});
-				await enqueueJobUpdate({ progress: `host capability ${args.action} finished with exit ${result.exitCode}` });
 				const content = truncate([
 					`Grant ${result.grantId} executed (${result.kind}: ${result.target}).`,
 					`Exit: ${result.exitCode}${result.timedOut ? " · timed out" : ""}${result.outputTruncated ? " · output truncated" : ""}`,
@@ -348,7 +491,7 @@ async function main() {
 					kind: "leader_consultation",
 					audience: args.audience === "user" ? "user" : "leader",
 					question: truncate(String(args.question ?? "Codex needs guidance."), 4000),
-					whyBlocking: truncate(String(args.why_blocking ?? ""), 4000),
+					whyBlocking: truncate(String(args.why_it_matters ?? args.why_blocking ?? ""), 4000),
 					options: Array.isArray(args.options) ? args.options.slice(0, 8).map(String) : [],
 					secret: false,
 					status: "pending",
@@ -470,13 +613,32 @@ async function main() {
 			params.item?.type === "agentMessage" &&
 			typeof params.item.text === "string"
 		) {
-			lastAgentText = params.item.text;
+			const phase = String(params.item.phase ?? "").trim();
+			if (phase === "final_answer") finalAgentText = params.item.text;
+			else if (!phase) unphasedAgentText = params.item.text;
+			else if (phase === "commentary") lastCommentaryText = truncate(params.item.text, 2000);
 		}
 		if (method === "error") lastError = truncate(params.error?.message ?? params.message ?? JSON.stringify(params), 4000);
-		const progress = describeCodexNotification(message);
-		const progressChanged = progress && progress !== lastNotificationProgress;
-		if (progressChanged) lastNotificationProgress = progress;
-		if (progressChanged) queueNotificationUpdate({ progress });
+		const activityUpdate = projectCodexActivityUpdate(message);
+		if (activityUpdate?.phase === "started") {
+			const key = activityUpdate.activity.id ?? `${activityUpdate.activity.category}:${activityUpdate.activity.summary}`;
+			activeObjectiveActivities.delete(key);
+			activeObjectiveActivities.set(key, activityUpdate.activity);
+			while (activeObjectiveActivities.size > 32) activeObjectiveActivities.delete(activeObjectiveActivities.keys().next().value);
+			currentObjectiveActivity = [...activeObjectiveActivities.values()].at(-1) ?? null;
+			queueNotificationUpdate({ currentActivity: currentObjectiveActivity, ...activeActivityProjection() });
+		} else if (activityUpdate?.phase === "completed") {
+			const completed = activityUpdate.activity;
+			const key = completed.id ?? `${completed.category}:${completed.summary}`;
+			activeObjectiveActivities.delete(key);
+			currentObjectiveActivity = [...activeObjectiveActivities.values()].at(-1) ?? null;
+			queueNotificationUpdate({ currentActivity: currentObjectiveActivity, lastActivity: completed, ...activeActivityProjection() });
+		} else if (method === "error") {
+			const progress = describeCodexNotification(message);
+			const progressChanged = progress && progress !== lastNotificationProgress;
+			if (progressChanged) lastNotificationProgress = progress;
+			if (progressChanged) queueNotificationUpdate({ progress });
+		}
 		if (
 			method === "turn/completed" &&
 			identity.thread === threadId &&
@@ -613,7 +775,7 @@ async function main() {
 		];
 		const codexStateHome = join(dirname(dirname(jobDir)), "state");
 		await mkdir(codexStateHome, { recursive: true, mode: 0o700 });
-		const codexChildEnvironment = sanitizeCodexEnvironment(process.env);
+		const codexChildEnvironment = sanitizeCodexEnvironment(process.env, request.hostCapabilityContext?.wslVersion);
 		// The worker retains the opaque SSH agent handle for research_pi_host;
 		// the sandboxed Codex process itself must not even inherit its path.
 		delete codexChildEnvironment.SSH_AUTH_SOCK;
@@ -684,13 +846,23 @@ async function main() {
 			await enqueueJobUpdate({ codexSqliteLogs: { mode: "unavailable", database: null, error: truncate(message, 1000) } });
 		}
 
+		const consultationWhyField = request.mode === "advisor" ? "why_it_matters" : "why_blocking";
 		const dynamicTools = [
 			{
+				type: "function",
+				name: "submit_research_pi_result",
+				description: request.mode === "advisor"
+					? "Submit the advisor working synthesis exactly once when the consultation turn is ready to hand back to Research Pi. Do not use this for commentary or progress updates."
+					: "Submit the executor's structured final handoff exactly once, only after the delegated objective succeeds, reaches a genuine blocker, or irrecoverably fails. Do not use this for plans, preambles, audit checkpoints, or progress updates.",
+				inputSchema: resultInputSchema,
+			},
+			{
+				type: "function",
 				name: "research_pi_host",
 				description:
 					request.hostCapabilityContext?.wslVersion !== undefined
-						? "Use Research Pi host capabilities for justified SSH or host-user operations. Project-trusted SSH targets run automatically; WSL host commands/project scripts require one-shot approval and cannot invoke Windows interop. Ask Research Pi through consult_research_pi when approval is missing. Normal uv/Python/shell commands stay in the project sandbox. Advisor mode may use read only."
-						: "Use Research Pi host capabilities for justified SSH or host-user operations. Project-trusted SSH targets and command prefixes run automatically; otherwise ask Research Pi for approval through consult_research_pi. Normal uv/Python/shell commands stay in the project sandbox. Advisor mode may use read only.",
+						? "Use Research Pi host capabilities for justified SSH or host-user operations. Project-trusted SSH targets run automatically; WSL host commands and project scripts require one-shot approval and cannot invoke Windows interop. For a listed command grant, pass grantId so its approved cwd is restored. A missing grant pauses this same tool call for the Pi TUI decision; do not duplicate it through consult_research_pi. Normal uv/Python/shell commands stay in the project sandbox. Advisor mode may use read only."
+						: "Use Research Pi host capabilities for justified SSH or host-user operations. Project-trusted SSH targets and command prefixes run automatically. For a listed command grant, pass grantId so its approved cwd is restored; do not switch capability kind or create a shell wrapper after a cwd mismatch. A missing grant pauses this same tool call for the Pi TUI decision; do not duplicate it through consult_research_pi. Normal uv/Python/shell commands stay in the project sandbox. Advisor mode may use read only.",
 				inputSchema: {
 					type: "object",
 					additionalProperties: false,
@@ -701,6 +873,7 @@ async function main() {
 						target: { type: "string", maxLength: 255 },
 						port: { type: "integer", minimum: 1, maximum: 65535 },
 						remoteCommand: { type: "string", maxLength: 32768 },
+						grantId: { type: "string", pattern: "^grant-[A-Za-z0-9]{8}$" },
 						argv: { type: "array", maxItems: 128, items: { type: "string", maxLength: 4096 } },
 						cwd: { type: "string", maxLength: 4096 },
 						args: { type: "array", maxItems: 64, items: { type: "string", maxLength: 4096 } },
@@ -709,17 +882,20 @@ async function main() {
 				},
 			},
 			{
+				type: "function",
 				name: "consult_research_pi",
 				description:
-					"Ask Research Pi only when a missing research decision or user-only fact materially blocks progress. Resolve implementation details yourself. Never request or transmit secrets with this tool.",
+					request.mode === "advisor"
+						? "Continue the research dialogue with Research Pi. Ask a focused clarification, assumption check, or interpretation choice when the answer would materially improve shared understanding; the discussion does not need to be completely blocked. Avoid performative or repetitive questions. Never request or transmit secrets."
+						: "Ask Research Pi only when a missing research decision or user-only fact materially blocks progress. Resolve implementation details yourself. Never request or transmit secrets with this tool.",
 				inputSchema: {
 					type: "object",
 					additionalProperties: false,
-					required: ["audience", "question", "why_blocking"],
+					required: ["audience", "question", consultationWhyField],
 					properties: {
 						audience: { type: "string", enum: ["leader", "user"] },
 						question: { type: "string", maxLength: 4000 },
-						why_blocking: { type: "string", maxLength: 4000 },
+						[consultationWhyField]: { type: "string", maxLength: 4000 },
 						options: { type: "array", maxItems: 8, items: { type: "string", maxLength: 1000 } },
 					},
 				},
@@ -730,12 +906,13 @@ async function main() {
 			model: request.model,
 			approvalPolicy: "never",
 			permissions: request.sandbox,
-			dynamicTools,
-			serviceName: "research_pi",
 		};
+		// Dynamic tools are a thread/start-only capability in the App Server
+		// protocol. Compatible Research Pi threads retain the tools they were
+		// created with; legacy threads are refreshed by resumeCodexJob.
 		const threadResponse = request.continuationThreadId
 			? await rpcRequest("thread/resume", { ...threadParams, threadId: request.continuationThreadId }, 60_000)
-			: await rpcRequest("thread/start", threadParams, 60_000);
+			: await rpcRequest("thread/start", { ...threadParams, serviceName: "research_pi", dynamicTools }, 60_000);
 		registerRootThread(threadResponse?.thread?.id ?? request.continuationThreadId);
 		if (!threadId) throw new Error("Codex app-server did not return a thread id");
 		if (request.mode === "executor") {
@@ -758,7 +935,6 @@ async function main() {
 				effort: request.reasoningEffort,
 				approvalPolicy: "never",
 				permissions: request.sandbox,
-				outputSchema,
 			},
 			60_000,
 		);
@@ -782,16 +958,24 @@ async function main() {
 		const turn = await turnDone;
 		if (timeout) clearTimeout(timeout);
 		if (commandTimer) clearInterval(commandTimer);
-		cancelNotificationUpdate();
+		await flushNotificationUpdate();
 		await updateQueue;
 		const turnFailed = turn?.status === "failed";
 		if (turnFailed) lastError = truncate(turn.error?.message ?? (lastError || "Codex turn failed"), 4000);
-		const result = parseStructuredResult(lastAgentText, turnFailed ? lastError : "");
+		const resultText = finalAgentText || unphasedAgentText;
+		const missingFinalError = !resultText && !submittedResult
+			? `Codex turn completed without a final_answer item.${lastCommentaryText ? ` Last commentary: ${lastCommentaryText}` : ""}`
+			: "";
+		const result = submittedResult ?? parseStructuredResult(resultText, turnFailed ? lastError : missingFinalError, request.mode);
 		const resultPath = join(jobDir, "result.json");
 		await writeJsonAtomic(resultPath, result);
-		const status = cancellationRequested ? "cancelled" : !turnFailed && !timedOut ? "completed" : "failed";
+		const status = cancellationRequested ? "cancelled" : !turnFailed && !timedOut && (submittedResult || resultText) ? "completed" : "failed";
 		const settledAt = now();
 		const gitAfter = await getGitSnapshot(request.cwd);
+		await supersedePendingCodexRequests(request.jobId, {
+			jobRoot: dirname(jobDir),
+			terminalStatus: status,
+		}).catch(() => undefined);
 		await writeJobUpdate((current) => ({
 			...current,
 			status,
@@ -799,10 +983,14 @@ async function main() {
 			threadId,
 			activeTurnId: null,
 			pendingRequest: null,
+			currentActivity: null,
+			activeActivities: [],
+			activeActivityCount: 0,
 			exitCode: status === "completed" ? 0 : 1,
 			progress: cancellationRequested ? "cancelled" : timedOut ? "timed out" : status,
 			gitAfter,
 			resultPath,
+			resultSource: submittedResult ? "submit_research_pi_result" : finalAgentText ? "final_answer" : unphasedAgentText ? "unphased_message" : "fallback",
 			error: status === "failed" ? lastError || "Codex turn failed" : null,
 			sideEffect: request.mode === "executor"
 				? { ...current.sideEffect, state: "settled", outcome: status, settledAt }
@@ -811,19 +999,27 @@ async function main() {
 			lastActivityAt: now(),
 		}));
 	} catch (error) {
-		cancelNotificationUpdate();
+		await flushNotificationUpdate();
 		await updateQueue;
 		lastError = truncate(error?.stack ?? String(error), 12000);
 		const resultPath = join(jobDir, "result.json");
-		await writeJsonAtomic(resultPath, parseStructuredResult(lastAgentText, lastError)).catch(() => undefined);
+		await writeJsonAtomic(resultPath, submittedResult ?? parseStructuredResult(finalAgentText || unphasedAgentText, lastError, request.mode)).catch(() => undefined);
 		const unknownOutcome = request.mode === "executor" && sideEffectStarted;
 		const finishedAt = now();
+		const terminalStatus = unknownOutcome ? "outcome_unknown" : cancellationRequested ? "cancelled" : "failed";
+		await supersedePendingCodexRequests(request.jobId, {
+			jobRoot: dirname(jobDir),
+			terminalStatus,
+		}).catch(() => undefined);
 		await writeJobUpdate((current) => ({
 			...current,
-			status: unknownOutcome ? "outcome_unknown" : cancellationRequested ? "cancelled" : "failed",
+			status: terminalStatus,
 			finishedAt,
 			activeTurnId: null,
 			pendingRequest: null,
+			currentActivity: null,
+			activeActivities: [],
+			activeActivityCount: 0,
 			progress: unknownOutcome ? "worker lost after side effects may have started" : cancellationRequested ? "cancelled" : "worker failed",
 			resultPath,
 			error: lastError,

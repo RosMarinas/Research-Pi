@@ -16,6 +16,90 @@
       "provider": "deepseek",
       "model": "deepseek-v4-flash",
       "thinking": "max"
+    },
+    "opencode-go-flash": {
+      "label": "OpenCode Go · DeepSeek V4 Flash",
+      "description": "Recommended subscription route for routine research leadership.",
+      "provider": "opencode-go",
+      "model": "deepseek-v4-flash",
+      "thinking": "max"
+    },
+    "opencode-go-ox-alpha": {
+      "label": "OpenCode Go · Ox Alpha Free",
+      "description": "Limited-time free preview with 1M context and Max reasoning.",
+      "provider": "opencode-go",
+      "model": "ox-alpha-free",
+      "thinking": "max"
+    },
+    "opencode-go-mimo": {
+      "label": "OpenCode Go · MiMo V2.5",
+      "description": "Highest-quota routine coordinator; evaluate on real project judgment before making it the default.",
+      "provider": "opencode-go",
+      "model": "mimo-v2.5",
+      "thinking": "high"
+    },
+    "opencode-go-luna": {
+      "label": "OpenCode Go · GPT 5.6 Luna",
+      "description": "Fast general project coordination with lower reasoning cost.",
+      "provider": "opencode-go",
+      "model": "gpt-5.6-luna",
+      "thinking": "high"
+    },
+    "opencode-go-qwen": {
+      "label": "OpenCode Go · Qwen3.7 Plus",
+      "description": "Long-context alternative for routine coordination and handoffs.",
+      "provider": "opencode-go",
+      "model": "qwen3.7-plus",
+      "thinking": "high"
+    },
+    "opencode-go-minimax": {
+      "label": "OpenCode Go · MiniMax M3",
+      "description": "Economical long-context alternative for routine project coordination.",
+      "provider": "opencode-go",
+      "model": "minimax-m3",
+      "thinking": "high"
+    },
+    "opencode-go-pro": {
+      "label": "OpenCode Go · DeepSeek V4 Pro",
+      "description": "Higher-quality DeepSeek route through the Go subscription.",
+      "provider": "opencode-go",
+      "model": "deepseek-v4-pro",
+      "thinking": "max"
+    },
+    "opencode-go-glm": {
+      "label": "OpenCode Go · GLM-5.2",
+      "description": "Alternative long-context reasoning route.",
+      "provider": "opencode-go",
+      "model": "glm-5.2",
+      "thinking": "high"
+    },
+    "opencode-go-qwen-max": {
+      "label": "OpenCode Go · Qwen3.8 Max",
+      "description": "Higher-cost Qwen route for difficult project-level synthesis.",
+      "provider": "opencode-go",
+      "model": "qwen3.8-max",
+      "thinking": "high"
+    },
+    "opencode-go-grok": {
+      "label": "OpenCode Go · Grok 4.5",
+      "description": "High-cost alternative for occasional cross-model review.",
+      "provider": "opencode-go",
+      "model": "grok-4.5",
+      "thinking": "high"
+    },
+    "opencode-go-kimi": {
+      "label": "OpenCode Go · Kimi K3",
+      "description": "High-cost long-context alternative with model-native Max reasoning.",
+      "provider": "opencode-go",
+      "model": "kimi-k3",
+      "thinking": "max"
+    },
+    "opencode-go-hy3": {
+      "label": "OpenCode Go · Hy3",
+      "description": "Lower-cost short-context alternative; Research Pi compacts earlier for this model.",
+      "provider": "opencode-go",
+      "model": "hy3",
+      "thinking": "high"
     }
   },
   "pi": {
@@ -51,9 +135,12 @@
     "compaction": {
       "softTokens": 278528,
       "hardTokens": 393216,
-      "recentTailTokens": [32768, 40960, 49152]
+      "recentTailTokens": [24576, 32768, 40960],
+      "summaryTargetTokens": 8192,
+      "summaryMaxTokens": 16384
     },
     "search": {
+      "enabled": "auto",
       "model": "deepseek-v4-flash",
       "thinkingBudgetTokens": 1024,
       "maxSources": 12,

@@ -1,4 +1,5 @@
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getMarkdownTheme, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
 	defaultCodexModel,
@@ -17,12 +18,18 @@ import {
 	steerCodexJob,
 	waitForCodexJob,
 } from "../lib/codex-jobs.mjs";
-import { getRuntimeUiAdapter, registerCodexRuntimeAdapter } from "../lib/research-runtime-adapters.mjs";
+import {
+	getHostCapabilityUiAdapter,
+	getRuntimeUiAdapter,
+	registerCodexRuntimeAdapter,
+} from "../lib/research-runtime-adapters.mjs";
 import {
 	RESEARCH_LEADER_ACTOR_ID,
 	RUNTIME_MESSAGE_KIND,
 	codexActorId,
+	consumeRuntimeMessageForAttachment,
 	readRuntimeSnapshot,
+	reconcileCodexRuntimeAsks,
 	recordCodexRuntimeEvent,
 	registerCodexRuntimeJob,
 	resolveResearchRuntime,
@@ -153,9 +160,23 @@ function requireText(value: string | undefined, label: string): string {
 	return value.trim();
 }
 
-function formatJob(job: ReturnType<typeof publicJobView>): string {
+const ACTIVE_JOB_STATUSES = new Set(["starting", "running", "cancelling"]);
+
+function jobActivityText(job: any): string {
+	if (job.currentActivity?.summary) return `now: ${boundedProgress(job.currentActivity.summary)}`;
+	if (job.lastActivity?.summary) return `last: ${boundedProgress(job.lastActivity.summary)}`;
+	const progress = boundedProgress(job.progress);
+	const completedLeaf = ACTIVE_JOB_STATUSES.has(job.status) && (
+		/\s·\s(?:completed|failed)$/i.test(progress)
+		|| /^(?:command|file changes)\s+(?:completed|failed):/i.test(progress)
+	);
+	return `${completedLeaf ? "last" : "phase"}: ${progress}`;
+}
+
+export function formatCodexJob(job: ReturnType<typeof publicJobView>): string {
 	if (job.status === "completed" && job.result) {
-		return `Codex job ${job.id} completed.\n${JSON.stringify(job.result, null, 2)}`;
+		const outcome = job.result.outcome ? ` Delegation outcome=${job.result.outcome}; goal_satisfied=${job.result.goal_satisfied === true}.` : "";
+		return `Codex turn ${job.id} completed.${outcome}\n${JSON.stringify(job.result, null, 2)}`;
 	}
 	if (job.status === "failed" || job.status === "cancelled") {
 		return `Codex job ${job.id} ${job.status}: ${job.error ?? job.progress}`;
@@ -164,9 +185,106 @@ function formatJob(job: ReturnType<typeof publicJobView>): string {
 		return `Codex job ${job.id} has outcome_unknown: side effects may have occurred. Inspect Git and external run state, then use action=reconcile with outcome and an evidence note before starting another executor in this workspace.`;
 	}
 	if (job.status === "input_required" && job.pendingRequest) {
-		return `Codex job ${job.id} needs input (${job.pendingRequest.id}): ${job.pendingRequest.question}`;
+		const pending = job.pendingRequest;
+		return [
+			`Codex job ${job.id} paused for input; its worker and current turn remain alive.`,
+			`Request id: ${pending.id}`,
+			`Question: ${pending.question}`,
+			pending.whyBlocking ? `${job.mode === "advisor" ? "Why this matters" : "Why it blocks progress"}: ${pending.whyBlocking}` : undefined,
+			pending.options?.length ? `Options: ${pending.options.join(" | ")}` : undefined,
+			pending.audience === "user"
+				? "This requires a user-owned choice. Ask the user, then answer this exact request; do not cancel or restart the Codex job."
+				: `Respond now with codex_delegate action=respond, jobId=${job.id}, requestId=${pending.id}. Do not cancel, restart, or replace this advisor turn.`,
+		].filter(Boolean).join("\n");
 	}
-	return `Codex job ${job.id} is ${job.status}: ${job.progress}. Use action=result later to retrieve its structured result.`;
+	return `Codex job ${job.id} is ${job.status}; ${jobActivityText(job)}. Use action=result later to retrieve its structured result.`;
+}
+
+function inlineCode(value: unknown): string {
+	return `\`${String(value ?? "").replaceAll("`", "'")}\``;
+}
+
+function resultList(value: unknown): string[] {
+	return Array.isArray(value) ? value.map((item) => String(item ?? "").trim()).filter(Boolean) : [];
+}
+
+export function codexResultPreview(result: any, limit = 420): string {
+	const text = String(result?.summary ?? result?.working_synthesis ?? result?.shared_understanding ?? "Codex returned no summary.").replace(/\s+/g, " ").trim();
+	return text.length <= limit ? text : `${text.slice(0, Math.max(0, limit - 3))}...`;
+}
+
+export function codexResultMarkdown(result: any): string {
+	if (!result || typeof result !== "object") return "Codex returned no structured result.";
+	const sections: string[] = [];
+	const outcome = String(result.outcome ?? "").trim();
+	const completionBasis = String(result.completion_basis ?? "").trim();
+	if (outcome || completionBasis) {
+		sections.push([
+			"## Delegation outcome",
+			"",
+			outcome ? `**${outcome}** · goal satisfied: ${result.goal_satisfied === true ? "yes" : "no"}` : "",
+			completionBasis,
+		].filter(Boolean).join("\n\n"));
+	}
+	const summary = String(result.summary ?? "").trim();
+	if (summary) sections.push(`## Summary\n\n${summary}`);
+	const sharedUnderstanding = String(result.shared_understanding ?? "").trim();
+	if (sharedUnderstanding) sections.push(`## Shared understanding\n\n${sharedUnderstanding}`);
+
+	const appendList = (title: string, values: unknown) => {
+		const items = resultList(values);
+		if (items.length) sections.push(`## ${title}\n\n${items.map((item) => `- ${item}`).join("\n")}`);
+	};
+	appendList("Points of agreement", result.points_of_agreement);
+	appendList("Candidate explanations", result.candidate_explanations);
+	appendList("Evidence", result.evidence);
+	appendList("Questions to resolve", result.questions_to_resolve);
+	appendList("Actions taken", result.actions_taken);
+
+	const changedFiles = resultList(result.changed_files);
+	if (changedFiles.length) sections.push(`## Changed files\n\n${changedFiles.map((path) => `- ${inlineCode(path)}`).join("\n")}`);
+
+	if (Array.isArray(result.checks) && result.checks.length) {
+		sections.push([
+			"## Checks",
+			"",
+			...result.checks.map((check: any) => `- ${inlineCode(check?.command)} — ${String(check?.result ?? "").trim()}`),
+		].join("\n"));
+	}
+
+	if (Array.isArray(result.external_effects) && result.external_effects.length) {
+		sections.push([
+			"## External effects",
+			"",
+			...result.external_effects.map((effect: any) => {
+				const identity = [effect?.kind, effect?.target, effect?.identifier].filter(Boolean).join(" · ");
+				const detail = String(effect?.detail ?? "").trim();
+				return `- **${identity || "effect"}**${detail ? ` — ${detail}` : ""}`;
+			}),
+		].join("\n"));
+	}
+
+	appendList("Uncertainties", result.uncertainties);
+	appendList("Remaining delegated work", result.remaining_work);
+	const workingSynthesis = String(result.working_synthesis ?? "").trim();
+	if (workingSynthesis) sections.push(`## Working synthesis\n\n${workingSynthesis}`);
+	const next = String(result.recommended_next_step ?? "").trim();
+	if (next) sections.push(`## Recommended next step\n\n${next}`);
+	const nextExchange = String(result.suggested_next_exchange ?? "").trim();
+	if (nextExchange) sections.push(`## Suggested next exchange\n\n${nextExchange}`);
+	return sections.join("\n\n") || "Codex returned an empty structured result.";
+}
+
+function codexResultCounts(result: any): string {
+	return [
+		resultList(result?.evidence).length ? `${result.evidence.length} evidence` : "",
+		resultList(result?.candidate_explanations).length ? `${result.candidate_explanations.length} candidates` : "",
+		resultList(result?.questions_to_resolve).length ? `${result.questions_to_resolve.length} questions` : "",
+		Array.isArray(result?.checks) && result.checks.length ? `${result.checks.length} checks` : "",
+		resultList(result?.changed_files).length ? `${result.changed_files.length} files` : "",
+		resultList(result?.uncertainties).length ? `${result.uncertainties.length} uncertainties` : "",
+		resultList(result?.remaining_work).length ? `${result.remaining_work.length} remaining` : "",
+	].filter(Boolean).join(" · ");
 }
 
 function formatMissions(missions: Awaited<ReturnType<typeof listCodexMissions>>): string {
@@ -200,7 +318,7 @@ async function leaderScope(ctx: ExtensionContext, options: { requireAttached?: b
 	const leaderSessionId = ctx.sessionManager.getSessionId();
 	const attachment = runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID, leaderSessionId);
 	if (options.requireAttached && !attachment) {
-		throw new Error("This Pi Session no longer owns the Research Leader; stop this run or explicitly take over before changing Codex work.");
+		throw new Error("This Pi Session is no longer the Leader Session; stop this run or explicitly take over before changing Codex work.");
 	}
 	return {
 		runtime,
@@ -255,10 +373,49 @@ async function listOwnedCodexMissions(ctx: ExtensionContext) {
 }
 
 export function formatCodexStatus(job: CodexJobView, activeCount = 1): string {
-	const icon = job.status === "completed" ? "✓" : job.status === "outcome_unknown" ? "!" : job.status === "failed" || job.status === "cancelled" ? "✗" : job.status === "input_required" ? "?" : "⚙";
+	const outcome = job.status === "completed" ? String(job.result?.outcome ?? "") : "";
+	const semanticIncomplete = Boolean(outcome && outcome !== "succeeded");
+	const icon = job.status === "completed" ? semanticIncomplete ? "!" : "✓" : job.status === "outcome_unknown" ? "!" : job.status === "failed" || job.status === "cancelled" ? "✗" : job.status === "input_required" ? "?" : "⚙";
 	const count = activeCount > 1 && !TERMINAL_JOB_STATUSES.has(job.status) ? `${activeCount} running · ` : "";
 	const mission = job.mission ? ` · ${boundedProgress(job.mission).slice(0, 36)}` : "";
-	return `${icon} Codex ${count}${job.mode} ${shortJobId(job.id)}${mission} · ${job.status} · ${boundedProgress(job.progress)}`;
+	const parallel = Number(job.activeActivityCount ?? job.activeActivities?.length ?? 0);
+	const activity = parallel > 1 ? `${parallel} parallel activities · /watch` : jobActivityText(job);
+	return `${icon} Codex ${count}${job.mode} ${shortJobId(job.id)}${mission} · ${job.status}${outcome ? `/${outcome}` : ""} · ${activity}`;
+}
+
+function stableCodexJobs(jobs: CodexJobView[]): CodexJobView[] {
+	return [...jobs].sort((left, right) => {
+		const leftStarted = String(left.startedAt ?? left.createdAt ?? "");
+		const rightStarted = String(right.startedAt ?? right.createdAt ?? "");
+		return leftStarted.localeCompare(rightStarted) || String(left.id).localeCompare(String(right.id));
+	});
+}
+
+export function formatCodexJobsStatus(jobs: CodexJobView[]): string | undefined {
+	const active = stableCodexJobs(jobs.filter((job) => !TERMINAL_JOB_STATUSES.has(job.status)));
+	if (!active.length) return undefined;
+	if (active.length === 1) return formatCodexStatus(active[0]);
+	const waiting = active.filter((job) => job.status === "input_required").length;
+	const cancelling = active.filter((job) => job.status === "cancelling").length;
+	const detail = [waiting ? `${waiting} waiting` : "", cancelling ? `${cancelling} cancelling` : ""].filter(Boolean).join(" · ");
+	return `${waiting ? "?" : "⚙"} Codex ${active.length} active${detail ? ` · ${detail}` : ""} · details above editor`;
+}
+
+function codexUiProjection(jobs: CodexJobView[]): string {
+	return JSON.stringify({
+		jobs: stableCodexJobs(jobs).map((job) => ({
+			id: job.id,
+			status: job.status,
+			mode: job.mode,
+			mission: job.mission,
+			progress: job.progress,
+			currentActivity: job.currentActivity,
+			activeActivities: job.activeActivities,
+			activeActivityCount: job.activeActivityCount,
+			lastActivity: job.lastActivity,
+			pendingRequest: job.pendingRequest?.id ?? null,
+		})),
+	});
 }
 
 export default function codexDelegateExtension(pi: ExtensionAPI) {
@@ -266,26 +423,42 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 	const activeJobs = new Map<string, CodexJobView>();
 	const monitorTimers = new Map<string, NodeJS.Timeout>();
 	const deliveredEvents = new Set<string>();
+	const capabilityApprovalRequests = new Map<string, Promise<boolean>>();
+	let capabilityApprovalQueue: Promise<unknown> = Promise.resolve();
 	let latestTerminal: CodexJobView | undefined;
 	let shuttingDown = false;
+	let lastFooterText: string | undefined;
+	let lastDockProjection: string | undefined;
 
 	const refreshFooter = (ctx: ExtensionContext) => {
+		if (shuttingDown) return;
 		if (!ctx.hasUI) return;
-		const active = [...activeJobs.values()];
-		const latest = active.at(-1);
-		ctx.ui.setStatus("codex_delegate", latest ? formatCodexStatus(latest, active.length) : latestTerminal ? formatCodexStatus(latestTerminal) : undefined);
+		const active = stableCodexJobs([...activeJobs.values()]);
+		const text = formatCodexJobsStatus(active) ?? (latestTerminal ? formatCodexStatus(latestTerminal) : undefined);
+		if (text === lastFooterText) return;
+		lastFooterText = text;
+		ctx.ui.setStatus("codex_delegate", text);
+	};
+
+	const refreshDock = (ctx: ExtensionContext, force = false) => {
+		if (shuttingDown) return;
+		const jobs = stableCodexJobs([...activeJobs.values()]);
+		const projection = codexUiProjection(jobs);
+		if (!force && projection === lastDockProjection) return;
+		lastDockProjection = projection;
+		void getRuntimeUiAdapter()?.refresh(ctx, { codexJobs: jobs }).catch(() => undefined);
 	};
 
 	const rememberJob = (job: CodexJobView, ctx: ExtensionContext) => {
+		if (shuttingDown) return;
 		if (TERMINAL_JOB_STATUSES.has(job.status)) {
 			activeJobs.delete(job.id);
 			latestTerminal = job;
 		} else {
-			activeJobs.delete(job.id);
 			activeJobs.set(job.id, job);
 		}
 		refreshFooter(ctx);
-		void getRuntimeUiAdapter()?.refresh(ctx, { codexJobs: [...activeJobs.values()] }).catch(() => undefined);
+		refreshDock(ctx);
 	};
 
 	const eventId = (job: CodexJobView): string | undefined => {
@@ -296,6 +469,13 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 
 	const boundedList = (values: unknown, limit = 8): string[] =>
 		Array.isArray(values) ? values.slice(0, limit).map((value) => boundedProgress(String(value))) : [];
+	const boundedDetailList = (values: unknown, limit: number, itemLimit: number): string[] =>
+		Array.isArray(values)
+			? values.slice(0, limit).map((value) => {
+				const text = String(value ?? "").replace(/\s+/g, " ").trim();
+				return text.length <= itemLimit ? text : `${text.slice(0, itemLimit - 3)}...`;
+			}).filter(Boolean)
+			: [];
 
 	const eventContent = (job: CodexJobView): string => {
 		if (job.status === "input_required" && job.pendingRequest) {
@@ -304,11 +484,16 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 				`Codex delegation ${job.id} is waiting for ${pending.audience === "user" ? "the user" : "Research Pi"}.`,
 				`Request id: ${pending.id}`,
 				`Question: ${pending.question}`,
-				pending.whyBlocking ? `Why it blocks progress: ${pending.whyBlocking}` : undefined,
+				pending.whyBlocking ? `${job.mode === "advisor" ? "Why this matters" : "Why it blocks progress"}: ${pending.whyBlocking}` : undefined,
 				pending.options?.length ? `Options: ${pending.options.join(" | ")}` : undefined,
+				pending.kind === "host_capability"
+					? "Research Pi will open the exact host-capability approval dialog in the attached TUI and return the decision to this same Codex turn."
+					: undefined,
 				pending.secret
 					? "This request is marked secret. Do not ask for or transmit the secret through Pi, model context, codex_delegate, or job files. Ask the user to configure it directly, then continue without echoing it."
-					: `Answer with codex_delegate action=respond, jobId=${job.id}, requestId=${pending.id}. Use action=steer only for unsolicited corrections to the active turn.`,
+					: pending.kind === "host_capability"
+						? undefined
+						: `Answer with codex_delegate action=respond, jobId=${job.id}, requestId=${pending.id}. Use action=steer only for unsolicited corrections to the active turn.`,
 			]
 				.filter(Boolean)
 				.join("\n");
@@ -323,13 +508,28 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			].join("\n");
 		}
 		const result = job.result ?? {};
+		const actionsTaken = boundedDetailList(result.actions_taken, 6, 360);
+		const changedFiles = boundedDetailList(result.changed_files, 12, 360);
+		const externalEffects = Array.isArray(result.external_effects)
+			? result.external_effects.slice(0, 6).map((effect: any) => {
+				const identity = [effect?.kind, effect?.target, effect?.identifier].filter(Boolean).join(" · ") || "effect";
+				const detail = String(effect?.detail ?? "").replace(/\s+/g, " ").trim();
+				return `${identity}${detail ? ` — ${detail.slice(0, 500)}` : ""}`;
+			})
+			: [];
 		return [
 			`Codex delegation ${job.id} ${job.status}. Pi must inspect this result and decide the next research action; completion alone is not scientific evidence.`,
 			`Mode/model: ${job.mode} · ${job.model} · ${job.reasoningEffort}`,
 			job.mission ? `Mission: ${job.mission}` : undefined,
+			result.outcome ? `Delegation outcome: ${result.outcome} · goal_satisfied=${result.goal_satisfied === true}` : undefined,
+			result.completion_basis ? `Completion basis: ${String(result.completion_basis).slice(0, 3000)}` : undefined,
 			result.summary ? `Summary: ${String(result.summary).slice(0, 5000)}` : undefined,
+			actionsTaken.length ? `Actions taken:\n- ${actionsTaken.join("\n- ")}` : undefined,
+			changedFiles.length ? `Changed files:\n- ${changedFiles.join("\n- ")}` : undefined,
+			externalEffects.length ? `External effects:\n- ${externalEffects.join("\n- ")}` : undefined,
 			boundedList(result.evidence).length ? `Evidence:\n- ${boundedList(result.evidence).join("\n- ")}` : undefined,
 			boundedList(result.uncertainties).length ? `Uncertainties:\n- ${boundedList(result.uncertainties).join("\n- ")}` : undefined,
+			boundedList(result.remaining_work).length ? `Remaining delegated work:\n- ${boundedList(result.remaining_work).join("\n- ")}` : undefined,
 			result.recommended_next_step ? `Recommended next step: ${String(result.recommended_next_step).slice(0, 3000)}` : undefined,
 			job.error ? `Error: ${String(job.error).slice(0, 3000)}` : undefined,
 			`Use codex_delegate action=result with jobId=${job.id} if the full structured result is needed.`,
@@ -338,16 +538,115 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			.join("\n");
 	};
 
+	const consumeCodexRequestMessages = async (
+		runtime: Awaited<ReturnType<typeof resolveResearchRuntime>>,
+		requestId: string,
+		ctx: ExtensionContext,
+		attachmentEpoch?: string | null,
+	) => {
+		const snapshot = await readRuntimeSnapshot(runtime);
+		for (const message of snapshot.messages) {
+			if (
+				message.type !== "ask"
+				|| message.relatesTo !== requestId
+				|| (message.status !== "queued" && message.status !== "delivered")
+			) continue;
+			await consumeRuntimeMessageForAttachment(runtime, message.id, {
+				sessionId: ctx.sessionManager.getSessionId(),
+				actorId: RESEARCH_LEADER_ACTOR_ID,
+				attachmentEpoch,
+			});
+		}
+	};
+
+	const resolveHostCapabilityRequest = async (
+		job: CodexJobView,
+		message: Awaited<ReturnType<typeof recordCodexRuntimeEvent>>,
+		runtime: Awaited<ReturnType<typeof resolveResearchRuntime>>,
+		attachment: NonNullable<ReturnType<typeof runtimeActorAttachment>>,
+		ctx: ExtensionContext,
+	): Promise<boolean> => {
+		const pending = job.pendingRequest;
+		if (!pending?.id || pending.kind !== "host_capability") return false;
+		const existing = capabilityApprovalRequests.get(pending.id);
+		if (existing) return await existing;
+
+		const run = async () => {
+			const adapter = getHostCapabilityUiAdapter();
+			if (!adapter?.review || !ctx.hasUI) return false;
+			let decision;
+			try {
+				decision = await adapter.review({ job, pendingRequest: pending, ctx });
+			} catch (error) {
+				if (!shuttingDown && ctx.hasUI) {
+					ctx.ui.notify(`Could not open Codex host approval: ${error instanceof Error ? error.message : String(error)}`, "warning");
+				}
+				return false;
+			}
+			if (decision?.status === "unsupported" || decision?.status === "unavailable") return false;
+			if (shuttingDown) return false;
+			const approved = decision?.status === "approved";
+			const grantId = approved ? decision.grant?.id : undefined;
+			const ownerCheck = await jobManagementScope(ctx, job.id);
+			await withRuntimeActorAttachment(
+				runtime,
+				RESEARCH_LEADER_ACTOR_ID,
+				{
+					sessionId: ctx.sessionManager.getSessionId(),
+					attachmentEpoch: attachment.epoch,
+				},
+				() => respondToCodexJob(job.id, {
+					requestId: pending.id,
+					response: approved
+						? `Research Pi user approved host capability ${grantId}. Continue the same tool call.`
+						: "Research Pi user denied the requested host capability. Do not retry or bypass it.",
+					...ownerCheck,
+				}),
+			);
+			if (message?.status === "queued") {
+				await settleRuntimeMessage(runtime, message.id, "delivered", {
+					sessionId: ctx.sessionManager.getSessionId(),
+					actorId: RESEARCH_LEADER_ACTOR_ID,
+					attachmentEpoch: attachment.epoch,
+				});
+			}
+			await consumeCodexRequestMessages(runtime, pending.id, ctx, attachment.epoch);
+			if (!shuttingDown && ctx.hasUI) {
+				ctx.ui.notify(
+					approved
+						? `Approved ${grantId}; Codex ${shortJobId(job.id)} is resuming automatically.`
+						: `Denied host capability request from Codex ${shortJobId(job.id)}; the same turn will receive the denial.`,
+					approved ? "warning" : "info",
+				);
+			}
+			return true;
+		};
+
+		const queued = capabilityApprovalQueue.then(run, run);
+		capabilityApprovalQueue = queued.catch(() => undefined);
+		capabilityApprovalRequests.set(pending.id, queued);
+		try {
+			return await queued;
+		} finally {
+			if (capabilityApprovalRequests.get(pending.id) === queued) capabilityApprovalRequests.delete(pending.id);
+		}
+	};
+
 	const deliverJobEvent = async (job: CodexJobView, ctx: ExtensionContext) => {
+		if (shuttingDown) return;
 		const id = eventId(job);
 		if (!id || deliveredEvents.has(id)) return;
 		const runtime = await resolveResearchRuntime(ctx.cwd);
+		if (shuttingDown) return;
+		await reconcileCodexRuntimeAsks(runtime, job);
 		const message = await recordCodexRuntimeEvent(runtime, job, eventContent(job));
-		if (!message || message.status !== "queued") {
+		if (shuttingDown) return;
+		if (!message) {
 			deliveredEvents.add(id);
 			return;
 		}
 		const snapshot = await readRuntimeSnapshot(runtime);
+		if (shuttingDown) return;
 		if (runtimeSessionInheritancePolicy(ctx.sessionManager.getBranch(), snapshot, ctx.sessionManager.getSessionId()) === "clean") {
 			// The durable Runtime mailbox now owns delivery. Mark the watcher event
 			// handled so a clean Session does not repeatedly re-project the same job.
@@ -360,6 +659,14 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			ctx.sessionManager.getSessionId(),
 		);
 		if (!attachment) return;
+		if (await resolveHostCapabilityRequest(job, message, runtime, attachment, ctx)) {
+			deliveredEvents.add(id);
+			return;
+		}
+		if (message.status !== "queued") {
+			deliveredEvents.add(id);
+			return;
+		}
 		const editorHasDraft = ctx.hasUI && Boolean(ctx.ui.getEditorText?.().trim());
 		try {
 			pi.sendMessage(
@@ -375,6 +682,10 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 						to: message.to,
 						jobId: job.id,
 						status: job.status,
+						mode: job.mode,
+						model: job.model,
+						reasoningEffort: job.reasoningEffort,
+						mission: job.mission ?? null,
 						requestId: job.pendingRequest?.id ?? null,
 						transient: true,
 						attachmentEpoch: attachment.epoch ?? null,
@@ -386,7 +697,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 				},
 			);
 		} catch (error) {
-			if (ctx.hasUI) ctx.ui.notify(`Could not deliver Codex event: ${error instanceof Error ? error.message : String(error)}`, "warning");
+			if (!shuttingDown && ctx.hasUI) ctx.ui.notify(`Could not deliver Codex event: ${error instanceof Error ? error.message : String(error)}`, "warning");
 			return;
 		}
 		await settleRuntimeMessage(runtime, message.id, "delivered", {
@@ -394,6 +705,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			actorId: RESEARCH_LEADER_ACTOR_ID,
 			attachmentEpoch: attachment.epoch ?? null,
 		});
+		if (shuttingDown) return;
 		deliveredEvents.add(id);
 		if (editorHasDraft && ctx.hasUI) {
 			ctx.ui.notify(`Codex ${shortJobId(job.id)} ${job.status}; the event is queued behind your editor draft.`, "info");
@@ -401,9 +713,10 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 	};
 
 	const monitorJob = (initial: CodexJobView, ctx: ExtensionContext) => {
+		if (shuttingDown) return;
 		rememberJob(initial, ctx);
 		void deliverJobEvent(initial, ctx).catch((error) => {
-			if (ctx.hasUI) ctx.ui.notify(`Could not persist Codex Runtime event: ${error instanceof Error ? error.message : String(error)}`, "warning");
+			if (!shuttingDown && ctx.hasUI) ctx.ui.notify(`Could not persist Codex Runtime event: ${error instanceof Error ? error.message : String(error)}`, "warning");
 		});
 		if (TERMINAL_JOB_STATUSES.has(initial.status) || monitorTimers.has(initial.id)) return;
 
@@ -411,17 +724,30 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			if (shuttingDown) return;
 			try {
 				const current = publicJobView(await readCodexJob(initial.id, await jobManagementScope(ctx, initial.id)));
+				if (shuttingDown) {
+					monitorTimers.delete(initial.id);
+					return;
+				}
 				rememberJob(current, ctx);
 				await deliverJobEvent(current, ctx);
+				if (shuttingDown) {
+					monitorTimers.delete(initial.id);
+					return;
+				}
 				if (TERMINAL_JOB_STATUSES.has(current.status)) {
 					monitorTimers.delete(current.id);
 					return;
 				}
 			} catch (error) {
+				if (shuttingDown) {
+					monitorTimers.delete(initial.id);
+					return;
+				}
 				if (isCodexJobOwnerError(error)) {
 					monitorTimers.delete(initial.id);
 					activeJobs.delete(initial.id);
 					refreshFooter(ctx);
+					refreshDock(ctx);
 					return;
 				}
 				const previous = activeJobs.get(initial.id) ?? initial;
@@ -434,6 +760,10 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 				);
 			}
 
+			if (shuttingDown) {
+				monitorTimers.delete(initial.id);
+				return;
+			}
 			const timer = setTimeout(poll, 750);
 			timer.unref();
 			monitorTimers.set(initial.id, timer);
@@ -444,13 +774,17 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		monitorTimers.set(initial.id, timer);
 	};
 
-	const resetMonitors = (ctx: ExtensionContext) => {
+	const resetMonitors = (ctx: ExtensionContext, options: { refreshRuntime?: boolean } = {}) => {
 		for (const timer of monitorTimers.values()) clearTimeout(timer);
 		monitorTimers.clear();
 		activeJobs.clear();
 		latestTerminal = undefined;
+		lastFooterText = undefined;
+		lastDockProjection = undefined;
 		if (ctx.hasUI) ctx.ui.setStatus("codex_delegate", undefined);
-		void getRuntimeUiAdapter()?.refresh(ctx, { codexJobs: [] }).catch(() => undefined);
+		if (options.refreshRuntime !== false) {
+			void getRuntimeUiAdapter()?.refresh(ctx, { codexJobs: [] }).catch(() => undefined);
+		}
 	};
 
 	const reattachBranchJobs = async (ctx: ExtensionContext) => {
@@ -471,7 +805,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 				monitorJob(publicJobView(job), ctx);
 			}
 		} catch (error) {
-			if (ctx.hasUI) ctx.ui.notify(`Could not reattach Codex jobs: ${error instanceof Error ? error.message : String(error)}`, "warning");
+			if (!shuttingDown && ctx.hasUI) ctx.ui.notify(`Could not reattach Codex jobs: ${error instanceof Error ? error.message : String(error)}`, "warning");
 		}
 	};
 
@@ -498,12 +832,14 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			let nextJob = latest;
 
 			if (message.type === "reply" && live && latest.pendingRequest?.id) {
+				const requestId = latest.pendingRequest.id;
 				const queued = await withLeaderLease(() => respondToCodexJob(latest.id, {
-					requestId: latest.pendingRequest.id,
+					requestId,
 					response: message.body,
 					...ownerCheck,
 				}));
 				nextJob = queued.job;
+				await consumeCodexRequestMessages(owner.runtime, requestId, ctx, owner.attachmentEpoch);
 			} else if (live && !preempt) {
 				const queued = await withLeaderLease(() => steerCodexJob(latest.id, { message: instruction, ...ownerCheck }));
 				nextJob = queued.job;
@@ -552,7 +888,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", (_event, ctx) => {
 		shuttingDown = true;
-		resetMonitors(ctx);
+		resetMonitors(ctx, { refreshRuntime: false });
 	});
 
 	pi.registerCommand("codex", {
@@ -575,29 +911,99 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		name: "codex_delegate",
 		label: "Codex Delegate",
 		description: [
-			"Delegate bounded operational work to a context-isolated local Codex executor, or obtain a read-only Codex second opinion.",
+			"Delegate bounded operational work to a context-isolated local Codex executor, or open a read-only collaborative research consultation with Codex.",
 			`Configured defaults: advisor ${defaultCodexModel("advisor")}/${defaultCodexReasoningEffort("advisor")}; executor ${defaultCodexModel("executor")}/${defaultCodexReasoningEffort("executor")}.`,
 			"Executor jobs run automatically inside the current project boundary. They may edit/delete files, freely commit, use public network, and run expensive experiments. Exact user-approved external-read, SSH-target, or fixed-script capabilities are available through an opaque host broker; raw credentials never enter Codex.",
 			"Pi remains responsible for framing the research question, judging evidence, and choosing the next research action.",
 			"Give related work a stable mission label and use reuse=auto to continue its exact Codex Actor thread across Pi sessions in this project workspace; use action=missions to inspect project mission threads.",
 			"Use action=status/result/cancel/resume/respond/steer with the returned job id; Actor-owned jobs remain bound to the exact project workspace but are not owned by one Pi conversation.",
 			"If an executor loses its worker after execution started, it stops at outcome_unknown. Inspect Git and external run state, then use action=reconcile; the harness blocks another writer until this is resolved.",
-			"Background completion and blocking requests enter the project Runtime mailbox and are delivered to the currently attached Research Leader session. respond answers an explicit request; steer corrects an active turn without restarting it.",
+			"Background completion and blocking requests enter the project Runtime mailbox and are delivered to the currently attached Leader Session. respond answers an explicit request; steer corrects an active turn without restarting it.",
 		].join(" "),
-		promptSnippet: "Delegate long operational work or a bounded second opinion to local Codex",
+		promptSnippet: "Delegate long operational work or collaboratively clarify a research question with Codex",
 		promptGuidelines: [
 			"Use codex_delegate when a bounded execution task would require many tools or produce enough intermediate output to pollute the research context; delegation is for context isolation, not automatic parallelism.",
-			"Before starting Codex, state the objective and success criteria. Send only relevant research context; do not copy the full conversation or ask Codex to decide the research objective.",
-			"Use a stable mission label for consecutive work on one research subtask and reuse=auto. The mission is a project Codex Actor and survives Pi session rotation. Start a fresh mission for an independent critique, a different research route, a different workspace, or substantially stale assumptions.",
+			"For executor delegation, state a concrete objective and observable success criteria.",
+			"For advisor consultation, start from the research uncertainty: provide relevant observations, current tentative understanding, and important unknowns. Task-style success criteria are not required. Send only relevant research context; do not copy the full conversation or ask Codex to decide the research objective.",
+			"Treat advisor consultation as a continuation of inquiry, not an automatic review or approval gate. Let the advisor reconstruct or question the framing when useful, then clarify, expand, distinguish, synthesize, or challenge ideas in proportion to their maturity. Use explicit critique, verdict, or adjudication language only when the object is actually ready for stress-testing; do not demand premature closure or a complete judgment in one turn.",
+			"Use a stable mission label for consecutive work on one research subtask and reuse=auto. The mission is a project Codex Actor and survives Pi session rotation. Continue the same advisor mission while jointly refining one question; start a fresh mission for a different research route, a different workspace, or substantially stale assumptions.",
 			"Use mode=executor when Codex should actually complete the work. It has standing authority for destructive, long-running, and expensive steps inside the current project and should not be micromanaged command by command.",
-			"If Codex needs an unapproved outside path, SSH target, or host script, review the exact request and ask the user for the returned /boundary grant. After approval, respond so Codex can retry the same turn. Do not disguise the operation as a new delegation.",
-			"Use mode=advisor only for a genuinely useful independent proposal or critique. Advisor is read-only but still uses max reasoning by default.",
+			"If Codex needs an unapproved outside path, SSH target, or host command, its structured request opens the Pi TUI approval dialog automatically. Do not ask the user to manufacture or return a grant id, and do not disguise the operation as a new delegation.",
+			"Use mode=advisor when the research question is immature or Pi would benefit from clarification, focused questions, competing explanations, or collaborative synthesis. Advisor is read-only, should not default to opposition or verdicts, and still uses max reasoning by default.",
 			"After retrieving a result, inspect its evidence and validity limitations. Codex completion does not by itself establish a scientific conclusion.",
+			"Treat job status=completed as App Server lifecycle only. For executor work, outcome=succeeded with goal_satisfied=true means the delegated objective completed; partial, blocked, or failed should be handled explicitly rather than described as success.",
 			"Never guess an outcome_unknown resolution. Reconcile only after inspecting the relevant Git state, files, remote runs, or other external effects, and record that evidence in note.",
 			"When a Codex request arrives, answer it promptly with action=respond if Pi can decide. Ask the user only for user-owned choices or direct credential setup. Never place secrets in a response.",
+			"A synchronous advisor returns input_required instead of blocking the Leader tool call. Treat it as the same live consultation: answer the exact jobId/requestId with action=respond, never by cancelling or starting a replacement advisor.",
 		],
 		parameters: ParamsSchema,
 		executionMode: "sequential",
+		renderCall(args, theme) {
+			const mode = args.mode ?? "executor";
+			const target = args.jobId ? shortJobId(args.jobId) : args.mission ?? mode;
+			const task = args.task ?? args.followUp ?? args.message ?? "";
+			const preview = task ? codexResultPreview({ summary: task }, 100) : "";
+			return new Text([
+				`${theme.fg("toolTitle", theme.bold("Codex"))} ${theme.fg("accent", args.action)} ${theme.fg("muted", `· ${target}`)}`,
+				preview ? theme.fg("dim", `  ${preview}`) : "",
+			].filter(Boolean).join("\n"), 0, 0);
+		},
+		renderResult(result, { expanded, isPartial }, theme) {
+			const details = result.details as CodexJobView | { missions?: unknown[] } | undefined;
+			if (!details || !("id" in details)) {
+				const content = result.content.find((item) => item.type === "text");
+				return new Text(content?.type === "text" ? content.text : "Codex returned no result.", 0, 0);
+			}
+
+			const job = details as CodexJobView;
+			const container = new Container();
+			const terminal = TERMINAL_JOB_STATUSES.has(job.status);
+			const outcome = job.status === "completed" ? String(job.result?.outcome ?? "") : "";
+			const semanticIncomplete = Boolean(outcome && outcome !== "succeeded");
+			const icon = job.status === "completed"
+				? theme.fg(semanticIncomplete ? "warning" : "success", semanticIncomplete ? "!" : "✓")
+				: job.status === "input_required" || job.status === "outcome_unknown"
+					? theme.fg("warning", job.status === "input_required" ? "?" : "!")
+					: job.status === "failed" || job.status === "cancelled"
+						? theme.fg("error", "✗")
+						: theme.fg("accent", "●");
+			container.addChild(new Text(
+				`${icon} ${theme.fg("toolTitle", theme.bold(`Codex ${job.mode}`))} ${theme.fg("accent", shortJobId(job.id))} ${theme.fg(terminal ? "muted" : "warning", `· ${job.status}${outcome ? `/${outcome}` : ""}`)}`,
+				0,
+				0,
+			));
+			container.addChild(new Text(
+				theme.fg("dim", [job.mission, job.model, job.reasoningEffort].filter(Boolean).join(" · ")),
+				0,
+				0,
+			));
+
+			if (job.result) {
+				container.addChild(new Spacer(1));
+				if (expanded) {
+					container.addChild(new Markdown(codexResultMarkdown(job.result), 0, 0, getMarkdownTheme()));
+					container.addChild(new Spacer(1));
+					container.addChild(new Text(theme.fg("dim", "Ctrl+O collapses · /watch for objective execution events"), 0, 0));
+				} else {
+					container.addChild(new Text(codexResultPreview(job.result), 0, 0));
+					const counts = codexResultCounts(job.result);
+					if (counts) container.addChild(new Text(theme.fg("muted", counts), 0, 0));
+					container.addChild(new Text(theme.fg("dim", "Ctrl+O expands the structured Codex response"), 0, 0));
+				}
+				return container;
+			}
+
+			const message = job.status === "failed" || job.status === "cancelled"
+				? job.error ?? job.progress
+				: job.status === "outcome_unknown"
+					? "Side effects may have occurred; inspect external state before reconciliation."
+					: job.status === "input_required" && job.pendingRequest
+						? job.pendingRequest.question
+						: jobActivityText(job);
+			container.addChild(new Text(theme.fg(job.status === "failed" ? "error" : "muted", String(message ?? "waiting")), 0, 0));
+			if (isPartial) container.addChild(new Text(theme.fg("dim", "Codex is still running..."), 0, 0));
+			return container;
+		},
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const requestedMode = params.mode;
@@ -665,7 +1071,9 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 								...ownerCheck,
 								followUp: task,
 							}));
-							commandReceipt = `Resumed Codex mission "${reusable.mission}" from job ${reusable.id} as ${job.id}.`;
+							commandReceipt = job.threadRefresh
+								? `Refreshed legacy Codex thread for mission "${reusable.mission}" as ${job.id}; the same Actor now has the current Research Pi tools.`
+								: `Resumed Codex mission "${reusable.mission}" from job ${reusable.id} as ${job.id}.`;
 						} else {
 							job = await withLeaderLease(() => startCodexJob({ ...common, task }));
 						}
@@ -692,21 +1100,26 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 							background: params.background,
 							...ownerCheck,
 						}));
+						if (job.threadRefresh) {
+							commandReceipt = `Refreshed legacy Codex thread from job ${jobId} as ${job.id}; the same mission Actor now has the current Research Pi tools.`;
+						}
 						ownerCheck = projectOwnerCheck;
 						effectiveBackground = params.background ?? job.autoNotify ?? (job.mode === "executor");
 						break;
 					}
 					case "respond": {
 						const jobId = requireText(params.jobId, "jobId");
+						const requestId = requireText(params.requestId, "requestId");
 						ownerCheck = await jobManagementScope(ctx, jobId);
 						const queued = await withLeaderLease(() => respondToCodexJob(jobId, {
-							requestId: requireText(params.requestId, "requestId"),
+							requestId,
 							response: params.response,
 							answers: params.answers,
 							...ownerCheck,
 						}));
 						job = queued.job;
-						commandReceipt = `Response queued for Codex request ${params.requestId} in job ${job.id}.`;
+						await consumeCodexRequestMessages(owner.runtime, requestId, ctx, owner.attachmentEpoch);
+						commandReceipt = `Response queued for Codex request ${requestId} in job ${job.id}.`;
 						break;
 					}
 					case "steer": {
@@ -762,9 +1175,15 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 					job = await waitForCodexJob(job.id, {
 						signal,
 						...ownerCheck,
+						returnOnInputRequired: (current) => current.pendingRequest?.kind !== "host_capability" || !ctx.hasUI,
 						onUpdate: (current) => {
 							const currentView = publicJobView(current);
 							rememberJob(currentView, ctx);
+							if (currentView.status === "input_required" && currentView.pendingRequest?.kind === "host_capability") {
+								void deliverJobEvent(currentView, ctx).catch((error) => {
+									if (!shuttingDown && ctx.hasUI) ctx.ui.notify(`Could not deliver Codex request: ${error instanceof Error ? error.message : String(error)}`, "warning");
+								});
+							}
 							if (ctx.hasUI) ctx.ui.setWorkingMessage(formatCodexStatus(currentView));
 							onUpdate?.({
 								content: [{ type: "text", text: `Codex ${current.status}: ${current.progress}` }],
@@ -775,6 +1194,10 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 					view = publicJobView(job);
 					await registerCodexRuntimeJob(owner.runtime, view);
 					rememberJob(view, ctx);
+					if (view.status === "input_required") {
+						await deliverJobEvent(view, ctx);
+						monitorJob(view, ctx);
+					}
 				} else if (!TERMINAL_JOB_STATUSES.has(view.status)) {
 					monitorJob(view, ctx);
 				}
@@ -783,8 +1206,8 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 					content: [{
 						type: "text",
 						text: commandReceipt && TERMINAL_JOB_STATUSES.has(view.status)
-							? `${commandReceipt}\n${formatJob(view)}`
-							: commandReceipt ?? formatJob(view),
+							? `${commandReceipt}\n${formatCodexJob(view)}`
+							: commandReceipt ?? formatCodexJob(view),
 					}],
 					details: view,
 				};

@@ -210,11 +210,24 @@ export class RuntimeBoardOverlay {
 	sessionLines() {
 		const th = this.theme;
 		const { leader, rotations, health } = this.model;
+		const sessionRole = leader.inheritancePolicy === "analysis"
+			? th.fg("accent", "analysis · project read-only")
+			: leader.inheritancePolicy === "clean"
+				? th.fg("warning", "clean context")
+				: th.fg("success", "Leader Session · project context");
+		const ownership = leader.inheritancePolicy === "analysis"
+			? th.fg("accent", `✓ current TUI is an Analysis Session; Leader remains ${leader.sessionSuffix || "detached"}`)
+			: leader.isCurrentSessionAttached
+				? th.fg("success", "✓ current TUI owns the Leader Session")
+				: th.fg("warning", "! Leader Session is attached elsewhere");
+		const sessionDetail = leader.inheritancePolicy === "analysis"
+			? `   current session ${shortId(leader.currentSessionId, 8) || "unknown"} · ${sessionRole}\n   Leader attachment ${leader.sessionSuffix || "detached"}${leader.branchAnchorId ? ` · branch anchor ${shortId(leader.branchAnchorId, 10)}` : ""}`
+			: `   session ${leader.sessionSuffix || "none"}${leader.branchAnchorId ? ` · branch anchor ${shortId(leader.branchAnchorId, 10)}` : ""} · ${sessionRole}`;
 		const rows = [
-			` ${th.fg("dim", "Research Leader attachment")}`,
+			` ${th.fg("dim", "Session role and Leader attachment")}`,
 			"",
-			` ${leader.isCurrentSessionAttached ? th.fg("success", "✓ current TUI owns Research Leader") : th.fg("warning", "! Research Leader is attached elsewhere")}`,
-			`   session ${leader.sessionSuffix || "none"}${leader.branchAnchorId ? ` · branch anchor ${shortId(leader.branchAnchorId, 10)}` : ""} · ${leader.inheritancePolicy === "clean" ? th.fg("warning", "clean context") : th.fg("success", "project context")}`,
+			` ${ownership}`,
+			...sessionDetail.split("\n"),
 			`   ${leader.activation ? th.fg("warning", `active agent run · ${shortId(leader.activation.id, 12)} · since ${clock(leader.activation.startedAt)}`) : th.fg("dim", "no active agent run")}`,
 			"",
 			` ${th.fg("dim", "Recent explicit handoffs")}`,
@@ -242,7 +255,7 @@ export class RuntimeBoardOverlay {
 		const memory = th.fg(stateColor(project.freshness), project.freshness);
 		const header = [
 			` ${th.fg("customMessageLabel", th.bold("◈ RESEARCH RUNTIME"))}  ${th.fg("accent", th.bold(project.name))} · project ${project.shortKey}`,
-			` ${memory} · r${project.revision}/state ${project.stateRevision || "—"} · leader ${leader.sessionSuffix || "detached"}${leader.inheritancePolicy === "clean" ? " · clean" : ""}`,
+			` ${memory} · r${project.revision}/state ${project.stateRevision || "—"} · ${leader.inheritancePolicy === "analysis" ? `analysis · leader ${leader.sessionSuffix || "detached"}` : `leader ${leader.sessionSuffix || "detached"}${leader.inheritancePolicy === "clean" ? " · clean" : ""}`}`,
 			` ${th.fg("dim", `${project.git.branch ?? "no branch"} @ ${project.git.commit ?? "unknown"}`)} · ${dirty}`,
 			` ${tabs}`,
 			"",
