@@ -1071,7 +1071,9 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 								...ownerCheck,
 								followUp: task,
 							}));
-							commandReceipt = `Resumed Codex mission "${reusable.mission}" from job ${reusable.id} as ${job.id}.`;
+							commandReceipt = job.threadRefresh
+								? `Refreshed legacy Codex thread for mission "${reusable.mission}" as ${job.id}; the same Actor now has the current Research Pi tools.`
+								: `Resumed Codex mission "${reusable.mission}" from job ${reusable.id} as ${job.id}.`;
 						} else {
 							job = await withLeaderLease(() => startCodexJob({ ...common, task }));
 						}
@@ -1098,6 +1100,9 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 							background: params.background,
 							...ownerCheck,
 						}));
+						if (job.threadRefresh) {
+							commandReceipt = `Refreshed legacy Codex thread from job ${jobId} as ${job.id}; the same mission Actor now has the current Research Pi tools.`;
+						}
 						ownerCheck = projectOwnerCheck;
 						effectiveBackground = params.background ?? job.autoNotify ?? (job.mode === "executor");
 						break;

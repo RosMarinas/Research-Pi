@@ -14,6 +14,7 @@ import {
 	DEFAULT_CODEX_ADVISOR_SCHEMA_PATH,
 	DEFAULT_CODEX_MODEL,
 	DEFAULT_CODEX_REASONING_EFFORT,
+	CODEX_DYNAMIC_TOOL_PROTOCOL_VERSION,
 	buildDelegationPrompt,
 	buildCodexContinuationNotice,
 	cancelCodexJob,
@@ -279,9 +280,11 @@ let completionTimer;
 let deltaNotificationsOptedOut = false;
 let hostToolPresent = false;
 let submissionToolPresent = false;
+let dynamicToolTypesValid = false;
 let turnOutputSchemaPresent = false;
 let consultationField = "missing-consultation-field";
 let isAdvisorSchema = false;
+let resumeParamsClean = true;
 let pendingFinalPrompt = "";
 process.stderr.write("fake app-server warning\\n");
 
@@ -290,7 +293,7 @@ const complete = (prompt, leaderResponse = "") => {
   if (sandbox === "${CODEX_EXECUTOR_PROFILE}") {
     writeFileSync(join(process.cwd(), "codex-executed.txt"), "executor ran\\n", "utf8");
   }
-  const evidence = [model, sandbox, prompt.includes("Research Pi") ? "role-present" : "role-missing", deltaNotificationsOptedOut ? "delta-opt-out" : "delta-not-opted-out", hostToolPresent ? "host-tool-present" : "host-tool-missing", submissionToolPresent ? "submission-tool-present" : "submission-tool-missing", turnOutputSchemaPresent ? "turn-schema-present" : "turn-schema-absent", consultationField, process.env.SSH_AUTH_SOCK ? "child-ssh-agent-present" : "child-ssh-agent-absent", leaderResponse].filter(Boolean);
+  const evidence = [model, sandbox, prompt.includes("Research Pi") ? "role-present" : "role-missing", deltaNotificationsOptedOut ? "delta-opt-out" : "delta-not-opted-out", hostToolPresent ? "host-tool-present" : "host-tool-missing", submissionToolPresent ? "submission-tool-present" : "submission-tool-missing", dynamicToolTypesValid ? "dynamic-tool-types-valid" : "dynamic-tool-types-invalid", turnOutputSchemaPresent ? "turn-schema-present" : "turn-schema-absent", consultationField, isResume ? (resumeParamsClean ? "resume-params-clean" : "resume-dynamic-tools-invalid") : "", process.env.SSH_AUTH_SOCK ? "child-ssh-agent-present" : "child-ssh-agent-absent", leaderResponse].filter(Boolean);
   let result = isAdvisorSchema ? {
     status: "working_synthesis",
     shared_understanding: "The question is still being clarified.",
@@ -344,18 +347,20 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     const consultation = message.params.dynamicTools?.find((tool) => tool.name === "consult_research_pi");
     const submission = message.params.dynamicTools?.find((tool) => tool.name === "submit_research_pi_result");
     submissionToolPresent = Boolean(submission);
+    dynamicToolTypesValid = message.params.dynamicTools?.every((tool) => tool.type === "function") ?? false;
     isAdvisorSchema = submission?.inputSchema?.required?.includes("shared_understanding") ?? false;
     consultationField = consultation?.inputSchema?.required?.includes("why_it_matters") ? "why-it-matters" : consultation?.inputSchema?.required?.includes("why_blocking") ? "why-blocking" : "missing-consultation-field";
     send({ id: message.id, result: { thread: { id: "thread-fake-123", turns: [] } } });
     send({ method: "thread/started", params: { thread: { id: "thread-fake-123", turns: [] } } });
   } else if (message.method === "thread/resume") {
     model = message.params.model;
-    hostToolPresent = message.params.dynamicTools?.some((tool) => tool.name === "research_pi_host") ?? false;
-    const consultation = message.params.dynamicTools?.find((tool) => tool.name === "consult_research_pi");
-    const submission = message.params.dynamicTools?.find((tool) => tool.name === "submit_research_pi_result");
-    submissionToolPresent = Boolean(submission);
-    isAdvisorSchema = submission?.inputSchema?.required?.includes("shared_understanding") ?? false;
-    consultationField = consultation?.inputSchema?.required?.includes("why_it_matters") ? "why-it-matters" : consultation?.inputSchema?.required?.includes("why_blocking") ? "why-blocking" : "missing-consultation-field";
+    resumeParamsClean = !Object.prototype.hasOwnProperty.call(message.params, "dynamicTools")
+      && !Object.prototype.hasOwnProperty.call(message.params, "serviceName");
+    // App Server persists dynamic tools on a compatible thread; thread/resume
+    // itself does not accept a dynamicTools field.
+    hostToolPresent = true;
+    submissionToolPresent = true;
+    dynamicToolTypesValid = true;
     isResume = true;
     send({ id: message.id, result: { thread: { id: message.params.threadId, turns: [] } } });
     send({ method: "thread/started", params: { thread: { id: message.params.threadId, turns: [] } } });
@@ -363,6 +368,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     activeTurn = "turn-fake-456";
     turnOutputSchemaPresent = Boolean(message.params.outputSchema);
     const prompt = message.params.input[0].text;
+    if (isResume) {
+      isAdvisorSchema = prompt.includes("read-only research advisor");
+      consultationField = isAdvisorSchema ? "why-it-matters" : "why-blocking";
+    }
     send({ id: message.id, result: { turn: { id: activeTurn, status: "inProgress", items: [], error: null } } });
     send({ method: "turn/started", params: { threadId: "thread-fake-123", turn: { id: activeTurn, status: "inProgress", items: [], error: null } } });
 	if (prompt.includes("crash after side effect barrier")) {
@@ -555,6 +564,7 @@ test("advisor, executor, and explicit resume produce durable structured jobs", a
 		assert.equal(executor.resultSource, "submit_research_pi_result");
 		assert.match(executor.result.evidence.join("\n"), /why-blocking/);
 		assert.match(executor.result.evidence.join("\n"), /submission-tool-present/);
+		assert.match(executor.result.evidence.join("\n"), /dynamic-tool-types-valid/);
 		assert.match(executor.result.evidence.join("\n"), /turn-schema-absent/);
 		assert.equal(readFileSync(join(workspace, "codex-executed.txt"), "utf8"), "executor ran\n");
 
@@ -567,6 +577,29 @@ test("advisor, executor, and explicit resume produce durable structured jobs", a
 		assert.equal(resumed.status, "completed");
 		assert.equal(resumed.continuationOf, executor.id);
 		assert.equal(resumed.result.summary, "resumed");
+		assert.match(resumed.result.evidence.join("\n"), /resume-params-clean/);
+
+		const legacyJobPath = join(jobRoot, resumed.id, "job.json");
+		const legacyJob = JSON.parse(readFileSync(legacyJobPath, "utf8"));
+		delete legacyJob.dynamicToolProtocolVersion;
+		writeFileSync(legacyJobPath, `${JSON.stringify(legacyJob, null, 2)}\n`, "utf8");
+		const refreshedStart = await resumeCodexJob(resumed.id, {
+			jobRoot,
+			codexBin,
+			followUp: "refresh a thread created before the current dynamic tools",
+		});
+		const refreshed = await waitForCodexJob(refreshedStart.id, { jobRoot });
+		assert.equal(refreshed.status, "completed");
+		assert.equal(refreshed.continuationOf, resumed.id);
+		assert.equal(refreshed.dynamicToolProtocolVersion, CODEX_DYNAMIC_TOOL_PROTOCOL_VERSION);
+		assert.equal(refreshed.threadRefresh?.reason, "dynamic_tool_protocol_upgrade");
+		assert.equal(refreshed.threadRefresh?.previousThreadId, resumed.threadId);
+		assert.equal(refreshed.resultSource, "submit_research_pi_result");
+		assert.match(refreshed.result.evidence.join("\n"), /submission-tool-present/);
+		const refreshedRequest = JSON.parse(readFileSync(join(jobRoot, refreshed.id, "request.json"), "utf8"));
+		assert.equal(refreshedRequest.continuationThreadId, null);
+		assert.match(refreshedRequest.prompt, /LEGACY THREAD REFRESH/);
+		assert.match(refreshedRequest.prompt, new RegExp(resumed.id));
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

@@ -27,6 +27,10 @@ export const DEFAULT_CODEX_EXECUTOR_MODEL = process.env.RESEARCH_PI_CODEX_EXECUT
 export const DEFAULT_CODEX_EXECUTOR_REASONING_EFFORT = process.env.RESEARCH_PI_CODEX_EXECUTOR_EFFORT?.trim() || "max";
 export const DEFAULT_CODEX_MODEL = DEFAULT_CODEX_EXECUTOR_MODEL;
 export const DEFAULT_CODEX_REASONING_EFFORT = DEFAULT_CODEX_EXECUTOR_REASONING_EFFORT;
+// App Server dynamic tools are fixed when a thread is created and cannot be
+// added by thread/resume. Bump this whenever the Research Pi dynamic tool set
+// or its required schemas change so pre-existing threads refresh once.
+export const CODEX_DYNAMIC_TOOL_PROTOCOL_VERSION = 1;
 
 const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled", "outcome_unknown"]);
 const RECONCILABLE_OUTCOMES = new Set(["completed", "failed", "cancelled"]);
@@ -361,7 +365,7 @@ function gitSnapshotFingerprint(snapshot) {
 		.slice(0, 16);
 }
 
-export function buildCodexContinuationNotice(previousJob, currentGit, currentResearch = {}) {
+function buildCodexFreshnessNotice(previousJob, currentGit, currentResearch = {}) {
 	const previousGit = previousJob.gitAfter ?? previousJob.gitBefore ?? {};
 	const previousFingerprint = gitSnapshotFingerprint(previousGit);
 	const currentFingerprint = gitSnapshotFingerprint(currentGit);
@@ -380,7 +384,26 @@ export function buildCodexContinuationNotice(previousJob, currentGit, currentRes
 	} else {
 		gitNotice = `The workspace changed after that job. Previous: ${describe(previousGit, previousFingerprint)}. Current: ${describe(currentGit, currentFingerprint)}. Treat prior file observations as stale and re-inspect the current workspace before editing, running, or interpreting evidence.`;
 	}
-	return `This continues Codex thread ${previousJob.threadId} from job ${previousJob.id}. ${routeNotice} ${gitNotice}`;
+	return `${routeNotice} ${gitNotice}`;
+}
+
+export function buildCodexContinuationNotice(previousJob, currentGit, currentResearch = {}) {
+	return `This continues Codex thread ${previousJob.threadId} from job ${previousJob.id}. ${buildCodexFreshnessNotice(previousJob, currentGit, currentResearch)}`;
+}
+
+export function buildCodexThreadRefreshNotice(previousJob, currentGit, currentResearch = {}) {
+	const handoff = String(
+		previousJob.result?.summary
+		?? previousJob.result?.working_synthesis
+		?? previousJob.result?.shared_understanding
+		?? "",
+	).trim().slice(0, 6000);
+	return [
+		`LEGACY THREAD REFRESH: job ${previousJob.id} used Codex thread ${previousJob.threadId}, which predates Research Pi dynamic-tool protocol v${CODEX_DYNAMIC_TOOL_PROTOCOL_VERSION}. A fresh Codex thread is being created so submit_research_pi_result, consult_research_pi, and research_pi_host are all available.`,
+		"The mission and Actor identity are unchanged, but conversational history is not being resumed. Reconstruct current state from the task and authoritative workspace; treat the previous handoff below as orientation rather than evidence.",
+		buildCodexFreshnessNotice(previousJob, currentGit, currentResearch),
+		handoff ? `<previous_handoff>\n${handoff}\n</previous_handoff>` : "No previous handoff summary is available.",
+	].join(" ");
 }
 
 function createJobId() {
@@ -440,6 +463,7 @@ export async function startCodexJob(options) {
 		});
 		const request = {
 			version: 5,
+			dynamicToolProtocolVersion: CODEX_DYNAMIC_TOOL_PROTOCOL_VERSION,
 			jobId,
 			mode,
 			model,
@@ -461,6 +485,7 @@ export async function startCodexJob(options) {
 			missionKey: mission ? missionKey(mission) : null,
 			prompt,
 			continuationThreadId: options.continuationThreadId,
+			threadRefresh: options.threadRefresh ?? null,
 			timeoutMinutes: options.timeoutMinutes ?? null,
 			codexBin: options.codexBin ?? process.env.PI_CODEX_BIN ?? "codex",
 			schemaPath,
@@ -472,6 +497,7 @@ export async function startCodexJob(options) {
 		};
 		const job = {
 			version: 5,
+			dynamicToolProtocolVersion: CODEX_DYNAMIC_TOOL_PROTOCOL_VERSION,
 			id: jobId,
 			transport: "app-server",
 			leaderSessionId: options.leaderSessionId ?? null,
@@ -505,6 +531,7 @@ export async function startCodexJob(options) {
 			activeTurnId: null,
 			pendingRequest: null,
 			continuationOf: options.continuationOf ?? null,
+			threadRefresh: options.threadRefresh ?? null,
 			exitCode: null,
 			progress: "queued",
 			currentActivity: null,
@@ -981,6 +1008,11 @@ export async function resumeCodexJob(jobId, options) {
 		throw new Error(`Codex job ${jobId} belongs to mission "${previous.mission}"; start a new thread for "${requestedMission}"`);
 	}
 	const currentGit = await getGitSnapshot(previous.cwd);
+	const canResumeThread = previous.dynamicToolProtocolVersion === CODEX_DYNAMIC_TOOL_PROTOCOL_VERSION;
+	const currentResearch = {
+		researchTrackRef: options.researchTrackRef ?? previous.researchTrackRef ?? "project:initial",
+		researchTrackLabel: options.researchTrackLabel ?? previous.researchTrackLabel ?? null,
+	};
 	return await startCodexJob({
 		...options,
 		cwd: previous.cwd,
@@ -988,14 +1020,19 @@ export async function resumeCodexJob(jobId, options) {
 		model: options.model ?? previous.model,
 		reasoningEffort: options.reasoningEffort ?? previous.reasoningEffort,
 		task: options.followUp,
-		continuationThreadId: previous.threadId,
+		continuationThreadId: canResumeThread ? previous.threadId : null,
 		continuationOf: previous.id,
+		threadRefresh: canResumeThread ? null : {
+			reason: "dynamic_tool_protocol_upgrade",
+			previousThreadId: previous.threadId,
+			previousProtocolVersion: previous.dynamicToolProtocolVersion ?? null,
+			currentProtocolVersion: CODEX_DYNAMIC_TOOL_PROTOCOL_VERSION,
+		},
 		leaderBranchAnchorId: options.leaderBranchAnchorId ?? previous.leaderBranchAnchorId ?? null,
 		mission: requestedMission ?? previous.mission ?? null,
-		continuationNotice: buildCodexContinuationNotice(previous, currentGit, {
-			researchTrackRef: options.researchTrackRef ?? previous.researchTrackRef ?? "project:initial",
-			researchTrackLabel: options.researchTrackLabel ?? previous.researchTrackLabel ?? null,
-		}),
+		continuationNotice: canResumeThread
+			? buildCodexContinuationNotice(previous, currentGit, currentResearch)
+			: buildCodexThreadRefreshNotice(previous, currentGit, currentResearch),
 		projectRevision: Number.isInteger(options.projectRevision) ? options.projectRevision : previous.projectRevision,
 		researchTrackRef: options.researchTrackRef ?? previous.researchTrackRef ?? "project:initial",
 		researchTrackLabel: options.researchTrackLabel ?? previous.researchTrackLabel ?? null,
@@ -1046,6 +1083,8 @@ export function publicJobView(job) {
 		activeTurnId: job.activeTurnId,
 		pendingRequest: job.pendingRequest ?? null,
 		continuationOf: job.continuationOf,
+		dynamicToolProtocolVersion: job.dynamicToolProtocolVersion ?? null,
+		threadRefresh: job.threadRefresh ?? null,
 		hostCapabilityCount: job.hostCapabilityCount ?? 0,
 		progress: job.progress,
 		currentActivity: job.currentActivity ?? null,

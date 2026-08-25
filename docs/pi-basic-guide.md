@@ -233,6 +233,8 @@ Codex 中间更新使用自然语言 `phase=commentary`，不再受终态 schema
 
 Pi 在连续处理同一研究子任务时应使用稳定、简短的 `mission` 标签。带 mission 的新派遣默认 `reuse=auto`：运行中的同 mission/mode/track job 会直接重新挂接，已完成的会通过 App Server `thread/resume` 续接历史；同一精确 workspace、mode、mission 和 research track 可跨 Pi session 复用。同一个 advisor mission 用于持续澄清同一问题；换轨后默认开启新 thread，只有用户或 Leader 显式恢复旧 job 才跨 track 续接，并会收到 route-change 警告。续接时 Runtime 也会比较 Git snapshot，工作区变化则要求 Codex 重新检查当前文件。使用 `/codex missions` 查看按 track 分组的任务链，使用 `/actors` 找当前活跃 Actor，或用 `/actors all` 找 suspended Actor 的稳定 `@codex:<Actor短码>`；若要切换研究路线或主动清除旧假设，使用新的 mission。
 
+App Server 的动态工具在 thread 创建时固定。Research Pi 为这组工具记录协议版本；升级结构化结果、Leader 咨询或宿主能力工具后，旧 thread 会在下一次续接时自动刷新一次。mission 与 Actor 身份保留，但旧对话不强行迁移；新 thread 从当前任务、上一轮简短 handoff 和权威工作区重建状态，之后继续正常复用。
+
 用户发现某个 Actor 跑偏时可以直接输入：
 
 ```text

@@ -849,6 +849,7 @@ async function main() {
 		const consultationWhyField = request.mode === "advisor" ? "why_it_matters" : "why_blocking";
 		const dynamicTools = [
 			{
+				type: "function",
 				name: "submit_research_pi_result",
 				description: request.mode === "advisor"
 					? "Submit the advisor working synthesis exactly once when the consultation turn is ready to hand back to Research Pi. Do not use this for commentary or progress updates."
@@ -856,6 +857,7 @@ async function main() {
 				inputSchema: resultInputSchema,
 			},
 			{
+				type: "function",
 				name: "research_pi_host",
 				description:
 					"Use Research Pi host capabilities for justified SSH or host-user operations. Project-trusted SSH targets and command prefixes run automatically. For a listed command grant, pass grantId so its approved cwd is restored; do not switch capability kind or create a shell wrapper after a cwd mismatch. A missing grant pauses this same tool call for the Pi TUI decision; do not duplicate it through consult_research_pi. Normal uv/Python/shell commands stay in the project sandbox. Advisor mode may use read only.",
@@ -878,6 +880,7 @@ async function main() {
 				},
 			},
 			{
+				type: "function",
 				name: "consult_research_pi",
 				description:
 					request.mode === "advisor"
@@ -901,12 +904,13 @@ async function main() {
 			model: request.model,
 			approvalPolicy: "never",
 			permissions: request.sandbox,
-			dynamicTools,
-			serviceName: "research_pi",
 		};
+		// Dynamic tools are a thread/start-only capability in the App Server
+		// protocol. Compatible Research Pi threads retain the tools they were
+		// created with; legacy threads are refreshed by resumeCodexJob.
 		const threadResponse = request.continuationThreadId
 			? await rpcRequest("thread/resume", { ...threadParams, threadId: request.continuationThreadId }, 60_000)
-			: await rpcRequest("thread/start", threadParams, 60_000);
+			: await rpcRequest("thread/start", { ...threadParams, serviceName: "research_pi", dynamicTools }, 60_000);
 		registerRootThread(threadResponse?.thread?.id ?? request.continuationThreadId);
 		if (!threadId) throw new Error("Codex app-server did not return a thread id");
 		if (request.mode === "executor") {
