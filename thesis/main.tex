@@ -50,6 +50,7 @@
 \newcolumntype{Y}{>{\raggedright\arraybackslash}X}
 \newcommand{\code}[1]{\texttt{#1}}
 \newcommand{\term}[1]{\textbf{#1}}
+\newcommand{\memtag}[1]{\fcolorbox{RPGreen}{RPGreen!8}{\strut\footnotesize\bfseries #1}}
 
 \newtcolorbox{resultbox}[1][]{
   colback=RPLight,
@@ -80,281 +81,395 @@
 \maketitle
 
 \begin{resultbox}[结论先行]
-Research-Pi 的核心成果不是给 Coding Agent 增加一段科研提示词，而是把长期科研状态、证据、Agent 协作、权限与 Session 交接提升为 Project 级运行时对象。Pi/DeepSeek 作为 Research Leader 负责问题理解、实验判断与用户沟通；Codex 作为可续接的 Advisor/Executor 负责工具密集和长程执行。当前系统已经形成可日常使用的科研入口，并在真实计算实验项目中持续暴露、修复上下文陈旧、跨 Session 串扰、压缩中断、权限阻塞和日志写盘等问题。工程机制已经得到自动化测试和打包验证，但“是否显著提高科研效率、缓存命中率和结论质量”仍需通过后续真实任务评估，而不能仅凭功能完成自动宣布成功。
+Research-Pi 不是 AutoResearch，也不只是给 Coding Agent 增加科研提示词。它面向研究者深度参与的计算实验流程，用三条轴组织 Harness：\term{记忆 $M$}让 Session 可以丢弃而研究认知留下，\term{通信 $C$}让 User、Leader 与 Subagent 的任务和消息不串扰，\term{控制 $A$}让 Agent 在项目内充分执行而人的研究裁决不可替代。当前工程机制已经通过自动化测试和真实项目迭代；是否提高科研效率与结论质量，仍需在后续科研任务中评估。
 \end{resultbox}
 
-\setcounter{tocdepth}{1}
+\setcounter{tocdepth}{2}
 \tableofcontents
 \newpage
 
-\section{背景：为什么科研 Agent 不能只等同于 Coding Agent}
+\section{模块一：动机与目标}
 
-AI、通信、机器人、优化与仿真研究的大量工作已经表现为计算实验：阅读代码和论文、构造假设、实现探针、运行本地或远程实验、解释结果，再决定保留、修改或淘汰一条路线。现有 Coding Agent 往往能完成单次编码任务，却容易在长程科研中出现五类结构性问题。
+\subsection{为什么通用 Coding Agent 不足以承担长程科研}
 
-\begin{enumerate}
-  \item \term{目标错位}：默认追求最小改动、代码整洁和生产鲁棒性，而科研早期真正需要的是快速区分假设和淘汰错误路线。
-  \item \term{上下文污染}：规划、命令、日志和中间实现都进入一个 Session，工具输出逐渐淹没研究问题。
-  \item \term{状态陈旧}：实验推进速度快于摘要和 ProjectView 更新，旧 claim 或旧 next step 可能被后续模型误当作当前事实。
-  \item \term{协作失真}：Leader 与执行 Agent 的任务、消息和完成状态容易混在一起；“子任务执行完成”又容易被误读为“研究假设成立”。
-  \item \term{权限两难}：沙箱太紧会迫使用户手工执行，完全放开又会把宿主凭据、其他项目和系统盘暴露给模型。
-\end{enumerate}
-
-这些问题说明，限制长程科研表现的往往不只是模型能力，而是 Harness 如何组织状态、上下文、协作和权限。因此，Research-Pi 的研究对象可以概括为：
-
-\begin{quote}
-如何设计一个面向计算实验科研的 Agent Harness，使模型能够快速探索、可靠更新研究判断、跨 Session 保持连续性，同时不让工具噪声、旧记忆和权限摩擦主导科研过程？
-\end{quote}
-
-\section{目标与边界}
-
-Research-Pi 的目标不是自动替代研究者，也不是立即构造“全自动 AI Scientist”。当前目标有三层：
+计算实验科研并不只是连续写代码。研究者需要反复提出假设、设计可区分实验、检查结果是否有效，并据此改变方向。通用 Coding Agent 在这一过程中主要暴露三类问题：
 
 \begin{enumerate}
-  \item 让单个研究者可以把 \code{pi} 作为统一科研入口；
-  \item 让 Pi、Codex、实验工具和长期记忆形成可恢复、可观察的 Project Runtime；
-  \item 让每轮工作最终回到可解释的研究推进：支持或削弱一个假设、发现混淆因素、淘汰路线，或明确下一高信息量实验。
+  \item \term{目标错位}：倾向最小改动、完成当前任务和保护已有实现，而科研早期更需要高信息增益实验、快速证伪和果断放弃弱路线。
+  \item \term{上下文污染}：计划、命令、日志和中间补丁不断进入同一 Session，真正的研究问题与证据边界逐渐被工具噪声淹没。
+  \item \term{模型固有惯性}：GPT 类模型容易沿最近任务继续局部修补，把流畅解释当成可靠结论，把进程 \code{completed}、任务完成和假设成立混为一谈；长上下文与有损摘要还会放大旧判断的惯性。
 \end{enumerate}
 
-系统有意保留以下边界：科研结论不由退出码、提交或 Agent 的 completed 状态自动生成；高代价或不可逆决策仍由用户控制；当前实现不自动拆解所有任务、不自动选择研究路线，也不承诺固定的缓存命中率或科研提速比例。
+因此，Research-Pi 不是要构造无人参与的 AutoResearch，而是要构造一个\term{研究者能够深度参与的 Research Harness}：Agent 承担记忆恢复、候选假设、工具执行和证据整理；人持续提供研究目标、价值判断、关键取舍和对结论的最终裁决。人的作用不是异常时才介入的审批器，而是研究闭环中不可替代的共同决策者。
 
-\section{总体设计原则}
+\section{模块二：三轴设计}
 
-\subsection{代码是实验工具，而不是默认需要保护的资产}
+\subsection{一张图理解 Research-Pi}
 
-研究阶段的实现首先必须正确表达实验意图。若一百行代码已经证明方向无效，整体回滚通常优于在沉没成本上继续打补丁。所谓“最小实验”指时间、算力、污染和不可逆代价小，并不要求 diff 小。只有路线获得证据支持后，才进入清理实现、补测试和提高鲁棒性的收敛阶段。
-
-\subsection{Project、Session 与 Context 分离}
-
-Research-Pi 将三个经常混淆的对象分开：
-
-\begin{itemize}
-  \item \term{Project}：长期研究问题、证据、决策、Agent 和权限的共同作用域；
-  \item \term{Session}：某个 Leader 的临时工作集，可以轮换或清空；
-  \item \term{Context}：某一次模型调用真正需要看到的有限信息。
-\end{itemize}
-
-因此，“更换 Session”不再意味着“重新理解整个项目”，而“Project 中存在一条消息”也不意味着它应永久进入每次模型调用。
-
-\subsection{Message、State 与 Evidence 分离}
-
-消息说明发生过一次通信；State 是当前可操作的研究认知；Evidence 是能够支撑或限制研究判断的观察及其 provenance。三者的更新规则不同。一个 Codex result 可以进入 mailbox，但只有经过有效性检查的实验记录才有资格更新 claim。
-
-\subsection{沟通是科研认知接口}
-
-Leader 面向 Codex 可以使用高密度内部术语，但面向用户必须恢复足够的研究脉络。高质量汇报需要按情况选择以下语义，而不是机械套固定模板：
-
-\begin{enumerate}
-  \item 当前结果位于哪个阶段，原本要回答什么问题；
-  \item Leader 与 subagent 实际做了什么；
-  \item 观察到了什么，关键数字相对于哪个基线或阈值；
-  \item 实验是否有效，主要限制是什么；
-  \item 证据如何改变研究判断，以及下一步为什么这样选。
-\end{enumerate}
-
-当用户已经掌握上下文并继续追问时，Leader 应直接回答，不重复整段背景。这里的目标是降低重新认知成本，而不是把技术内容过度通俗化。
-
-\section{系统架构}
+Research-Pi 将 Harness 归纳为三个相互耦合的轴：记忆 $M$ 维持跨时间的研究连续性，通信 $C$ 维持跨 Actor 的任务连续性，控制 $A$ 决定谁可以把判断变成现实行动。
 
 \begin{figure}[H]
   \centering
   \begin{tikzpicture}[
-    node distance=8mm and 9mm,
-    box/.style={draw=RPLine, very thick, rounded corners=2pt, text width=2.65cm, minimum height=14mm, align=center, fill=white, inner sep=5pt, font=\small},
-    leader/.style={box, text width=2.9cm, draw=RPBlue, fill=RPBlue!7},
-    runtime/.style={box, text width=3.7cm, draw=RPCyan, fill=RPCyan!7},
-    exec/.style={box, draw=RPOrange, fill=RPOrange!8},
-    evidence/.style={box, draw=RPGreen, fill=RPGreen!8},
-    arrow/.style={-{Latex[length=2.4mm]}, thick, draw=RPGray}
+    node distance=12mm and 17mm,
+    box/.style={draw=RPLine, very thick, rounded corners=2pt, minimum height=12mm, text width=2.55cm, align=center, fill=white, inner sep=5pt, font=\small},
+    human/.style={box, draw=RPBlue, fill=RPBlue!7},
+    agent/.style={box, draw=RPCyan, fill=RPCyan!7},
+    memory/.style={box, draw=RPGreen, fill=RPGreen!8},
+    control/.style={box, draw=RPOrange, fill=RPOrange!9},
+    arrow/.style={-{Latex[length=2.3mm]}, thick, draw=RPGray},
+    flow/.style={{Latex[length=2.3mm]}-{Latex[length=2.3mm]}, thick, draw=RPGray}
   ]
-    \node[box] (user) {User\\研究目标与裁决};
-    \node[leader, right=of user] (pi) {Pi / DeepSeek\\Research Leader};
-    \node[runtime, right=of pi] (runtime) {Project Runtime\\Actor · Action\\Mailbox · Lease};
-    \node[exec, right=of runtime] (codex) {Codex\\Advisor / Executor};
-    \node[box, below=of codex] (tools) {代码 · Git\\本地/远程实验\\Artifacts};
-    \node[evidence, below=of runtime] (evidence) {Evidence Ledger\\Experiment / Transition\\Provenance};
-    \node[evidence, below=of pi] (memory) {Project State\\Memory / Compact\\Search / ProjectView};
-    \node[box, below=of user] (authority) {Project Boundary\\Sandbox / Host Capability};
+    \node[human] (user) {User\\目标与最终裁决};
+    \node[agent, right=of user] (leader) {Pi Leader\\规划与解释};
+    \node[agent, right=of leader] (sub) {Subagent\\Advisor / Executor};
+    \node[memory, below=of user] (mem) {Memory $M$\\证据、状态、ProjectView};
+    \node[control, below=of leader] (auth) {Control $A$\\角色、权限、恢复};
+    \node[box, below=of sub] (work) {Actions\\代码、实验、SSH};
 
-    \draw[arrow,<->] (user) -- (pi);
-    \draw[arrow,<->] (pi) -- (runtime);
-    \draw[arrow,<->] (runtime) -- (codex);
-    \draw[arrow] (codex) -- (tools);
-    \draw[arrow] (tools) -- (evidence);
-    \draw[arrow] (evidence) -- (memory);
-    \draw[arrow] (memory) -- (pi);
-    \draw[arrow] (authority) -- (pi);
+    \node[font=\small\bfseries, text=RPCyan] at ($(user.north)!0.5!(sub.north)+(0,7mm)$) {Communication $C$};
+    \draw[flow] (user) -- (leader);
+    \draw[flow] (leader) -- (sub);
+    \draw[arrow] (mem) -- (leader);
+    \draw[arrow] (leader) -- (auth);
+    \draw[arrow] (sub) -- (work);
+    \draw[arrow] (auth) -- (work);
+    \draw[arrow] (work.south) |- (mem.south);
   \end{tikzpicture}
-  \caption{Research-Pi 的 Project-centric 分层架构。Leader 保留科研判断，Runtime 维护跨 Session 状态，Codex 隔离工具密集执行。}
-  \label{fig:architecture}
+  \caption{Research-Pi 的三轴闭环。上层通信 $C$ 连接 User、Leader 与 Subagent；控制 $A$ 约束它们能够触发的现实行动；行动产生的证据回到记忆 $M$，再通过 ProjectView 和检索进入下一轮判断。}
+  \label{fig:three-axes}
 \end{figure}
-
-从实现上看，系统建立在 Pi Core 之上，并通过受审查的 extensions 和 libraries 形成六个层次：
-
-\begin{enumerate}
-  \item \term{模型与兼容层}：统一管理 DeepSeek/OpenCode Go profile、thinking level 和 provider compatibility；
-  \item \term{研究行为层}：稳定 Research Contract、skill 白名单和 Research Briefing；
-  \item \term{运行时层}：Project Actor、Action、mailbox、Leader attachment 与 Session rotation；
-  \item \term{认知状态层}：experiment ledger、transition、structured compact、memory search 和 ProjectView；
-  \item \term{执行协作层}：Codex mission/thread 复用、advisor/executor、watch 与 structured result；
-  \item \term{权限层}：project sandbox、SSH target、external read、host command 与批准账本。
-\end{enumerate}
-
-\section{关键机制}
-
-\subsection{Project Runtime：从聊天记录转向语义事件}
-
-Runtime 采用 append-only ledger 保存少量语义事件，而不是高频记录每个 token 或 heartbeat。设事件流为
-\[
-L_t=(e_1,e_2,\ldots,e_t), \qquad S_t=\operatorname{fold}(L_t),
-\]
-其中 $S_t$ 是当前 Project snapshot。只有 state commit/amend、research transition 和 evidence record 增加 Project revision；Actor activation 等运行事件不自动改变科研状态。
-
-Project 同时只有一个 attached Research Leader Session。attachment epoch 与 activation lease 防止两个 Session 同时把自己当成 Leader；Codex completion、权限请求和消息通过 durable mailbox 交给当前 attached Session，而不是绑定最初发起任务的聊天窗口。
-
-\subsection{ProjectView：及时更新，同时保护前缀缓存}
-
-早期 ProjectView 依赖 compact 后的 structured state，实验推进后容易滞后。当前设计将它拆成：
-
-\begin{itemize}
-  \item \term{structured baseline}：最近一次可信综合，带 session/entry/hash provenance；
-  \item \term{live delta}：baseline 之后的新 transition、intervention、observation、validity 和 interpretation。
-\end{itemize}
-
-若 evidence 新于 baseline，旧 claim 和 planned next experiment 只作为历史基线显示，不能作为当前结论执行。窄幅更新使用 state amendment，实质换轨使用 transition，真正的阶段边界才进行模型 compact；普通实验完成不机械触发压缩。
-
-为改善 DeepSeek 的 prefix/KV cache，ProjectView 不再在每轮删除后移动到最新 user message 前，而是在用户轮开始时通过 \code{before\_agent\_start} 向 Session 尾部持久追加 snapshot 或短 delta。同一 agent turn 内刚产生的新 evidence，只由 \code{context} hook 在下一模型调用尾部临时补充。理想化的请求关系由
-\[
-P_{t+1}=P_t\;\Vert\;A_t\;\Vert\;U_{t+1}\;\Vert\;\Delta V_{t+1}
-\]
-近似表达：旧请求 $P_t$ 尽量保持为新请求的完整前缀，变化集中在尾部。实际缓存仍是 provider 的 best-effort 能力，需要根据 \code{cacheRead} 而非 Harness 自己的 hash 判断。DeepSeek 官方也明确不保证固定命中率。\footnote{DeepSeek Context Caching: \url{https://api-docs.deepseek.com/guides/kv_cache/}}
-
-\subsection{Memory 与 Compact：索引、状态和原文各司其职}
-
-Research Memory 使用本地全文索引检索历史 Session 与 experiment record，不引入向量数据库。检索结果先返回 session/entry 引用，再按需读取原文，因此 assistant summary 不会天然获得比实验记录更高的证据等级。
-
-Research Compaction 在 agent 和工具链完全 settled 后执行。默认 soft/hard 上下文阈值约为 272K/384K，保留 24K/32K/40K 的动态 recent tail，结构化摘要目标 8K、生成上限 16K。Compact 输出不仅是自然语言摘要，还包括 research question、竞争假设、观察、有效性、决策、未决混淆因素、下一实验和 evidence references。完整 JSONL 历史仍然保留。
-
-\subsection{Codex 协作：隔离执行噪声，而不是追求形式并行}
-
-Pi 是 Leader，Codex 是具备同等项目执行权限的 operational executor 或只读 advisor。派遣的主要价值是隔离大量工具调用和中间输出，而不是为了并发本身。
-
-连续子任务使用稳定 mission 标签，并在同一 workspace、mode、mission 和 research track 上复用 Codex thread。Runtime 将 transport lifecycle 与任务语义结果分开：App Server 的 completed 只说明 turn 正常结算；只有 executor 返回 \code{outcome=succeeded} 且 \code{goal\_satisfied=true}，才表示委派目标完成。即便如此，它仍不是科学假设成立的证据。
-
-Codex 可在运行中发送 progress、ask 和 result。权限请求通过同一 host capability bridge 弹到 Pi TUI，用户批准后恢复原 tool call；完成结果携带 summary、actions、changed files、checks、external effects、uncertainties 和 remaining work，Leader 再将其翻译成面向用户的研究汇报。
-
-\subsection{权限模型：项目内高自主，项目外显式越界}
-
-Research-Pi 不按 \code{python3 -c}、\code{bash -lc} 等字符串形式机械封禁命令，而按效果边界管理权限：
-
-\begin{itemize}
-  \item 当前项目内允许正常读写、删除、Git commit、依赖安装和实验执行；
-  \item 必要系统运行时只读开放，Git hooks 保持只读；
-  \item 其他项目、宿主凭据、SSH agent 和 Unix socket 默认不可见；
-  \item 项目外只读文件、精确 SSH target 和 host command 通过一次、Session 或 Project 范围批准；
-  \item 私钥、API key、\code{.env} 和 keychain 不能被授权成模型可读内容。
-\end{itemize}
-
-这使“自动化执行”和“宿主安全”不再被简化成全开或全关。WSL2 场景另有 Windows 专用分支，用于限制跨入 \path{/mnt} 的高风险 Windows 文件操作。
-
-\subsection{低写盘观察性}
-
-Tool Activity、Runtime Dock 和 \code{/watch} 从已有状态投影运行进度，不建立第二套 heartbeat 日志。Codex job 只在可见进度或语义状态变化时写入；token delta storm 不持续落盘。敏感 trace 与 Codex TRACE/DEBUG SQLite 日志默认关闭，只有显式诊断时启用。
-
-\section{一次科研任务中的消息与判断流程}
-
-\begin{figure}[H]
-  \centering
-  \begin{tikzpicture}[
-    flowstep/.style={draw=RPLine, rounded corners=2pt, fill=RPLight, text width=0.82\textwidth, minimum height=9mm, align=center, inner xsep=7pt},
-    arrow/.style={-{Latex[length=2.2mm]}, thick, draw=RPGray},
-    node distance=5mm
-  ]
-    \node[flowstep] (q) {1. User 与 Leader 明确研究问题、竞争假设和什么观察会改变判断};
-    \node[flowstep, below=of q] (d) {2. Leader 直接运行低噪声探针，或把长程执行交给 Codex mission};
-    \node[flowstep, below=of d] (o) {3. 工具/Executor 返回操作事实：命令、文件、run、artifact、失败与权限请求};
-    \node[flowstep, below=of o] (v) {4. Leader 分离 observation 与 interpretation，并检查介入是否生效、结果是否可解释};
-    \node[flowstep, below=of v] (e) {5. 决策相关结果写入 experiment ledger；transition 或 amendment 更新 Project revision};
-    \node[flowstep, below=of e] (p) {6. ProjectView delta 进入下一模型边界；Leader 向用户说明阶段、工作、证据、边界与下一步};
-    \foreach \a/\b in {q/d,d/o,o/v,v/e,e/p}{\draw[arrow] (\a) -- (\b);}
-  \end{tikzpicture}
-  \caption{从任务执行到科研判断的完整链路。关键点是操作事实不能跨过有效性检查直接成为结论。}
-\end{figure}
-
-\section{阶段成果与工程证据}
-
-截至本报告生成时，主分支已经形成全局可安装的 \code{pi} CLI、16 个显式 Harness extensions、20 个核心 library modules 和 143 个自动化测试用例。稳定包将程序、用户配置和运行状态分离，并检查 npm manifest 不包含 credentials、sessions、traces、Runtime ledger 或 Codex job。
 
 \begin{table}[H]
   \centering
-  \caption{主要问题、当前机制与已获得的工程证据}
+  \caption{三轴分别解决什么问题}
   \small
-  \setlength{\tabcolsep}{4pt}
-  \begin{tabularx}{\textwidth}{>{\bfseries\raggedright\arraybackslash}p{2.55cm}YY}
+  \begin{tabularx}{\textwidth}{>{\bfseries\raggedright\arraybackslash}p{1.7cm}p{4.1cm}Y}
     \toprule
-    问题 & 当前机制 & 当前证据与边界 \\
+    轴 & 核心问题 & 在 Research-Pi 中的体现 \\
     \midrule
-    偏开发、过度保守 & Research Contract；探索/收敛分阶段 & Prompt、skill 和真实任务行为已迭代；尚无正式行为 A/B \\
-    长上下文压缩失真 & Structured compact、provenance、recent tail、settled 后压缩 & schema/unit tests 与长期 Session 实测；摘要仍可能犯错，原文保留 \\
-    ProjectView 陈旧 & revision、baseline/delta、追加式 snapshot & stale/transition/Git/大视图截断测试；真实缓存收益待测 \\
-    Codex 串话或误路由 & 任务身份五元组与 Leader lease & 跨 Session、branch、workspace 和 thread reuse 测试 \\
-    Codex 运行不可见 & Runtime Dock、mailbox、watch 与结构化终态 & 命令/文件/ask/result 投影与低写盘测试 \\
-    权限过紧导致人工接管 & 项目沙箱、capability broker 与 Codex 审批桥 & Git/Python/SSH/host-command/preflight 测试；高权限操作仍需人审 \\
-    用户看不懂阶段进展 & Leader 沟通约定与 research-briefing & 结构与触发规则已实现；表达质量需继续从真实对话迭代 \\
+    记忆 $M$ & 哪些历史可信、当前研究状态是什么、本轮模型需要看到什么 & 原始 Session/Artifact、实验账本、全文检索、structured compact、ProjectView \\
+    通信 $C$ & 谁在处理哪个目标，问题、进度和结果应送给谁 & User--Leader 对话、Actor/Action、mission/thread、durable mailbox、ASK/result、Session handoff \\
+    控制 $A$ & 谁能读写或执行，哪些决策必须由人裁决，副作用未知时如何恢复 & Leader/Analysis 角色、project sandbox、host capability、SSH trust、preflight、cancel/reconcile \\
     \bottomrule
   \end{tabularx}
 \end{table}
 
-工程验证包括语法检查、Runtime/ProjectView/Codex/permission 单元测试、包清单审计和隔离配置下的 CLI smoke。这里必须区分两类结论：这些检查能够说明实现路径按预期工作，却不能单独证明 Research-Pi 已经提升了科学发现质量。
+\subsection{M：四类扩展把历史变成模型可用的研究状态}
 
-\section{真实科研使用带来的认识}
+“原始、结构化、工作”描述的是记忆层级，不是扩展名称。Research-Pi 中真正对应的四类功能如下：
 
-Research-Pi 并非闭门一次性设计，而是在 EmbeddingWorld 等长程计算实验中不断被真实摩擦修正。典型例子包括：
+\begin{table}[H]
+  \centering
+  \caption{记忆扩展的职责与层级}
+  \small
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{3.8cm}YY}
+    \toprule
+    扩展功能 & 它具体做什么 & 在记忆层级中的作用 \\
+    \midrule
+    \memtag{M1}\quad\term{原始检索}\par\smallskip
+    \term{Research Memory}\par{\footnotesize Search / Read}
+    & 为完整 Session JSONL、实验记录和历史条目建立本地全文索引；先返回 session/entry 引用，再读取小范围原文
+    & \term{原始历史的检索入口}。原文保留最高信息量，但不会自动进入每轮上下文 \\
+    \addlinespace[2pt]\cmidrule(lr){1-3}\addlinespace[2pt]
+    \memtag{M2}\quad\term{证据账本}\par\smallskip
+    \term{Experiment Ledger}
+    & \code{record\_experiment} 保存 intervention、observation、validity、interpretation 与 provenance；transition 保存研究换轨
+    & \term{结构化证据记忆}。记录“发生了什么及是否可解释”，但不自动代表当前结论 \\
+    \addlinespace[2pt]\cmidrule(lr){1-3}\addlinespace[2pt]
+    \memtag{M3}\quad\term{长期状态}\par\smallskip
+    \term{Project State}\par{\footnotesize via Research Compaction}
+    & 在阶段检查点综合 research question、claim、竞争假设、观察、决策、混淆因素和下一实验；按 revision 持久化，amendment/transition 做显式更新
+    & \term{Project 级持久状态源}。回答“当前依据什么相信什么”，跨 Session 共享且带 provenance \\
+    \addlinespace[2pt]\cmidrule(lr){1-3}\addlinespace[2pt]
+    \memtag{M4}\quad\term{调用视图}\par\smallskip
+    \term{ProjectView}
+    & 每次从 Project State、最新 evidence/transition、task handoff、Git 与 Runtime 状态重新渲染限长 snapshot/delta
+    & \term{可重建的模型上下文投影}。回答“这次调用需要看到什么”，带 freshness，但不是新的状态源 \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+四层并不互相替代：Research Memory 找回精确来源，Experiment Ledger 保存证据，Compact 形成 Project State，ProjectView 再与最新 delta 共同生成 Model Context。\term{M3 是状态源，M4 是状态视图}：M3 持久、低频并承载 Project 级综合；M4 按 Session/调用重建、受上下文预算约束，随 freshness 和 live delta 变化。新 evidence 可以先出现在 M4 中，但在 compact/amend/transition 前仍标记为“尚未综合”，不能反向覆盖 M3。普通 compact 回答“此前对话说了什么”；Research Compaction 则回答“现在依据什么相信什么、还不知道什么、下一实验要区分什么”。
+
+\subsection{C：消息沿 Project Runtime 路由，而不是绑定某个聊天窗口}
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[
+    x=1cm,y=1cm,
+    actor/.style={draw=RPCyan, very thick, rounded corners=2pt, minimum width=3.15cm, minimum height=9mm, align=center, fill=RPCyan!7, font=\small},
+    human/.style={actor, draw=RPBlue, fill=RPBlue!7},
+    runtime/.style={actor, draw=RPGreen, fill=RPGreen!7},
+    life/.style={draw=RPLine, dashed, thick},
+    msg/.style={-{Latex[length=2.1mm]}, thick},
+    taskmsg/.style={msg, draw=RPBlue},
+    askmsg/.style={msg, draw=RPOrange},
+    resultmsg/.style={msg, draw=RPGreen},
+    async/.style={msg, draw=RPGray, dashed}
+  ]
+    \node[human] (u) at (0,0) {User};
+    \node[actor] (l) at (4.25,0) {Attached Pi Leader};
+    \node[runtime] (r) at (8.5,0) {Project Runtime / Mailbox};
+    \node[actor] (c) at (12.75,0) {Codex Actor};
+
+    \foreach \n in {u,l,r,c}{\draw[life] (\n.south) -- ++(0,-9.4);}
+
+    \draw[taskmsg] (0,-1.0) -- node[above,fill=white,inner sep=1pt,font=\scriptsize]{1. research request} (4.25,-1.0);
+    \draw[taskmsg] (4.25,-1.8) -- node[above,fill=white,inner sep=1pt,font=\scriptsize]{2. start / resume mission} (8.5,-1.8);
+    \draw[taskmsg] (8.5,-2.6) -- node[above,fill=white,inner sep=1pt,font=\scriptsize]{3. task + project context} (12.75,-2.6);
+    \draw[async] (12.75,-3.4) -- node[above,fill=white,inner sep=1pt,font=\scriptsize]{progress / notify} (8.5,-3.4);
+    \draw[askmsg] (12.75,-4.2) -- node[above,fill=white,inner sep=1pt,font=\scriptsize]{4. ASK / input\_required} (8.5,-4.2);
+    \draw[askmsg] (8.5,-5.0) -- node[above,fill=white,inner sep=1pt,font=\scriptsize]{deliver to current Leader} (4.25,-5.0);
+    \draw[askmsg] (4.25,-5.8) -- node[above,fill=white,inner sep=1pt,font=\scriptsize]{5. respond / steer} (8.5,-5.8);
+    \draw[askmsg] (8.5,-6.6) -- node[above,fill=white,inner sep=1pt,font=\scriptsize]{resume the same job} (12.75,-6.6);
+    \draw[resultmsg] (12.75,-7.4) -- node[above,fill=white,inner sep=1pt,font=\scriptsize]{6. structured result} (8.5,-7.4);
+    \draw[resultmsg] (8.5,-8.2) -- node[above,fill=white,inner sep=1pt,font=\scriptsize]{deliver once + settle} (4.25,-8.2);
+    \draw[resultmsg] (4.25,-9.0) -- node[above,fill=white,inner sep=1pt,font=\scriptsize]{7. evidence-bounded report} (0,-9.0);
+  \end{tikzpicture}
+  \caption{Codex 消息先进入 Project Runtime，再交给当前 attached Leader。蓝色 1--3 是任务路径，橙色 4--5 是阻塞 ASK 往返，绿色 6--7 是结果路径；灰色虚线 progress 只供 \code{/watch} 观察。ASK 通过精确的 job ID 和 request ID 返回同一 Codex turn；Session 轮换只改变 Leader attachment，不改变 Action、mailbox 和 mission 的 Project 归属。}
+  \label{fig:communication-sequence}
+\end{figure}
+
+\par\medskip
+\noindent\term{三条关键消息路径如下：}
 
 \begin{itemize}
-  \item 两个 Pi Session 的 Codex 消息曾发生交叉，推动 job ownership 从会话局部升级为 Project Actor 与 attachment lease；
-  \item compaction 曾在长任务结束时中断主流程，推动“agent settled 后再 compact”和恢复机制；
-  \item ProjectView 落后于实验推进，推动 semantic revision、stale baseline 和 evidence delta；
-  \item 远程脚本、系统 Git/Python 与 SSH 曾被沙箱过度限制，推动 capability broker 与 preflight；
-  \item trace 和 Codex 内部日志可能造成高频写盘，推动稀疏语义事件、按需 watch 和默认关闭 DEBUG 日志；
-  \item Leader 汇报充满内部黑话，推动将“用户共享研究状态”与“Agent 内部高密度通信”分开设计。
+  \item \term{任务路径}：Leader 用稳定 mission 启动或续接 Action；Runtime 绑定 Project、workspace、mode、research track 和 Codex thread，防止另一个 Session 或分支误接任务。
+  \item \term{阻塞路径}：Codex 需要信息或权限时发送 ASK/\code{input\_required}。mailbox 将它交给当前 Leader；\code{respond} 回答明确请求，\code{steer} 在安全边界修正方向，二者都续接原 job，而不是重启一个新 Agent。
+  \item \term{结果路径}：progress/notify 主要进入状态栏和 \code{/watch}；terminal result 只投递一次并保留结构化 outcome、changed files、checks、external effects 与 remaining work。Leader 进行有效性判断后再向 User 汇报或写入证据记忆。
 \end{itemize}
 
-这些案例共同说明：Harness 的价值不只是提供更多工具，而是决定什么信息进入模型、何时更新、由谁解释、以什么权限执行，以及如何让研究者持续参与高质量判断。
+Mailbox 消息经历 \code{queued → delivered → consumed/superseded}，因此“模型看见 ASK”不等于请求已经结算，旧 ASK 也不会永久复活。Analysis Session 的 synthesis 通过同一 Runtime 作为 proposal 发给 Leader，但它不能消费 Leader mailbox 或直接更新 Project State。通信轴由此维持任务连续性，同时保持 Session 隔离。
+\subsection{A：让 Agent 放手执行，让人保留研究裁决}
 
-\section{当前局限与下一阶段}
+控制轴不是为了把 Agent 变成“乌龟”，而是把不同主体的权力说清楚：
 
-\subsection{尚未完成的验证}
+\begin{itemize}
+  \item \term{User}决定研究目标、关键取舍、项目外授权以及高代价或不可逆裁决；
+  \item \term{Leader}在项目内规划、修改、运行实验和调度 subagent，并负责解释证据；
+  \item \term{Subagent}在委派范围内咨询或执行；executor 可拥有与 Leader 相当的项目内权限，但不能取代 User/Leader 定义研究问题和更新结论；
+  \item \term{Analysis Session}共享 Project memory，但保持只读；有价值的讨论作为 proposal 发给 Leader，只有用户显式 promote 后才获得执行权。
+\end{itemize}
 
-当前最重要的缺口不是继续堆叠功能，而是建立真实科研任务上的评估：
+模型默认可在当前项目内读写、commit 和运行实验；项目外文件、精确 SSH target 与宿主命令通过 capability 明示越界，凭据本身不进入上下文。若 worker 中断且副作用未知，系统先检查 Git/run/远程状态并 reconcile，而不是盲目重跑。其好处是同时获得项目内执行自由、人的最终控制和可恢复的自动化。
+
+\section{模块三：关键细节与当前证据}
+
+\subsection{科研策略：先获得可靠信息，再做工程化}
+
+Research Contract 把代码视为检验假设的工具：原因不明时形成实质不同的竞争假设，优先选择能区分它们的实验；负结果先检查介入是否生效；连续局部补丁没有增加信息量时主动换抽象或回到干净状态。只有方向获得证据支持后，才提高测试、兼容性与工程质量。该策略横跨三轴，但不另建一份 Project 状态。
+
+\subsection{上下文与缓存：稳定前缀，动态尾部}
+
+ProjectView 使用 append-only snapshot/delta：历史请求尽量保持为共同前缀，新 evidence、handoff 和 freshness 变化集中在尾部，从而兼顾状态及时性与 DeepSeek KV-cache locality。Research compact 只在 agent 和工具链 settled 后触发；soft 阈值为 272K、hard 阈值为 384K，三档 recent tail 为 32K、40K 和 48K。缓存收益最终以 provider 的 cache-read tokens 判断，不由 Harness 自己宣布。
+
+\subsection{一次模型调用：长前缀保持稳定，变化集中在尾部}
+
+逻辑上，第 $t$ 个用户轮次中第 $k$ 次模型调用的完整请求可写为
+\[
+R_{t,k}=P\;\Vert\;H_{t-1}\;\Vert\;U_t\;\Vert\;W_{t,k}\;\Vert\;\Delta V_{t,k},
+\]
+其中 $P$ 是 Harness 前缀，$H_{t-1}$ 是进入本轮前的持久 Session 历史，$U_t$ 是当前用户请求，$W_{t,k}$ 是本轮已发生的 assistant/tool 消息，$\Delta V_{t,k}$ 是同一轮中新 evidence 或 Runtime 变化产生的临时 ProjectView delta。
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[
+    x=1cm,y=1cm,
+    layer/.style={draw=RPLine, very thick, rounded corners=2pt,
+      minimum width=10.80cm, text width=10.15cm, align=left,
+      inner xsep=8pt, inner ysep=5pt, font=\small},
+    stable/.style={layer, fill=RPGreen!7, draw=RPGreen},
+    turn/.style={layer, fill=RPBlue!6, draw=RPBlue},
+    delta/.style={layer, fill=RPOrange!8, draw=RPOrange}
+  ]
+    \node[stable] (p) at (0,0) {%
+      \term{P\quad Harness 固定前缀}\hfill
+      \textcolor{RPGray}{来源：安装包与项目配置；更新：版本、模型或工具定义变化时}\\[-1pt]
+      \footnotesize System prompt、Research Contract、项目规则、已加载 skills 与 tool schemas。它定义模型的角色、科研方法和可用动作。};
+
+    \node[stable, below=2.5mm of p] (h) {%
+      \term{$H_{t-1}$\quad 持久 Session 前缀}\hfill
+      \textcolor{RPGray}{来源：上一轮已落定状态；更新：追加消息或 compact 时}\\[-1pt]
+      \footnotesize Research compact、保留的 recent tail、既往对话与工具结果，以及进入本轮时的 ProjectView snapshot 和已接收 mailbox。};
+
+    \node[turn, below=5mm of h] (u) {%
+      \term{$U_t$\quad 当前用户输入}\hfill
+      \textcolor{RPGray}{来源：User；更新：每个用户轮次一次}\\[-1pt]
+      \footnotesize 当前问题、约束、补充材料与显式授权。它给本轮推理确定目标，但不改写前面的历史证据。};
+
+    \node[turn, below=2.5mm of u] (w) {%
+      \term{$W_{t,k}$\quad 本轮增量轨迹}\hfill
+      \textcolor{RPGray}{来源：Leader、工具与 Subagent；更新：本轮持续追加}\\[-1pt]
+      \footnotesize assistant 推理外显、tool call/result、已接纳的 progress、ASK 与 RESULT。第 $k$ 次调用只在第 $k-1$ 次调用的尾部继续增长。};
+
+    \node[delta, below=2.5mm of w] (d) {%
+      \term{$\Delta V_{t,k}$\quad ProjectView 实时增量}\hfill
+      \textcolor{RPGray}{来源：语义状态变化；更新：必要时追加}\\[-1pt]
+      \footnotesize 尚未进入稳定 snapshot 的最新 evidence、transition、handoff、Git/Runtime 与 mailbox freshness；无实质变化时不重复注入。};
+
+    \draw[-{Latex[length=2.2mm]}, thick, draw=RPGray]
+      ($(p.west)+(-7mm,3mm)$) -- node[left,align=right,font=\scriptsize,text=RPGray]
+      {输入顺序\\从早到新} ($(d.west)+(-7mm,-3mm)$);
+
+    \draw[very thick, draw=RPGreen]
+      ($(p.east)+(5mm,3mm)$) -- ($(p.east)+(8mm,3mm)$) --
+      ($(h.east)+(8mm,-3mm)$) -- ($(h.east)+(5mm,-3mm)$);
+    \node[right=7mm of p.east, anchor=west, align=left, text width=2.35cm,
+      font=\scriptsize\bfseries, text=RPGreen] {跨轮稳定前缀\\优先命中 KV cache};
+
+    \draw[dashed, thick, draw=RPOrange]
+      ($(h.south west)+(-1mm,-2.5mm)$) -- ($(h.south east)+(1mm,-2.5mm)$)
+      node[midway,fill=white,inner sep=1.5pt,font=\scriptsize\bfseries,text=RPOrange]
+      {缓存边界：下面是当前轮追加内容};
+
+    \draw[very thick, draw=RPOrange]
+      ($(u.east)+(5mm,3mm)$) -- ($(u.east)+(8mm,3mm)$) --
+      ($(d.east)+(8mm,-3mm)$) -- ($(d.east)+(5mm,-3mm)$);
+    \node[right=7mm of w.east, anchor=west, align=left, text width=2.35cm,
+      font=\scriptsize\bfseries, text=RPOrange] {当前轮动态尾部\\已写入部分可供下一次调用复用};
+  \end{tikzpicture}
+  \caption{一次 Research-Pi 模型调用的纵向上下文栈。上方 $P$ 与 $H_{t-1}$ 构成跨轮稳定前缀；下方 $U_t$、$W_{t,k}$ 与 $\Delta V_{t,k}$ 按事件追加。ProjectView 的稳定 snapshot 位于 $H_{t-1}$，尚未综合的新变化位于末尾 delta。只要已有字节不变，provider 就能从左逻辑前缀（图中自上而下）复用 KV cache；compact、模型/工具定义变化或从历史中移除消息会建立新的缓存边界。}
+  \label{fig:context-composition}
+\end{figure}
+
+\subsection{可观察性：看得见协作，但不复制一套高频日志}
+
+Runtime Dock、\code{/watch} 和 Tool Activity 直接投影 Actor/Action/mailbox 与 Codex 事件，只在语义状态或可见进度变化时持久化；token delta、heartbeat 和 TRACE/DEBUG SQLite 默认不持续写盘。观察界面不自动进入 Leader 上下文，因此既能看见 subagent 正在做什么，也不会用观察本身污染研究对话。
+
+\subsection{阶段成果、边界与下一步}
+
+\begin{table}[H]
+  \centering
+  \caption{真实科研摩擦推动的关键设计}
+  \small
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabularx}{\textwidth}{>{\bfseries\raggedright\arraybackslash}p{3cm}YY}
+    \toprule
+    实际问题 & 对应设计 & 已验证边界 \\
+    \midrule
+    Compact 后丢失研究判断 & 分层记忆、evidence refs、recent tail、原文检索 & schema/unit tests；摘要仍可能出错 \\
+    ProjectView 陈旧或被最近任务束缚 & direction--trajectory--latest handoff--frontier 与 live delta & stale/transition/handoff/截断测试；真实恢复效率待测 \\
+    两个 Session 的 Codex 消息串扰 & Project Actor、Leader lease、durable mailbox 与 request retirement & 跨 Session/workspace/thread reuse tests \\
+    Codex 权限或远程执行阻塞 & 项目内自主、capability broker、SSH trust 与 preflight & Git/Python/SSH/host-command tests；宿主授权仍需人审 \\
+    工具过程污染上下文和磁盘 & subagent 隔离、按需 watch、稀疏语义事件 & 低写盘与 structured result tests \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+当前主分支包含全局可安装 CLI、16 个 Harness extensions、20 个核心 library modules 和 153 个自动化测试用例。这些证据说明机制按预期工作，却不能证明 Research-Pi 已经提高科学发现质量。下一阶段应在真实项目中观察三类指标：新 Session 恢复研究方向所需时间、无效负结果或错误路线延续率、用户为理解阶段进展所需的追问次数。评估目标不是 Agent 是否更少询问人，而是人是否能以更低认知成本做出更高质量的研究判断。
+
+\section{模块四：使用手册与工具说明}
+
+本节只给出能够形成完整工作闭环的入口。更细的参数、恢复步骤和权限语法由项目文档维护，避免汇报正文退化为逐项 API 说明。
+
+\subsection{安装、配置与启动}
+
+稳定版本按全局 CLI 安装，要求 Node.js 22.19 或更高版本：
+
+\begin{lstlisting}[language=bash]
+npm install -g 'git+https://github.com/RosMarinas/Research-Pi.git#main'
+pi setup
+pi paths
+\end{lstlisting}
+
+\code{pi setup} 创建配置和凭据模板。普通配置位于 \path{~/.config/research-pi/config.json}，API key 单独位于 \path{~/.config/research-pi/credentials.env}；Session、Runtime、memory、Codex job 和授权账本默认位于 \path{~/.local/state/research-pi/}，不写入科研仓库。进入任意科研项目后直接运行：
+
+\begin{lstlisting}[language=bash]
+cd /path/to/research-project
+pi
+pi --analysis
+\end{lstlisting}
+
+模型与 thinking 由 profile 管理。\code{pi config list/show/use} 查看或切换持久配置，TUI 内使用 \code{/model}；Research compact 阈值、Web Search、Codex advisor/executor 默认模型和 UI 密度均由同一个非敏感 \code{config.json} 管理。
+
+\subsection{先选择 Session 角色}
+
+\begin{table}[H]
+  \centering
+  \caption{两种面向用户的 Session 角色}
+  \small
+  \begin{tabularx}{\textwidth}{>{\bfseries\raggedright\arraybackslash}p{2.8cm}YYY}
+    \toprule
+    角色 & 适用场景 & 可以做什么 & 不应做什么 \\
+    \midrule
+    Leader Session & 推进实验、修改实现、调度执行 & 写项目、运行本地/远程实验、调度 Codex、更新 Project State、消费 mailbox & 不应把执行完成直接宣布为科学结论 \\
+    Analysis Session & 独立阅读、讨论、比较假设 & 读项目与 ProjectView、Web 查询、经批准的外部文件与保守 SSH 只读检查 & 不写代码、不启动实验、不抢 mailbox、不更新 Project State \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+Analysis Session 形成有价值的认识后，用 \code{/analysis send <摘要>} 投递候选分析；需要实际执行时，由用户使用 \code{/runtime promote <原因>} 显式转成 Leader。这种分工允许“先想清楚”与“开始干活”共享 Project 记忆，又不混淆行动权限。
+
+\subsection{典型科研工作流}
+
+一次推荐的闭环不是固定表单，而是以下语义顺序：
 
 \begin{enumerate}
-  \item 对比原始 Pi、Research-Pi 以及不同 ProjectView 策略下的任务恢复时间、重复工具调用和错误路线延续率；
-  \item 使用 provider 返回的 hit/miss tokens 观察 append-only delta 对缓存命中率和费用的实际影响；
-  \item 记录用户为理解当前阶段所需的追问次数，评估 Research Briefing 是否降低认知恢复成本；
-  \item 衡量 experiment record 和 validity separation 是否减少“无效负结果被当作研究反证”；
-  \item 在 WSL2/Windows 物理机继续验证 \code{/mnt} 边界、系统盘保护和跨平台安装。
+  \item 说明研究目标、已有观察以及什么结果会改变判断；
+  \item 由 Leader 恢复 ProjectView，形成竞争假设并选择高信息量介入；
+  \item 小型探针由 Leader 直接运行，工具密集或长程任务交给 Codex executor，开放问题可交给 advisor 共同讨论；
+  \item 对结果做最低必要有效性检查，区分 observation、interpretation 和 claim boundary；
+  \item 只有会影响后续判断的结果才写 \code{record\_experiment}；换轨写 transition，局部状态纠正写 amendment；
+  \item Leader 向用户说明阶段、所做工作、关键证据、限制及下一决策。需要换 Session 时使用 Project-aware rotation，而不是复制整段旧 transcript。
 \end{enumerate}
 
-\subsection{可能形成的进一步研究问题}
+一个合适的启动请求例如：
 
-从系统实践中可以抽象出三个具有研究价值的方向：
+\begin{quote}
+先恢复当前研究方向、竞争假设和最近有效证据。针对当前异常提出有实质差异的解释，选择最能区分它们的低成本探针；允许修改实验代码，但在更新判断前确认介入确实发生。不要因为最近任务是修 bug 就默认继续修补。
+\end{quote}
+
+\subsection{工具按三轴归类}
+
+\begin{table}[H]
+  \centering
+  \caption{常用工具与它们维护的 Harness 状态}
+  \small
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabularx}{\textwidth}{>{\bfseries\raggedright\arraybackslash}p{1.55cm}p{5.25cm}Y}
+    \toprule
+    轴 & 工具/命令 & 使用原则 \\
+    \midrule
+    记忆 & \code{record\_experiment}、\code{record\_research\_transition}、\code{amend\_project\_state}、\code{research\_memory\_search/read}、\code{/compact} & 记录影响研究判断的证据和换轨；历史先检索再读原文；不要为普通探针制造治理负担 \\
+    通信 & \code{codex\_delegate}、\code{/actors}、\code{/inbox}、\code{/message}、\code{/steer}、\code{/watch}、\code{/analysis send} & mission 应稳定且对应同一研究子问题；优先续接现有 Actor，不因后台仍在运行而重复派遣 \\
+    控制 & \code{/boundary}、\code{host\_capability}、\code{/boundary doctor}、\code{research\_checkpoint}、\code{/runtime promote/takeover} & 项目内正常自主；项目外按精确 target/argv 授权；未知副作用先检查并 reconcile，再决定是否重跑 \\
+    Context & \code{/runtime view/rotate/new/inherit}、\code{/memory}、\code{/side} & rotate 保留 Project 认知但丢弃旧 transcript；clean Session 主动排除 Project 注入；side 隔离临时追问 \\
+    配置 & \code{/model}、\code{/config}、\code{pi paths}、\code{pi doctor} & 配置与凭据分离；安装或权限异常先运行无模型 doctor \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\subsection{何时使用 Codex，何时由 Leader 直接完成}
+
+Codex 的判据不是“任务看起来高级”，而是过程是否会产生大量工具调用、中间日志、长程执行或需要可续接的第二思路。小型搜索、一次性只读探针和当前上下文内即可完成的判断由 Leader 直接处理；大规模代码审查、实现、测试、远程实验或大量资料整理适合 executor；尚未形成清晰问题、需要竞争解释和反例时适合 advisor。Codex 可以拥有与 Leader 相当的项目内执行权限，但研究问题的定义、证据有效性与用户汇报仍由 Leader 负责。
+
+\subsection{Session 交接与故障恢复}
 
 \begin{itemize}
-  \item \term{Context-native Runtime}：把状态物化、消息路由和 KV-cache locality 共同设计，而不是把 context 当作无结构字符串；
-  \item \term{多 Actor 语义一致性}：在并行或异步 Agent 中保证任务、证据和研究路线不串扰，同时避免全局锁拖慢探索；
-  \item \term{Human--AI Shared Research State}：把沟通质量视为科研系统性能的一部分，研究怎样让用户以较低认知成本保持有效监督和提出高价值问题。
+  \item \code{/runtime rotate}：丢弃旧 transcript，继承 ProjectView、mailbox 和恢复身份；适合正常长会话交接；
+  \item \code{/runtime new clean}：暂时不注入 Project 记忆，用于主动检查记忆偏置；\code{/runtime inherit} 恢复；
+  \item \code{/runtime view}：检查方向、路线、最近 handoff、当前前沿和 freshness；
+  \item \code{/watch}：查看 Codex 活动而不把执行流灌入 Leader 上下文；
+  \item \code{outcome\_unknown}：表示可能已有副作用但终态不可信；先检查 Git、run 或远程状态，再 reconcile，不能直接重跑；
+  \item \code{/boundary doctor}：检查 Git、Python、sandbox 和 Codex preflight，区分环境失败与研究失败。
 \end{itemize}
 
-\clearpage
-\section{总结}
+\subsection{安全与数据边界}
 
-Research-Pi 当前已经从“给 Pi 加科研 prompt”的最初想法，发展为一个包含研究行为、Project Runtime、结构化记忆、Agent 协作、权限和用户沟通的完整 Harness。其最重要的设计思想可以归纳为：
+模型默认可在当前项目内读写、删除、commit、安装项目依赖和运行实验；SSH target、项目外只读文件和宿主命令通过 capability 显式批准。私钥、API key、\code{.env}、keychain 和 credential socket 不进入模型上下文。\code{!}/\code{!!} 是用户本人以宿主权限运行的人工通道，不等价于模型 shell。Trace 和 Codex DEBUG SQLite 日志默认关闭；只有短时诊断才启用，并在使用后恢复关闭。
+
+\clearpage
+\section*{总结}
+
+Research-Pi 当前已经从“给 Pi 加科研 prompt”的最初想法，发展为一个由记忆、通信和控制三轴支撑，并由科研策略与用户接口共同约束的完整 Harness。其最重要的设计思想可以归纳为：
 
 \begin{enumerate}
-  \item 用 Project 保存长期科研认知，用 Session 承载可替换的局部工作；
-  \item 用语义事件和 evidence provenance 更新状态，而不是让聊天摘要垄断记忆；
-  \item 让 Pi 负责问题与解释，让 Codex 负责隔离执行，但不把执行完成当作科学结论；
-  \item 项目内给予高自主，项目外通过明确 capability 越界；
+  \item \term{记忆轴}用 Project 保存长期科研认知，用 Session 承载可替换的局部工作，并以原文、语义事件、综合状态和上下文投影维持权威边界；
+  \item \term{通信轴}让 Pi 负责问题与解释，让 Analysis Session 提供只读讨论，让 Codex 隔离咨询与执行噪声，并以 Actor/Action/mailbox 保证跨 Session 路由；
+  \item \term{控制轴}在项目内给予高自主，在项目外通过明确 capability 越界，把角色权限、现实副作用和恢复身份置于模型外约束；
+  \item 执行完成、消息到达和科学结论是三种不同事件，不能相互自动替代；
   \item 把 Leader 对用户的汇报视为共享研究状态的维护，而不是附属文案；
   \item 在真实科研任务中持续迭代，并对尚未验证的效果保持明确边界。
 \end{enumerate}
