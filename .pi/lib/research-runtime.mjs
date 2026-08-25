@@ -265,6 +265,7 @@ export async function readRuntimeSnapshot(runtime) {
 	const actions = new Map();
 	const evidence = new Map();
 	const transitions = [];
+	const handoffs = new Map();
 	const rotations = new Map();
 	const inheritanceRequests = new Map();
 	const activations = new Map();
@@ -347,6 +348,9 @@ export async function readRuntimeSnapshot(runtime) {
 				evidence.set(data.id, { ...current, ...data, recordedAt: event.at, revision });
 				break;
 			}
+			case "work.handoff.recorded":
+				handoffs.set(data.id, { ...handoffs.get(data.id), ...data, recordedAt: event.at });
+				break;
 			case "session.rotation.requested":
 				rotations.set(data.id, { ...data, status: "pending", requestedAt: event.at });
 				break;
@@ -393,6 +397,7 @@ export async function readRuntimeSnapshot(runtime) {
 		actions: [...actions.values()],
 		evidence: [...evidence.values()],
 		transitions,
+		handoffs: [...handoffs.values()],
 		activeTransition: transitions.at(-1) ?? null,
 		rejectedStates,
 		rotations: rotationList,
@@ -645,6 +650,15 @@ function boundedRuntimeText(value, max) {
 	return text.length <= max ? text : `${text.slice(0, max - 3)}...`;
 }
 
+function boundedRuntimeBlock(value, max) {
+	const text = String(value ?? "")
+		.replace(/\r\n/g, "\n")
+		.replace(/[\t ]+/g, " ")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
+	return text.length <= max ? text : `${text.slice(0, max - 3)}...`;
+}
+
 export async function recordRuntimeEvidence(runtime, record) {
 	if (!record?.id) throw new Error("Project evidence id is required");
 	const snapshot = await readRuntimeSnapshot(runtime);
@@ -692,6 +706,32 @@ export async function recordRuntimeEvidence(runtime, record) {
 		trackLabel,
 	};
 	return await appendRuntimeEvent(runtime, "evidence.recorded", data, { id: `evidence:${data.id}` });
+}
+
+export async function recordRuntimeHandoff(runtime, input) {
+	const snapshot = await readRuntimeSnapshot(runtime);
+	const resolvedTrack = resolveRuntimeResearchTrack(snapshot, input.trackRef);
+	const id = validateMessageId(input.id ?? createEventId("handoff"));
+	const data = {
+		id,
+		kind: boundedRuntimeText(input.kind, 80) || "leader-task",
+		task: boundedRuntimeText(input.task, 1600),
+		summary: boundedRuntimeBlock(input.summary, 6000),
+		sessionId: boundedRuntimeText(input.sessionId, 200) || null,
+		actorId: boundedRuntimeText(input.actorId, 200) || RESEARCH_LEADER_ACTOR_ID,
+		toolNames: Array.isArray(input.toolNames)
+			? input.toolNames.map((item) => boundedRuntimeText(item, 120)).filter(Boolean).slice(0, 24)
+			: [],
+		git: input.git ? {
+			branch: boundedRuntimeText(input.git.branch, 300) || null,
+			commit: boundedRuntimeText(input.git.commit, 160) || null,
+			dirty: input.git.dirty ?? null,
+		} : null,
+		trackRef: resolvedTrack.trackRef,
+		trackLabel: input.trackLabel ?? resolvedTrack.trackLabel,
+	};
+	if (!data.task && !data.summary) throw new Error("Runtime work handoff requires a task or summary");
+	return await appendRuntimeEvent(runtime, "work.handoff.recorded", data, { id: `work-handoff:${id}` });
 }
 
 export async function recordResearchTransition(runtime, transition) {
@@ -1095,6 +1135,15 @@ export async function registerCodexRuntimeJob(runtime, job) {
 			model: job.model,
 			outcome: job.result?.outcome ?? null,
 			goalSatisfied: job.result?.goal_satisfied ?? null,
+			summary: boundedRuntimeText(job.result?.summary ?? job.result?.working_synthesis, 4000) || null,
+			completionBasis: boundedRuntimeText(job.result?.completion_basis, 2400) || null,
+			changedFiles: Array.isArray(job.result?.changed_files)
+				? job.result.changed_files.map((item) => boundedRuntimeText(item, 600)).filter(Boolean).slice(0, 12)
+				: [],
+			remainingWork: Array.isArray(job.result?.remaining_work)
+				? job.result.remaining_work.map((item) => boundedRuntimeText(item, 700)).filter(Boolean).slice(0, 8)
+				: [],
+			recommendedNextStep: boundedRuntimeText(job.result?.recommended_next_step ?? job.result?.suggested_next_exchange, 1800) || null,
 		},
 		projectRevision: Number.isInteger(job.projectRevision) ? job.projectRevision : snapshot.revision,
 		trackRef,

@@ -20,6 +20,7 @@ import {
 	appendRuntimeEventAtRevision,
 	initializeResearchRuntime,
 	readRuntimeSnapshot,
+	recordRuntimeHandoff,
 	recordResearchTransition,
 	runtimeActorAttachment,
 	runtimeTrackStatus,
@@ -446,7 +447,7 @@ test("newer Runtime activity prevents an old next experiment from being presente
 	assert.equal(view.freshness, "unconfirmed");
 	assert.match(text, /Runtime activity is newer/);
 	assert.match(text, /baseline is historical or unconfirmed/);
-	assert.match(text, /Baseline planned next experiment: Run the oracle/);
+	assert.match(text, /Baseline planned next experiment .*Run the oracle/);
 	assert.match(text, /csb-param-v0-q1/);
 });
 
@@ -557,7 +558,51 @@ test("ProjectView keeps the newest live evidence when a large baseline must be t
 	});
 	const text = renderProjectView(view);
 	assert.ok(text.length <= 12_000);
-	assert.match(text, /Structured baseline truncated/);
+	assert.match(text, /Direction and trajectory truncated/);
 	assert.match(text, /--- live project delta/);
 	assert.match(text, /NEWEST_OBSERVATION_MUST_SURVIVE/);
+});
+
+test("ProjectView compresses earlier work but expands the latest handoff under project direction", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-project-handoff-"));
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace);
+		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a" }, { runtimeRoot: join(root, "runtime") });
+		await commitProjectState(runtime, {
+			compactionEntry: compaction("direction-state"),
+			sessionId: "session-a",
+			appendRuntimeEvent,
+			appendRuntimeEventAtRevision,
+			readRuntimeSnapshot,
+		});
+		await recordRuntimeHandoff(runtime, {
+			id: "handoff-earlier",
+			task: "Repair the experiment launcher",
+			summary: "The launcher now preserves the registered run identity.",
+			sessionId: "session-a",
+			toolNames: ["edit"],
+		});
+		await recordRuntimeHandoff(runtime, {
+			id: "handoff-latest",
+			kind: "research-evidence",
+			task: "Run the oracle bypass diagnostic",
+			summary: "The action margin recovered from 0.02 to 0.31.\n\nThis localizes the loss before the decoder but does not qualify the full route.",
+			sessionId: "session-b",
+			toolNames: ["record_experiment"],
+			git: { branch: "main", commit: "b".repeat(40), dirty: false },
+		});
+		const snapshot = await readRuntimeSnapshot(runtime);
+		assert.equal(snapshot.revision, 1, "operational handoffs must not advance scientific Project revision");
+		const view = buildProjectView({ runtime, snapshot, git: {}, experiments: [] });
+		const text = renderProjectView(view);
+		assert.ok(text.indexOf("=== PROJECT DIRECTION") < text.indexOf("=== LATEST COMPLETED WORK"));
+		assert.match(text, /Repair the experiment launcher -> The launcher now preserves/);
+		assert.match(text, /Task: Run the oracle bypass diagnostic/);
+		assert.match(text, /The action margin recovered from 0.02 to 0.31/);
+		assert.match(text, /not an instruction to continue the same kind of task/);
+		assert.match(text, /The current user request selects the immediate task/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });

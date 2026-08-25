@@ -29,8 +29,8 @@ export const RESEARCH_STATE_TOOL = Object.freeze({
 			"criticalContext",
 		],
 		properties: {
-			researchQuestion: { type: "string", maxLength: 2_000 },
-			currentClaim: { type: "string", maxLength: 2_000 },
+			researchQuestion: { type: "string", maxLength: 2_000, description: "Project-level research direction and current scientific frontier; never replace it with the latest coding/debugging task unless the research objective truly changed" },
+			currentClaim: { type: "string", maxLength: 2_000, description: "Current evidence-bounded scientific position, not a software progress statement" },
 			hypotheses: {
 				type: "array",
 				maxItems: 24,
@@ -91,7 +91,7 @@ export const RESEARCH_STATE_TOOL = Object.freeze({
 					validityChecks: STRING_ARRAY_SCHEMA,
 				},
 			},
-			criticalContext: STRING_ARRAY_SCHEMA,
+			criticalContext: { ...STRING_ARRAY_SCHEMA, description: "Direction-setting stage, route constraints, non-goals, and continuation principles that a new Session needs to avoid local task inertia" },
 		},
 	},
 	constrainedSampling: { type: "json_schema", strict: "prefer" },
@@ -853,6 +853,8 @@ Rules:
 9. Experiment trackRef/trackLabel identify route provenance. Evidence from a retired route may remain scientifically relevant, but do not silently use it as evidence that the current route's intervention occurred.
 10. runGitCommit identifies code that produced a run; recordedAtGit only identifies the workspace when the memo was written. Never substitute one for the other.
 11. An independent clean or Analysis Session summary is a candidate synthesis, not Project authority or experimental evidence. Retain useful hypotheses, but require normal provenance before making strong updates.
+12. researchQuestion anchors the project-level direction and current scientific frontier. Do not replace it with the most recent coding, debugging, infrastructure, or documentation task unless that task truly changed the research objective.
+13. criticalContext should preserve the current stage, route guardrails, meaningful non-goals, and continuation principles needed by a new Session. nextExperiment is a research intervention selected for information gain, not an inherited coding TODO.
 
 Required schema:
 {

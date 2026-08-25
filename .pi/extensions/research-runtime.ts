@@ -56,6 +56,7 @@ import {
 	pendingRuntimeMessages,
 	readRuntimeSnapshot,
 	reconcileCodexRuntimeAsks,
+	recordRuntimeHandoff,
 	requestRuntimeSessionRotation,
 	requestRuntimeSessionInheritance,
 	resolveRuntimeActor,
@@ -176,6 +177,26 @@ function analysisSessionContext(content: string): string {
 function compact(text: string, limit = 160): string {
 	const value = String(text ?? "").replace(/\s+/g, " ").trim();
 	return value.length <= limit ? value : `${value.slice(0, limit - 3)}...`;
+}
+
+function latestAssistantText(messages: any[]): string {
+	for (const message of [...(messages ?? [])].reverse()) {
+		if (message?.role !== "assistant") continue;
+		const content = typeof message.content === "string"
+			? message.content
+			: Array.isArray(message.content)
+				? message.content.filter((part: any) => part?.type === "text").map((part: any) => part.text).join("\n")
+				: "";
+		if (content.trim()) return content.trim();
+	}
+	return "";
+}
+
+function handoffKind(toolNames: Set<string>): string {
+	if (toolNames.has("record_research_transition")) return "research-route-change";
+	if (toolNames.has("record_experiment")) return "research-evidence";
+	if (toolNames.has("codex_delegate")) return "delegated-project-work";
+	return "leader-project-task";
 }
 
 function runtimeDisplayBody(content: string): string {
@@ -412,9 +433,11 @@ function projectViewPersistenceMode(
 	previous?: ProjectViewReceipt,
 ): ProjectViewReceipt["mode"] | null {
 	if (!previous) return "snapshot";
+	if (previous.version !== view.version) return "snapshot";
 	const gitChanged = previous.gitFingerprint !== projectViewGitFingerprint(view);
 	const revisionChanged = previous.projectRevision !== view.projectRevision;
-	if (!gitChanged && !revisionChanged) return null;
+	const viewChanged = previous.fingerprint !== projectViewFingerprint(view);
+	if (!gitChanged && !revisionChanged && !viewChanged) return null;
 	if (
 		view.projectRevision < previous.projectRevision
 		|| view.stateRevision !== previous.stateRevision
@@ -450,6 +473,9 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	let sessionInheritancePolicy: SessionInheritancePolicy = "project";
 	let requestedInitialSessionMode: SessionInheritancePolicy | undefined =
 		process.env.RESEARCH_PI_INITIAL_SESSION_MODE === "analysis" ? "analysis" : undefined;
+	let lastUserPrompt = "";
+	let projectWorkThisRun = false;
+	const projectToolsThisRun = new Set<string>();
 
 	const isAnalysisSession = () => sessionInheritancePolicy === "analysis";
 	const isProjectAwareSession = () => sessionInheritancePolicy !== "clean";
@@ -955,6 +981,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 
 	pi.on("input", async (event, ctx) => {
 		if (event.source === "extension") return;
+		lastUserPrompt = event.text.trim();
 		if (/^\/runtime\s+analysis(?:\s|$)/.test(event.text.trim())) return;
 		try {
 			const activeRuntime = await getRuntime(ctx, { claim: !isAnalysisSession() });
@@ -1008,6 +1035,8 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_start", async (_event, ctx) => {
+		projectWorkThisRun = false;
+		projectToolsThisRun.clear();
 		if (isAnalysisSession()) return;
 		const activeRuntime = await getRuntime(ctx);
 		const sessionId = ctx.sessionManager.getSessionId();
@@ -1030,10 +1059,32 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("agent_end", async () => {
+	pi.on("agent_end", async (event, ctx) => {
 		if (!runtime || !activeActivationId) return;
-		await settleRuntimeActorActivation(runtime, activeActivationId, { reason: "agent end" });
-		activeActivationId = undefined;
+		const activationId = activeActivationId;
+		try {
+			if (!isAnalysisSession() && projectWorkThisRun) {
+				const summary = latestAssistantText(event.messages);
+				if (summary) {
+					await recordRuntimeHandoff(runtime, {
+						id: activationId,
+						kind: handoffKind(projectToolsThisRun),
+						task: lastUserPrompt,
+						summary,
+						sessionId: ctx.sessionManager.getSessionId(),
+						actorId: RESEARCH_LEADER_ACTOR_ID,
+						toolNames: [...projectToolsThisRun],
+						git: await getGitSnapshot(ctx.cwd),
+					});
+					projectViewDirty = true;
+				}
+			}
+		} catch (error) {
+			if (ctx.hasUI) ctx.ui.notify(`Could not record ProjectView task handoff: ${error instanceof Error ? error.message : String(error)}`, "warning");
+		} finally {
+			await settleRuntimeActorActivation(runtime, activationId, { reason: "agent end" });
+			activeActivationId = undefined;
+		}
 	});
 
 	const projectViewMutatingTools = new Set([
@@ -1060,7 +1111,15 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		// Refresh only after tools that can change project evidence, Git, files,
 		// or Runtime delegation state. The next context hook performs one
 		// deterministic rebuild; read-only tools preserve the exact prompt suffix.
-		if (projectViewMutatingTools.has(event.toolName)) projectViewDirty = true;
+		if (projectViewMutatingTools.has(event.toolName)) {
+			projectViewDirty = true;
+			const codexStatus = event.toolName === "codex_delegate" ? String(event.result?.details?.status ?? "") : "";
+			const codexTurnSettled = !codexStatus || ["completed", "failed", "cancelled", "outcome_unknown"].includes(codexStatus);
+			if (!event.isError && codexTurnSettled) {
+				projectWorkThisRun = true;
+				projectToolsThisRun.add(event.toolName);
+			}
+		}
 	});
 
 	pi.on("context", async (event, ctx) => {
@@ -1119,6 +1178,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			!persistedProjectView
 			|| view.projectRevision !== persistedProjectView.projectRevision
 			|| projectViewGitFingerprint(view) !== persistedProjectView.gitFingerprint
+			|| projectViewFingerprint(view) !== persistedProjectView.fingerprint
 		) {
 			updateText = renderProjectViewDelta(view, persistedProjectView?.projectRevision ?? 0);
 		}

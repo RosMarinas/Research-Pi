@@ -1286,3 +1286,65 @@ test("ProjectView persists an append-only snapshot and then a short semantic del
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("a completed Leader work turn becomes a durable cross-Session handoff without changing scientific revision", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-work-handoff-"));
+	const previousRoot = process.env.RESEARCH_PI_RUNTIME_DIR;
+	process.env.RESEARCH_PI_RUNTIME_DIR = join(root, "runtime");
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace);
+		const handlers = new Map();
+		const branch = [];
+		const pi = {
+			on(name, handler) { handlers.set(name, handler); },
+			registerCommand() {},
+			registerTool() {},
+			registerMessageRenderer() {},
+			registerEntryRenderer() {},
+			sendMessage() {},
+			appendEntry() {},
+		};
+		researchRuntimeExtension(pi);
+		const ctx = {
+			cwd: workspace,
+			hasUI: true,
+			ui: { setStatus() {}, notify() {}, setEditorText() {} },
+			sessionManager: {
+				getSessionId: () => "session-handoff",
+				getLeafId: () => "leaf-handoff",
+				getBranch: () => branch,
+			},
+			getContextUsage: () => null,
+			isIdle: () => false,
+			abort() {},
+		};
+		await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
+		const first = await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "start" }, ctx);
+		branch.push({ type: "custom_message", customType: first.message.customType, content: first.message.content, details: first.message.details });
+
+		await handlers.get("input")({ type: "input", source: "user", text: "Repair the local experiment launcher, but do not change the research route." }, ctx);
+		await handlers.get("agent_start")({ type: "agent_start" }, ctx);
+		handlers.get("tool_execution_end")({ type: "tool_execution_end", toolCallId: "edit-1", toolName: "edit", result: {}, isError: false });
+		await handlers.get("agent_end")({
+			type: "agent_end",
+			messages: [{ role: "assistant", content: [{ type: "text", text: "Launcher repaired and checked. This was infrastructure-only; the research direction is unchanged." }] }],
+		}, ctx);
+
+		const runtime = await resolveResearchRuntime(workspace);
+		const snapshot = await readRuntimeSnapshot(runtime);
+		assert.equal(snapshot.revision, 0);
+		assert.equal(snapshot.handoffs.length, 1);
+		assert.match(snapshot.handoffs[0].task, /Repair the local experiment launcher/);
+		assert.match(snapshot.handoffs[0].summary, /research direction is unchanged/);
+
+		const update = await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "new session continues" }, ctx);
+		assert.equal(update.message.details.mode, "delta");
+		assert.match(String(update.message.content), /Latest completed work handoff/);
+		assert.match(String(update.message.content), /context, not an automatic next task/);
+	} finally {
+		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
+		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
