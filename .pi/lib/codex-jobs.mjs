@@ -264,7 +264,7 @@ function processIsAlive(pid) {
 async function acquireWriterLock(jobRoot, cwd, jobId) {
 	const lockPath = writerLockPath(jobRoot, cwd);
 	await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
-	const payload = { version: 1, jobId, cwd, pid: null, createdAt: now() };
+	const payload = { version: 2, jobId, cwd, pid: null, workerInstanceId: null, createdAt: now() };
 
 	for (let attempt = 0; attempt < 2; attempt++) {
 		try {
@@ -284,7 +284,10 @@ async function acquireWriterLock(jobRoot, cwd, jobId) {
 				existing = null;
 			}
 			const age = existing?.createdAt ? Date.now() - Date.parse(existing.createdAt) : Number.POSITIVE_INFINITY;
-			if (existing && (processIsAlive(existing.pid) || age < 15000)) {
+			const identifiedWorkerAlive = existing?.workerInstanceId
+				? await workerLeaseIsFresh(jobRoot, existing.jobId, existing.workerInstanceId)
+				: processIsAlive(existing?.pid);
+			if (existing && (identifiedWorkerAlive || age < 15000)) {
 				throw new Error(`Codex executor ${existing.jobId ?? "unknown"} is already writing ${cwd}`);
 			}
 			await unlink(lockPath).catch(() => undefined);
@@ -328,11 +331,23 @@ export async function releaseWriterLock(lockPath, jobId) {
 	}
 }
 
-async function updateWriterLock(lockPath, jobId, pid) {
+async function updateWriterLock(lockPath, jobId, pid, workerInstanceId) {
 	if (!lockPath) return;
 	const current = await readJson(lockPath);
 	if (current.jobId !== jobId) throw new Error(`Writer lock ownership changed for ${jobId}`);
-	await writeJsonAtomic(lockPath, { ...current, pid, updatedAt: now() });
+	await writeJsonAtomic(lockPath, { ...current, pid, workerInstanceId, updatedAt: now() });
+}
+
+export async function workerLeaseIsFresh(jobRoot, jobId, workerInstanceId, maxAgeMs = 15_000) {
+	if (!jobId || !workerInstanceId) return false;
+	try {
+		const lease = await readJson(join(jobRoot, jobId, "worker-lease.json"));
+		return lease.workerInstanceId === workerInstanceId
+			&& Number.isFinite(Date.parse(lease.heartbeatAt))
+			&& Date.now() - Date.parse(lease.heartbeatAt) <= maxAgeMs;
+	} catch {
+		return false;
+	}
 }
 
 export async function getGitSnapshot(cwd) {
@@ -451,6 +466,7 @@ export async function startCodexJob(options) {
 		}
 		await mkdir(jobDir, { recursive: false, mode: 0o700 });
 		const createdAt = now();
+		const workerInstanceId = randomUUID();
 		const sandbox = mode === "advisor" ? CODEX_ADVISOR_PROFILE : CODEX_EXECUTOR_PROFILE;
 		const prompt = buildDelegationPrompt({
 			mode,
@@ -490,6 +506,7 @@ export async function startCodexJob(options) {
 			codexBin: options.codexBin ?? process.env.PI_CODEX_BIN ?? "codex",
 			schemaPath,
 			lockPath,
+			workerInstanceId,
 			runtimeTmp: boundaryRuntime?.runtimeTmp,
 			gitIdentity,
 			skipSandboxPreflight: options.skipSandboxPreflight === true,
@@ -525,6 +542,7 @@ export async function startCodexJob(options) {
 			startedAt: null,
 			finishedAt: null,
 			workerPid: null,
+			workerInstanceId,
 			codexPid: null,
 			codexSqliteLogs: null,
 			threadId: options.continuationThreadId ?? null,
@@ -559,7 +577,7 @@ export async function startCodexJob(options) {
 			env: sanitizeCodexEnvironment(process.env),
 		});
 		if (!worker.pid) throw new Error("Codex job worker did not start");
-		await updateWriterLock(lockPath, jobId, worker.pid);
+		await updateWriterLock(lockPath, jobId, worker.pid, workerInstanceId);
 		worker.unref();
 		return await readCodexJob(jobId, { jobRoot, reconcile: false });
 	} catch (error) {
@@ -823,7 +841,10 @@ export async function readCodexJob(jobId, options = {}) {
 	assertCodexJobLeader(job, options);
 	if (options.reconcile !== false && !isTerminalStatus(job.status)) {
 		const createdAge = Date.now() - Date.parse(job.createdAt);
-		if (job.workerPid && !processIsAlive(job.workerPid)) {
+		const identifiedWorkerAlive = job.workerInstanceId
+			? await workerLeaseIsFresh(jobRoot, job.id, job.workerInstanceId)
+			: processIsAlive(job.workerPid);
+		if (job.workerPid && !identifiedWorkerAlive && createdAge > 15_000) {
 			const unknownOutcome = job.mode === "executor" && job.sideEffect?.state === "started";
 			job = await updateJobFile(jobDir, (current) => ({
 				...current,
@@ -955,26 +976,24 @@ export async function cancelCodexJob(jobId, options = {}) {
 		progress: "cancellation requested",
 		lastActivityAt: now(),
 	}));
-	if (processIsAlive(job.workerPid)) {
-		try {
-			process.kill(job.workerPid, "SIGTERM");
-		} catch {
-			// Reconciliation below handles a process that exited between the checks.
-		}
-	}
-	for (let attempt = 0; attempt < 30; attempt++) {
+	const commandId = createCommandId();
+	await writeJsonAtomic(join(jobDir, "commands", `${commandId}.json`), {
+		version: 1,
+		id: commandId,
+		jobId,
+		createdAt: now(),
+		status: "pending",
+		type: "cancel",
+	});
+	for (let attempt = 0; attempt < 100; attempt++) {
 		await delay(100);
 		job = await readCodexJob(jobId, { jobRoot, ...ownerOptions });
 		if (isTerminalStatus(job.status)) return job;
 	}
-	if (processIsAlive(job.workerPid)) {
-		try {
-			if (process.platform !== "win32") process.kill(-job.workerPid, "SIGKILL");
-			else process.kill(job.workerPid, "SIGKILL");
-		} catch {
-			// The exact job process group may already have exited.
-		}
-	}
+	// Cancellation is delivered through the job's nonce-bound command channel.
+	// Never signal a durable PID directly: after restart it may identify an
+	// unrelated process. A fresh worker keeps ownership and may still settle.
+	if (job.workerInstanceId && await workerLeaseIsFresh(jobRoot, job.id, job.workerInstanceId)) return job;
 	const unknownOutcome = job.mode === "executor" && job.sideEffect?.state === "started";
 	job = await updateJobFile(jobDir, (current) => ({
 		...current,

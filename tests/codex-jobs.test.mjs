@@ -33,6 +33,7 @@ import {
 	steerCodexJob,
 	supersedePendingCodexRequests,
 	waitForCodexJob,
+	workerLeaseIsFresh,
 } from "../.pi/lib/codex-jobs.mjs";
 import { CODEX_ADVISOR_PROFILE, CODEX_EXECUTOR_PROFILE } from "../.pi/lib/project-boundary.mjs";
 import {
@@ -762,6 +763,24 @@ test("Codex environment removes provider credentials without dropping execution 
 	assert.equal(env.PATH, "/bin");
 	assert.equal(env.HOME, "/tmp/example-home");
 	assert.equal(env.SSH_AUTH_SOCK, "/tmp/ssh.sock");
+});
+
+test("worker liveness is bound to an instance nonce rather than PID alone", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-worker-identity-"));
+	try {
+		const jobId = "codex-2026-08-27-feedface";
+		const jobDir = join(root, jobId);
+		mkdirSync(jobDir, { recursive: true });
+		writeFileSync(join(jobDir, "worker-lease.json"), `${JSON.stringify({
+			workerInstanceId: "worker-instance-a",
+			pid: process.pid,
+			heartbeatAt: new Date().toISOString(),
+		})}\n`);
+		assert.equal(await workerLeaseIsFresh(root, jobId, "worker-instance-a"), true);
+		assert.equal(await workerLeaseIsFresh(root, jobId, "worker-instance-b"), false);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });
 
 test("advisor, executor, and explicit resume produce durable structured jobs", async () => {

@@ -50,10 +50,10 @@ function formatSearchResults(results: ReturnType<typeof searchMemory>, sync: unk
 		return `No matching research memory was found. Index sync: ${JSON.stringify(sync)}`;
 	}
 	const lines = results.map(
-		(result, index) =>
-			`[${index + 1}] ${result.ref} | ${result.kind}/${result.reliability} | ${result.timestamp || "unknown time"}\n${result.snippet}`,
+			(result, index) =>
+				`[${index + 1}] ${result.ref} | ${result.kind}/${result.reliability} | ${result.timestamp || "unknown time"}\n${result.snippet}`,
 	);
-	return `${lines.join("\n\n")}\n\nUse research_memory_read with sessionId and entryId to inspect exact surrounding entries before relying on a hit.`;
+	return `${lines.join("\n\n")}\n\nUse research_memory_read with projectKey, sessionId, and entryId to inspect exact surrounding entries before relying on a hit.`;
 }
 
 async function resolveProjectRoot(pi: ExtensionAPI, cwd: string, signal?: AbortSignal): Promise<string> {
@@ -70,7 +70,7 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Search prior project sessions and experiment evidence when earlier work is materially relevant",
 		promptGuidelines: [
 			"Use research_memory_search when the user refers to earlier sessions, previous experiments, an old decision, or when resolving uncertainty would benefit from known prior evidence. Do not call it routinely every turn.",
-			"Prefer recorded-evidence hits over assistant-synthesis or derived-summary hits. Read the exact entry before treating a snippet as evidence, and preserve its S:<session>/E:<entry> reference.",
+			"Prefer recorded-evidence hits over assistant-synthesis or derived-summary hits. Read the exact entry before treating a snippet as evidence, and preserve its P:<project>/S:<session>/E:<entry> reference.",
 			"Absence of a search hit is not evidence that an experiment was never run; report the searched scope and query when absence matters.",
 		],
 		parameters: Type.Object({
@@ -141,6 +141,7 @@ export default function (pi: ExtensionAPI) {
 			"Treat assistant and compaction text as fallible prior reasoning. Recorded experiments still require their stated validity judgment to support a conclusion.",
 		],
 		parameters: Type.Object({
+			projectKey: Type.Optional(Type.String({ description: "Project key from a search result; required when the same Session/entry identifier exists in more than one project" })),
 			sessionId: Type.String({ description: "Session identifier from a search result" }),
 			entryId: Type.String({ description: "Entry identifier from a search result" }),
 			radius: Type.Optional(Type.Integer({ minimum: 0, maximum: 10, description: "Indexed entries before/after; default 1" })),
@@ -152,6 +153,7 @@ export default function (pi: ExtensionAPI) {
 			const payload = await withIndex(ctx.cwd, (db, sync) => ({
 				sync,
 				result: readMemory(db, {
+					projectKey: params.projectKey,
 					sessionId: params.sessionId,
 					entryId: params.entryId,
 					radius: params.radius,

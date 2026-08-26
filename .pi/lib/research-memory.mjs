@@ -13,6 +13,14 @@ function sha256(value) {
 	return createHash("sha256").update(value).digest("hex");
 }
 
+export function memoryProjectKey(projectCwd) {
+	return `project-${sha256(resolve(projectCwd || ".")).slice(0, 24)}`;
+}
+
+function memoryRef(projectCwd, sessionId, entryId) {
+	return `P:${memoryProjectKey(projectCwd)}/S:${sessionId}/E:${entryId}`;
+}
+
 function scalar(value, maxChars = 2_000) {
 	if (typeof value !== "string") return "";
 	const normalized = value.replace(/\r\n/g, "\n").trim();
@@ -610,7 +618,8 @@ export function searchMemory(db, options) {
 		if (seenHashes.has(row.content_hash)) continue;
 		seenHashes.add(row.content_hash);
 		results.push({
-			ref: `S:${row.session_id}/E:${row.entry_id}`,
+			ref: memoryRef(row.project_cwd, row.session_id, row.entry_id),
+			projectKey: memoryProjectKey(row.project_cwd),
 			sessionId: row.session_id,
 			entryId: row.entry_id,
 			parentId: row.parent_id,
@@ -629,12 +638,21 @@ export function searchMemory(db, options) {
 	return results;
 }
 
-export function readMemory(db, { sessionId, entryId, radius = 1, maxChars = 12_000 }) {
+export function readMemory(db, { projectKey, sessionId, entryId, radius = 1, maxChars = 12_000 }) {
 	const boundedRadius = Math.max(0, Math.min(Number(radius) || 0, 10));
 	const boundedChars = Math.max(500, Math.min(Number(maxChars) || 12_000, 40_000));
-	const center = db
-		.prepare("SELECT * FROM memory_units WHERE session_id = ? AND entry_id = ? ORDER BY source_kind = 'experiment-ledger' DESC LIMIT 1")
-		.get(sessionId, entryId);
+	const candidates = db
+		.prepare("SELECT * FROM memory_units WHERE session_id = ? AND entry_id = ? ORDER BY source_kind = 'experiment-ledger' DESC")
+		.all(sessionId, entryId)
+		.filter((row) => !projectKey || memoryProjectKey(row.project_cwd) === projectKey);
+	const distinctSources = new Map(candidates.map((row) => [row.source_path, row]));
+	if (!projectKey && distinctSources.size > 1) {
+		throw new Error(`Memory reference S:${sessionId}/E:${entryId} is ambiguous across projects; provide the projectKey returned by research_memory_search`);
+	}
+	if (projectKey && distinctSources.size > 1) {
+		throw new Error(`Memory reference P:${projectKey}/S:${sessionId}/E:${entryId} is ambiguous across Session sources; refusing to choose one implicitly`);
+	}
+	const center = distinctSources.values().next().value;
 	if (!center) return undefined;
 	const rows = db
 		.prepare(`
@@ -650,7 +668,7 @@ export function readMemory(db, { sessionId, entryId, radius = 1, maxChars = 12_0
 		const text = row.text.length <= remaining ? row.text : `${row.text.slice(0, remaining)}\n[READ_TRUNCATED]`;
 		remaining -= text.length;
 		entries.push({
-			ref: `S:${row.session_id}/E:${row.entry_id}`,
+			ref: memoryRef(row.project_cwd, row.session_id, row.entry_id),
 			entryId: row.entry_id,
 			parentId: row.parent_id,
 			timestamp: row.timestamp,
@@ -662,6 +680,7 @@ export function readMemory(db, { sessionId, entryId, radius = 1, maxChars = 12_0
 		});
 	}
 	return {
+		projectKey: memoryProjectKey(center.project_cwd),
 		sessionId: center.session_id,
 		projectCwd: center.project_cwd,
 		sessionName: center.session_name ?? undefined,
