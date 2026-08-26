@@ -4,12 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import codexDelegateExtension, {
+	codexJobVisibleForRecovery,
 	codexRuntimeDeliveryDecision,
 	codexResultMarkdown,
 	codexResultPreview,
 	formatCodexJob,
 	formatCodexJobsStatus,
 	formatCodexStatus,
+	planCodexJobRecovery,
 } from "../.pi/extensions/codex-delegate.ts";
 import {
 	DEFAULT_CODEX_ADVISOR_SCHEMA_PATH,
@@ -96,6 +98,101 @@ test("Pi registers one Codex delegation tool instead of a family of noisy tools"
 	assert.match(registered.promptGuidelines.join("\n"), /repeated status\/result reads are suppressed/);
 	assert.equal(command.name, "codex");
 	assert.match(command.definition.description, /mission threads/);
+});
+
+test("Codex branch recovery keeps Project jobs global and legacy jobs branch-scoped", () => {
+	const scope = {
+		projectKey: "project-a",
+		leaderActorId: "research-leader",
+		leaderSessionId: "session-a",
+		branchEntryIds: new Set(["root", "branch-a"]),
+	};
+	assert.equal(codexJobVisibleForRecovery({
+		leaderActorId: "research-leader",
+		projectKey: "project-a",
+	}, scope), true);
+	assert.equal(codexJobVisibleForRecovery({
+		leaderActorId: "research-leader",
+		projectKey: "project-b",
+	}, scope), false);
+	assert.equal(codexJobVisibleForRecovery({
+		leaderActorId: null,
+		leaderSessionId: "session-a",
+		leaderBranchAnchorId: "branch-a",
+	}, scope), true);
+	assert.equal(codexJobVisibleForRecovery({
+		leaderActorId: null,
+		leaderSessionId: "session-a",
+		leaderBranchAnchorId: "branch-b",
+	}, scope), false);
+});
+
+test("Codex tree navigation refreshes its branch projection synchronously without job discovery", () => {
+	const handlers = new Map();
+	codexDelegateExtension({
+		registerTool() {},
+		registerCommand() {},
+		on(name, handler) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },
+		sendMessage() {},
+	});
+	const treeHandler = handlers.get("session_tree")?.[0];
+	assert.equal(typeof treeHandler, "function");
+	const result = treeHandler({ type: "session_tree" }, {
+		cwd: "/workspace",
+		hasUI: false,
+		sessionManager: {
+			getSessionId: () => "session-a",
+			getBranch: () => [{ id: "branch-a", type: "message" }],
+		},
+	});
+	assert.equal(result, undefined, "tree navigation must not await filesystem or Runtime recovery");
+});
+
+test("Codex recovery ignores synchronized terminal history and retains live or unresolved jobs", () => {
+	const base = {
+		id: "codex-history",
+		actionId: "action:codex-history",
+		actorId: "codex:history",
+		autoNotify: true,
+	};
+	const snapshot = {
+		actors: [{ id: "codex:history" }, { id: "codex:live" }, { id: "codex:unknown" }],
+		actions: [
+			{ id: "action:codex-history", kind: "codex-delegation", externalId: "codex-history", status: "completed" },
+			{ id: "action:codex-live", kind: "codex-delegation", externalId: "codex-live", status: "running" },
+			{ id: "action:codex-unknown", kind: "codex-delegation", externalId: "codex-unknown", status: "outcome_unknown" },
+			{ id: "action:other", kind: "other", externalId: "codex-other", status: "running" },
+		],
+		messages: [{
+			type: "result",
+			metadata: { jobId: "codex-history", status: "completed" },
+		}],
+	};
+	assert.deepEqual(planCodexJobRecovery({ ...base, status: "completed" }, snapshot), {
+		register: false,
+		monitor: false,
+	});
+	assert.deepEqual(planCodexJobRecovery({
+		...base,
+		id: "codex-live",
+		actionId: "action:codex-live",
+		actorId: "codex:live",
+		status: "running",
+	}, snapshot), { register: false, monitor: true });
+	assert.deepEqual(planCodexJobRecovery({
+		...base,
+		id: "codex-missed-terminal",
+		actionId: "action:codex-missed-terminal",
+		actorId: "codex:missed-terminal",
+		status: "completed",
+	}, snapshot), { register: true, monitor: true });
+	assert.deepEqual(planCodexJobRecovery({
+		...base,
+		id: "codex-unknown",
+		actionId: "action:codex-unknown",
+		actorId: "codex:unknown",
+		status: "outcome_unknown",
+	}, snapshot), { register: false, monitor: true });
 });
 
 test("background Codex reads stay fused until a real external event", () => {

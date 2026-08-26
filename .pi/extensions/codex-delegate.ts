@@ -315,6 +315,40 @@ type CodexJobView = ReturnType<typeof publicJobView>;
 
 const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled", "outcome_unknown"]);
 
+type CodexRecoveryScope = {
+	projectKey: string;
+	leaderActorId: string;
+	leaderSessionId: string;
+	branchEntryIds: Set<string>;
+};
+
+export function codexJobVisibleForRecovery(job: CodexJobView, scope: CodexRecoveryScope): boolean {
+	if (job.leaderActorId) {
+		return job.projectKey === scope.projectKey && job.leaderActorId === scope.leaderActorId;
+	}
+	return job.leaderSessionId === scope.leaderSessionId
+		&& Boolean(job.leaderBranchAnchorId && scope.branchEntryIds.has(job.leaderBranchAnchorId));
+}
+
+export function planCodexJobRecovery(job: CodexJobView, snapshot: any): { register: boolean; monitor: boolean } {
+	const actorId = job.actorId ?? codexActorId(job);
+	const actionId = job.actionId ?? `action:${job.id}`;
+	const actor = (snapshot?.actors ?? []).find((candidate: any) => candidate.id === actorId);
+	const action = (snapshot?.actions ?? []).find((candidate: any) =>
+		candidate.id === actionId || candidate.externalId === job.id,
+	);
+	const terminalEventRecorded = TERMINAL_JOB_STATUSES.has(job.status) && (snapshot?.messages ?? []).some((message: any) =>
+		message.type === "result"
+		&& message.metadata?.jobId === job.id
+		&& message.metadata?.status === job.status,
+	);
+	const register = !actor || !action || action.status !== job.status;
+	const monitor = !TERMINAL_JOB_STATUSES.has(job.status)
+		|| job.status === "outcome_unknown"
+		|| (job.autoNotify !== false && !terminalEventRecorded);
+	return { register, monitor };
+}
+
 function shortJobId(jobId: string): string {
 	return jobId.slice(-8);
 }
@@ -376,6 +410,21 @@ async function listOwnedCodexJobs(ctx: ExtensionContext) {
 	return [...new Map([...projectJobs, ...legacyJobs].map((job) => [job.id, job])).values()];
 }
 
+async function listRestorableCodexJobs(ctx: ExtensionContext) {
+	const scope = await leaderScope(ctx);
+	const [projectJobs, legacyJobs] = await Promise.all([
+		listCodexJobs({ cwd: ctx.cwd, projectKey: scope.projectKey, leaderActorId: scope.leaderActorId }),
+		// Startup recovery indexes all legacy jobs owned by this Pi Session once.
+		// Branch visibility is applied after reading so tree navigation can switch
+		// legacy live monitors from memory without another directory scan.
+		listCodexJobs({ cwd: ctx.cwd, leaderSessionId: scope.leaderSessionId, legacyOnly: true }),
+	]);
+	return {
+		scope,
+		jobs: [...new Map([...projectJobs, ...legacyJobs].map((job) => [job.id, job])).values()],
+	};
+}
+
 async function listOwnedCodexMissions(ctx: ExtensionContext) {
 	const scope = await leaderScope(ctx);
 	const [projectMissions, legacyMissions] = await Promise.all([
@@ -434,6 +483,7 @@ function codexUiProjection(jobs: CodexJobView[]): string {
 export default function codexDelegateExtension(pi: ExtensionAPI) {
 	const EVENT_KIND = "codex-delegation-event";
 	const activeJobs = new Map<string, CodexJobView>();
+	const suspendedLegacyJobs = new Map<string, CodexJobView>();
 	const monitorTimers = new Map<string, NodeJS.Timeout>();
 	const deliveredEvents = new Set<string>();
 	const deliveringEvents = new Set<string>();
@@ -804,6 +854,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		for (const timer of monitorTimers.values()) clearTimeout(timer);
 		monitorTimers.clear();
 		activeJobs.clear();
+		suspendedLegacyJobs.clear();
 		latestTerminal = undefined;
 		lastFooterText = undefined;
 		lastDockProjection = undefined;
@@ -813,26 +864,73 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		}
 	};
 
-	const reattachBranchJobs = async (ctx: ExtensionContext) => {
-		resetMonitors(ctx);
+	const refreshDeliveredEvents = (ctx: ExtensionContext) => {
 		deliveredEvents.clear();
-		const branch = ctx.sessionManager.getBranch();
-		for (const entry of branch) {
+		for (const entry of ctx.sessionManager.getBranch()) {
 			if (entry.type === "custom_message" && [EVENT_KIND, RUNTIME_MESSAGE_KIND].includes(entry.customType) && entry.details?.eventId) {
 				deliveredEvents.add(String(entry.details.eventId));
 			}
 		}
+	};
+
+	const reattachBranchJobs = async (ctx: ExtensionContext): Promise<boolean> => {
+		resetMonitors(ctx);
+		refreshDeliveredEvents(ctx);
 		try {
 			const runtime = await resolveResearchRuntime(ctx.cwd);
-			const jobs = await listOwnedCodexJobs(ctx);
+			const [{ jobs, scope }, snapshot] = await Promise.all([
+				listRestorableCodexJobs(ctx),
+				readRuntimeSnapshot(runtime),
+			]);
 			for (const job of jobs) {
-				if (job.leaderActorId) await registerCodexRuntimeJob(runtime, publicJobView(job));
-				if (TERMINAL_JOB_STATUSES.has(job.status) && job.autoNotify === false) continue;
-				monitorJob(publicJobView(job), ctx);
+				const view = publicJobView(job);
+				const recovery = planCodexJobRecovery(view, snapshot);
+				if (!codexJobVisibleForRecovery(view, scope)) {
+					if (recovery.monitor && !view.leaderActorId) suspendedLegacyJobs.set(view.id, view);
+					continue;
+				}
+				if (recovery.register) await registerCodexRuntimeJob(runtime, view);
+				if (recovery.monitor) monitorJob(view, ctx);
 			}
+			return true;
 		} catch (error) {
 			if (!shuttingDown && ctx.hasUI) ctx.ui.notify(`Could not reattach Codex jobs: ${error instanceof Error ? error.message : String(error)}`, "warning");
+			return false;
 		}
+	};
+
+	const refreshTreeJobs = (ctx: ExtensionContext) => {
+		refreshDeliveredEvents(ctx);
+		latestTerminal = undefined;
+		lastFooterText = undefined;
+		lastDockProjection = undefined;
+		const branchEntryIds = new Set(ctx.sessionManager.getBranch().map((entry) => entry.id));
+		const legacyScope: CodexRecoveryScope = {
+			projectKey: "",
+			leaderActorId: "",
+			leaderSessionId: ctx.sessionManager.getSessionId(),
+			branchEntryIds,
+		};
+		const legacyVisible = (job: CodexJobView) => codexJobVisibleForRecovery(job, legacyScope);
+
+		// Project-owned jobs belong to the Project Actor and keep their existing
+		// monitor. Legacy jobs are the only branch-owned jobs; suspend or resume
+		// those from the one-time startup index without touching disk or Runtime.
+		for (const [jobId, job] of activeJobs) {
+			if (job.leaderActorId || legacyVisible(job)) continue;
+			const timer = monitorTimers.get(jobId);
+			if (timer) clearTimeout(timer);
+			monitorTimers.delete(jobId);
+			activeJobs.delete(jobId);
+			suspendedLegacyJobs.set(jobId, job);
+		}
+		for (const [jobId, job] of suspendedLegacyJobs) {
+			if (!legacyVisible(job)) continue;
+			suspendedLegacyJobs.delete(jobId);
+			monitorJob(job, ctx);
+		}
+		refreshFooter(ctx);
+		refreshDock(ctx, true);
 	};
 
 	registerCodexRuntimeAdapter({
@@ -945,8 +1043,8 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("session_tree", async (_event, ctx) => {
-		await reattachBranchJobs(ctx);
+	pi.on("session_tree", (_event, ctx) => {
+		refreshTreeJobs(ctx);
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
