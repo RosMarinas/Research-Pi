@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { getRuntimeUiAdapter } from "../.pi/lib/research-runtime-adapters.mjs";
+import { acknowledgeDirectCodexTerminalResult } from "../.pi/extensions/codex-delegate.ts";
 import researchRuntimeExtension, {
 	analysisSessionToolBlockReason,
 	actorLines,
@@ -25,7 +26,7 @@ import {
 	appendRuntimeEventAtRevision,
 	claimRuntimeActorAttachment,
 	codexActorId,
-	consumeRuntimeMessageForAttachment,
+	consumeRuntimeMessagesForAttachment,
 	createRuntimeMessage,
 	detachRuntimeActor,
 	initializeResearchRuntime,
@@ -42,6 +43,7 @@ import {
 	runtimeActorAttachment,
 	runtimeActorTarget,
 	runtimeSessionInheritancePolicy,
+	runtimeSessionProjectContext,
 	settleRuntimeMessage,
 	settleRuntimeActorActivation,
 	settleRuntimeSessionRotation,
@@ -124,6 +126,7 @@ test("Runtime status reports live activation instead of historical Actor count",
 });
 
 test("Analysis Session exposes inspection tools but blocks work and Project mutation", () => {
+	assert.equal(runtimeSessionInheritancePolicy([], null, null, "analysis"), "analysis");
 	for (const tool of ["read", "grep", "find", "ls", "research_memory_search", "research_memory_read", "web_search", "host_capability", "analysis_send_to_leader"]) {
 		assert.equal(analysisSessionToolBlockReason("analysis", tool), null, tool);
 	}
@@ -475,14 +478,22 @@ test("delivered but unconsumed messages remain recoverable across Leader Session
 			type: "result",
 			from: "user",
 			to: RESEARCH_LEADER_ACTOR_ID,
-			body: "Result awaiting a settled Leader turn",
-		});
-		await settleRuntimeMessage(runtime, message.id, "delivered", { sessionId: "session-a" });
-		const snapshot = await readRuntimeSnapshot(runtime);
+				body: "Result awaiting a settled Leader turn",
+			});
+			const firstAttachment = runtimeActorAttachment(await readRuntimeSnapshot(runtime), RESEARCH_LEADER_ACTOR_ID, "session-a");
+			await settleRuntimeMessage(runtime, message.id, "delivered", { sessionId: "session-a", attachmentEpoch: firstAttachment.epoch });
+			const snapshot = await readRuntimeSnapshot(runtime);
 		assert.equal(pendingRuntimeMessages(snapshot).length, 0);
 		assert.deepEqual(unconsumedRuntimeMessages(snapshot).map((item) => item.id), [message.id]);
-		assert.equal(unconsumedRuntimeMessages(snapshot, { forSessionId: "session-a" }).length, 0);
-		assert.deepEqual(unconsumedRuntimeMessages(snapshot, { forSessionId: "session-b" }).map((item) => item.id), [message.id]);
+			assert.equal(unconsumedRuntimeMessages(snapshot, { forSessionId: "session-a" }).length, 0);
+			assert.deepEqual(unconsumedRuntimeMessages(snapshot, { forSessionId: "session-b" }).map((item) => item.id), [message.id]);
+			const claimed = await claimRuntimeActorAttachment(runtime, RESEARCH_LEADER_ACTOR_ID, {
+				sessionId: "session-a", branchAnchorId: "new-live-instance", reason: "same Session reopened",
+			}, { force: true });
+			const reopened = await readRuntimeSnapshot(runtime);
+			assert.deepEqual(unconsumedRuntimeMessages(reopened, {
+				forSessionId: "session-a", forAttachmentEpoch: claimed.attachment.epoch,
+			}).map((item) => item.id), [message.id]);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -584,6 +595,39 @@ test("Codex mission and mode define stable Actors while job events remain idempo
 	}
 });
 
+test("a directly-read Codex terminal result consumes its durable mailbox event", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-direct-terminal-"));
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace, { recursive: true });
+		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a" }, { runtimeRoot: join(root, "runtime") });
+		const attachment = runtimeActorAttachment(await readRuntimeSnapshot(runtime), RESEARCH_LEADER_ACTOR_ID, "session-a");
+		const job = {
+			id: "codex-2026-08-27-deadbeef",
+			actorId: "codex:direct-terminal",
+			status: "completed",
+			mode: "advisor",
+			model: "gpt-5.6-sol",
+			reasoningEffort: "max",
+			result: { working_synthesis: "terminal result was read directly" },
+		};
+		const first = await acknowledgeDirectCodexTerminalResult({
+			runtime, job, content: "terminal result was read directly", sessionId: "session-a", attachmentEpoch: attachment.epoch,
+		});
+		const second = await acknowledgeDirectCodexTerminalResult({
+			runtime, job, content: "terminal result was read directly", sessionId: "session-a", attachmentEpoch: attachment.epoch,
+		});
+		assert.equal(first.status, "consumed");
+		assert.equal(second.status, "consumed");
+		const snapshot = await readRuntimeSnapshot(runtime);
+		const terminal = snapshot.messages.find((message) => message.metadata?.jobId === job.id);
+		assert.equal(terminal.status, "consumed");
+		assert.equal(unconsumedRuntimeMessages(snapshot, { to: RESEARCH_LEADER_ACTOR_ID, forSessionId: "session-a" }).length, 0);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("Runtime mailbox delivery is single-owner and rechecks message state before send", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-delivery-"));
 	const previousRoot = process.env.RESEARCH_PI_RUNTIME_DIR;
@@ -645,7 +689,7 @@ test("Runtime mailbox delivery is single-owner and rechecks message state before
 			to: RESEARCH_LEADER_ACTOR_ID,
 			body: "consume before the queued send",
 		});
-		await consumeRuntimeMessageForAttachment(runtime, consumed.id, {
+		await consumeRuntimeMessagesForAttachment(runtime, [consumed.id], {
 			sessionId: "session-delivery",
 			actorId: RESEARCH_LEADER_ACTOR_ID,
 		});
@@ -665,6 +709,52 @@ test("Runtime mailbox delivery is single-owner and rechecks message state before
 		idle = true;
 		assert.equal(await adapter.deliver(ctx, { messageId: deferred.id }), "delivered");
 		assert.equal(sent.length, 2);
+	} finally {
+		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
+		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("ordinary Leader claim starts the mailbox watcher immediately", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-claim-watch-"));
+	const previousRoot = process.env.RESEARCH_PI_RUNTIME_DIR;
+	process.env.RESEARCH_PI_RUNTIME_DIR = join(root, "runtime");
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace, { recursive: true });
+		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-b" });
+		const oldAttachment = runtimeActorAttachment(await readRuntimeSnapshot(runtime), RESEARCH_LEADER_ACTOR_ID, "session-b");
+		const handlers = new Map();
+		const sent = [];
+		const pi = {
+			on(name, handler) { handlers.set(name, handler); },
+			registerCommand() {}, registerTool() {}, registerMessageRenderer() {}, registerEntryRenderer() {}, appendEntry() {},
+			sendMessage(message, options) { sent.push({ message, options }); },
+		};
+		researchRuntimeExtension(pi);
+		const ctx = {
+			cwd: workspace,
+			hasUI: true,
+			ui: { setStatus() {}, notify() {}, getEditorText: () => "", setEditorText() {} },
+			sessionManager: { getSessionId: () => "session-a", getLeafId: () => "leaf-a", getBranch: () => [] },
+			getContextUsage: () => null,
+			isIdle: () => true,
+			abort() {},
+		};
+		await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
+		await detachRuntimeActor(runtime, RESEARCH_LEADER_ACTOR_ID, "session-b", oldAttachment.epoch);
+		await handlers.get("input")({ type: "input", source: "user", text: "take the available Leader lease" }, ctx);
+		await createRuntimeMessage(runtime, {
+			id: "msg-after-ordinary-claim",
+			type: "notify",
+			from: "user",
+			to: RESEARCH_LEADER_ACTOR_ID,
+			body: "watcher should deliver without another user message",
+		});
+		await new Promise((resolve) => setTimeout(resolve, RUNTIME_TEST_WATCH_SETTLE_MS));
+		assert.equal(sent.filter((item) => item.message?.details?.messageId === "msg-after-ordinary-claim").length, 1);
+		await handlers.get("session_shutdown")({ type: "session_shutdown" }, ctx);
 	} finally {
 		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
 		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;
@@ -905,7 +995,7 @@ test("Runtime steer is non-preemptive by default and leaves context after one se
 			await handlers.get("agent_settled")({ type: "agent_settled" }, ctx);
 			const waitingContext = await handlers.get("context")({ type: "context", messages: [pendingAsk] }, ctx);
 			assert.equal(waitingContext.messages.filter((message) => message.details?.requestId === "request-pending").length, 1);
-			await consumeRuntimeMessageForAttachment(runtime, pendingRuntimeAsk.id, {
+			await consumeRuntimeMessagesForAttachment(runtime, [pendingRuntimeAsk.id], {
 				sessionId: "session-extension",
 				actorId: RESEARCH_LEADER_ACTOR_ID,
 			});
@@ -1220,9 +1310,26 @@ test("Analysis Session observes Project state without stealing the Leader, then 
 			],
 		}, ctx);
 		assert.equal(filtered.messages.some((message) => message.customType === RUNTIME_MESSAGE_KIND), false);
-		assert.ok(filtered.messages.some((message) => message.content === "Discuss H1 versus H2"));
+			assert.ok(filtered.messages.some((message) => message.content === "Discuss H1 versus H2"));
 
-		const revisionBeforeCompact = snapshot.revision;
+			await commands.get("runtime").handler("context off", ctx);
+			assert.equal(runtimeSessionInheritancePolicy(branch), "analysis");
+			assert.equal(runtimeSessionProjectContext(branch, "analysis"), "none");
+			assert.equal(await handlers.get("before_agent_start")({ type: "before_agent_start" }, ctx), undefined);
+			assert.equal(handlers.get("tool_call")({ toolName: "bash", input: { command: "echo mutate" } }).block, true);
+			const contextOff = await handlers.get("context")({
+				type: "context",
+				messages: [
+					{ role: "custom", customType: "research-project-view", content: "old ProjectView" },
+					{ role: "user", content: "analysis without project context" },
+				],
+			}, ctx);
+			assert.deepEqual(contextOff.messages, [{ role: "user", content: "analysis without project context" }]);
+			await commands.get("runtime").handler("context on", ctx);
+			assert.equal(runtimeSessionProjectContext(branch, "analysis"), "project");
+			assert.match((await handlers.get("before_agent_start")({ type: "before_agent_start" }, ctx)).message.content, /Session role: Analysis Session/);
+
+			const revisionBeforeCompact = snapshot.revision;
 		await handlers.get("session_compact")({ type: "session_compact", compactionEntry: { type: "compaction", id: "analysis-compact" } }, ctx);
 		assert.equal((await readRuntimeSnapshot(runtime)).revision, revisionBeforeCompact, "Analysis compaction must not write Project State");
 
@@ -1390,11 +1497,11 @@ test("an active Leader Session blocks silent takeover but explicit takeover adva
 		assert.notEqual(attachmentB.epoch, attachmentA.epoch);
 		assert.ok(sent.some((payload) => payload.details?.messageId === message.id));
 		assert.equal((await readRuntimeSnapshot(runtime)).messages.find((item) => item.id === message.id)?.attachmentEpoch, attachmentB.epoch);
-		assert.equal((await consumeRuntimeMessageForAttachment(runtime, message.id, {
+		assert.equal((await consumeRuntimeMessagesForAttachment(runtime, [message.id], {
 			sessionId: "session-a",
 			actorId: RESEARCH_LEADER_ACTOR_ID,
 			attachmentEpoch: attachmentA.epoch,
-		})).status, "stale_attachment");
+		}))[0].status, "stale_attachment");
 		assert.equal((await readRuntimeSnapshot(runtime)).messages.find((item) => item.id === message.id)?.status, "delivered");
 		await assert.rejects(
 			withRuntimeActorAttachment(runtime, RESEARCH_LEADER_ACTOR_ID, {
@@ -1443,7 +1550,10 @@ test("a cross-session research transition refreshes ProjectView at the next mode
 		};
 		await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
 		const runtime = await resolveResearchRuntime(workspace);
+		const attachment = runtimeActorAttachment(await readRuntimeSnapshot(runtime), RESEARCH_LEADER_ACTOR_ID, "session-a");
 		await recordResearchTransition(runtime, {
+			sessionId: "session-a",
+			attachmentEpoch: attachment.epoch,
 			id: "transition-safe-boundary",
 			from: "route A",
 			to: "route B",

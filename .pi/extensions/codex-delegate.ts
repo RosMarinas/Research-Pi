@@ -26,8 +26,9 @@ import {
 import {
 	RESEARCH_LEADER_ACTOR_ID,
 	RUNTIME_MESSAGE_KIND,
+	assertRuntimeActorAttachment,
 	codexActorId,
-	consumeRuntimeMessageForAttachment,
+	consumeRuntimeMessagesForAttachment,
 	readRuntimeSnapshot,
 	reconcileCodexRuntimeAsks,
 	recordCodexRuntimeEvent,
@@ -38,7 +39,6 @@ import {
 	runtimeActorAttachment,
 	runtimeSessionInheritancePolicy,
 	settleRuntimeMessage,
-	withRuntimeActorAttachment,
 } from "../lib/research-runtime.mjs";
 
 const ActionSchema = Type.Union(
@@ -382,6 +382,17 @@ async function leaderScope(ctx: ExtensionContext, options: { requireAttached?: b
 	};
 }
 
+async function withCurrentLeader<T>(
+	scope: Awaited<ReturnType<typeof leaderScope>>,
+	operation: () => Promise<T>,
+): Promise<T> {
+	await assertRuntimeActorAttachment(scope.runtime, RESEARCH_LEADER_ACTOR_ID, {
+		sessionId: scope.leaderSessionId,
+		attachmentEpoch: scope.attachmentEpoch,
+	});
+	return await operation();
+}
+
 function projectJobManagementScope(ctx: ExtensionContext, scope: Awaited<ReturnType<typeof leaderScope>>) {
 	return {
 		expectedCwd: ctx.cwd,
@@ -478,6 +489,29 @@ function codexUiProjection(jobs: CodexJobView[]): string {
 			pendingRequest: job.pendingRequest?.id ?? null,
 		})),
 	});
+}
+
+export async function acknowledgeDirectCodexTerminalResult({
+	runtime,
+	job,
+	content,
+	sessionId,
+	attachmentEpoch,
+}: {
+	runtime: Awaited<ReturnType<typeof resolveResearchRuntime>>;
+	job: CodexJobView;
+	content: string;
+	sessionId: string;
+	attachmentEpoch: string;
+}) {
+	if (!TERMINAL_JOB_STATUSES.has(job.status)) return null;
+	const message = await recordCodexRuntimeEvent(runtime, job, content);
+	if (!message) return null;
+	return (await consumeRuntimeMessagesForAttachment(runtime, [message.id], {
+		sessionId,
+		actorId: RESEARCH_LEADER_ACTOR_ID,
+		attachmentEpoch,
+	}))[0];
 }
 
 export default function codexDelegateExtension(pi: ExtensionAPI) {
@@ -623,13 +657,15 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		attachmentEpoch?: string | null,
 	) => {
 		const snapshot = await readRuntimeSnapshot(runtime);
-		for (const message of snapshot.messages) {
-			if (
-				message.type !== "ask"
-				|| message.relatesTo !== requestId
-				|| (message.status !== "queued" && message.status !== "delivered")
-			) continue;
-			await consumeRuntimeMessageForAttachment(runtime, message.id, {
+		const messageIds = snapshot.messages
+			.filter((message) =>
+				message.type === "ask"
+				&& message.relatesTo === requestId
+				&& (message.status === "queued" || message.status === "delivered"),
+			)
+			.map((message) => message.id);
+		if (messageIds.length) {
+			await consumeRuntimeMessagesForAttachment(runtime, messageIds, {
 				sessionId: ctx.sessionManager.getSessionId(),
 				actorId: RESEARCH_LEADER_ACTOR_ID,
 				attachmentEpoch,
@@ -666,21 +702,17 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			const approved = decision?.status === "approved";
 			const grantId = approved ? decision.grant?.id : undefined;
 			const ownerCheck = await jobManagementScope(ctx, job.id);
-			await withRuntimeActorAttachment(
-				runtime,
-				RESEARCH_LEADER_ACTOR_ID,
-				{
-					sessionId: ctx.sessionManager.getSessionId(),
-					attachmentEpoch: attachment.epoch,
-				},
-				() => respondToCodexJob(job.id, {
-					requestId: pending.id,
-					response: approved
-						? `Research Pi user approved host capability ${grantId}. Continue the same tool call.`
-						: "Research Pi user denied the requested host capability. Do not retry or bypass it.",
-					...ownerCheck,
-				}),
-			);
+			await assertRuntimeActorAttachment(runtime, RESEARCH_LEADER_ACTOR_ID, {
+				sessionId: ctx.sessionManager.getSessionId(),
+				attachmentEpoch: attachment.epoch,
+			});
+			await respondToCodexJob(job.id, {
+				requestId: pending.id,
+				response: approved
+					? `Research Pi user approved host capability ${grantId}. Continue the same tool call.`
+					: "Research Pi user denied the requested host capability. Do not retry or bypass it.",
+				...ownerCheck,
+			});
 			if (message?.status === "queued") {
 				await settleRuntimeMessage(runtime, message.id, "delivered", {
 					sessionId: ctx.sessionManager.getSessionId(),
@@ -936,12 +968,6 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 	registerCodexRuntimeAdapter({
 		dispatch: async ({ runtime, actor, message, preempt, ctx }) => {
 			const owner = await leaderScope(ctx, { requireAttached: true });
-			const withLeaderLease = <T>(operation: () => Promise<T>) => withRuntimeActorAttachment(
-				owner.runtime,
-				RESEARCH_LEADER_ACTOR_ID,
-				{ sessionId: owner.leaderSessionId, attachmentEpoch: owner.attachmentEpoch },
-				operation,
-			);
 			const jobs = await listCodexJobs({
 				cwd: ctx.cwd,
 				projectKey: owner.projectKey,
@@ -957,7 +983,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 
 			if (message.type === "reply" && live && latest.pendingRequest?.id) {
 				const requestId = latest.pendingRequest.id;
-				const queued = await withLeaderLease(() => respondToCodexJob(latest.id, {
+				const queued = await withCurrentLeader(owner, () => respondToCodexJob(latest.id, {
 					requestId,
 					response: message.body,
 					...ownerCheck,
@@ -965,10 +991,10 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 				nextJob = queued.job;
 				await consumeCodexRequestMessages(owner.runtime, requestId, ctx, owner.attachmentEpoch);
 			} else if (live && !preempt) {
-				const queued = await withLeaderLease(() => steerCodexJob(latest.id, { message: instruction, ...ownerCheck }));
+				const queued = await withCurrentLeader(owner, () => steerCodexJob(latest.id, { message: instruction, ...ownerCheck }));
 				nextJob = queued.job;
 			} else {
-				nextJob = await withLeaderLease(async () => {
+				nextJob = await withCurrentLeader(owner, async () => {
 					if (live) await cancelCodexJob(latest.id, ownerCheck);
 					if (!latest.threadId) return null;
 					return await resumeCodexJob(latest.id, {
@@ -1172,12 +1198,6 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			const startMode = requestedMode ?? "executor";
 			const mutatesCodex = !["status", "result", "missions"].includes(params.action);
 			const owner = await leaderScope(ctx, { requireAttached: mutatesCodex });
-			const withLeaderLease = <T>(operation: () => Promise<T>) => withRuntimeActorAttachment(
-				owner.runtime,
-				RESEARCH_LEADER_ACTOR_ID,
-				{ sessionId: owner.leaderSessionId, attachmentEpoch: owner.attachmentEpoch },
-				operation,
-			);
 			const projectOwnerCheck = projectJobManagementScope(ctx, owner);
 			let ownerCheck = projectOwnerCheck;
 			let effectiveBackground = params.background ?? (startMode === "executor");
@@ -1228,7 +1248,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 							job = reusable;
 							commandReceipt = `Codex mission "${reusable.mission}" already has active job ${reusable.id}; attached to it instead of starting a duplicate.`;
 						} else if (reusable?.threadId) {
-							job = await withLeaderLease(() => resumeCodexJob(reusable.id, {
+							job = await withCurrentLeader(owner, () => resumeCodexJob(reusable.id, {
 								...common,
 								...ownerCheck,
 								followUp: task,
@@ -1237,14 +1257,14 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 								? `Refreshed legacy Codex thread for mission "${reusable.mission}" as ${job.id}; the same Actor now has the current Research Pi tools.`
 								: `Resumed Codex mission "${reusable.mission}" from job ${reusable.id} as ${job.id}.`;
 						} else {
-							job = await withLeaderLease(() => startCodexJob({ ...common, task }));
+							job = await withCurrentLeader(owner, () => startCodexJob({ ...common, task }));
 						}
 						break;
 					}
 					case "resume": {
 						const jobId = requireText(params.jobId, "jobId");
 						ownerCheck = await jobManagementScope(ctx, jobId);
-						job = await withLeaderLease(() => resumeCodexJob(jobId, {
+						job = await withCurrentLeader(owner, () => resumeCodexJob(jobId, {
 							followUp: requireText(params.followUp, "followUp"),
 							mode: params.mode,
 							model: params.model,
@@ -1273,7 +1293,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 						const jobId = requireText(params.jobId, "jobId");
 						const requestId = requireText(params.requestId, "requestId");
 						ownerCheck = await jobManagementScope(ctx, jobId);
-						const queued = await withLeaderLease(() => respondToCodexJob(jobId, {
+						const queued = await withCurrentLeader(owner, () => respondToCodexJob(jobId, {
 							requestId,
 							response: params.response,
 							answers: params.answers,
@@ -1287,7 +1307,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 					case "steer": {
 						const jobId = requireText(params.jobId, "jobId");
 						ownerCheck = await jobManagementScope(ctx, jobId);
-						const queued = await withLeaderLease(() => steerCodexJob(jobId, {
+						const queued = await withCurrentLeader(owner, () => steerCodexJob(jobId, {
 							message: requireText(params.message, "message"),
 							...ownerCheck,
 						}));
@@ -1300,18 +1320,30 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 						const jobId = requireText(params.jobId, "jobId");
 						ownerCheck = await jobManagementScope(ctx, jobId);
 						job = await readCodexJob(jobId, ownerCheck);
+						const terminalView = publicJobView(job);
+						if (TERMINAL_JOB_STATUSES.has(terminalView.status) && owner.attachmentEpoch) {
+							await acknowledgeDirectCodexTerminalResult({
+								runtime: owner.runtime,
+								job: terminalView,
+								content: eventContent(terminalView),
+								sessionId: owner.leaderSessionId,
+								attachmentEpoch: owner.attachmentEpoch,
+							});
+							const id = eventId(terminalView);
+							if (id) deliveredEvents.add(id);
+						}
 						break;
 					}
 					case "cancel": {
 						const jobId = requireText(params.jobId, "jobId");
 						ownerCheck = await jobManagementScope(ctx, jobId);
-						job = await withLeaderLease(() => cancelCodexJob(jobId, ownerCheck));
+						job = await withCurrentLeader(owner, () => cancelCodexJob(jobId, ownerCheck));
 						break;
 					}
 					case "reconcile": {
 						const jobId = requireText(params.jobId, "jobId");
 						ownerCheck = await jobManagementScope(ctx, jobId);
-						job = await withLeaderLease(() => reconcileCodexJobOutcome(jobId, {
+						job = await withCurrentLeader(owner, () => reconcileCodexJobOutcome(jobId, {
 							outcome: params.outcome,
 							note: requireText(params.note, "note"),
 							...ownerCheck,

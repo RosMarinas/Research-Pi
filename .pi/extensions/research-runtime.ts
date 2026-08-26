@@ -1,6 +1,5 @@
 import { getMarkdownTheme, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Box, Markdown, Text } from "@earendil-works/pi-tui";
-import { type Stats, unwatchFile, watchFile } from "node:fs";
 import { join } from "node:path";
 import { Type } from "typebox";
 import {
@@ -37,6 +36,7 @@ import {
 	runtimeDockVisible,
 } from "../lib/runtime-dock-ui.mjs";
 import { resolveResearchPiPaths } from "../lib/runtime-paths.mjs";
+import { createRuntimeMailboxWatcher } from "../lib/runtime-mailbox-watch.mjs";
 import {
 	RESEARCH_LEADER_ACTOR_ID,
 	RUNTIME_EVENT_ENTRY_KIND,
@@ -49,7 +49,7 @@ import {
 	appendRuntimeEventAtRevision,
 	claimRuntimeActorAttachment,
 	createRuntimeMessage,
-	consumeRuntimeMessageForAttachment,
+	consumeRuntimeMessagesForAttachment,
 	detachRuntimeActor,
 	ensureRuntimeActor,
 	initializeResearchRuntime,
@@ -65,6 +65,7 @@ import {
 	runtimeActorTarget,
 	runtimeMessageText,
 	runtimeSessionInheritancePolicy,
+	runtimeSessionProjectContext,
 	settleRuntimeActorActivation,
 	settleRuntimeMessage,
 	settleRuntimeSessionRotation,
@@ -78,6 +79,7 @@ type RuntimeMessage = ReturnType<typeof pendingRuntimeMessages>[number];
 type RuntimeSnapshot = Awaited<ReturnType<typeof readRuntimeSnapshot>>;
 type RuntimeActivation = RuntimeSnapshot["activations"][number];
 type SessionInheritancePolicy = "project" | "clean" | "analysis";
+type ProjectContextMode = "project" | "none";
 type ProjectViewReceipt = {
 	version: number;
 	persistent: true;
@@ -494,21 +496,23 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	const runtimeDockClock = createRuntimeDockClock(() => runtimeDockTui?.requestRender?.());
 	let attachmentLossNotified = false;
 	let sessionInheritancePolicy: SessionInheritancePolicy = "project";
+	let projectContextMode: ProjectContextMode = "project";
 	let requestedInitialSessionMode: SessionInheritancePolicy | undefined =
 		process.env.RESEARCH_PI_INITIAL_SESSION_MODE === "analysis" ? "analysis" : undefined;
 	let lastUserPrompt = "";
 	let projectWorkThisRun = false;
 	const projectToolsThisRun = new Set<string>();
 	const toolExecutionInputs = new Map<string, Record<string, unknown>>();
-	let runtimeMailboxWatchPath: string | undefined;
-	let runtimeMailboxWatchListener: ((current: Stats, previous: Stats) => void) | undefined;
-	let runtimeMailboxScanRunning = false;
-	let runtimeMailboxRescanRequested = false;
-	let runtimeMailboxWatchGeneration = 0;
-	let runtimeMailboxWarning = "";
+	const setSessionMode = (
+		policy: SessionInheritancePolicy,
+		context: ProjectContextMode = policy === "clean" ? "none" : "project",
+	) => {
+		sessionInheritancePolicy = policy;
+		projectContextMode = context;
+	};
 
 	const isAnalysisSession = () => sessionInheritancePolicy === "analysis";
-	const isProjectAwareSession = () => sessionInheritancePolicy !== "clean";
+	const isProjectAwareSession = () => projectContextMode === "project";
 
 	const ensureAnalysisSessionActor = async (activeRuntime: RuntimeContext, ctx: ExtensionContext) => {
 		const sessionId = ctx.sessionManager.getSessionId();
@@ -525,7 +529,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 
 	const getRuntime = async (
 		ctx: ExtensionContext,
-		options: { claim?: boolean; force?: boolean; reason?: string } = {},
+		options: { claim?: boolean; force?: boolean; onlyIfUnattached?: boolean; reason?: string } = {},
 	): Promise<RuntimeContext> => {
 		const sessionId = ctx.sessionManager.getSessionId();
 		if (runtime && runtimeInputCwd === ctx.cwd && localSessionId === sessionId) {
@@ -540,22 +544,14 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			const snapshot = await readRuntimeSnapshot(runtime);
 			const existingAttachment = runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID);
 			if (existingAttachment?.sessionId === sessionId) localAttachmentEpoch = existingAttachment.epoch ?? undefined;
-			if (!existingAttachment) {
-				const claim = await claimRuntimeActorAttachment(runtime, RESEARCH_LEADER_ACTOR_ID, {
-					sessionId,
-					branchAnchorId: ctx.sessionManager.getLeafId(),
-					reason: "first live Session",
-				}, { onlyIfUnattached: true });
-				if (claim.attachment?.sessionId === sessionId) localAttachmentEpoch = claim.attachment.epoch ?? undefined;
-			}
 		}
 		if (options.claim && !(await isRuntimeActorAttached(runtime, RESEARCH_LEADER_ACTOR_ID, sessionId))) {
 			const claim = await claimRuntimeActorAttachment(runtime, RESEARCH_LEADER_ACTOR_ID, {
 				sessionId,
 				branchAnchorId: ctx.sessionManager.getLeafId(),
 				reason: options.reason ?? (options.force ? "explicit takeover" : "user activity"),
-			}, { force: options.force === true });
-			if (claim.status === "busy") throw new RuntimeLeaderBusyError(claim.activation);
+			}, { force: options.force === true, onlyIfUnattached: options.onlyIfUnattached === true });
+			if (claim.status === "busy" && !options.onlyIfUnattached) throw new RuntimeLeaderBusyError(claim.activation);
 			if (claim.attachment?.sessionId === sessionId) localAttachmentEpoch = claim.attachment.epoch ?? undefined;
 		}
 		return runtime;
@@ -565,12 +561,16 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		const activeRuntime = await getRuntime(ctx);
 		let snapshot = suppliedSnapshot ?? await readRuntimeSnapshot(activeRuntime);
 		if (!snapshot.projectState && !migrationAttemptedProjects.has(activeRuntime.projectKey)) {
-			migrationAttemptedProjects.add(activeRuntime.projectKey);
-			if (!snapshot.activeTransition && snapshot.revision === 0) {
+			const sessionId = ctx.sessionManager.getSessionId();
+			const attachment = runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID, sessionId);
+			if (attachment?.epoch && !snapshot.activeTransition && snapshot.revision === 0) {
+				migrationAttemptedProjects.add(activeRuntime.projectKey);
 				await migrateLatestProjectState({
 					runtime: activeRuntime,
 					sessionDir: resolveResearchPiPaths({ harnessRoot: HARNESS_ROOT }).sessionDir,
 					cwd: ctx.cwd,
+					leaderSessionId: sessionId,
+					attachmentEpoch: attachment.epoch,
 					appendRuntimeEvent,
 					appendRuntimeEventAtRevision,
 					readRuntimeSnapshot,
@@ -657,7 +657,9 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		const showFooterStatus = summary.active > 0 || summary.waiting > 0 || open > 0 || sessionInheritancePolicy === "clean" || sessionInheritancePolicy === "analysis" || UI_RUNTIME_STRIP === "off";
 		ctx.ui.setStatus(
 			"research_runtime",
-			showFooterStatus ? formatRuntimeStatus(activeRuntime.projectKey, snapshot, sessionInheritancePolicy) : undefined,
+			showFooterStatus
+				? `${formatRuntimeStatus(activeRuntime.projectKey, snapshot, sessionInheritancePolicy)}${isAnalysisSession() && !isProjectAwareSession() ? " · view off" : ""}`
+				: undefined,
 		);
 		await refreshDock(ctx, { snapshot });
 	};
@@ -717,16 +719,11 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	};
 
 	const deliverToCurrentLeader = async (
-		activeRuntime: RuntimeContext,
 		message: RuntimeMessage,
+		attachment: NonNullable<ReturnType<typeof runtimeActorAttachment>>,
 		ctx: ExtensionContext,
 		options: { preempt?: boolean; triggerTurn?: boolean; deferWhenBusy?: boolean } = {},
 	) => {
-		const sessionId = ctx.sessionManager.getSessionId();
-		const attachment = runtimeActorAttachment(await readRuntimeSnapshot(activeRuntime), RESEARCH_LEADER_ACTOR_ID, sessionId);
-		if (!attachment) {
-			return { status: "queued" as const, detail: "The Leader Session is attached to another Pi session" };
-		}
 		if (options.preempt && !ctx.isIdle()) ctx.abort();
 		const idle = ctx.isIdle();
 		if (!idle && options.deferWhenBusy) {
@@ -772,12 +769,15 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			// Re-read immediately before send. The message may have been answered
 			// and consumed after an earlier monitor snapshot was taken.
 			const snapshot = await readRuntimeSnapshot(activeRuntime);
+			const attachment = runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID, sessionId);
+			if (!attachment) return "deferred";
 			const message = unconsumedRuntimeMessages(snapshot, {
 				to: RESEARCH_LEADER_ACTOR_ID,
 				forSessionId: sessionId,
+				forAttachmentEpoch: attachment?.epoch,
 			}).find((candidate) => candidate.id === messageId);
 			if (!message) return "handled";
-			const result = await deliverToCurrentLeader(activeRuntime, message, ctx, options);
+			const result = await deliverToCurrentLeader(message, attachment, ctx, options);
 			if (result.status !== "delivered") return "deferred";
 			await settleRuntimeMessage(activeRuntime, message.id, "delivered", {
 				sessionId,
@@ -802,7 +802,12 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			if (message.status === "superseded") supersededMessageIds.add(message.id);
 		}
 		let delivered = 0;
-		for (const message of unconsumedRuntimeMessages(currentSnapshot, { to: RESEARCH_LEADER_ACTOR_ID, forSessionId: sessionId })) {
+		const attachment = runtimeActorAttachment(currentSnapshot, RESEARCH_LEADER_ACTOR_ID, sessionId);
+		for (const message of unconsumedRuntimeMessages(currentSnapshot, {
+			to: RESEARCH_LEADER_ACTOR_ID,
+			forSessionId: sessionId,
+			forAttachmentEpoch: attachment?.epoch,
+		})) {
 			const result = await deliverLeaderMailboxMessage(activeRuntime, message.id, ctx, options);
 			if (result === "delivered") delivered += 1;
 		}
@@ -817,73 +822,33 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		if (sessionInheritancePolicy !== "project") return null;
 		const snapshot = await readRuntimeSnapshot(activeRuntime);
 		const sessionId = ctx.sessionManager.getSessionId();
-		if (!runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID, sessionId)) return null;
+		const attachment = runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID, sessionId);
+		if (!attachment) return null;
 		const open = unconsumedRuntimeMessages(snapshot, {
 			to: RESEARCH_LEADER_ACTOR_ID,
 			forSessionId: sessionId,
+			forAttachmentEpoch: attachment.epoch,
 		});
 		if (!open.length) return 0;
 		return await deliverOpenLeaderMessages(activeRuntime, snapshot, ctx, options);
 	};
 
-	const scanRuntimeMailbox = async (ctx: ExtensionContext, generation: number) => {
-		// A ledger change is only a wake hint. Delivery authority and truth come
-		// from the current attachment plus a fresh fold of durable mailbox state.
-		if (generation !== runtimeMailboxWatchGeneration || sessionInheritancePolicy !== "project" || !runtime) return;
-		if (runtimeMailboxScanRunning) {
-			runtimeMailboxRescanRequested = true;
-			return;
-		}
-		runtimeMailboxScanRunning = true;
-		try {
-			const delivered = await drainLeaderMailboxIfAttached(runtime, ctx, {
+	const runtimeMailboxWatcher = createRuntimeMailboxWatcher({
+		intervalMs: RUNTIME_MAILBOX_WATCH_INTERVAL_MS,
+		drain: async (activeRuntime, ctx) => {
+			if (sessionInheritancePolicy !== "project" || runtime !== activeRuntime) return null;
+			return await drainLeaderMailboxIfAttached(activeRuntime, ctx, {
 				triggerTurn: true,
 				deferWhenBusy: true,
 			});
-			if (delivered === null) {
-				stopRuntimeMailboxWatch();
-				return;
-			}
-			if (delivered) await refreshStatus(ctx);
-			runtimeMailboxWarning = "";
-		} catch (error) {
-			const message = `Runtime mailbox wake failed: ${error instanceof Error ? error.message : String(error)}`;
-			if (ctx.hasUI && message !== runtimeMailboxWarning) ctx.ui.notify(message, "warning");
-			runtimeMailboxWarning = message;
-		} finally {
-			runtimeMailboxScanRunning = false;
-			if (runtimeMailboxRescanRequested && generation === runtimeMailboxWatchGeneration) {
-				runtimeMailboxRescanRequested = false;
-				queueMicrotask(() => void scanRuntimeMailbox(ctx, generation));
-			}
-		}
-	};
-
-	const stopRuntimeMailboxWatch = () => {
-		runtimeMailboxWatchGeneration += 1;
-		if (runtimeMailboxWatchPath && runtimeMailboxWatchListener) {
-			unwatchFile(runtimeMailboxWatchPath, runtimeMailboxWatchListener);
-		}
-		runtimeMailboxWatchPath = undefined;
-		runtimeMailboxWatchListener = undefined;
-		runtimeMailboxRescanRequested = false;
-		runtimeMailboxWarning = "";
-	};
-
-	const startRuntimeMailboxWatch = (activeRuntime: RuntimeContext, ctx: ExtensionContext) => {
-		stopRuntimeMailboxWatch();
-		const generation = runtimeMailboxWatchGeneration;
-		runtimeMailboxWatchPath = activeRuntime.ledgerPath;
-		runtimeMailboxWatchListener = (current, previous) => {
-			if (generation !== runtimeMailboxWatchGeneration) return;
-			if (current.mtimeMs === previous.mtimeMs && current.size === previous.size) return;
-			void scanRuntimeMailbox(ctx, generation);
-		};
-		watchFile(runtimeMailboxWatchPath, {
-			persistent: false,
-			interval: RUNTIME_MAILBOX_WATCH_INTERVAL_MS,
-		}, runtimeMailboxWatchListener);
-	};
+		},
+		onDelivered: async (ctx) => await refreshStatus(ctx),
+		onWarning: async (ctx, message) => {
+			if (ctx.hasUI) ctx.ui.notify(message, "warning");
+		},
+	});
+	const stopRuntimeMailboxWatch = runtimeMailboxWatcher.stop;
+	const startRuntimeMailboxWatch = runtimeMailboxWatcher.start;
 
 	const dispatchMessage = async (
 		activeRuntime: RuntimeContext,
@@ -1006,22 +971,37 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (event, ctx) => {
 		stopRuntimeMailboxWatch();
-		const activeRuntime = await getRuntime(ctx);
+		const provisionalPolicy = runtimeSessionInheritancePolicy(
+			ctx.sessionManager.getBranch(),
+			null,
+			null,
+			requestedInitialSessionMode ?? "project",
+		) as SessionInheritancePolicy;
+		// Resolve the requested role before touching Runtime. An initialization
+		// failure must never promote an Analysis Session through the default.
+		setSessionMode(provisionalPolicy, runtimeSessionProjectContext(ctx.sessionManager.getBranch(), provisionalPolicy) as ProjectContextMode);
+		const activeRuntime = await getRuntime(ctx, {
+			claim: provisionalPolicy === "project",
+			onlyIfUnattached: true,
+			reason: "first live Leader Session",
+		});
 		let snapshot = await readRuntimeSnapshot(activeRuntime);
 		if (requestedInitialSessionMode === "analysis") {
 			pi.appendEntry(RUNTIME_SESSION_POLICY_ENTRY_KIND, {
 				policy: "analysis",
+				projectContext: "project",
 				reason: "pi --analysis",
 				projectKey: activeRuntime.projectKey,
 			});
-			sessionInheritancePolicy = "analysis";
+			setSessionMode("analysis");
 			requestedInitialSessionMode = undefined;
 		} else {
-			sessionInheritancePolicy = runtimeSessionInheritancePolicy(
+			const policy = runtimeSessionInheritancePolicy(
 				ctx.sessionManager.getBranch(),
 				snapshot,
 				ctx.sessionManager.getSessionId(),
 			) as SessionInheritancePolicy;
+			setSessionMode(policy, runtimeSessionProjectContext(ctx.sessionManager.getBranch(), policy) as ProjectContextMode);
 		}
 		persistedProjectView = isProjectAwareSession()
 			? latestProjectViewReceipt(ctx.sessionManager.getBranch())
@@ -1037,7 +1017,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 				return !event.previousSessionFile && !request.fromSessionFile && request.fromSessionId !== currentSessionId;
 			});
 			if (pendingInheritance) {
-				sessionInheritancePolicy = pendingInheritance.policy as SessionInheritancePolicy;
+				setSessionMode(pendingInheritance.policy as SessionInheritancePolicy);
 				await settleRuntimeSessionInheritance(activeRuntime, pendingInheritance.id, "applied", {
 					toSessionId: currentSessionId,
 					toSessionFile: ctx.sessionManager.getSessionFile(),
@@ -1133,7 +1113,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		latestProjectView = undefined;
 		latestCodexJobs = [];
 		toolExecutionInputs.clear();
-		sessionInheritancePolicy = "project";
+		setSessionMode("project");
 	});
 
 	pi.on("input", async (event, ctx) => {
@@ -1141,11 +1121,12 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		lastUserPrompt = event.text.trim();
 		if (/^\/runtime\s+analysis(?:\s|$)/.test(event.text.trim())) return;
 		try {
-			const activeRuntime = await getRuntime(ctx, { claim: !isAnalysisSession() });
+			const activeRuntime = await getRuntime(ctx, { claim: sessionInheritancePolicy === "project" });
 			attachmentLossNotified = false;
 			if (isAnalysisSession()) {
-				await refreshProjectView(ctx);
+				if (isProjectAwareSession()) await refreshProjectView(ctx);
 			} else if (sessionInheritancePolicy === "project") {
+				startRuntimeMailboxWatch(activeRuntime, ctx);
 				const { snapshot } = await refreshProjectView(ctx);
 				if (await deliverOpenLeaderMessages(activeRuntime, snapshot, ctx, { triggerTurn: false })) {
 					await refreshProjectView(ctx);
@@ -1162,7 +1143,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", async (_event, ctx) => {
-		if (sessionInheritancePolicy === "clean") return;
+		if (!isProjectAwareSession()) return;
 		const activeRuntime = await getRuntime(ctx);
 		const snapshot = await readRuntimeSnapshot(activeRuntime);
 		if (!isAnalysisSession() && !runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID, ctx.sessionManager.getSessionId())) return;
@@ -1177,7 +1158,9 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		const mode = projectViewPersistenceMode(view, previous);
 		if (!mode) return;
 		const rawContent = mode === "snapshot"
-			? projectViewText
+			? isAnalysisSession()
+				? renderProjectView(view, { includeDirectedMessages: false })
+				: projectViewText
 			: renderProjectViewDelta(view, previous?.projectRevision ?? 0);
 		const content = isAnalysisSession() ? analysisSessionContext(rawContent) : rawContent;
 		persistedProjectView = projectViewReceipt(view, mode);
@@ -1292,7 +1275,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			}
 			return { messages: event.messages };
 		}
-		if (sessionInheritancePolicy === "clean") {
+		if (!isProjectAwareSession()) {
 			return {
 				messages: event.messages.filter((message) =>
 					message.customType !== PROJECT_VIEW_KIND
@@ -1328,7 +1311,9 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		);
 		let updateText = "";
 		if (!hasPersistentView) {
-			updateText = projectViewText;
+			updateText = isAnalysisSession()
+				? renderProjectView(view, { includeDirectedMessages: false })
+				: projectViewText;
 		} else if (
 			!persistedProjectView
 			|| view.projectRevision !== persistedProjectView.projectRevision
@@ -1356,9 +1341,16 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			return;
 		}
 		const activeRuntime = await getRuntime(ctx, { claim: true });
+		const sessionId = ctx.sessionManager.getSessionId();
+		const attachment = runtimeActorAttachment(await readRuntimeSnapshot(activeRuntime), RESEARCH_LEADER_ACTOR_ID, sessionId);
+		if (!attachment?.epoch) {
+			if (ctx.hasUI) ctx.ui.notify("Research compact remained Session-local because Leader ownership changed before Project State commit.", "warning");
+			return;
+		}
 		const result = await commitProjectState(activeRuntime, {
 			compactionEntry: event.compactionEntry,
-			sessionId: ctx.sessionManager.getSessionId(),
+			sessionId,
+			attachmentEpoch: attachment.epoch,
 			appendRuntimeEvent,
 			appendRuntimeEventAtRevision,
 			readRuntimeSnapshot,
@@ -1370,6 +1362,9 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 				"warning",
 			);
 		}
+		if (result?.status === "stale_attachment" && ctx.hasUI) {
+			ctx.ui.notify("Research compact remained Session-local because Leader ownership changed during Project State commit.", "warning");
+		}
 		await refreshProjectView(ctx);
 		await refreshStatus(ctx);
 	});
@@ -1380,17 +1375,20 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		if (materializedMessages.size) {
 			activeRuntime = await getRuntime(ctx);
 			const sessionId = ctx.sessionManager.getSessionId();
-			for (const [messageId, materialized] of materializedMessages) {
+			const consumableIds = [...materializedMessages].flatMap(([messageId, materialized]) => {
 				// A blocking Codex ask is only settled when a response/approval is
 				// actually queued. Merely showing it to the Leader must not make the
 				// Runtime inbox look empty while the underlying job still waits.
-				if (materialized.type === "ask" && materialized.requestId) continue;
-				const result = await consumeRuntimeMessageForAttachment(activeRuntime, messageId, {
+				return materialized.type === "ask" && materialized.requestId ? [] : [messageId];
+			});
+			if (consumableIds.length) {
+				const results = await consumeRuntimeMessagesForAttachment(activeRuntime, consumableIds, {
 					sessionId,
 					actorId: RESEARCH_LEADER_ACTOR_ID,
-					attachmentEpoch: materialized.attachmentEpoch,
 				});
-				if (result.status === "consumed") consumedMessageIds.add(messageId);
+				for (const result of results) {
+					if (result.status === "consumed") consumedMessageIds.add(result.messageId);
+				}
 			}
 			materializedMessages.clear();
 			runtimeChanged = true;
@@ -1470,11 +1468,35 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			try {
 				const [mode = "board", ...rest] = args.trim().split(/\s+/).filter(Boolean);
-				if (!["board", "health", "recommend", "view", "rotate", "takeover", "analysis", "promote", "new", "inherit"].includes(mode)) {
-					throw new Error("Usage: /runtime [board|health|recommend|view|analysis [reason]|promote <reason>|rotate [reason]|takeover <reason>|new <clean|analysis> [reason]|inherit [reason]]");
+				if (!["board", "health", "recommend", "view", "rotate", "takeover", "analysis", "context", "promote", "new", "inherit"].includes(mode)) {
+					throw new Error("Usage: /runtime [board|health|recommend|view|analysis [reason]|context <on|off>|promote <reason>|rotate [reason]|takeover <reason>|new <clean|analysis> [reason]|inherit [reason]]");
 				}
 				if (mode === "board") {
 					await showRuntimeBoard(ctx);
+					await refreshStatus(ctx);
+					return;
+				}
+				if (mode === "context") {
+					if (!isAnalysisSession()) throw new Error("/runtime context is for Analysis Sessions; Leader Sessions always use Project context.");
+					const requested = rest[0];
+					if (requested !== "on" && requested !== "off") throw new Error("Usage: /runtime context <on|off>");
+					const activeRuntime = await getRuntime(ctx);
+					projectContextMode = requested === "on" ? "project" : "none";
+					pi.appendEntry(RUNTIME_SESSION_POLICY_ENTRY_KIND, {
+						policy: "analysis",
+						projectContext: projectContextMode,
+						reason: `Analysis ProjectView ${requested}`,
+						projectKey: activeRuntime.projectKey,
+					});
+					persistedProjectView = undefined;
+					if (projectContextMode === "project") {
+						await refreshProjectView(ctx);
+					} else {
+						projectViewText = "";
+						projectViewHash = "";
+						latestProjectView = undefined;
+					}
+					ctx.ui.notify(`Analysis ProjectView is now ${requested === "on" ? "enabled" : "disabled"}; the Analysis role and capability policy did not change.`, "info");
 					await refreshStatus(ctx);
 					return;
 				}
@@ -1507,10 +1529,11 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 					}
 					pi.appendEntry(RUNTIME_SESSION_POLICY_ENTRY_KIND, {
 						policy: "analysis",
+						projectContext: "project",
 						reason,
 						projectKey: activeRuntime.projectKey,
 					});
-					sessionInheritancePolicy = "analysis";
+					setSessionMode("analysis");
 					stopRuntimeMailboxWatch();
 					persistedProjectView = undefined;
 					await ensureAnalysisSessionActor(activeRuntime, ctx);
@@ -1526,10 +1549,11 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 					const activeRuntime = await getRuntime(ctx, { claim: true, force: true, reason });
 					pi.appendEntry(RUNTIME_SESSION_POLICY_ENTRY_KIND, {
 						policy: "project",
+						projectContext: "project",
 						reason,
 						projectKey: activeRuntime.projectKey,
 					});
-					sessionInheritancePolicy = "project";
+					setSessionMode("project");
 					startRuntimeMailboxWatch(activeRuntime, ctx);
 					persistedProjectView = undefined;
 					attachmentLossNotified = false;
@@ -1543,7 +1567,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 					if (!["clean", "analysis"].includes(rest[0] ?? "")) throw new Error("Usage: /runtime new <clean|analysis> [reason]");
 					await ctx.waitForIdle();
 					const policy = rest[0] as "clean" | "analysis";
-					const activeRuntime = await getRuntime(ctx, { claim: !isAnalysisSession() });
+					const activeRuntime = await getRuntime(ctx, { claim: sessionInheritancePolicy === "project" });
 					const reason = rest.slice(1).join(" ").trim() || (policy === "analysis" ? "fresh read-only Analysis Session" : "explicit clean-context Session");
 					const request = await requestRuntimeSessionInheritance(activeRuntime, {
 						policy,
@@ -1557,6 +1581,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 							setup: async (sessionManager) => {
 								sessionManager.appendCustomEntry(RUNTIME_SESSION_POLICY_ENTRY_KIND, {
 									policy,
+									projectContext: policy === "clean" ? "none" : "project",
 									requestId: request.id,
 									reason,
 									projectKey: activeRuntime.projectKey,
@@ -1588,10 +1613,11 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 					const reason = rest.join(" ").trim() || "explicitly restore Project inheritance";
 					pi.appendEntry(RUNTIME_SESSION_POLICY_ENTRY_KIND, {
 						policy: "project",
+						projectContext: "project",
 						reason,
 						projectKey: activeRuntime.projectKey,
 					});
-					sessionInheritancePolicy = "project";
+					setSessionMode("project");
 					startRuntimeMailboxWatch(activeRuntime, ctx);
 					const { snapshot } = await refreshProjectView(ctx);
 					await deliverOpenLeaderMessages(activeRuntime, snapshot, ctx, { triggerTurn: false });

@@ -2,7 +2,13 @@ import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { getGitSnapshot } from "../lib/codex-jobs.mjs";
-import { recordResearchTransition, resolveResearchRuntime } from "../lib/research-runtime.mjs";
+import {
+	RESEARCH_LEADER_ACTOR_ID,
+	readRuntimeSnapshot,
+	recordResearchTransition,
+	resolveResearchRuntime,
+	runtimeActorAttachment,
+} from "../lib/research-runtime.mjs";
 
 export default function researchTransitionExtension(pi: ExtensionAPI) {
 	pi.registerTool({
@@ -36,11 +42,17 @@ export default function researchTransitionExtension(pi: ExtensionAPI) {
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const id = `transition-${new Date().toISOString().replace(/[-:.]/g, "")}-${randomUUID().slice(0, 8)}`;
+			const runtime = await resolveResearchRuntime(ctx.cwd);
+			const sessionId = ctx.sessionManager.getSessionId();
+			const snapshot = await readRuntimeSnapshot(runtime);
+			const attachment = runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID, sessionId);
+			if (!attachment?.epoch) throw new Error("This is no longer the Leader Session; explicitly promote or take over before changing the research route.");
 			const git = await getGitSnapshot(ctx.cwd);
-			const transition = await recordResearchTransition(await resolveResearchRuntime(ctx.cwd), {
+			const transition = await recordResearchTransition(runtime, {
 				id,
 				...params,
-				sessionId: ctx.sessionManager.getSessionId(),
+				sessionId,
+				attachmentEpoch: attachment.epoch,
 				workspaceRoot: ctx.cwd,
 				git: { root: git.root, branch: git.branch, commit: git.commit, dirty: git.dirty },
 			});

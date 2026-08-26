@@ -316,6 +316,20 @@ test("Runtime merge restores route provenance for an experiment already present 
 	assert.equal(evidence.experiments[0].trackLabel, "old contract route");
 });
 
+test("Runtime-only evidence preserves its observation and downgrades missing observations", () => {
+	const evidence = mergeProjectRuntimeEvidence({
+		experiments: [], checkpoints: [], previousState: null, validRefs: new Set(), sourceCatalog: [],
+	}, {
+		evidence: [
+			{ id: "observed", observation: "The registered margin increased to 0.31.", validityJudgment: "valid", conclusion: "The diagnostic passed." },
+			{ id: "missing", observation: "", validityJudgment: "valid", conclusion: "A legacy conclusion without its observation." },
+		],
+	});
+	assert.equal(evidence.experiments.find((item) => item.id === "observed").observation, "The registered margin increased to 0.31.");
+	assert.equal(evidence.experiments.find((item) => item.id === "observed").validityJudgment, "valid");
+	assert.equal(evidence.experiments.find((item) => item.id === "missing").validityJudgment, "inconclusive");
+});
+
 test("compact claim strength respects confirmatory, exploratory, and diagnostic evidence modes", () => {
 	const makeEntry = (id, evidenceMode, predictionStatus, prediction = "") => ({
 		type: "custom",

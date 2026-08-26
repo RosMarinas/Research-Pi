@@ -13,6 +13,7 @@ import {
 	readRuntimeSnapshot,
 	recordResearchTransition,
 	resolveResearchRuntime,
+	runtimeActorAttachment,
 } from "../.pi/lib/research-runtime.mjs";
 
 function toolFrom(extension, extra = {}) {
@@ -34,8 +35,11 @@ test("record_experiment mirrors concise evidence into Project Runtime", async ()
 	try {
 		const workspace = join(root, "workspace");
 		mkdirSync(workspace);
-		const runtime = await resolveResearchRuntime(workspace);
+		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-evidence" });
+		const attachment = runtimeActorAttachment(await readRuntimeSnapshot(runtime), "research-leader", "session-evidence");
 		await recordResearchTransition(runtime, {
+			sessionId: "session-evidence",
+			attachmentEpoch: attachment.epoch,
 			id: "new-current-route",
 			to: "new current route",
 			reason: "exercise explicit provenance for a delayed old-route result",
@@ -261,6 +265,7 @@ test("record_research_transition is a narrow explicit project-memory operation",
 	try {
 		const workspace = join(root, "workspace");
 		mkdirSync(workspace);
+		await initializeResearchRuntime(workspace, { sessionId: "session-transition" });
 		const tool = toolFrom(researchTransitionExtension);
 		assert.equal(tool.name, "record_research_transition");
 		assert.match(tool.description, /rare project-level change/);

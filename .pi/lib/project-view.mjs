@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { RESEARCH_COMPACTION_KIND, RESEARCH_COMPACTION_VERSION } from "./research-compact.mjs";
-import { runtimeResearchTrack, runtimeTrackStatus } from "./research-runtime.mjs";
+import { RESEARCH_LEADER_ACTOR_ID, runtimeResearchTrack, runtimeTrackStatus } from "./research-runtime.mjs";
 
 export const PROJECT_VIEW_KIND = "research-project-view";
 export const PROJECT_VIEW_DELTA_KIND = "research-project-view-delta";
@@ -70,6 +70,7 @@ export async function commitProjectState(runtime, input) {
 		|| entry.details?.version !== RESEARCH_COMPACTION_VERSION
 		|| !entry.details?.researchState
 	) return null;
+	if (!input.attachmentEpoch) throw new Error("Project State commit requires the current Leader attachment");
 	const snapshot = await input.readRuntimeSnapshot(runtime);
 	const track = runtimeResearchTrack(snapshot);
 	const basedOnRevision = Number.isInteger(entry.details.projectRevision)
@@ -91,10 +92,19 @@ export async function commitProjectState(runtime, input) {
 		trackRef: track.ref,
 		trackLabel: track.label,
 	};
+	const leaderSessionId = String(input.leaderSessionId ?? input.sessionId);
 	const result = await input.appendRuntimeEventAtRevision(runtime, "project.state.committed", {
 		state: entry.details.researchState,
 		source,
-	}, basedOnRevision, { id: `project-state:${source.sessionId}:${source.entryId}` });
+	}, basedOnRevision, {
+		id: `project-state:${source.sessionId}:${source.entryId}`,
+		expectedAttachment: {
+			actorId: RESEARCH_LEADER_ACTOR_ID,
+			sessionId: leaderSessionId,
+			attachmentEpoch: input.attachmentEpoch,
+		},
+	});
+	if (result.status === "stale_attachment") return result;
 	if (result.status !== "conflict") return result;
 	await input.appendRuntimeEvent(runtime, "project.state.rejected", {
 		source,
@@ -133,7 +143,7 @@ async function sessionCandidates(sessionDir) {
 	return described.filter(Boolean).sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, MAX_SESSION_FILES);
 }
 
-export async function migrateLatestProjectState({ runtime, sessionDir, cwd, appendRuntimeEvent, appendRuntimeEventAtRevision, readRuntimeSnapshot }) {
+export async function migrateLatestProjectState({ runtime, sessionDir, cwd, leaderSessionId, attachmentEpoch, appendRuntimeEvent, appendRuntimeEventAtRevision, readRuntimeSnapshot }) {
 	let bytes = 0;
 	for (const candidate of await sessionCandidates(sessionDir)) {
 		if (bytes + candidate.size > MAX_SESSION_BYTES) break;
@@ -156,6 +166,8 @@ export async function migrateLatestProjectState({ runtime, sessionDir, cwd, appe
 		return await commitProjectState(runtime, {
 			compactionEntry: compaction,
 			sessionId: header.id,
+			leaderSessionId,
+			attachmentEpoch,
 			appendRuntimeEvent,
 			appendRuntimeEventAtRevision,
 			readRuntimeSnapshot,
@@ -332,7 +344,8 @@ function truncateSection(text, limit, marker) {
 	return `${text.slice(0, Math.max(0, limit - marker.length - 1)).trimEnd()}\n${marker}`;
 }
 
-export function renderProjectView(view) {
+export function renderProjectView(view, options = {}) {
+	const includeDirectedMessages = options.includeDirectedMessages !== false;
 	const state = view.state;
 	const lines = [
 		"<research_project_view>",
@@ -460,8 +473,12 @@ export function renderProjectView(view) {
 		...bullets(view.experiments, (item) => `${item.id} [${item.validityJudgment ?? "inconclusive"}] [route=${item.routeStatus}] ${compact(item.question, 300)} -> ${compact(item.conclusion, 380)}${item.runId ? ` | run=${compact(item.runId, 140)}` : ""}`, "none recorded"),
 		"Live/unresolved Runtime actions:",
 		...bullets(view.actions, (item) => `${item.id} [${item.status}] [route=${item.routeStatus}] ${compact(item.label, 300)} external=${item.externalId ?? "none"}`, "none"),
-		"Open Runtime messages (queued or delivered but not consumed):",
-		...bullets(view.openMessages, (item) => `${item.id} [${item.status}] [route=${item.routeStatus}] ${item.type} from=${item.from}: ${item.body}`, "none"),
+		includeDirectedMessages
+			? "Open Runtime messages (queued or delivered but not consumed):"
+			: `Open directed Runtime messages: ${view.openMessages.length} (contents are visible only to the addressed Session).`,
+		...(includeDirectedMessages
+			? bullets(view.openMessages, (item) => `${item.id} [${item.status}] [route=${item.routeStatus}] ${item.type} from=${item.from}: ${item.body}`, "none")
+			: []),
 		"=== NEW-SESSION ORIENTATION ===",
 		"The current user request selects the immediate task. Recent completed work, live Actions, dirty files, and a baseline next experiment are context, not automatic instructions.",
 		"Before acting, place the user request inside the project direction and current research frontier. Do not continue a local coding, debugging, or infrastructure loop merely because it is recent; continue it only when it still advances the research objective or the user explicitly requests it.",
