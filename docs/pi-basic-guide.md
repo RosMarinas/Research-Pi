@@ -14,7 +14,7 @@ Research Pi 有两个直观的项目角色：
 - **Leader Session**：默认入口 `pi`。可以修改项目、运行实验、调度 Codex、更新 Project State，并独占 durable Leader mailbox。
 - **Analysis Session**：入口 `pi --analysis`。读取同一 ProjectView 并讨论问题，但不抢占 Leader、不接收 Codex ASK/result，也不能修改代码、启动实验或更新 Project State。
 
-Analysis Session 可以使用项目内只读工具，也可以通过 `host_capability` 读取已批准的外部文件或执行受限 SSH 检查。SSH 允许 `cat/head/tail/grep/rg/find/ls/stat`、只读 Git、调度器和 `nvidia-smi` 查询等单条命令或只读 pipeline；shell 串联、重定向、解释器、进程控制和实验启动会被拒绝。目标已获得 Project trust 时无需重复审批，否则只审批 SSH target，凭据本身不会进入模型上下文。
+Analysis Session 可以使用项目内只读工具，也可以通过 `host_capability` 读取已批准的外部文件或执行 SSH 检查。`cat/head/tail/grep/rg/find/ls/stat`、只读 Git、调度器和 `nvidia-smi` 查询等保守语法可在受信 SSH target 上直接执行；其他远端命令会向用户展示完整命令并申请一次性或当前 Session 的精确授权，不会把该授权泛化成整个 SSH target 的信任。凭据路径始终禁止进入模型上下文。
 
 讨论形成可操作结论后，有两条路：
 
@@ -172,6 +172,7 @@ Pi 现在提供这些低摩擦研究工具：
 - `/runtime`（或 `/runtime board`）：打开 Project 控制面；左右或 Tab 切换 overview/actors/messages/sessions，`r` 手动刷新，`v` 查看完整 ProjectView。Actors 页用上下键选择，Enter 或 `w` 直接打开对应 Codex Watch。面板不进入模型上下文，也不后台轮询。需要注意的 Runtime 状态会通过 editor 上方的自折叠 Dock 显示。
 - `/runtime health|recommend|view`：查看 Project Runtime 健康度、只读生命周期建议或当前 ProjectView。
 - `/runtime analysis [reason]`：把当前 Session 原地切为 Analysis Session；释放 Leader attachment，但保留 ProjectView 供只读讨论。
+- `/runtime context <on|off>`：只在 Analysis Session 中切换 ProjectView 自动注入；Analysis 角色和权限不变。重新开启时恢复 ProjectView 上下文，不改写旧 transcript。
 - `/analysis send <message>`：将 Analysis Session 的讨论摘要作为 proposal 投递给当前 Leader，不更新 Project State。
 - `/runtime promote <reason>`：将当前 Analysis Session 显式晋升为 Leader Session；接管执行权并接收未消费 mailbox。
 - `/runtime takeover <reason>`：当另一 Leader Session 正在工作且确实需要人工接管时，显式转移 attachment；旧运行会在下一模型边界停止。

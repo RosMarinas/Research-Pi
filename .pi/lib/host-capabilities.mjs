@@ -1,15 +1,18 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { access, mkdir, open, readFile, readdir, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { access, mkdir, open, readFile, readdir, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import {
+	CREDENTIAL_BASENAMES,
+	CREDENTIAL_RELATIVE_PATHS,
 	isProtectedProjectMutation,
 	isWithinRoot,
 	resolveBoundaryPath,
 	resolveProjectRoot,
 	secretEnvironmentNames,
 } from "./project-boundary.mjs";
+import { withOwnerFileLock } from "./owner-file-lock.mjs";
 
 const LEDGER_VERSION = 2;
 const SESSION_GRANT_MS = 24 * 60 * 60 * 1000;
@@ -20,10 +23,6 @@ const FORBIDDEN_SECRET_EXTENSIONS = new Set([".key", ".pem", ".p12", ".pfx"]);
 
 function now() {
 	return new Date().toISOString();
-}
-
-function delay(ms) {
-	return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 }
 
 function normalizeScope(scope) {
@@ -175,31 +174,9 @@ async function readLedger(context, ledgerKind = "session") {
 async function withLedgerLock(context, ledgerKind, action) {
 	const path = ledgerPath(context, ledgerKind);
 	await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-	const lockPath = `${path}.lock`;
-	let handle;
-	for (let attempt = 0; attempt < 80; attempt += 1) {
-		try {
-			handle = await open(lockPath, "wx", 0o600);
-			await handle.writeFile(`${process.pid} ${now()}\n`, "utf8");
-			break;
-		} catch (error) {
-			if (error?.code !== "EEXIST") throw error;
-			try {
-				const lockStat = await stat(lockPath);
-				if (Date.now() - lockStat.mtimeMs > 30_000) await unlink(lockPath);
-			} catch (lockError) {
-				if (lockError?.code !== "ENOENT") throw lockError;
-			}
-			await delay(25);
-		}
-	}
-	if (!handle) throw new Error("Timed out waiting for the capability ledger lock");
-	try {
-		return await action(await readLedger(context, ledgerKind), path);
-	} finally {
-		await handle.close().catch(() => undefined);
-		await unlink(lockPath).catch(() => undefined);
-	}
+	return await withOwnerFileLock(`${path}.lock`, async () => action(await readLedger(context, ledgerKind), path), {
+		timeoutMessage: "Timed out waiting for the capability ledger lock",
+	});
 }
 
 function extension(path) {
@@ -212,7 +189,10 @@ export function isForbiddenCredentialRead(path) {
 	const candidate = resolve(path);
 	const name = candidate.slice(candidate.lastIndexOf(sep) + 1);
 	const lower = name.toLowerCase();
+	const normalized = candidate.split(sep).join("/").toLowerCase();
 	if (lower === ".env" || lower.startsWith(".env.")) return true;
+	if (CREDENTIAL_BASENAMES.includes(lower)) return true;
+	if (CREDENTIAL_RELATIVE_PATHS.some((path) => normalized.endsWith(`/${path}`))) return true;
 	if (FORBIDDEN_SECRET_EXTENSIONS.has(extension(candidate))) return true;
 	const home = resolve(homedir());
 	const rel = relative(home, candidate).split(sep).join("/");
@@ -225,7 +205,7 @@ export function isForbiddenCredentialRead(path) {
 		);
 	}
 	return (
-		rel === ".aws/credentials" ||
+		CREDENTIAL_RELATIVE_PATHS.includes(rel) ||
 		rel.startsWith(".gnupg/") ||
 		rel.startsWith(".config/gcloud/") ||
 		rel === ".kube/config" ||
@@ -295,7 +275,17 @@ export async function prepareCapabilityRequest(context, input) {
 	}
 	if (kind === "ssh-target") {
 		const target = normalizeSshTarget(input.target, input.port);
-		return { kind, target: target.canonical, destination: target.destination, port: target.port };
+		const remoteCommand = input.commandScoped ? String(input.remoteCommand ?? "").trim() : undefined;
+		if (input.commandScoped && (!remoteCommand || remoteCommand.length > 32_768 || remoteCommand.includes("\0"))) {
+			throw new Error("A command-scoped SSH capability requires one bounded remoteCommand");
+		}
+		return {
+			kind,
+			target: target.canonical,
+			destination: target.destination,
+			port: target.port,
+			...(remoteCommand ? { remoteCommand, match: "exact-command" } : {}),
+		};
 	}
 	if (kind === "host-command") {
 		const argv = normalizeArgs(input.argv);
@@ -343,7 +333,11 @@ function grantMatches(grant, request) {
 	if (grant.kind === "external-read") {
 		return grant.directory ? isWithinRoot(grant.target, request.target) : grant.target === request.target;
 	}
-	if (grant.kind === "ssh-target") return grant.target === request.target;
+	if (grant.kind === "ssh-target") {
+		if (grant.target !== request.target) return false;
+		if (request.remoteCommand) return grant.remoteCommand === request.remoteCommand;
+		return !grant.remoteCommand;
+	}
 	if (grant.kind === "host-command") {
 		return grant.cwd === request.cwd && (
 			grant.match === "prefix"
@@ -358,6 +352,9 @@ function grantMatches(grant, request) {
 }
 
 export function capabilityGrantSummary(grant) {
+	if (grant.kind === "ssh-target" && grant.remoteCommand) {
+		return `${grant.id} · ssh-target exact-command · ${grant.target} · ${grant.scope}`;
+	}
 	if (grant.kind === "host-command") {
 		return `${grant.id} · host-command ${grant.match ?? "exact"} · cwd=${grant.cwd} · ${displayArgv(grant.argv ?? [])} · ${grant.scope}`;
 	}

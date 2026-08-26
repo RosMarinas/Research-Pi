@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { mkdir, realpath, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -22,7 +22,14 @@ const ANALYSIS_REMOTE_READ_COMMANDS = new Set([
 const ANALYSIS_GIT_READ_SUBCOMMANDS = new Set([
 	"status", "log", "show", "diff", "rev-parse", "ls-files", "ls-tree", "cat-file", "describe", "name-rev",
 ]);
-const REMOTE_CREDENTIAL_PATH_PATTERN = /(?:^|[\s'"/])(?:\.ssh|\.gnupg|\.aws|\.config\/gcloud|\.kube)(?:[\s'"/]|$)|(?:^|[\s'"/])(?:id_rsa|id_ed25519|auth\.json|credentials(?:\.json)?|\.env(?:\.[^\s/'"]*)?|[^\s/'"]+\.(?:pem|key))(?:[\s'"/]|$)|\/proc\/(?:self|\d+)\/environ|\/etc\/(?:shadow|gshadow)/i;
+export const CREDENTIAL_BASENAMES = Object.freeze([
+	".npmrc", ".pypirc", ".netrc", "_netrc", ".git-credentials", "credentials.env",
+]);
+export const CREDENTIAL_RELATIVE_PATHS = Object.freeze([
+	".pi/agent/auth.json", ".codex/auth.json", ".config/gh/hosts.yml",
+	".config/research-pi/credentials.env", ".aws/credentials", ".docker/config.json",
+]);
+const REMOTE_CREDENTIAL_PATH_PATTERN = /(?:^|[\s'"/])(?:\.ssh|\.gnupg|\.aws|\.config\/gcloud|\.config\/gh|\.config\/research-pi|\.codex|\.docker|\.kube)(?:[\s'"/]|$)|(?:^|[\s'"/])(?:id_rsa|id_ed25519|auth\.json|credentials(?:\.json|\.env)?|\.env(?:\.[^\s/'"]*)?|\.npmrc|\.pypirc|\.netrc|_netrc|\.git-credentials|hosts\.yml|[^\s/'"]+\.(?:pem|key|p12|pfx))(?:[\s'"/]|$)|\/proc\/(?:self|\d+)\/environ|\/etc\/(?:shadow|gshadow)/i;
 
 function parseAnalysisShellWords(input) {
 	const words = [];
@@ -132,16 +139,18 @@ function analysisNvidiaSmiReadOnly(words) {
 	return true;
 }
 
-export function isAnalysisReadOnlySshCommand(command) {
+function isAnalysisReadOnlySshGrammar(command) {
 	const text = String(command ?? "").trim();
 	if (!text || text.length > 12_000) return false;
-	if (REMOTE_CREDENTIAL_PATH_PATTERN.test(text)) return false;
 	if (/[\r\n;&<>`$(){}]/.test(text) || text.includes("||")) return false;
 	const pipeline = splitAnalysisPipeline(text);
 	if (!pipeline?.length) return false;
 	return pipeline.every((part) => {
 		const words = parseAnalysisShellWords(part);
 		if (!words?.length) return false;
+		// Auto-approval applies to the remote system command, not an arbitrary
+		// project-local executable that happens to share an allow-listed basename.
+		if (words[0].includes("/") || words[0].includes("\\")) return false;
 		const commandName = basename(words[0]);
 		if (commandName === "git") return analysisGitReadOnly(words);
 		if (commandName === "nvidia-smi") return analysisNvidiaSmiReadOnly(words);
@@ -153,6 +162,17 @@ export function isAnalysisReadOnlySshCommand(command) {
 		if (commandName === "sort" && words.some((word) => word === "-o" || word === "--output" || word.startsWith("--output="))) return false;
 		return true;
 	});
+}
+
+export function analysisSshCommandPolicy(command) {
+	const text = String(command ?? "").trim();
+	if (!text || text.length > 32_768 || text.includes("\0")) return "denied";
+	if (REMOTE_CREDENTIAL_PATH_PATTERN.test(text)) return "denied";
+	return isAnalysisReadOnlySshGrammar(text) ? "safe" : "approval_required";
+}
+
+export function isAnalysisReadOnlySshCommand(command) {
+	return analysisSshCommandPolicy(command) === "safe";
 }
 
 function expandHome(path) {
@@ -206,7 +226,12 @@ export function isSensitiveProjectPath(root, candidate) {
 	if (!isWithinRoot(root, candidate)) return false;
 	const rel = relative(root, candidate).split(sep).join("/");
 	const name = basename(candidate);
-	return name === ".env" || name.startsWith(".env.") || rel === ".pi/agent/auth.json";
+	return (
+		name === ".env"
+		|| name.startsWith(".env.")
+		|| CREDENTIAL_BASENAMES.includes(name.toLowerCase())
+		|| CREDENTIAL_RELATIVE_PATHS.includes(rel)
+	);
 }
 
 export function isProtectedProjectMutation(root, candidate) {
@@ -276,7 +301,8 @@ function workspaceRules(access) {
 		'".env.*" = "deny"',
 		'"**/.env" = "deny"',
 		'"**/.env.*" = "deny"',
-		'".pi/agent/auth.json" = "deny"',
+		...CREDENTIAL_BASENAMES.flatMap((name) => [`${JSON.stringify(name)} = "deny"`, `${JSON.stringify(`**/${name}`)} = "deny"`]),
+		...CREDENTIAL_RELATIVE_PATHS.map((path) => `${JSON.stringify(path)} = "deny"`),
 		'".git/hooks" = "read"',
 	].join(", ");
 }
@@ -287,35 +313,42 @@ function temporaryDenyRules() {
 	return [...paths].map((path) => `${JSON.stringify(path)} = "deny"`).join(", ");
 }
 
-function gitRules(workspaceRoot, access) {
-	if (!workspaceRoot) return "";
+function gitMetadataRoots(workspaceRoot) {
+	if (!workspaceRoot) return [];
 	const gitPath = join(workspaceRoot, ".git");
-	if (!existsSync(gitPath)) return "";
-	const writableGitPaths = [
+	try {
+		if (!existsSync(gitPath)) return [];
+		if (statSync(gitPath).isDirectory()) return [gitPath];
+		const pointer = readFileSync(gitPath, "utf8").match(/^gitdir:\s*(.+)\s*$/im)?.[1];
+		if (!pointer) return [];
+		const gitDir = resolve(workspaceRoot, pointer);
+		let commonDir = gitDir;
+		const commonPointer = join(gitDir, "commondir");
+		if (existsSync(commonPointer)) {
+			const relativeCommon = readFileSync(commonPointer, "utf8").trim();
+			if (relativeCommon) commonDir = resolve(gitDir, relativeCommon);
+		}
+		return [...new Set([gitDir, commonDir])];
+	} catch {
+		// A malformed or concurrently changing .git pointer must not prevent the
+		// boundary extension from initializing; normal workspace rules still apply.
+		return [];
+	}
+}
+
+function gitRules(workspaceRoot, access) {
+	const roots = gitMetadataRoots(workspaceRoot);
+	if (!roots.length) return "";
+	const writableGitPaths = roots.flatMap((gitPath) => [
 		gitPath,
-		join(gitPath, "COMMIT_EDITMSG"),
-		join(gitPath, "FETCH_HEAD"),
-		join(gitPath, "HEAD"),
-		join(gitPath, "HEAD.lock"),
-		join(gitPath, "MERGE_HEAD"),
-		join(gitPath, "ORIG_HEAD"),
-		join(gitPath, "config"),
-		join(gitPath, "config.lock"),
-		join(gitPath, "index"),
-		join(gitPath, "index.lock"),
-		join(gitPath, "logs"),
-		join(gitPath, "modules"),
-		join(gitPath, "objects"),
-		join(gitPath, "packed-refs"),
-		join(gitPath, "packed-refs.lock"),
-		join(gitPath, "refs"),
-		join(gitPath, "research-pi"),
-		join(gitPath, "rr-cache"),
-		join(gitPath, "worktrees"),
-	];
+		...[
+			"COMMIT_EDITMSG", "FETCH_HEAD", "HEAD", "HEAD.lock", "MERGE_HEAD", "ORIG_HEAD", "config", "config.lock",
+			"index", "index.lock", "logs", "modules", "objects", "packed-refs", "packed-refs.lock", "refs", "research-pi", "rr-cache", "worktrees",
+		].map((name) => join(gitPath, name)),
+	]);
 	return [
 		...writableGitPaths.map((path) => `${JSON.stringify(path)} = "${access}"`),
-		`${JSON.stringify(join(gitPath, "hooks"))} = "read"`,
+		...roots.map((gitPath) => `${JSON.stringify(join(gitPath, "hooks"))} = "read"`),
 	].join(", ");
 }
 
@@ -502,7 +535,7 @@ function discoverSensitiveProjectPaths(root, maxDepth = 4) {
 		}
 		for (const entry of entries) {
 			const path = join(directory, entry.name);
-			if (entry.isFile() && (entry.name === ".env" || entry.name.startsWith(".env."))) found.add(path);
+			if (entry.isFile() && isSensitiveProjectPath(root, path)) found.add(path);
 			if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
 			if ([".git", "node_modules", ".pi/sessions", "data", "datasets"].includes(entry.name)) continue;
 			visit(path, depth + 1);
@@ -529,7 +562,8 @@ export function buildSandboxRuntimeConfig(root, environment = process.env, runti
 		join(root, ".env.*"),
 		join(root, "**", ".env"),
 		join(root, "**", ".env.*"),
-		join(root, ".pi", "agent", "auth.json"),
+		...CREDENTIAL_BASENAMES.flatMap((name) => [join(root, name), join(root, "**", name)]),
+		...CREDENTIAL_RELATIVE_PATHS.map((path) => join(root, ...path.split("/"))),
 		...discoverSensitiveProjectPaths(root),
 	];
 	const externalDefaultWrites = [
