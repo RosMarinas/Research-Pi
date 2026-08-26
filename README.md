@@ -6,7 +6,7 @@ Research Pi 是面向 AI、机器人、通信、优化与仿真等计算实验�
 
 它不是一段“科研提示词”，而是一套 Project-centric Runtime：长期研究状态、实验记录、Agent 协作、权限和 Session 交接不再完全依赖单次模型上下文。
 
-`Pi Core 0.84.2` · `DeepSeek / OpenCode Go` · `Codex App Server` · `macOS / Linux / WSL2`
+`Pi Core 0.84.2` · `DeepSeek / ZAI Coding Plan / OpenCode Go` · `Codex App Server` · `macOS / Linux / WSL2`
 
 ## 设计原则
 
@@ -42,6 +42,7 @@ pi paths
 
 ```dotenv
 DEEPSEEK_API_KEY=...
+ZAI_API_KEY=...
 OPENCODE_API_KEY=...
 ```
 

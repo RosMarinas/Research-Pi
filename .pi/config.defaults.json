@@ -17,18 +17,25 @@
       "model": "deepseek-v4-flash",
       "thinking": "max"
     },
+    "zai-glm-5.3": {
+      "label": "ZAI Coding Plan · GLM-5.3",
+      "description": "Flagship Coding Plan route for difficult research and engineering work.",
+      "provider": "zai",
+      "model": "glm-5.3",
+      "thinking": "max"
+    },
+    "zai-glm-5.3-flash": {
+      "label": "ZAI Coding Plan · GLM-5.3 Flash",
+      "description": "Fast multimodal Coding Plan route with 1M context and Max reasoning.",
+      "provider": "zai",
+      "model": "glm-5.3-flash",
+      "thinking": "max"
+    },
     "opencode-go-flash": {
       "label": "OpenCode Go · DeepSeek V4 Flash",
       "description": "Recommended subscription route for routine research leadership.",
       "provider": "opencode-go",
       "model": "deepseek-v4-flash",
-      "thinking": "max"
-    },
-    "opencode-go-ox-alpha": {
-      "label": "OpenCode Go · Ox Alpha Free",
-      "description": "Limited-time free preview with 1M context and Max reasoning.",
-      "provider": "opencode-go",
-      "model": "ox-alpha-free",
       "thinking": "max"
     },
     "opencode-go-mimo": {
