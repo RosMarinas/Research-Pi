@@ -47,17 +47,45 @@ function compaction(id = "compact-1") {
 	};
 }
 
+async function leaderCredentials(runtime, sessionId = "session-a") {
+	const attachment = runtimeActorAttachment(await readRuntimeSnapshot(runtime), "research-leader", sessionId);
+	assert.ok(attachment?.epoch, `missing Leader attachment for ${sessionId}`);
+	return { sessionId, attachmentEpoch: attachment.epoch };
+}
+
 test("Project state commit is idempotent and folds into the Runtime snapshot", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-project-view-"));
 	try {
 		const workspace = join(root, "workspace");
 		mkdirSync(workspace);
 		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a" }, { runtimeRoot: join(root, "runtime") });
-		const input = { compactionEntry: compaction(), sessionId: "session-a", appendRuntimeEvent, appendRuntimeEventAtRevision, readRuntimeSnapshot };
+		const input = { compactionEntry: compaction(), ...await leaderCredentials(runtime), appendRuntimeEvent, appendRuntimeEventAtRevision, readRuntimeSnapshot };
 		await Promise.all([commitProjectState(runtime, input), commitProjectState(runtime, input)]);
 		const snapshot = await readRuntimeSnapshot(runtime);
 		assert.equal(snapshot.projectState.state.researchQuestion, "Does intervention A distinguish H1 from H2?");
 		assert.equal(snapshot.projectState.source.entryId, "compact-1");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a stale Leader cannot commit canonical Project State after takeover", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-project-stale-leader-"));
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace);
+		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a" }, { runtimeRoot: join(root, "runtime") });
+		const staleLeader = await leaderCredentials(runtime, "session-a");
+		await initializeResearchRuntime(workspace, { sessionId: "session-b" }, { runtimeRoot: join(root, "runtime") });
+		const result = await commitProjectState(runtime, {
+			compactionEntry: compaction("stale-leader-state"),
+			...staleLeader,
+			appendRuntimeEvent,
+			appendRuntimeEventAtRevision,
+			readRuntimeSnapshot,
+		});
+		assert.equal(result.status, "stale_attachment");
+		assert.equal((await readRuntimeSnapshot(runtime)).projectState, null);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -80,7 +108,7 @@ test("bounded session migration follows the active branch and commits its latest
 			{ type: "message", id: "leaf", parentId: "active", message: { role: "assistant", content: "continue" } },
 		].map(JSON.stringify).join("\n") + "\n");
 		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-new" }, { runtimeRoot: join(root, "runtime") });
-		await migrateLatestProjectState({ runtime, sessionDir, cwd: workspace, appendRuntimeEvent, appendRuntimeEventAtRevision, readRuntimeSnapshot });
+		await migrateLatestProjectState({ runtime, sessionDir, cwd: workspace, leaderSessionId: "session-new", ...(await leaderCredentials(runtime, "session-new")), appendRuntimeEvent, appendRuntimeEventAtRevision, readRuntimeSnapshot });
 		assert.equal((await readRuntimeSnapshot(runtime)).projectState.source.entryId, "active");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
@@ -95,12 +123,13 @@ test("a research transition makes the old state stale and blocks a stale compact
 		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a" }, { runtimeRoot: join(root, "runtime") });
 		await commitProjectState(runtime, {
 			compactionEntry: compaction("old-state"),
-			sessionId: "session-a",
+			...await leaderCredentials(runtime),
 			appendRuntimeEvent,
 			appendRuntimeEventAtRevision,
 			readRuntimeSnapshot,
 		});
 		await recordResearchTransition(runtime, {
+			...await leaderCredentials(runtime),
 			id: "transition-parameterized",
 			from: "v4 discrete contract",
 			to: "CSB-Parameterized-v0 Q1",
@@ -113,7 +142,7 @@ test("a research transition makes the old state stale and blocks a stale compact
 		stale.details.projectRevision = 1;
 		const result = await commitProjectState(runtime, {
 			compactionEntry: stale,
-			sessionId: "session-stale",
+			...await leaderCredentials(runtime),
 			appendRuntimeEvent,
 			appendRuntimeEventAtRevision,
 			readRuntimeSnapshot,
@@ -143,12 +172,13 @@ test("a parallel research transition keeps the previous route current while addi
 		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a" }, { runtimeRoot: join(root, "runtime") });
 		await commitProjectState(runtime, {
 			compactionEntry: compaction("route-a-state"),
-			sessionId: "session-a",
+			...await leaderCredentials(runtime),
 			appendRuntimeEvent,
 			appendRuntimeEventAtRevision,
 			readRuntimeSnapshot,
 		});
 		const transition = await recordResearchTransition(runtime, {
+			...await leaderCredentials(runtime),
 			id: "transition-parallel-b",
 			from: "route A",
 			to: "route B",
@@ -229,7 +259,7 @@ test("Project State amendments are partial, provenance-labelled, and revision gu
 		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a" }, { runtimeRoot: join(root, "runtime") });
 		await commitProjectState(runtime, {
 			compactionEntry: compaction("base-state"),
-			sessionId: "session-a",
+			...await leaderCredentials(runtime),
 			appendRuntimeEvent,
 			appendRuntimeEventAtRevision,
 			readRuntimeSnapshot,
@@ -299,12 +329,13 @@ test("Project State amendment refuses to rewrite a retired research route", asyn
 		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a" }, { runtimeRoot: join(root, "runtime") });
 		await commitProjectState(runtime, {
 			compactionEntry: compaction("retired-state"),
-			sessionId: "session-a",
+			...await leaderCredentials(runtime),
 			appendRuntimeEvent,
 			appendRuntimeEventAtRevision,
 			readRuntimeSnapshot,
 		});
 		await recordResearchTransition(runtime, {
+			...await leaderCredentials(runtime),
 			id: "retire-old-state",
 			to: "replacement route",
 			reason: "accepted evidence changes the active route",
@@ -337,6 +368,7 @@ test("a transition can continue an explicit live parallel route", async () => {
 		mkdirSync(workspace);
 		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a" }, { runtimeRoot: join(root, "runtime") });
 		await recordResearchTransition(runtime, {
+			...await leaderCredentials(runtime),
 			id: "route-b",
 			to: "route B",
 			reason: "keep the initial route alive",
@@ -344,6 +376,7 @@ test("a transition can continue an explicit live parallel route", async () => {
 			authorityRefs: ["user-decision:parallel"],
 		});
 		const routeC = await recordResearchTransition(runtime, {
+			...await leaderCredentials(runtime),
 			id: "route-c",
 			fromTrackRef: "project:initial",
 			to: "route C",
@@ -367,6 +400,7 @@ test("research transitions use Project revision compare-and-append", async () =>
 		mkdirSync(workspace);
 		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a" }, { runtimeRoot: join(root, "runtime") });
 		await recordResearchTransition(runtime, {
+			...await leaderCredentials(runtime),
 			id: "transition-first",
 			to: "route B",
 			reason: "first accepted transition",
@@ -375,7 +409,8 @@ test("research transitions use Project revision compare-and-append", async () =>
 			basedOnRevision: 0,
 		});
 		await assert.rejects(
-			recordResearchTransition(runtime, {
+				recordResearchTransition(runtime, {
+					...await leaderCredentials(runtime),
 				id: "transition-stale",
 				to: "route C",
 				reason: "stale competing transition",
@@ -419,6 +454,21 @@ test("ProjectView is concise, validity-labelled, and transient fallback updates 
 	assert.equal(messages[2].customType, PROJECT_VIEW_KIND);
 	assert.equal(messages[2].details.transient, true);
 	assert.equal(materializeProjectViewDelta(messages, text).filter((message) => message.customType === PROJECT_VIEW_KIND).length, 1);
+});
+
+test("Analysis ProjectView keeps project context without directed mailbox contents", () => {
+	const view = buildProjectView({
+		runtime: { projectKey: "project-analysis-view", workspaceRoot: "/workspace" },
+		snapshot: {
+			actors: [], actions: [], evidence: [], transitions: [], handoffs: [], revision: 0,
+			messages: [{ id: "leader-only", type: "notify", from: "analysis:one", to: "research-leader", status: "queued", body: "PRIVATE_LEADER_MAILBOX_BODY" }],
+		},
+		git: {}, experiments: [],
+	});
+	const analysisText = renderProjectView(view, { includeDirectedMessages: false });
+	assert.match(analysisText, /Open directed Runtime messages: 1/);
+	assert.doesNotMatch(analysisText, /PRIVATE_LEADER_MAILBOX_BODY|leader-only|analysis:one/);
+	assert.match(renderProjectView(view), /PRIVATE_LEADER_MAILBOX_BODY/);
 });
 
 test("newer Runtime activity prevents an old next experiment from being presented as current", () => {
@@ -571,7 +621,7 @@ test("ProjectView compresses earlier work but expands the latest handoff under p
 		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a" }, { runtimeRoot: join(root, "runtime") });
 		await commitProjectState(runtime, {
 			compactionEntry: compaction("direction-state"),
-			sessionId: "session-a",
+			...await leaderCredentials(runtime),
 			appendRuntimeEvent,
 			appendRuntimeEventAtRevision,
 			readRuntimeSnapshot,

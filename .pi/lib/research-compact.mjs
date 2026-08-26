@@ -342,6 +342,10 @@ export function mergeProjectRuntimeEvidence(evidence, runtimeSnapshot) {
 		const sessionId = text(record.source?.sessionId, 200) || "project-runtime";
 		const ref = refFor(sessionId, record.id);
 		const predictionStatus = normalizePredictionStatus(record);
+		const observation = text(record.observation, 4_000);
+		const requestedValidity = ["valid", "invalid", "inconclusive"].includes(record.validityJudgment)
+			? record.validityJudgment
+			: "inconclusive";
 		evidence.experiments.push({
 			ref,
 			entryId: record.id,
@@ -355,10 +359,10 @@ export function mergeProjectRuntimeEvidence(evidence, runtimeSnapshot) {
 			evidenceMode: normalizeEvidenceMode(record, predictionStatus),
 			registrationRef: text(record.registrationRef, 1_000) || undefined,
 			validityChecks: list(record.validityChecks, 20, 700),
-			observation: "",
-			validityJudgment: ["valid", "invalid", "inconclusive"].includes(record.validityJudgment)
-				? record.validityJudgment
-				: "inconclusive",
+			observation,
+			// A conclusion without its observation cannot retain a strong validity
+			// label when imported from Runtime into a new compaction context.
+			validityJudgment: observation ? requestedValidity : "inconclusive",
 			conclusion: text(record.conclusion, 4_000),
 			nextStep: text(record.nextStep, 2_000),
 			runId: text(record.runId, 300) || undefined,

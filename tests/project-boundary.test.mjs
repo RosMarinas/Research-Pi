@@ -6,6 +6,7 @@ import test from "node:test";
 import projectBoundaryExtension from "../.pi/extensions/project-boundary.ts";
 import {
 	CODEX_EXECUTOR_PROFILE,
+	analysisSshCommandPolicy,
 	assertWslSandboxDependencies,
 	assertWslWorkspaceBoundary,
 	boundaryWarning,
@@ -73,6 +74,10 @@ test("credential-like project paths require the same one-shot gate", async () =>
 	try {
 		assert.equal((await resolveBoundaryPath(root, ".env")).sensitive, true);
 		assert.equal((await resolveBoundaryPath(root, ".env.local")).sensitive, true);
+		assert.equal((await resolveBoundaryPath(root, ".npmrc")).sensitive, true);
+		assert.equal((await resolveBoundaryPath(root, ".codex/auth.json")).sensitive, true);
+		assert.equal((await resolveBoundaryPath(root, ".config/gh/hosts.yml")).sensitive, true);
+		assert.equal((await resolveBoundaryPath(root, ".config/research-pi/credentials.env")).sensitive, true);
 		assert.equal((await resolveBoundaryPath(root, "src/model.ts")).sensitive, false);
 		assert.equal(directToolPath("grep", {}), ".");
 		assert.equal(directToolPath("bash", { path: ".." }), undefined);
@@ -189,6 +194,14 @@ test("Analysis Session SSH accepts inspection commands and rejects remote side e
 		"journalctl --vacuum-time=1s",
 		"nvidia-smi -pm 1",
 	]) assert.equal(isAnalysisReadOnlySshCommand(command), false, command);
+
+	for (const command of ["./cat result.json", "/tmp/cat result.json", "./git status"]) {
+		assert.equal(isAnalysisReadOnlySshCommand(command), false, command);
+		assert.equal(analysisSshCommandPolicy(command), "approval_required", command);
+	}
+	for (const command of ["cat ~/.codex/auth.json", "cat ~/.docker/config.json", "cat ~/.config/gh/hosts.yml", "cat ~/_netrc"]) {
+		assert.equal(analysisSshCommandPolicy(command), "denied", command);
+	}
 });
 
 test("Codex executor profile keeps project and Git writable with public network", () => {
@@ -199,6 +212,9 @@ test("Codex executor profile keeps project and Git writable with public network"
 		assert.match(profile, /":root" = "deny"/);
 		assert.match(profile, /\.git\/objects.*"write"/);
 		assert.match(profile, /\.git\/hooks.*"read"/);
+		assert.match(profile, /\.npmrc.*"deny"/);
+		assert.match(profile, /\.codex\/auth\.json.*"deny"/);
+		assert.match(profile, /\.config\/gh\/hosts\.yml.*"deny"/);
 		assert.match(profile, /domains = \{ "\*" = "allow" \}/);
 
 		const args = codexPermissionConfigArguments("executor", root, `${root}/.git/research-pi/tmp`, {
@@ -209,6 +225,25 @@ test("Codex executor profile keeps project and Git writable with public network"
 		assert.ok(args.some((arg) => arg.includes("ignore_default_excludes=false")));
 		assert.ok(args.some((arg) => arg.includes("TMPDIR")));
 		assert.ok(args.some((arg) => arg.includes("GIT_AUTHOR_NAME")));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("linked worktrees grant their real Git dir and common dir without making hooks writable", () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-linked-worktree-"));
+	try {
+		const commonGit = join(root, "main", ".git");
+		const worktreeGit = join(commonGit, "worktrees", "feature");
+		const worktree = join(root, "feature");
+		mkdirSync(worktreeGit, { recursive: true });
+		mkdirSync(worktree, { recursive: true });
+		writeFileSync(join(worktree, ".git"), `gitdir: ${worktreeGit}\n`);
+		writeFileSync(join(worktreeGit, "commondir"), "../..\n");
+		const profile = permissionProfileDefinition({ access: "write", workspaceRoot: worktree });
+		assert.match(profile, new RegExp(worktreeGit.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+		assert.match(profile, new RegExp(join(commonGit, "objects").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+		assert.match(profile, new RegExp(`${join(commonGit, "hooks").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}.*read`));
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

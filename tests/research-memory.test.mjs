@@ -118,7 +118,8 @@ test("indexes Chinese text, short IDs, provenance, branch state, and redacts cre
 			};
 			const chinese = searchMemory(db, { ...base, query: "科研压缩", limit: 6 });
 			assert.ok(chinese.length >= 1);
-			assert.ok(chinese.every((result) => result.ref.startsWith("S:session-1/E:")));
+			assert.ok(chinese.every((result) => result.ref.includes("/S:session-1/E:")));
+			assert.ok(chinese.every((result) => result.projectKey.startsWith("project-")));
 
 			const shortId = searchMemory(db, { ...base, query: "V4", limit: 6 });
 			assert.equal(shortId[0].entryId, "u1");
@@ -134,10 +135,42 @@ test("indexes Chinese text, short IDs, provenance, branch state, and redacts cre
 			const abandoned = searchMemory(db, { ...base, query: "zebra", includeAbandonedBranches: true });
 			assert.equal(abandoned[0].entryId, "abandoned");
 
-			const read = readMemory(db, { sessionId: "session-1", entryId: "exp-entry", radius: 1 });
+			const read = readMemory(db, { projectKey: chinese[0].projectKey, sessionId: "session-1", entryId: "exp-entry", radius: 1 });
 			const experimentEntry = read.entries.find((entry) => entry.entryId === "exp-entry");
 			assert.equal(experimentEntry.kind, "experiment");
 			assert.match(experimentEntry.text, /中文检索可用/);
+		} finally {
+			db.close();
+		}
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("exact memory reads are project-qualified when Session identifiers collide", () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-memory-project-scope-"));
+	try {
+		const sessions = join(root, "sessions");
+		mkdirSync(sessions, { recursive: true });
+		for (const [name, project, text] of [["a", "project-a", "alpha project result"], ["b", "project-b", "beta project result"]]) {
+			writeJsonl(join(sessions, `${name}.jsonl`), [
+				{ type: "session", id: "shared-session", cwd: join(root, project) },
+				{ type: "message", id: "shared-entry", parentId: null, message: { role: "user", content: text } },
+			]);
+		}
+		const db = openMemoryIndex(join(root, "memory.sqlite"));
+		try {
+			syncMemoryIndex(db, { sessionDir: sessions });
+			assert.throws(
+				() => readMemory(db, { sessionId: "shared-session", entryId: "shared-entry" }),
+				/ambiguous across projects/,
+			);
+			const hit = searchMemory(db, {
+				query: "alpha", scope: "all", currentCwd: root, currentSessionId: "other", includeCurrentSession: false, includeAbandonedBranches: false,
+			})[0];
+			const exact = readMemory(db, { projectKey: hit.projectKey, sessionId: hit.sessionId, entryId: hit.entryId });
+			assert.match(exact.entries[0].text, /alpha project result/);
+			assert.doesNotMatch(exact.entries[0].text, /beta project result/);
 		} finally {
 			db.close();
 		}

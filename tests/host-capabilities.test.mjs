@@ -8,6 +8,7 @@ import {
 	capabilityGrantSummary,
 	createCapabilityGrant,
 	executeGrantedCapability,
+	findCapabilityGrant,
 	hostBridgeEnvironment,
 	isForbiddenCredentialRead,
 	listCapabilityGrants,
@@ -79,6 +80,25 @@ test("credential files cannot become model-readable capabilities", async () => {
 	}
 });
 
+test("common package, GitHub, and Codex credential stores cannot become model-readable", async () => {
+	const paths = fixture("research-pi-cap-common-credentials-");
+	try {
+		const context = await resolveCapabilityContext(paths.project, "session-common-credentials", { stateRoot: paths.stateRoot });
+		for (const relativePath of [".npmrc", ".codex/auth.json", ".config/gh/hosts.yml", ".config/research-pi/credentials.env"]) {
+			const target = join(paths.root, "outside", relativePath);
+			mkdirSync(join(target, ".."), { recursive: true });
+			writeFileSync(target, "token=synthetic-secret\n");
+			await assert.rejects(
+				prepareCapabilityRequest(context, { kind: "external-read", path: target }),
+				/Credential material cannot be made model-readable/,
+				relativePath,
+			);
+		}
+	} finally {
+		rmSync(paths.root, { recursive: true, force: true });
+	}
+});
+
 test("SSH grants use opaque host credentials and exact targets", async () => {
 	const paths = fixture("research-pi-cap-ssh-");
 	try {
@@ -123,6 +143,33 @@ process.stdout.write(JSON.stringify({
 		);
 		const ledgerText = readFileSync(context.ledgerPath, "utf8");
 		assert.doesNotMatch(ledgerText, /opaque-agent|must-not-leak/);
+	} finally {
+		rmSync(paths.root, { recursive: true, force: true });
+	}
+});
+
+test("Analysis SSH escalation grants only the exact approved remote command", async () => {
+	const paths = fixture("research-pi-cap-analysis-ssh-");
+	try {
+		const context = await resolveCapabilityContext(paths.project, "session-analysis-ssh", { stateRoot: paths.stateRoot });
+		const broad = await prepareCapabilityRequest(context, { kind: "ssh-target", target: "lab.example" });
+		await createCapabilityGrant(context, broad, "project");
+		const exact = await prepareCapabilityRequest(context, {
+			kind: "ssh-target",
+			target: "lab.example",
+			remoteCommand: "python3 inspect_run.py",
+			commandScoped: true,
+		});
+		assert.equal(await findCapabilityGrant(context, exact), undefined, "broad target trust must not authorize Analysis escalation");
+		const grant = await createCapabilityGrant(context, exact, "once");
+		assert.equal((await findCapabilityGrant(context, exact)).id, grant.id);
+		const different = await prepareCapabilityRequest(context, {
+			kind: "ssh-target",
+			target: "lab.example",
+			remoteCommand: "python3 other.py",
+			commandScoped: true,
+		});
+		assert.equal(await findCapabilityGrant(context, different), undefined);
 	} finally {
 		rmSync(paths.root, { recursive: true, force: true });
 	}

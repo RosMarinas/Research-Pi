@@ -1,6 +1,6 @@
 # Research Pi
 
-> 让 Session 可以丢弃，让科研认知留下。
+> 面向Project设计的Research harness，拒绝一个session干到底。
 
 Research Pi 是面向 AI、机器人、通信、优化与仿真等计算实验科研的 Pi Harness。它把代码视为检验假设的实验工具，优先追求可靠信息、有效证据和高信息增益实验；只有当研究方向得到支持后，才提高工程化与稳定交付强度。
 
@@ -90,6 +90,7 @@ ProjectView 使用 append-only snapshot/delta：研究 revision 或 Git identity
 | `/runtime rotate` | 新建不复制旧 transcript、但继承 Project 状态的 Leader Session |
 | `pi --analysis` | 新开只读 Analysis Session；不抢占 Leader，不接收其 mailbox |
 | `/analysis send <摘要>` | 把有价值的讨论投递给 Leader；用 `/runtime promote <原因>` 转为 Leader |
+| `/runtime context <on\|off>` | Analysis 保持只读角色，只切换后续轮次是否注入 ProjectView |
 | `/runtime new clean` | 新建不继承 ProjectView 的纯净 Session；用 `/runtime inherit` 恢复 |
 | `/memory <query>` | 搜索当前 Project 的历史 Session 与实验记录 |
 | `/side <问题>` | 隔离追问；有价值时用 `/side use <id>` 提升到主线 |

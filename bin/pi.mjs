@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,6 +25,10 @@ const paths = resolveResearchPiPaths({ harnessRoot: packageRoot });
 const packageJson = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
 const coreVersion = String(packageJson.dependencies?.["@earendil-works/pi-coding-agent"] ?? "").replace(/^[^0-9]*/, "");
 
+// Conversations, traces, memory indexes, and capability receipts are private
+// even in development mode. The child Pi process inherits this umask.
+process.umask(0o077);
+
 function parseCredentialFile(path) {
 	if (!existsSync(path)) return {};
 	const result = {};
@@ -43,8 +47,19 @@ function parseCredentialFile(path) {
 }
 
 function ensureRuntimeLayout(config) {
-	for (const path of [paths.configRoot, paths.stateRoot, paths.agentDir, paths.sessionDir]) {
+	for (const path of [
+		...(paths.development ? [] : [paths.configRoot]),
+		paths.stateRoot,
+		paths.agentDir,
+		paths.sessionDir,
+		paths.memoryDir,
+		paths.runtimeDir,
+		paths.codexDir,
+		paths.capabilityDir,
+		paths.traceDir,
+	]) {
 		mkdirSync(path, { recursive: true, mode: 0o700 });
+		chmodSync(path, 0o700);
 	}
 	writeResearchPiAgentConfig(paths.agentDir, config, { coreVersion });
 }

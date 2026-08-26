@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { appendFile, mkdir, readdir } from "node:fs/promises";
+import { appendFile, mkdir, readdir, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { executeGrantedCapability, inspectCapabilityAuthorization } from "./host-capabilities.mjs";
 import { compactCodexAuditEvent, describeCodexNotification, projectCodexActivityUpdate } from "./codex-activity.mjs";
@@ -191,6 +191,8 @@ async function main() {
 	let sideEffectStarted = false;
 	let timeout;
 	let commandTimer;
+	let workerLeaseTimer;
+	let workerLeaseUpdate = Promise.resolve();
 	let notificationUpdateTimer;
 	let pendingNotificationUpdate = null;
 	let lastNotificationProgress = null;
@@ -676,6 +678,8 @@ async function main() {
 						expectedTurnId: activeTurnId,
 						input: [{ type: "text", text: command.message }],
 					});
+				} else if (command.type === "cancel") {
+					requestCancellation();
 				} else {
 					throw new Error(`Unsupported Codex command ${command.type}`);
 				}
@@ -707,7 +711,7 @@ async function main() {
 		}
 	};
 
-	process.on("SIGTERM", () => {
+	const requestCancellation = () => {
 		cancellationRequested = true;
 		hostCapabilityAbort.abort();
 		enqueueJobUpdate({ status: "cancelling", progress: "interrupting Codex turn" });
@@ -717,9 +721,23 @@ async function main() {
 			terminateChild("SIGTERM");
 		}
 		setTimeout(() => terminateChild("SIGKILL"), 7000).unref();
+	};
+
+	process.on("SIGTERM", () => {
+		requestCancellation();
 	});
 
 	try {
+		const workerLeasePath = join(jobDir, "worker-lease.json");
+		const publishWorkerLease = () => workerLeaseUpdate = workerLeaseUpdate.catch(() => undefined).then(() => writeJsonAtomic(workerLeasePath, {
+			version: 1, jobId: request.jobId, workerInstanceId: request.workerInstanceId,
+			pid: process.pid, heartbeatAt: now(),
+		}));
+		await publishWorkerLease();
+		workerLeaseTimer = setInterval(() => {
+			void publishWorkerLease().catch(() => undefined);
+		}, 1_000);
+		workerLeaseTimer.unref();
 		let cancelledBeforeStart = false;
 		await writeJobUpdate((current) => {
 			if (current.status === "cancelling") {
@@ -728,6 +746,7 @@ async function main() {
 					...current,
 					status: "cancelled",
 					workerPid: process.pid,
+					workerInstanceId: request.workerInstanceId,
 					finishedAt: now(),
 					progress: "cancelled before execution started",
 					lastActivityAt: now(),
@@ -737,6 +756,7 @@ async function main() {
 				...current,
 				status: "running",
 				workerPid: process.pid,
+				workerInstanceId: request.workerInstanceId,
 				startedAt: now(),
 				progress: request.continuationThreadId ? "connecting to Codex app-server and resuming thread" : "connecting to Codex app-server",
 				lastActivityAt: now(),
@@ -1033,6 +1053,8 @@ async function main() {
 		hostCapabilityAbort.abort();
 		if (timeout) clearTimeout(timeout);
 		if (commandTimer) clearInterval(commandTimer);
+		if (workerLeaseTimer) clearInterval(workerLeaseTimer);
+		await workerLeaseUpdate.catch(() => undefined);
 		cancelNotificationUpdate();
 		for (const pending of pendingRpc.values()) {
 			clearTimeout(pending.timer);
@@ -1050,6 +1072,7 @@ async function main() {
 			await appendFile(join(jobDir, "stderr-tail.log"), stderrTail, { mode: 0o600 }).catch(() => undefined);
 		}
 		await releaseWriterLock(request.lockPath, request.jobId).catch(() => undefined);
+		await unlink(join(jobDir, "worker-lease.json")).catch(() => undefined);
 	}
 }
 

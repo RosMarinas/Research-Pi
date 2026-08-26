@@ -4,11 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import codexDelegateExtension, {
+	codexJobVisibleForRecovery,
+	codexRuntimeDeliveryDecision,
 	codexResultMarkdown,
 	codexResultPreview,
 	formatCodexJob,
 	formatCodexJobsStatus,
 	formatCodexStatus,
+	planCodexJobRecovery,
 } from "../.pi/extensions/codex-delegate.ts";
 import {
 	DEFAULT_CODEX_ADVISOR_SCHEMA_PATH,
@@ -30,6 +33,7 @@ import {
 	steerCodexJob,
 	supersedePendingCodexRequests,
 	waitForCodexJob,
+	workerLeaseIsFresh,
 } from "../.pi/lib/codex-jobs.mjs";
 import { CODEX_ADVISOR_PROFILE, CODEX_EXECUTOR_PROFILE } from "../.pi/lib/project-boundary.mjs";
 import {
@@ -92,8 +96,262 @@ test("Pi registers one Codex delegation tool instead of a family of noisy tools"
 	assert.match(registered.promptGuidelines.join("\n"), /advisor consultation, start from the research uncertainty/);
 	assert.match(registered.promptGuidelines.join("\n"), /continuation of inquiry, not an automatic review or approval gate/);
 	assert.match(registered.promptGuidelines.join("\n"), /explicit critique, verdict, or adjudication language only/);
+	assert.match(registered.promptGuidelines.join("\n"), /repeated status\/result reads are suppressed/);
 	assert.equal(command.name, "codex");
 	assert.match(command.definition.description, /mission threads/);
+});
+
+test("Codex branch recovery keeps Project jobs global and legacy jobs branch-scoped", () => {
+	const scope = {
+		projectKey: "project-a",
+		leaderActorId: "research-leader",
+		leaderSessionId: "session-a",
+		branchEntryIds: new Set(["root", "branch-a"]),
+	};
+	assert.equal(codexJobVisibleForRecovery({
+		leaderActorId: "research-leader",
+		projectKey: "project-a",
+	}, scope), true);
+	assert.equal(codexJobVisibleForRecovery({
+		leaderActorId: "research-leader",
+		projectKey: "project-b",
+	}, scope), false);
+	assert.equal(codexJobVisibleForRecovery({
+		leaderActorId: null,
+		leaderSessionId: "session-a",
+		leaderBranchAnchorId: "branch-a",
+	}, scope), true);
+	assert.equal(codexJobVisibleForRecovery({
+		leaderActorId: null,
+		leaderSessionId: "session-a",
+		leaderBranchAnchorId: "branch-b",
+	}, scope), false);
+});
+
+test("Codex tree navigation refreshes its branch projection synchronously without job discovery", () => {
+	const handlers = new Map();
+	codexDelegateExtension({
+		registerTool() {},
+		registerCommand() {},
+		on(name, handler) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },
+		sendMessage() {},
+	});
+	const treeHandler = handlers.get("session_tree")?.[0];
+	assert.equal(typeof treeHandler, "function");
+	const result = treeHandler({ type: "session_tree" }, {
+		cwd: "/workspace",
+		hasUI: false,
+		sessionManager: {
+			getSessionId: () => "session-a",
+			getBranch: () => [{ id: "branch-a", type: "message" }],
+		},
+	});
+	assert.equal(result, undefined, "tree navigation must not await filesystem or Runtime recovery");
+});
+
+test("Codex recovery ignores synchronized terminal history and retains live or unresolved jobs", () => {
+	const base = {
+		id: "codex-history",
+		actionId: "action:codex-history",
+		actorId: "codex:history",
+		autoNotify: true,
+	};
+	const snapshot = {
+		actors: [{ id: "codex:history" }, { id: "codex:live" }, { id: "codex:unknown" }],
+		actions: [
+			{ id: "action:codex-history", kind: "codex-delegation", externalId: "codex-history", status: "completed" },
+			{ id: "action:codex-live", kind: "codex-delegation", externalId: "codex-live", status: "running" },
+			{ id: "action:codex-unknown", kind: "codex-delegation", externalId: "codex-unknown", status: "outcome_unknown" },
+			{ id: "action:other", kind: "other", externalId: "codex-other", status: "running" },
+		],
+		messages: [{
+			type: "result",
+			metadata: { jobId: "codex-history", status: "completed" },
+		}],
+	};
+	assert.deepEqual(planCodexJobRecovery({ ...base, status: "completed" }, snapshot), {
+		register: false,
+		monitor: false,
+	});
+	assert.deepEqual(planCodexJobRecovery({
+		...base,
+		id: "codex-live",
+		actionId: "action:codex-live",
+		actorId: "codex:live",
+		status: "running",
+	}, snapshot), { register: false, monitor: true });
+	assert.deepEqual(planCodexJobRecovery({
+		...base,
+		id: "codex-missed-terminal",
+		actionId: "action:codex-missed-terminal",
+		actorId: "codex:missed-terminal",
+		status: "completed",
+	}, snapshot), { register: true, monitor: true });
+	assert.deepEqual(planCodexJobRecovery({
+		...base,
+		id: "codex-unknown",
+		actionId: "action:codex-unknown",
+		actorId: "codex:unknown",
+		status: "outcome_unknown",
+	}, snapshot), { register: false, monitor: true });
+});
+
+test("background Codex reads stay fused until a real external event", () => {
+	const handlers = new Map();
+	const addHandler = (name, handler) => handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+	codexDelegateExtension({
+		registerTool() {},
+		registerCommand() {},
+		on: addHandler,
+		sendMessage() {},
+	});
+	const emit = (name, event) => {
+		let result;
+		for (const handler of handlers.get(name) ?? []) result = handler(event);
+		return result;
+	};
+	const jobId = "codex-2026-08-26T06-31-42-429Z-45dd0c38";
+
+	emit("tool_result", {
+		type: "tool_result",
+		toolName: "codex_delegate",
+		toolCallId: "start-call",
+		input: { action: "start" },
+		content: [],
+		details: { id: jobId, status: "starting", autoNotify: true },
+		isError: false,
+	});
+	const afterStart = emit("tool_call", {
+		type: "tool_call",
+		toolName: "codex_delegate",
+		toolCallId: "first-poll",
+		input: { action: "result", jobId },
+	});
+	assert.equal(afterStart.block, true);
+	assert.equal(afterStart.terminate, true);
+	assert.match(afterStart.reason, /polling suppressed/);
+	assert.equal(emit("tool_call", {
+		type: "tool_call",
+		toolName: "codex_delegate",
+		toolCallId: "normal-control",
+		input: { action: "steer", jobId, message: "new evidence" },
+	}), undefined, "the read fuse must not affect normal Codex control actions");
+
+	// An automatic model-cycle restart is not a new reason to poll.
+	emit("agent_start", { type: "agent_start" });
+	assert.equal(emit("tool_call", {
+		type: "tool_call",
+		toolName: "codex_delegate",
+		toolCallId: "poll-after-auto-restart",
+		input: { action: "result", jobId },
+	})?.block, true);
+	emit("input", { type: "input", source: "interactive", text: "check the job" });
+	assert.equal(emit("tool_call", {
+		type: "tool_call",
+		toolName: "codex_delegate",
+		toolCallId: "allowed-read",
+		input: { action: "status", jobId },
+	}), undefined);
+	const repeated = emit("tool_call", {
+		type: "tool_call",
+		toolName: "codex_delegate",
+		toolCallId: "repeated-read",
+		input: { action: "result", jobId },
+	});
+	assert.equal(repeated.block, true);
+	assert.equal(repeated.terminate, true);
+
+	emit("tool_result", {
+		type: "tool_result",
+		toolName: "codex_delegate",
+		toolCallId: "allowed-read",
+		input: { action: "status", jobId },
+		content: [],
+		details: undefined,
+		isError: true,
+	});
+	assert.equal(emit("tool_call", {
+		type: "tool_call",
+		toolName: "codex_delegate",
+		toolCallId: "retry-after-error",
+		input: { action: "result", jobId },
+	}), undefined);
+
+	const manualJobId = "codex-2026-08-26T07-00-00-000Z-manual01";
+	emit("input", { type: "input", source: "interactive", text: "manually inspect" });
+	assert.equal(emit("tool_call", {
+		type: "tool_call",
+		toolName: "codex_delegate",
+		toolCallId: "manual-read",
+		input: { action: "status", jobId: manualJobId },
+	}), undefined);
+	emit("tool_result", {
+		type: "tool_result",
+		toolName: "codex_delegate",
+		toolCallId: "manual-read",
+		input: { action: "status", jobId: manualJobId },
+		content: [],
+		details: { id: manualJobId, status: "running", autoNotify: false },
+		isError: false,
+	});
+	assert.equal(emit("tool_call", {
+		type: "tool_call",
+		toolName: "codex_delegate",
+		toolCallId: "manual-read-again",
+		input: { action: "result", jobId: manualJobId },
+	}), undefined, "manual non-notifying jobs must remain readable");
+
+	emit("input", { type: "input", source: "interactive", text: "answer the advisor" });
+	emit("tool_result", {
+		type: "tool_result",
+		toolName: "codex_delegate",
+		toolCallId: "advisor-response",
+		input: { action: "respond", jobId: manualJobId },
+		content: [],
+		details: { id: manualJobId, status: "running", autoNotify: false },
+		isError: false,
+	});
+	assert.equal(emit("tool_call", {
+		type: "tool_call",
+		toolName: "codex_delegate",
+		toolCallId: "poll-after-response",
+		input: { action: "result", jobId: manualJobId },
+	})?.block, true, "a resumed advisor is monitored even when its original start was synchronous");
+});
+
+test("Codex mailbox delivery defers until the Leader can receive a still-open event", () => {
+	assert.equal(codexRuntimeDeliveryDecision({
+		messageStatus: "queued",
+		isIdle: false,
+		editorHasDraft: false,
+	}), "defer");
+	assert.equal(codexRuntimeDeliveryDecision({
+		messageStatus: "queued",
+		isIdle: true,
+		editorHasDraft: true,
+	}), "defer");
+	assert.equal(codexRuntimeDeliveryDecision({
+		messageStatus: "queued",
+		isIdle: true,
+		editorHasDraft: false,
+	}), "deliver");
+	assert.equal(codexRuntimeDeliveryDecision({
+		messageStatus: "consumed",
+		isIdle: true,
+		editorHasDraft: false,
+	}), "handled");
+});
+
+test("a nonterminal Codex result tells the Leader to yield to Runtime delivery", () => {
+	const text = formatCodexJob({
+		id: "codex-2026-08-26T06-31-42-429Z-45dd0c38",
+		mode: "advisor",
+		status: "running",
+		progress: "web search",
+	});
+	assert.match(text, /Runtime mailbox will deliver/);
+	assert.match(text, /Do not call status\/result again in this Leader run/);
+	assert.doesNotMatch(text, /Use action=result later/);
 });
 
 test("Codex delegation exposes bounded running and terminal footer states", () => {
@@ -524,6 +782,24 @@ test("Codex environment removes provider credentials without dropping execution 
 	assert.equal(wsl.PATH, "/usr/bin");
 	assert.equal(wsl.WSL_INTEROP, undefined);
 	assert.equal(wsl.DEEPSEEK_API_KEY, undefined);
+});
+
+test("worker liveness is bound to an instance nonce rather than PID alone", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-worker-identity-"));
+	try {
+		const jobId = "codex-2026-08-27-feedface";
+		const jobDir = join(root, jobId);
+		mkdirSync(jobDir, { recursive: true });
+		writeFileSync(join(jobDir, "worker-lease.json"), `${JSON.stringify({
+			workerInstanceId: "worker-instance-a",
+			pid: process.pid,
+			heartbeatAt: new Date().toISOString(),
+		})}\n`);
+		assert.equal(await workerLeaseIsFresh(root, jobId, "worker-instance-a"), true);
+		assert.equal(await workerLeaseIsFresh(root, jobId, "worker-instance-b"), false);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });
 
 test("advisor, executor, and explicit resume produce durable structured jobs", async () => {

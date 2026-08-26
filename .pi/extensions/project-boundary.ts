@@ -21,11 +21,11 @@ import {
 import { registerHostCapabilityUiAdapter } from "../lib/research-runtime-adapters.mjs";
 import {
 	boundaryWarning,
+	analysisSshCommandPolicy,
 	buildSandboxRuntimeConfig,
 	directToolPath,
 	assertWslSandboxDependencies,
 	isProtectedProjectMutation,
-	isAnalysisReadOnlySshCommand,
 	likelySandboxDenial,
 	prepareBoundaryRuntime,
 	readGitIdentity,
@@ -39,6 +39,11 @@ import { resolveSystemRuntimePolicy } from "../lib/security-policy.mjs";
 type BoundaryRuntime = Awaited<ReturnType<typeof prepareBoundaryRuntime>>;
 type CapabilityContext = Awaited<ReturnType<typeof resolveCapabilityContext>>;
 type SystemRuntimePolicy = Awaited<ReturnType<typeof resolveSystemRuntimePolicy>>;
+const INITIAL_SESSION_POLICY = process.env.RESEARCH_PI_INITIAL_SESSION_MODE === "analysis" ? "analysis" : "project";
+
+function currentSessionPolicy(ctx: any) {
+	return runtimeSessionInheritancePolicy(ctx.sessionManager.getBranch(), null, null, INITIAL_SESSION_POLICY);
+}
 
 function sameCapabilityProject(left: CapabilityContext, right: CapabilityContext): boolean {
 	if (left.projectRoot !== right.projectRoot || left.projectLedgerPath !== right.projectLedgerPath) return false;
@@ -85,7 +90,7 @@ function parseCommandWords(input: string): string[] {
 	return words;
 }
 
-function capabilityInput(params: any) {
+function capabilityInput(params: any, options: { commandScopedSsh?: boolean } = {}) {
 	if (params.action === "read") return { kind: "external-read", path: params.path };
 	if (params.action === "ssh") {
 		return {
@@ -93,6 +98,7 @@ function capabilityInput(params: any) {
 			target: params.target,
 			port: params.port,
 			remoteCommand: params.remoteCommand,
+			commandScoped: options.commandScopedSsh === true,
 			timeoutSeconds: params.timeoutSeconds,
 		};
 	}
@@ -117,11 +123,12 @@ function capabilityInput(params: any) {
 }
 
 function analysisCapabilityBlockReason(ctx: any, params: any): string | null {
-	if (runtimeSessionInheritancePolicy(ctx.sessionManager.getBranch()) !== "analysis") return null;
+	if (currentSessionPolicy(ctx) !== "analysis") return null;
 	if (params.action === "list" || params.action === "read") return null;
-	if (params.action === "ssh" && isAnalysisReadOnlySshCommand(params.remoteCommand)) return null;
 	if (params.action === "ssh") {
-		return "Analysis Session SSH is inspection-only. Use one read-only command or pipeline such as cat/head/tail/grep/rg/find/ls/stat/git status|log|show|diff, scheduler queries, or nvidia-smi queries. Shell chaining, redirection, interpreters, credential paths, writes, process control, and experiment launch commands are blocked.";
+		return analysisSshCommandPolicy(params.remoteCommand) === "denied"
+			? "Analysis Session cannot request an SSH command that may expose credential material or has an invalid command shape. Use opaque SSH credentials without reading credential contents."
+			: null;
 	}
 	return `Analysis Session cannot use host_capability action=${String(params.action)}. External exact-file reads and conservatively validated SSH inspection are allowed; host commands and scripts require promotion to the Leader Session.`;
 }
@@ -134,7 +141,9 @@ function describeCapabilityRequest(request: any, operation?: any): string {
 		return [
 			`Use local SSH credentials for: ${request.target}`,
 			operation?.remoteCommand ? `Current remote command:\n${operation.remoteCommand}` : "This pre-grant authorizes commands to this target.",
-			"A project trust grant permits future commands to this target without repeated approval.",
+			request.remoteCommand
+				? "This request authorizes only the exact remote command shown above; it does not broaden trust for the SSH target."
+				: "A project trust grant permits future commands to this target without repeated approval.",
 		].join("\n");
 	}
 	if (request.kind === "host-command") {
@@ -314,11 +323,14 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 		operation?: any,
 		approvalContext: CapabilityContext = requireCapabilityContext(),
 		announce = true,
+		allowProjectScope = true,
 	) => {
 		if (!ctx.hasUI) return undefined;
 		const wslOneShot = approvalContext.wslVersion !== undefined &&
 			(request.kind === "host-command" || request.kind === "project-script");
-		const projectTrustLabel = request.kind === "ssh-target"
+		const projectTrustLabel = !allowProjectScope
+			? undefined
+			: request.kind === "ssh-target"
 			? "Trust this SSH target for the project"
 			: request.kind === "host-command" && !wslOneShot
 				? "Trust the suggested command prefix for the project"
@@ -376,14 +388,14 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 		description: [
 			"Use a host capability when a justified project operation needs SSH credentials or host-user authority.",
 			"read accesses an approved external file; ssh uses an approved exact target with opaque credentials; command runs an argv inside the project cwd with host authority; script is the legacy strict exact-script mode.",
-			"In an Analysis Session, only list, exact external reads, and conservatively validated read-only SSH inspection commands are available.",
+			"In an Analysis Session, exact external reads and conservative SSH inspection are available; broader exact SSH commands can be requested from the user without promoting the Session.",
 			"Project-trusted SSH targets and command prefixes run without repeated approval. Never use this tool to inspect private keys, tokens, or credential stores.",
 			"Under WSL2, SSH target trust may persist, but host commands and project scripts require one-shot approval and cannot invoke Windows interop.",
 		].join(" "),
 		promptSnippet: "Use project-trusted SSH or host-command capabilities instead of handing executable commands back to the user",
 		promptGuidelines: [
 			"In a Leader Session, run arbitrary uv, Python, shell, Node, Git, and test commands normally inside the project sandbox. In an Analysis Session, use read tools or read-only SSH inspection instead.",
-			"For Analysis Session SSH inspection, use absolute remote paths and a single read command or read-only pipeline; do not use cd, shell chaining, redirection, an interpreter, or a process-changing command.",
+			"For Analysis Session SSH inspection, prefer the auto-approved read-only grammar. If a broader exact remote command is necessary, request it through this tool; the user sees and approves that exact command.",
 			"When a justified command needs host SSH access or another host-user capability, call host_capability command with an exact argv. Reuse a listed grantId when possible; its approved cwd is then restored automatically.",
 			"Direct SSH uses opaque credentials. Host-command has broader user authority and must match an approved exact command or project prefix; never request, read, print, copy, or transmit private keys or tokens.",
 			"If a command grant reports a cwd mismatch, retry the same command action with that grantId. Do not switch to script or wrap it in a new shell command merely to obtain another grant.",
@@ -412,11 +424,15 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 					const grants = await listCapabilityGrants(context);
 					return { content: [{ type: "text", text: grants.length ? grants.map(capabilityGrantSummary).join("\n") : "No active host capabilities." }] };
 				}
-				const input = capabilityInput(params);
+				const analysisSshPolicy = currentSessionPolicy(ctx) === "analysis" && params.action === "ssh"
+					? analysisSshCommandPolicy(params.remoteCommand)
+					: null;
+				const commandScopedSsh = analysisSshPolicy === "approval_required";
+				const input = capabilityInput(params, { commandScopedSsh });
 				const inspected = await inspectCapabilityAuthorization(context, input);
 				const request = inspected.request;
 				if (!inspected.grant) {
-					const grant = await requestInteractiveGrant(request, ctx, input);
+					const grant = await requestInteractiveGrant(request, ctx, input, context, true, !commandScopedSsh);
 					if (!grant) throw new Error("Host capability was not approved by the user");
 				}
 				let outputTail = "";
@@ -454,7 +470,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			"Do not attempt an indirect boundary bypass. Request the exact brokered target or argv and continue after approval; use ! only if the broker cannot express the operation.",
 		],
 		async execute(id, params, signal, onUpdate, ctx) {
-			if (runtimeSessionInheritancePolicy(ctx.sessionManager.getBranch()) === "analysis") {
+			if (currentSessionPolicy(ctx) === "analysis") {
 				return {
 					content: [{ type: "text", text: "Analysis Session cannot use project bash because an arbitrary command could modify code or start work. Use read/grep/find/ls, approved external reads, or host_capability ssh with a read-only inspection command." }],
 					isError: true,
