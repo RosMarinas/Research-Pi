@@ -119,6 +119,26 @@ const ANALYSIS_SAFE_TOOLS = new Set([
 	"analysis_send_to_leader",
 ]);
 const ANALYSIS_CODEX_READ_ACTIONS = new Set(["status", "result", "missions"]);
+const PROJECT_VIEW_MUTATING_TOOLS = new Set([
+	"bash",
+	"edit",
+	"write",
+	"record_experiment",
+	"record_research_transition",
+	"amend_project_state",
+	"research_checkpoint",
+]);
+const PROJECT_VIEW_READ_ONLY_CODEX_ACTIONS = new Set(["status", "result", "missions"]);
+
+export function projectViewToolMutates(
+	toolName: string,
+	input: Record<string, unknown> = {},
+): boolean {
+	if (toolName === "codex_delegate") {
+		return !PROJECT_VIEW_READ_ONLY_CODEX_ACTIONS.has(String(input.action ?? ""));
+	}
+	return PROJECT_VIEW_MUTATING_TOOLS.has(toolName);
+}
 
 export function analysisSessionToolBlockReason(
 	policy: SessionInheritancePolicy,
@@ -454,6 +474,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	let activeActivationId: string | undefined;
 	const consumedMessageIds = new Set<string>();
 	const supersededMessageIds = new Set<string>();
+	const deliveringMessageIds = new Set<string>();
 	const materializedMessages = new Map<string, {
 		attachmentEpoch: string | null;
 		requestId: string | null;
@@ -476,6 +497,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	let lastUserPrompt = "";
 	let projectWorkThisRun = false;
 	const projectToolsThisRun = new Set<string>();
+	const toolExecutionInputs = new Map<string, Record<string, unknown>>();
 
 	const isAnalysisSession = () => sessionInheritancePolicy === "analysis";
 	const isProjectAwareSession = () => sessionInheritancePolicy !== "clean";
@@ -634,6 +656,13 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 
 	registerRuntimeUiAdapter({
 		refresh: async (ctx: ExtensionContext, options: { codexJobs?: any[] } = {}) => refreshDock(ctx, options),
+		deliver: async (ctx: ExtensionContext, options: { messageId: string }) => {
+			const activeRuntime = await getRuntime(ctx);
+			return await deliverLeaderMailboxMessage(activeRuntime, options.messageId, ctx, {
+				triggerTurn: true,
+				deferWhenBusy: true,
+			});
+		},
 	});
 
 	const showRuntimeBoard = async (ctx: ExtensionCommandContext) => {
@@ -683,7 +712,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		activeRuntime: RuntimeContext,
 		message: RuntimeMessage,
 		ctx: ExtensionContext,
-		options: { preempt?: boolean; triggerTurn?: boolean } = {},
+		options: { preempt?: boolean; triggerTurn?: boolean; deferWhenBusy?: boolean } = {},
 	) => {
 		const sessionId = ctx.sessionManager.getSessionId();
 		const attachment = runtimeActorAttachment(await readRuntimeSnapshot(activeRuntime), RESEARCH_LEADER_ACTOR_ID, sessionId);
@@ -692,6 +721,9 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		}
 		if (options.preempt && !ctx.isIdle()) ctx.abort();
 		const idle = ctx.isIdle();
+		if (!idle && options.deferWhenBusy) {
+			return { status: "queued" as const, detail: "The Leader is still running; delivery remains in the Runtime mailbox" };
+		}
 		pi.sendMessage(
 			{
 				customType: RUNTIME_MESSAGE_KIND,
@@ -719,11 +751,42 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		};
 	};
 
+	const deliverLeaderMailboxMessage = async (
+		activeRuntime: RuntimeContext,
+		messageId: string,
+		ctx: ExtensionContext,
+		options: { triggerTurn?: boolean; deferWhenBusy?: boolean } = {},
+	): Promise<"delivered" | "deferred" | "handled"> => {
+		if (deliveringMessageIds.has(messageId)) return "deferred";
+		deliveringMessageIds.add(messageId);
+		try {
+			const sessionId = ctx.sessionManager.getSessionId();
+			// Re-read immediately before send. The message may have been answered
+			// and consumed after an earlier monitor snapshot was taken.
+			const snapshot = await readRuntimeSnapshot(activeRuntime);
+			const message = unconsumedRuntimeMessages(snapshot, {
+				to: RESEARCH_LEADER_ACTOR_ID,
+				forSessionId: sessionId,
+			}).find((candidate) => candidate.id === messageId);
+			if (!message) return "handled";
+			const result = await deliverToCurrentLeader(activeRuntime, message, ctx, options);
+			if (result.status !== "delivered") return "deferred";
+			await settleRuntimeMessage(activeRuntime, message.id, "delivered", {
+				sessionId,
+				actorId: RESEARCH_LEADER_ACTOR_ID,
+				attachmentEpoch: result.attachmentEpoch,
+			});
+			return "delivered";
+		} finally {
+			deliveringMessageIds.delete(messageId);
+		}
+	};
+
 	const deliverOpenLeaderMessages = async (
 		activeRuntime: RuntimeContext,
 		snapshot: RuntimeSnapshot,
 		ctx: ExtensionContext,
-		options: { triggerTurn?: boolean } = {},
+		options: { triggerTurn?: boolean; deferWhenBusy?: boolean } = {},
 	) => {
 		const sessionId = ctx.sessionManager.getSessionId();
 		const currentSnapshot = await reconcileStaleCodexMailbox(activeRuntime, snapshot);
@@ -732,14 +795,8 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		}
 		let delivered = 0;
 		for (const message of unconsumedRuntimeMessages(currentSnapshot, { to: RESEARCH_LEADER_ACTOR_ID, forSessionId: sessionId })) {
-			const result = await deliverToCurrentLeader(activeRuntime, message, ctx, { triggerTurn: options.triggerTurn });
-			if (result.status !== "delivered") continue;
-			await settleRuntimeMessage(activeRuntime, message.id, "delivered", {
-				sessionId,
-				actorId: RESEARCH_LEADER_ACTOR_ID,
-				attachmentEpoch: result.attachmentEpoch,
-			});
-			delivered += 1;
+			const result = await deliverLeaderMailboxMessage(activeRuntime, message.id, ctx, options);
+			if (result === "delivered") delivered += 1;
 		}
 		return delivered;
 	};
@@ -976,6 +1033,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		persistedProjectView = undefined;
 		latestProjectView = undefined;
 		latestCodexJobs = [];
+		toolExecutionInputs.clear();
 		sessionInheritancePolicy = "project";
 	});
 
@@ -1087,17 +1145,6 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		}
 	});
 
-	const projectViewMutatingTools = new Set([
-		"bash",
-		"edit",
-		"write",
-		"record_experiment",
-		"record_research_transition",
-		"amend_project_state",
-		"research_checkpoint",
-		"codex_delegate",
-	]);
-
 	pi.on("tool_call", (event) => {
 		const reason = analysisSessionToolBlockReason(
 			sessionInheritancePolicy,
@@ -1107,11 +1154,20 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		return reason ? { block: true, reason, terminate: false } : undefined;
 	});
 
+	pi.on("tool_execution_start", (event) => {
+		if (event.toolName === "codex_delegate") {
+			toolExecutionInputs.set(event.toolCallId, (event.args ?? {}) as Record<string, unknown>);
+		}
+	});
+
 	pi.on("tool_execution_end", (event) => {
+		const input = toolExecutionInputs.get(event.toolCallId) ?? {};
+		toolExecutionInputs.delete(event.toolCallId);
 		// Refresh only after tools that can change project evidence, Git, files,
 		// or Runtime delegation state. The next context hook performs one
-		// deterministic rebuild; read-only tools preserve the exact prompt suffix.
-		if (projectViewMutatingTools.has(event.toolName)) {
+		// deterministic rebuild; pure Codex status/result reads preserve the
+		// exact prompt suffix and cannot manufacture another ProjectView delta.
+		if (projectViewToolMutates(event.toolName, input)) {
 			projectViewDirty = true;
 			const codexStatus = event.toolName === "codex_delegate" ? String(event.result?.details?.status ?? "") : "";
 			const codexTurnSettled = !codexStatus || ["completed", "failed", "cancelled", "outcome_unknown"].includes(codexStatus);

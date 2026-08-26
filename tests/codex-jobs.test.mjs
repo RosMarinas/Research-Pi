@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import codexDelegateExtension, {
+	codexRuntimeDeliveryDecision,
 	codexResultMarkdown,
 	codexResultPreview,
 	formatCodexJob,
@@ -92,8 +93,167 @@ test("Pi registers one Codex delegation tool instead of a family of noisy tools"
 	assert.match(registered.promptGuidelines.join("\n"), /advisor consultation, start from the research uncertainty/);
 	assert.match(registered.promptGuidelines.join("\n"), /continuation of inquiry, not an automatic review or approval gate/);
 	assert.match(registered.promptGuidelines.join("\n"), /explicit critique, verdict, or adjudication language only/);
+	assert.match(registered.promptGuidelines.join("\n"), /repeated status\/result reads are suppressed/);
 	assert.equal(command.name, "codex");
 	assert.match(command.definition.description, /mission threads/);
+});
+
+test("background Codex reads stay fused until a real external event", () => {
+	const handlers = new Map();
+	const addHandler = (name, handler) => handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+	codexDelegateExtension({
+		registerTool() {},
+		registerCommand() {},
+		on: addHandler,
+		sendMessage() {},
+	});
+	const emit = (name, event) => {
+		let result;
+		for (const handler of handlers.get(name) ?? []) result = handler(event);
+		return result;
+	};
+	const jobId = "codex-2026-08-26T06-31-42-429Z-45dd0c38";
+
+	emit("tool_result", {
+		type: "tool_result",
+		toolName: "codex_delegate",
+		toolCallId: "start-call",
+		input: { action: "start" },
+		content: [],
+		details: { id: jobId, status: "starting", autoNotify: true },
+		isError: false,
+	});
+	const afterStart = emit("tool_call", {
+		type: "tool_call",
+		toolName: "codex_delegate",
+		toolCallId: "first-poll",
+		input: { action: "result", jobId },
+	});
+	assert.equal(afterStart.block, true);
+	assert.equal(afterStart.terminate, true);
+	assert.match(afterStart.reason, /polling suppressed/);
+	assert.equal(emit("tool_call", {
+		type: "tool_call",
+		toolName: "codex_delegate",
+		toolCallId: "normal-control",
+		input: { action: "steer", jobId, message: "new evidence" },
+	}), undefined, "the read fuse must not affect normal Codex control actions");
+
+	// An automatic model-cycle restart is not a new reason to poll.
+	emit("agent_start", { type: "agent_start" });
+	assert.equal(emit("tool_call", {
+		type: "tool_call",
+		toolName: "codex_delegate",
+		toolCallId: "poll-after-auto-restart",
+		input: { action: "result", jobId },
+	})?.block, true);
+	emit("input", { type: "input", source: "interactive", text: "check the job" });
+	assert.equal(emit("tool_call", {
+		type: "tool_call",
+		toolName: "codex_delegate",
+		toolCallId: "allowed-read",
+		input: { action: "status", jobId },
+	}), undefined);
+	const repeated = emit("tool_call", {
+		type: "tool_call",
+		toolName: "codex_delegate",
+		toolCallId: "repeated-read",
+		input: { action: "result", jobId },
+	});
+	assert.equal(repeated.block, true);
+	assert.equal(repeated.terminate, true);
+
+	emit("tool_result", {
+		type: "tool_result",
+		toolName: "codex_delegate",
+		toolCallId: "allowed-read",
+		input: { action: "status", jobId },
+		content: [],
+		details: undefined,
+		isError: true,
+	});
+	assert.equal(emit("tool_call", {
+		type: "tool_call",
+		toolName: "codex_delegate",
+		toolCallId: "retry-after-error",
+		input: { action: "result", jobId },
+	}), undefined);
+
+	const manualJobId = "codex-2026-08-26T07-00-00-000Z-manual01";
+	emit("input", { type: "input", source: "interactive", text: "manually inspect" });
+	assert.equal(emit("tool_call", {
+		type: "tool_call",
+		toolName: "codex_delegate",
+		toolCallId: "manual-read",
+		input: { action: "status", jobId: manualJobId },
+	}), undefined);
+	emit("tool_result", {
+		type: "tool_result",
+		toolName: "codex_delegate",
+		toolCallId: "manual-read",
+		input: { action: "status", jobId: manualJobId },
+		content: [],
+		details: { id: manualJobId, status: "running", autoNotify: false },
+		isError: false,
+	});
+	assert.equal(emit("tool_call", {
+		type: "tool_call",
+		toolName: "codex_delegate",
+		toolCallId: "manual-read-again",
+		input: { action: "result", jobId: manualJobId },
+	}), undefined, "manual non-notifying jobs must remain readable");
+
+	emit("input", { type: "input", source: "interactive", text: "answer the advisor" });
+	emit("tool_result", {
+		type: "tool_result",
+		toolName: "codex_delegate",
+		toolCallId: "advisor-response",
+		input: { action: "respond", jobId: manualJobId },
+		content: [],
+		details: { id: manualJobId, status: "running", autoNotify: false },
+		isError: false,
+	});
+	assert.equal(emit("tool_call", {
+		type: "tool_call",
+		toolName: "codex_delegate",
+		toolCallId: "poll-after-response",
+		input: { action: "result", jobId: manualJobId },
+	})?.block, true, "a resumed advisor is monitored even when its original start was synchronous");
+});
+
+test("Codex mailbox delivery defers until the Leader can receive a still-open event", () => {
+	assert.equal(codexRuntimeDeliveryDecision({
+		messageStatus: "queued",
+		isIdle: false,
+		editorHasDraft: false,
+	}), "defer");
+	assert.equal(codexRuntimeDeliveryDecision({
+		messageStatus: "queued",
+		isIdle: true,
+		editorHasDraft: true,
+	}), "defer");
+	assert.equal(codexRuntimeDeliveryDecision({
+		messageStatus: "queued",
+		isIdle: true,
+		editorHasDraft: false,
+	}), "deliver");
+	assert.equal(codexRuntimeDeliveryDecision({
+		messageStatus: "consumed",
+		isIdle: true,
+		editorHasDraft: false,
+	}), "handled");
+});
+
+test("a nonterminal Codex result tells the Leader to yield to Runtime delivery", () => {
+	const text = formatCodexJob({
+		id: "codex-2026-08-26T06-31-42-429Z-45dd0c38",
+		mode: "advisor",
+		status: "running",
+		progress: "web search",
+	});
+	assert.match(text, /Runtime mailbox will deliver/);
+	assert.match(text, /Do not call status\/result again in this Leader run/);
+	assert.doesNotMatch(text, /Use action=result later/);
 });
 
 test("Codex delegation exposes bounded running and terminal footer states", () => {

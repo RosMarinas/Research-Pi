@@ -3,6 +3,7 @@ import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { getRuntimeUiAdapter } from "../.pi/lib/research-runtime-adapters.mjs";
 import researchRuntimeExtension, {
 	analysisSessionToolBlockReason,
 	actorLines,
@@ -10,6 +11,7 @@ import researchRuntimeExtension, {
 	codexRuntimeMessagePreview,
 	formatRuntimeHealth,
 	formatRuntimeStatus,
+	projectViewToolMutates,
 	reconcileStaleCodexMailbox,
 	runtimeHealth,
 	runtimeActorSummary,
@@ -120,6 +122,18 @@ test("Analysis Session exposes inspection tools but blocks work and Project muta
 	assert.match(analysisSessionToolBlockReason("analysis", "record_experiment"), /cannot use record_experiment/);
 	assert.match(analysisSessionToolBlockReason("analysis", "codex_delegate", { action: "start", mode: "advisor" }), /cannot use codex_delegate/);
 	assert.equal(analysisSessionToolBlockReason("project", "bash"), null);
+});
+
+test("pure Codex reads do not dirty ProjectView while delegation changes still do", () => {
+	for (const action of ["status", "result", "missions"]) {
+		assert.equal(projectViewToolMutates("codex_delegate", { action }), false, action);
+	}
+	for (const action of ["start", "resume", "respond", "steer", "cancel", "reconcile"]) {
+		assert.equal(projectViewToolMutates("codex_delegate", { action }), true, action);
+	}
+	assert.equal(projectViewToolMutates("edit"), true);
+	assert.equal(projectViewToolMutates("read"), false);
+	assert.equal(projectViewToolMutates("codex_delegate", { action: "future-mutating-action" }), true);
 });
 
 test("lifecycle health is observe-only and prioritizes ambiguous side effects", () => {
@@ -555,6 +569,94 @@ test("Codex mission and mode define stable Actors while job events remain idempo
 		assert.match(stableTarget, /^codex:[a-f0-9]{8}$/);
 		assert.equal(resolveRuntimeActor(snapshot, `@${stableTarget}`).id, executorActor);
 	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("Runtime mailbox delivery is single-owner and rechecks message state before send", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-delivery-"));
+	const previousRoot = process.env.RESEARCH_PI_RUNTIME_DIR;
+	process.env.RESEARCH_PI_RUNTIME_DIR = join(root, "runtime");
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace, { recursive: true });
+		const handlers = new Map();
+		const sent = [];
+		let idle = true;
+		const pi = {
+			on(name, handler) { handlers.set(name, handler); },
+			registerCommand() {},
+			registerTool() {},
+			registerMessageRenderer() {},
+			registerEntryRenderer() {},
+			sendMessage(message, options) { sent.push({ message, options }); },
+			appendEntry() {},
+		};
+		researchRuntimeExtension(pi);
+		const ctx = {
+			cwd: workspace,
+			hasUI: true,
+			ui: { setStatus() {}, notify() {} },
+			sessionManager: {
+				getSessionId: () => "session-delivery",
+				getLeafId: () => "leaf-delivery",
+				getBranch: () => [],
+			},
+			getContextUsage: () => null,
+			isIdle: () => idle,
+			abort() {},
+		};
+		await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
+		const runtime = await resolveResearchRuntime(workspace);
+		const message = await createRuntimeMessage(runtime, {
+			id: "message-single-owner-delivery",
+			type: "ask",
+			from: "user",
+			to: RESEARCH_LEADER_ACTOR_ID,
+			body: "deliver exactly once",
+		});
+		const adapter = getRuntimeUiAdapter();
+		const concurrent = await Promise.all([
+			adapter.deliver(ctx, { messageId: message.id }),
+			adapter.deliver(ctx, { messageId: message.id }),
+		]);
+		assert.equal(concurrent.filter((status) => status === "delivered").length, 1);
+		assert.equal(sent.length, 1);
+		assert.equal(sent[0].options.triggerTurn, true);
+		assert.equal((await readRuntimeSnapshot(runtime)).messages.find((item) => item.id === message.id)?.status, "delivered");
+		assert.equal(await adapter.deliver(ctx, { messageId: message.id }), "handled");
+		assert.equal(sent.length, 1);
+
+		const consumed = await createRuntimeMessage(runtime, {
+			id: "message-consumed-before-delivery",
+			type: "ask",
+			from: "user",
+			to: RESEARCH_LEADER_ACTOR_ID,
+			body: "consume before the queued send",
+		});
+		await consumeRuntimeMessageForAttachment(runtime, consumed.id, {
+			sessionId: "session-delivery",
+			actorId: RESEARCH_LEADER_ACTOR_ID,
+		});
+		assert.equal(await adapter.deliver(ctx, { messageId: consumed.id }), "handled");
+		assert.equal(sent.length, 1, "a consumed mailbox message must not be materialized later");
+
+		const deferred = await createRuntimeMessage(runtime, {
+			id: "message-deferred-while-busy",
+			type: "notify",
+			from: "user",
+			to: RESEARCH_LEADER_ACTOR_ID,
+			body: "wait until the Leader is idle",
+		});
+		idle = false;
+		assert.equal(await adapter.deliver(ctx, { messageId: deferred.id }), "deferred");
+		assert.equal(sent.length, 1);
+		idle = true;
+		assert.equal(await adapter.deliver(ctx, { messageId: deferred.id }), "delivered");
+		assert.equal(sent.length, 2);
+	} finally {
+		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
+		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;
 		rmSync(root, { recursive: true, force: true });
 	}
 });

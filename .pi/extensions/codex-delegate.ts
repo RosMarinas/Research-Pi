@@ -197,7 +197,20 @@ export function formatCodexJob(job: ReturnType<typeof publicJobView>): string {
 				: `Respond now with codex_delegate action=respond, jobId=${job.id}, requestId=${pending.id}. Do not cancel, restart, or replace this advisor turn.`,
 		].filter(Boolean).join("\n");
 	}
-	return `Codex job ${job.id} is ${job.status}; ${jobActivityText(job)}. Use action=result later to retrieve its structured result.`;
+	return [
+		`Codex job ${job.id} is ${job.status}; ${jobActivityText(job)}.`,
+		"The Runtime mailbox will deliver its next blocking or terminal event automatically.",
+		"Do not call status/result again in this Leader run; end the run and wait for that event.",
+	].join(" ");
+}
+
+export function codexRuntimeDeliveryDecision({ messageStatus, isIdle, editorHasDraft }: {
+	messageStatus: string;
+	isIdle: boolean;
+	editorHasDraft: boolean;
+}): "deliver" | "defer" | "handled" {
+	if (messageStatus !== "queued") return "handled";
+	return isIdle && !editorHasDraft ? "deliver" : "defer";
 }
 
 function inlineCode(value: unknown): string {
@@ -423,12 +436,27 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 	const activeJobs = new Map<string, CodexJobView>();
 	const monitorTimers = new Map<string, NodeJS.Timeout>();
 	const deliveredEvents = new Set<string>();
+	const deliveringEvents = new Set<string>();
+	const codexReadsUntilExternalEvent = new Set<string>();
+	const codexReadToolCalls = new Map<string, string>();
 	const capabilityApprovalRequests = new Map<string, Promise<boolean>>();
 	let capabilityApprovalQueue: Promise<unknown> = Promise.resolve();
 	let latestTerminal: CodexJobView | undefined;
 	let shuttingDown = false;
 	let lastFooterText: string | undefined;
 	let lastDockProjection: string | undefined;
+
+	const releaseCodexReadFuse = (jobId?: string) => {
+		if (!jobId) {
+			codexReadsUntilExternalEvent.clear();
+			codexReadToolCalls.clear();
+			return;
+		}
+		codexReadsUntilExternalEvent.delete(jobId);
+		for (const [toolCallId, pendingJobId] of codexReadToolCalls) {
+			if (pendingJobId === jobId) codexReadToolCalls.delete(toolCallId);
+		}
+	};
 
 	const refreshFooter = (ctx: ExtensionContext) => {
 		if (shuttingDown) return;
@@ -632,90 +660,88 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		}
 	};
 
-	const deliverJobEvent = async (job: CodexJobView, ctx: ExtensionContext) => {
-		if (shuttingDown) return;
+	const deliverJobEvent = async (job: CodexJobView, ctx: ExtensionContext): Promise<"handled" | "deferred"> => {
+		if (shuttingDown) return "handled";
 		const id = eventId(job);
-		if (!id || deliveredEvents.has(id)) return;
-		const runtime = await resolveResearchRuntime(ctx.cwd);
-		if (shuttingDown) return;
-		await reconcileCodexRuntimeAsks(runtime, job);
-		const message = await recordCodexRuntimeEvent(runtime, job, eventContent(job));
-		if (shuttingDown) return;
-		if (!message) {
-			deliveredEvents.add(id);
-			return;
-		}
-		const snapshot = await readRuntimeSnapshot(runtime);
-		if (shuttingDown) return;
-		if (runtimeSessionInheritancePolicy(ctx.sessionManager.getBranch(), snapshot, ctx.sessionManager.getSessionId()) === "clean") {
-			// The durable Runtime mailbox now owns delivery. Mark the watcher event
-			// handled so a clean Session does not repeatedly re-project the same job.
-			deliveredEvents.add(id);
-			return;
-		}
-		const attachment = runtimeActorAttachment(
-			snapshot,
-			RESEARCH_LEADER_ACTOR_ID,
-			ctx.sessionManager.getSessionId(),
-		);
-		if (!attachment) return;
-		if (await resolveHostCapabilityRequest(job, message, runtime, attachment, ctx)) {
-			deliveredEvents.add(id);
-			return;
-		}
-		if (message.status !== "queued") {
-			deliveredEvents.add(id);
-			return;
-		}
-		const editorHasDraft = ctx.hasUI && Boolean(ctx.ui.getEditorText?.().trim());
+		if (!id || deliveredEvents.has(id)) return "handled";
+		if (deliveringEvents.has(id)) return "deferred";
+		deliveringEvents.add(id);
 		try {
-			pi.sendMessage(
-				{
-					customType: RUNTIME_MESSAGE_KIND,
-					content: runtimeMessageText(message),
-					display: true,
-					details: {
-						eventId: id,
-						messageId: message.id,
-						type: message.type,
-						from: message.from,
-						to: message.to,
-						jobId: job.id,
-						status: job.status,
-						mode: job.mode,
-						model: job.model,
-						reasoningEffort: job.reasoningEffort,
-						mission: job.mission ?? null,
-						requestId: job.pendingRequest?.id ?? null,
-						transient: true,
-						attachmentEpoch: attachment.epoch ?? null,
-					},
-				},
-				{
-					deliverAs: editorHasDraft ? "nextTurn" : "followUp",
-					triggerTurn: !editorHasDraft,
-				},
+			const runtime = await resolveResearchRuntime(ctx.cwd);
+			if (shuttingDown) return "handled";
+			await reconcileCodexRuntimeAsks(runtime, job);
+			const message = await recordCodexRuntimeEvent(runtime, job, eventContent(job));
+			if (shuttingDown) return "handled";
+			if (!message) {
+				deliveredEvents.add(id);
+				return "handled";
+			}
+			const snapshot = await readRuntimeSnapshot(runtime);
+			if (shuttingDown) return "handled";
+			if (runtimeSessionInheritancePolicy(ctx.sessionManager.getBranch(), snapshot, ctx.sessionManager.getSessionId()) === "clean") {
+				// The durable Runtime mailbox now owns delivery. Mark the watcher event
+				// handled so a clean Session does not repeatedly re-project the same job.
+				deliveredEvents.add(id);
+				return "handled";
+			}
+			const attachment = runtimeActorAttachment(
+				snapshot,
+				RESEARCH_LEADER_ACTOR_ID,
+				ctx.sessionManager.getSessionId(),
 			);
-		} catch (error) {
-			if (!shuttingDown && ctx.hasUI) ctx.ui.notify(`Could not deliver Codex event: ${error instanceof Error ? error.message : String(error)}`, "warning");
-			return;
-		}
-		await settleRuntimeMessage(runtime, message.id, "delivered", {
-			sessionId: ctx.sessionManager.getSessionId(),
-			actorId: RESEARCH_LEADER_ACTOR_ID,
-			attachmentEpoch: attachment.epoch ?? null,
-		});
-		if (shuttingDown) return;
-		deliveredEvents.add(id);
-		if (editorHasDraft && ctx.hasUI) {
-			ctx.ui.notify(`Codex ${shortJobId(job.id)} ${job.status}; the event is queued behind your editor draft.`, "info");
+			if (!attachment) return "handled";
+			if (await resolveHostCapabilityRequest(job, message, runtime, attachment, ctx)) {
+				deliveredEvents.add(id);
+				return "handled";
+			}
+			const editorHasDraft = ctx.hasUI && Boolean(ctx.ui.getEditorText?.().trim());
+			const decision = codexRuntimeDeliveryDecision({
+				messageStatus: message.status,
+				isIdle: ctx.isIdle(),
+				editorHasDraft,
+			});
+			if (decision === "handled") {
+				deliveredEvents.add(id);
+				return "handled";
+			}
+			// Keep the durable mailbox entry queued while the Leader is running or
+			// editing. Re-read it before delivery so an ask answered through an
+			// explicit result/respond path cannot arrive later as a stale follow-up.
+			if (decision === "defer") return "deferred";
+			try {
+				const adapter = getRuntimeUiAdapter();
+				if (!adapter?.deliver) return "deferred";
+				const delivered = await adapter.deliver(ctx, { messageId: message.id });
+				if (delivered === "deferred") return "deferred";
+				if (delivered === "delivered") {
+					// A genuinely new mailbox event is the boundary that permits one
+					// fresh status/result read for this job.
+					releaseCodexReadFuse(job.id);
+				}
+			} catch (error) {
+				if (!shuttingDown && ctx.hasUI) ctx.ui.notify(`Could not deliver Codex event: ${error instanceof Error ? error.message : String(error)}`, "warning");
+				return "deferred";
+			}
+			if (shuttingDown) return "handled";
+			deliveredEvents.add(id);
+			return "handled";
+		} finally {
+			deliveringEvents.delete(id);
 		}
 	};
 
 	const monitorJob = (initial: CodexJobView, ctx: ExtensionContext) => {
 		if (shuttingDown) return;
 		rememberJob(initial, ctx);
-		void deliverJobEvent(initial, ctx).catch((error) => {
+		void deliverJobEvent(initial, ctx).then((disposition) => {
+			if (disposition !== "deferred" || shuttingDown || monitorTimers.has(initial.id)) return;
+			const timer = setTimeout(() => {
+				monitorTimers.delete(initial.id);
+				monitorJob(initial, ctx);
+			}, 750);
+			timer.unref();
+			monitorTimers.set(initial.id, timer);
+		}).catch((error) => {
 			if (!shuttingDown && ctx.hasUI) ctx.ui.notify(`Could not persist Codex Runtime event: ${error instanceof Error ? error.message : String(error)}`, "warning");
 		});
 		if (TERMINAL_JOB_STATUSES.has(initial.status) || monitorTimers.has(initial.id)) return;
@@ -729,12 +755,12 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 					return;
 				}
 				rememberJob(current, ctx);
-				await deliverJobEvent(current, ctx);
+				const delivery = await deliverJobEvent(current, ctx);
 				if (shuttingDown) {
 					monitorTimers.delete(initial.id);
 					return;
 				}
-				if (TERMINAL_JOB_STATUSES.has(current.status)) {
+				if (TERMINAL_JOB_STATUSES.has(current.status) && delivery === "handled") {
 					monitorTimers.delete(current.id);
 					return;
 				}
@@ -879,7 +905,44 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		shuttingDown = false;
+		releaseCodexReadFuse();
 		await reattachBranchJobs(ctx);
+	});
+
+	pi.on("input", (event) => {
+		if (event.source !== "extension") releaseCodexReadFuse();
+	});
+
+	pi.on("tool_call", (event) => {
+		if (event.toolName !== "codex_delegate") return;
+		const action = String(event.input?.action ?? "");
+		if (action !== "status" && action !== "result") return;
+		const jobId = String(event.input?.jobId ?? "");
+		if (!jobId) return;
+		if (codexReadsUntilExternalEvent.has(jobId) || [...codexReadToolCalls.values()].includes(jobId)) {
+			return {
+				block: true,
+				reason: `Repeated Codex polling suppressed for ${jobId}. Its Runtime mailbox notification is already armed; end this Leader run and wait for the next blocking or terminal event.`,
+				terminate: true,
+			};
+		}
+		codexReadToolCalls.set(event.toolCallId, jobId);
+	});
+
+	pi.on("tool_result", (event) => {
+		if (event.toolName !== "codex_delegate") return;
+		const pendingJobId = codexReadToolCalls.get(event.toolCallId);
+		codexReadToolCalls.delete(event.toolCallId);
+		if (event.isError) return;
+		const details = event.details as CodexJobView | undefined;
+		const action = String(event.input?.action ?? "");
+		if (
+			details?.id
+			&& (details.autoNotify !== false || action === "respond")
+			&& !TERMINAL_JOB_STATUSES.has(details.status)
+		) {
+			codexReadsUntilExternalEvent.add(details.id);
+		}
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
@@ -935,6 +998,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			"Never guess an outcome_unknown resolution. Reconcile only after inspecting the relevant Git state, files, remote runs, or other external effects, and record that evidence in note.",
 			"When a Codex request arrives, answer it promptly with action=respond if Pi can decide. Ask the user only for user-owned choices or direct credential setup. Never place secrets in a response.",
 			"A synchronous advisor returns input_required instead of blocking the Leader tool call. Treat it as the same live consultation: answer the exact jobId/requestId with action=respond, never by cancelling or starting a replacement advisor.",
+			"After a background job or resumed advisor returns a nonterminal state, end the current Leader run. Runtime delivers the next blocking or terminal event; repeated status/result reads are suppressed until a real external event arrives.",
 		],
 		parameters: ParamsSchema,
 		executionMode: "sequential",
