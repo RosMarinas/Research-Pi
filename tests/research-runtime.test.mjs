@@ -52,6 +52,17 @@ import {
 	withRuntimeActorAttachment,
 } from "../.pi/lib/research-runtime.mjs";
 
+const RUNTIME_TEST_WATCH_SETTLE_MS = 400;
+
+async function waitUntil(predicate, { timeoutMs = 3_000, intervalMs = 20 } = {}) {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (await predicate()) return;
+		await new Promise((resolve) => setTimeout(resolve, intervalMs));
+	}
+	throw new Error(`Condition was not met within ${timeoutMs}ms`);
+}
+
 test("Codex Runtime result cards preserve Markdown structure when expanded", () => {
 	const content = [
 		"[Research Runtime result msg-1 from codex:mission-demo:advisor]",
@@ -661,6 +672,152 @@ test("Runtime mailbox delivery is single-owner and rechecks message state before
 	}
 });
 
+test("Analysis handoff wakes only the attached Leader and retries after a busy turn settles", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-analysis-wake-"));
+	const previousRoot = process.env.RESEARCH_PI_RUNTIME_DIR;
+	process.env.RESEARCH_PI_RUNTIME_DIR = join(root, "runtime");
+	let leaderStarted = false;
+	let analysisStarted = false;
+	let leaderHandlers;
+	let leaderCtx;
+	let analysisHandlers;
+	let analysisCtx;
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace, { recursive: true });
+
+		leaderHandlers = new Map();
+		const leaderSent = [];
+		let leaderIdle = true;
+		const leaderPi = {
+			on(name, handler) { leaderHandlers.set(name, handler); },
+			registerCommand() {},
+			registerTool() {},
+			registerMessageRenderer() {},
+			registerEntryRenderer() {},
+			sendMessage(message, options) { leaderSent.push({ message, options }); },
+			appendEntry() {},
+		};
+		researchRuntimeExtension(leaderPi);
+		leaderCtx = {
+			cwd: workspace,
+			hasUI: true,
+			ui: { setStatus() {}, setWidget() {}, notify() {}, setEditorText() {} },
+			sessionManager: {
+				getSessionId: () => "session-leader-wake",
+				getSessionFile: () => join(root, "leader.jsonl"),
+				getLeafId: () => "leaf-leader-wake",
+				getBranch: () => [],
+			},
+			getContextUsage: () => null,
+			isIdle: () => leaderIdle,
+			abort() {},
+		};
+		await leaderHandlers.get("session_start")({ type: "session_start", reason: "startup" }, leaderCtx);
+		leaderStarted = true;
+
+		analysisHandlers = new Map();
+		const analysisTools = new Map();
+		const analysisSent = [];
+		const analysisBranch = [{
+			type: "custom",
+			id: "analysis-policy-wake",
+			customType: RUNTIME_SESSION_POLICY_ENTRY_KIND,
+			data: { policy: "analysis", reason: "cross-process wake test" },
+		}];
+		const analysisPi = {
+			on(name, handler) { analysisHandlers.set(name, handler); },
+			registerCommand() {},
+			registerTool(tool) { analysisTools.set(tool.name, tool); },
+			registerMessageRenderer() {},
+			registerEntryRenderer() {},
+			sendMessage(message, options) { analysisSent.push({ message, options }); },
+			appendEntry(customType, data) {
+				analysisBranch.push({ type: "custom", id: `analysis-entry-${analysisBranch.length}`, customType, data });
+			},
+		};
+		researchRuntimeExtension(analysisPi);
+		analysisCtx = {
+			cwd: workspace,
+			hasUI: true,
+			ui: { setStatus() {}, setWidget() {}, notify() {}, setEditorText() {} },
+			sessionManager: {
+				getSessionId: () => "session-analysis-wake",
+				getSessionFile: () => join(root, "analysis.jsonl"),
+				getLeafId: () => "leaf-analysis-wake",
+				getBranch: () => analysisBranch,
+			},
+			getContextUsage: () => null,
+			isIdle: () => true,
+			abort() {},
+		};
+		await analysisHandlers.get("session_start")({ type: "session_start", reason: "startup" }, analysisCtx);
+		analysisStarted = true;
+
+		const first = await analysisTools.get("analysis_send_to_leader").execute(
+			"analysis-wake-1",
+			{ message: "Observation: the held-out response changed. Proposal: compare H1 and H2." },
+			undefined,
+			undefined,
+			analysisCtx,
+		);
+		assert.equal(first.isError, undefined);
+		await waitUntil(() => leaderSent.length === 1);
+		assert.equal(analysisSent.length, 0, "Analysis Session must never materialize the Leader mailbox locally");
+		assert.equal(leaderSent[0].message.details.messageId, first.details.messageId);
+		assert.equal(leaderSent[0].options.triggerTurn, true);
+		let runtime = await resolveResearchRuntime(workspace);
+		let snapshot = await readRuntimeSnapshot(runtime);
+		assert.equal(snapshot.messages.find((message) => message.id === first.details.messageId)?.status, "delivered");
+		assert.equal(runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID)?.sessionId, "session-leader-wake");
+
+		leaderIdle = false;
+		const second = await analysisTools.get("analysis_send_to_leader").execute(
+			"analysis-wake-2",
+			{ message: "Proposal: run the discriminating check only after the current Leader turn." },
+			undefined,
+			undefined,
+			analysisCtx,
+		);
+		await new Promise((resolve) => setTimeout(resolve, RUNTIME_TEST_WATCH_SETTLE_MS));
+		assert.equal(leaderSent.length, 1, "a busy Leader is not interrupted by an Analysis proposal");
+		snapshot = await readRuntimeSnapshot(runtime);
+		assert.equal(snapshot.messages.find((message) => message.id === second.details.messageId)?.status, "queued");
+
+		leaderIdle = true;
+		await leaderHandlers.get("agent_settled")({ type: "agent_settled" }, leaderCtx);
+		await waitUntil(() => leaderSent.length === 2);
+		assert.equal(leaderSent[1].message.details.messageId, second.details.messageId);
+		assert.equal(leaderSent[1].options.triggerTurn, true);
+		await new Promise((resolve) => setTimeout(resolve, RUNTIME_TEST_WATCH_SETTLE_MS));
+		assert.equal(leaderSent.length, 2, "ledger delivery receipts must not wake the Leader again");
+
+		const moved = await claimRuntimeActorAttachment(runtime, RESEARCH_LEADER_ACTOR_ID, {
+			sessionId: "session-new-leader",
+			branchAnchorId: "leaf-new-leader",
+			reason: "test attachment move",
+		}, { force: true });
+		assert.equal(moved.status, "attached");
+		const third = await analysisTools.get("analysis_send_to_leader").execute(
+			"analysis-wake-3",
+			{ message: "This proposal belongs to the newly attached Leader only." },
+			undefined,
+			undefined,
+			analysisCtx,
+		);
+		await new Promise((resolve) => setTimeout(resolve, RUNTIME_TEST_WATCH_SETTLE_MS));
+		assert.equal(leaderSent.length, 2, "a stale Leader watcher must not receive mail after attachment moves");
+		snapshot = await readRuntimeSnapshot(runtime);
+		assert.equal(snapshot.messages.find((message) => message.id === third.details.messageId)?.status, "queued");
+	} finally {
+		if (analysisStarted) await analysisHandlers.get("session_shutdown")({ type: "session_shutdown" }, analysisCtx);
+		if (leaderStarted) await leaderHandlers.get("session_shutdown")({ type: "session_shutdown" }, leaderCtx);
+		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
+		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("Runtime steer is non-preemptive by default and leaves context after one settled run", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-extension-"));
 	const previousRoot = process.env.RESEARCH_PI_RUNTIME_DIR;
@@ -711,6 +868,8 @@ test("Runtime steer is non-preemptive by default and leaves context after one se
 		assert.equal(sent.length, 1);
 		assert.equal(sent[0].options.deliverAs, "followUp");
 		assert.equal(sent[0].message.customType, RUNTIME_MESSAGE_KIND);
+		await new Promise((resolve) => setTimeout(resolve, RUNTIME_TEST_WATCH_SETTLE_MS));
+		assert.equal(sent.length, 1, "direct Leader delivery and the ledger watcher share one delivery owner");
 
 		const agentMessage = { role: "custom", ...sent[0].message, timestamp: Date.now() };
 		const firstContext = await handlers.get("context")({ type: "context", messages: [agentMessage] }, ctx);

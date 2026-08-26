@@ -23,7 +23,7 @@ Analysis Session 可以使用项目内只读工具，也可以通过 `host_capab
 /runtime promote 因为用户决定由本 Session 执行已讨论的诊断
 ```
 
-前者只把“候选分析”放进 Leader mailbox，不会自动成为科研事实；后者显式接管 Leader 角色并恢复执行工具。需要同时保留原 Leader 并行工作时，应从另一个终端运行 `pi --analysis`；同一 TUI 内的 `/runtime analysis` 适合把当前 Session 原地降为只读讨论。
+前者只把“候选分析”放进 Leader mailbox，不会自动成为科研事实；当前 attached Leader 空闲时会由 Runtime 自动唤醒处理，正在运行时则等该轮 settled 后安全投递，不需要用户再发一条消息来刷新 inbox。后者显式接管 Leader 角色并恢复执行工具。需要同时保留原 Leader 并行工作时，应从另一个终端运行 `pi --analysis`；同一 TUI 内的 `/runtime analysis` 适合把当前 Session 原地降为只读讨论。
 
 第一次交互式启动若出现 project trust 提示，确认信任本项目的 `.pi` 配置。进入界面后直接输入自然语言任务并按 Enter。
 
