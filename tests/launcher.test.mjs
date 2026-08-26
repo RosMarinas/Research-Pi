@@ -25,6 +25,7 @@ test("packaged launcher creates external config/state and runs the pinned core",
 		const credentials = join(config, "credentials.env");
 		assert.match(readFileSync(credentials, "utf8"), /DEEPSEEK_API_KEY=/);
 		assert.match(readFileSync(credentials, "utf8"), /OPENCODE_API_KEY=/);
+		assert.match(readFileSync(credentials, "utf8"), /ZAI_API_KEY=/);
 		assert.equal(statSync(credentials).mode & 0o777, 0o600);
 		const configPath = join(config, "config.json");
 		assert.equal(JSON.parse(readFileSync(configPath, "utf8")).activeProfile, "deepseek-pro");
@@ -49,6 +50,12 @@ test("packaged launcher creates external config/state and runs the pinned core",
 		assert.match(switchGo.stdout, /opencode-go\/deepseek-v4-flash/);
 		assert.equal(JSON.parse(readFileSync(configPath, "utf8")).activeProfile, "opencode-go-flash");
 		assert.equal(JSON.parse(readFileSync(join(state, "agent", "settings.json"), "utf8")).defaultProvider, "opencode-go");
+
+		const switchGlm = spawnSync(process.execPath, [launcher, "config", "use", "zai-glm-5.3-flash"], { encoding: "utf8", env: environment });
+		assert.equal(switchGlm.status, 0, switchGlm.stderr);
+		assert.match(switchGlm.stdout, /zai\/glm-5\.3-flash/);
+		assert.equal(JSON.parse(readFileSync(configPath, "utf8")).activeProfile, "zai-glm-5.3-flash");
+		assert.equal(JSON.parse(readFileSync(join(state, "agent", "settings.json"), "utf8")).defaultProvider, "zai");
 
 		const version = spawnSync(process.execPath, [launcher, "--version"], { encoding: "utf8", env: environment });
 		assert.equal(version.status, 0, version.stderr);

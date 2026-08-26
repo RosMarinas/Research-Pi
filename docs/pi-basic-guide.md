@@ -1,6 +1,6 @@
 # Research Pi 基本使用指南
 
-这份指南面向 Research Pi：Pi 0.84.2、官方 DeepSeek 与精选 OpenCode Go profiles。源码 checkout 用于快速开发；稳定版本作为 npm CLI 全局安装。两种形态的日常入口都是 `pi`。
+这份指南面向 Research Pi：Pi 0.84.2、官方 DeepSeek、ZAI GLM Coding Plan 与精选 OpenCode Go profiles。源码 checkout 用于快速开发；稳定版本作为 npm CLI 全局安装。两种形态的日常入口都是 `pi`。
 
 ## 1. 启动
 
@@ -43,7 +43,7 @@ pi-traced
 
 科研 prompt、DeepSeek 配置、研究工具、Codex executor 和 session 由 harness 提供；文件操作、Git checkpoint、Codex 委派和实验账本作用在启动 `pi` 时所在的研究仓库。所有项目的 Research Pi session 集中保存在当前运行形态的状态目录，每个 session header 仍记录其原始工作目录。
 
-稳定包首次安装后运行 `pi setup`，随后在 `~/.config/research-pi/credentials.env` 填入 `DEEPSEEK_API_KEY` 和/或 `OPENCODE_API_KEY`。前者支持官方 DeepSeek Leader 与原生小型搜索，后者支持 OpenCode Go 的全部内置 profiles。稳定包的普通配置位于 `~/.config/research-pi/config.json`；session、project Runtime、memory、Codex job、grant 和 trace 默认集中在 `~/.local/state/research-pi/`。源码开发入口使用 checkout 的 `.env`、`.pi/config.json` 与 `.pi/` 状态；每个开发 worktree 的配置和运行状态彼此隔离。`pi paths` 可确认当前运行的是哪一种形态。
+稳定包首次安装后运行 `pi setup`，随后在 `~/.config/research-pi/credentials.env` 填入所需 provider 的 key。`DEEPSEEK_API_KEY` 支持官方 DeepSeek Leader 与原生小型搜索，`ZAI_API_KEY` 支持全局 GLM Coding Plan 的 GLM-5.3 与 GLM-5.3-Flash，`OPENCODE_API_KEY` 支持 OpenCode Go profiles。稳定包的普通配置位于 `~/.config/research-pi/config.json`；session、project Runtime、memory、Codex job、grant 和 trace 默认集中在 `~/.local/state/research-pi/`。源码开发入口使用 checkout 的 `.env`、`.pi/config.json` 与 `.pi/` 状态；每个开发 worktree 的配置和运行状态彼此隔离。`pi paths` 可确认当前运行的是哪一种形态。
 
 查看或切换配置：
 
@@ -51,6 +51,7 @@ pi-traced
 pi config show
 pi config list
 pi config use opencode-go-flash
+pi config use zai-glm-5.3-flash
 pi --profile deepseek-pro   # 只覆盖本次启动
 ```
 

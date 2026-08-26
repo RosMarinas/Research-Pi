@@ -8,6 +8,7 @@ export const RESEARCH_PI_CONFIG_SCHEMA_PATH = resolve(LIB_DIR, "../schemas/resea
 export const RESEARCH_PI_CONFIG_VERSION = 1;
 export const RESEARCH_PI_PROVIDER_CREDENTIALS = Object.freeze({
 	deepseek: "DEEPSEEK_API_KEY",
+	zai: "ZAI_API_KEY",
 	"opencode-go": "OPENCODE_API_KEY",
 });
 export const RESEARCH_PI_THEME_CHOICES = Object.freeze([
@@ -19,33 +20,39 @@ export const RESEARCH_PI_THEME_CHOICES = Object.freeze([
 ]);
 
 const RESEARCH_PI_CUSTOM_MODELS = Object.freeze({
-	"opencode-go": [
+	zai: [
 		{
-			id: "ox-alpha-free",
-			name: "Ox Alpha Free (limited time)",
+			id: "glm-5.3-flash",
+			name: "GLM-5.3 Flash",
 			api: "openai-completions",
-			baseUrl: "https://opencode.ai/zen/go/v1",
+			baseUrl: "https://api.z.ai/api/coding/paas/v4",
 			reasoning: true,
 			thinkingLevelMap: {
-				off: null,
-				minimal: null,
-				low: null,
-				medium: null,
+				off: "low",
+				minimal: "low",
+				low: "low",
+				medium: "high",
 				high: "high",
-				xhigh: null,
+				xhigh: "max",
 				max: "max",
 			},
-			input: ["text"],
+			input: ["text", "image"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow: 1_000_000,
 			maxTokens: 131_072,
 			compat: {
 				supportsStore: false,
 				supportsDeveloperRole: false,
+				supportsReasoningEffort: true,
 				maxTokensField: "max_tokens",
+				thinkingFormat: "zai",
 			},
 		},
 	],
+});
+
+const RETIRED_PROFILE_FALLBACKS = Object.freeze({
+	"opencode-go-ox-alpha": "opencode-go-flash",
 });
 
 const TOP_LEVEL_KEYS = new Set([
@@ -181,7 +188,11 @@ export function defaultResearchPiConfig() {
 }
 
 export function resolveResearchPiConfig(input = {}) {
-	return validateResearchPiConfig(merge(defaultResearchPiConfig(), input));
+	const defaults = defaultResearchPiConfig();
+	const resolved = merge(defaults, input);
+	for (const name of Object.keys(RETIRED_PROFILE_FALLBACKS)) delete resolved.profiles?.[name];
+	resolved.activeProfile = RETIRED_PROFILE_FALLBACKS[resolved.activeProfile] ?? resolved.activeProfile;
+	return validateResearchPiConfig(resolved);
 }
 
 export function writeResearchPiConfig(path, config) {

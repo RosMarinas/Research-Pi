@@ -30,14 +30,16 @@ test("one Research Pi config resolves leader, Codex, compact, search, and UI def
 	assert.equal(config.research.compaction.summaryMaxTokens, 16 * 1024);
 	assert.equal(config.research.search.model, "deepseek-v4-flash");
 	assert.equal(config.research.search.enabled, "auto");
+	assert.equal(config.profiles["zai-glm-5.3"].model, "glm-5.3");
+	assert.equal(config.profiles["zai-glm-5.3"].thinking, "max");
+	assert.equal(config.profiles["zai-glm-5.3-flash"].model, "glm-5.3-flash");
+	assert.equal(config.profiles["zai-glm-5.3-flash"].thinking, "max");
 	assert.equal(config.profiles["opencode-go-flash"].provider, "opencode-go");
-	assert.equal(config.profiles["opencode-go-ox-alpha"].model, "ox-alpha-free");
-	assert.equal(config.profiles["opencode-go-ox-alpha"].thinking, "max");
 	assert.equal(config.profiles["opencode-go-luna"].model, "gpt-5.6-luna");
 	assert.equal(config.profiles["opencode-go-qwen"].model, "qwen3.7-plus");
 	assert.equal(config.profiles["opencode-go-mimo"].model, "mimo-v2.5");
 	assert.equal(config.profiles["opencode-go-kimi"].thinking, "max");
-	assert.equal(Object.values(config.profiles).filter((profile) => profile.provider === "opencode-go").length, 12);
+	assert.equal(Object.values(config.profiles).filter((profile) => profile.provider === "opencode-go").length, 11);
 	assert.equal(config.ui.density, "balanced");
 	assert.equal(config.ui.runtimeStrip, "auto");
 	assert.equal(config.ui.showProfileStatus, false);
@@ -52,6 +54,20 @@ test("partial user config merges over defaults and rejects dangerous ambiguity",
 	assert.equal(config.profiles[config.activeProfile].model, "deepseek-v4-flash");
 	assert.equal(config.codex.executor.model, "gpt-5.6-luna");
 	assert.equal(config.codex.executor.reasoningEffort, "max");
+	const migrated = resolveResearchPiConfig({
+		activeProfile: "opencode-go-ox-alpha",
+		profiles: {
+			"opencode-go-ox-alpha": {
+				label: "Retired Ox Alpha",
+				description: "Legacy local profile.",
+				provider: "opencode-go",
+				model: "ox-alpha-free",
+				thinking: "max",
+			},
+		},
+	});
+	assert.equal(migrated.activeProfile, "opencode-go-flash");
+	assert.equal(migrated.profiles["opencode-go-ox-alpha"], undefined);
 	assert.throws(() => resolveResearchPiConfig({ activeProfile: "missing" }), /does not exist/);
 	assert.throws(() => resolveResearchPiConfig({ typoSetting: true }), /Unknown Research Pi config key/);
 	assert.throws(() => resolveResearchPiConfig({ research: { compaction: { softTokens: 500_000 } } }), /below hardTokens/);
@@ -90,17 +106,22 @@ test("config persistence creates a private file, schema, and generated Pi adapte
 			"opencode-go/kimi-k3:max",
 			"opencode-go/mimo-v2.5:high",
 			"opencode-go/minimax-m3:high",
-			"opencode-go/ox-alpha-free:max",
 			"opencode-go/qwen3.7-plus:high",
 			"opencode-go/qwen3.8-max:high",
+			"zai/glm-5.3-flash:max",
+			"zai/glm-5.3:max",
 		]);
 		assert.equal(models.providers.deepseek.modelOverrides["deepseek-v4-flash"].compat.maxTokensField, "max_tokens");
-		const ox = models.providers["opencode-go"].models.find((model) => model.id === "ox-alpha-free");
-		assert.equal(ox.contextWindow, 1_000_000);
-		assert.equal(ox.maxTokens, 131_072);
-		assert.equal(ox.reasoning, true);
-		assert.equal(ox.thinkingLevelMap.high, "high");
-		assert.equal(ox.thinkingLevelMap.max, "max");
+		assert.equal(models.providers["opencode-go"], undefined);
+		const glmFlash = models.providers.zai.models.find((model) => model.id === "glm-5.3-flash");
+		assert.equal(glmFlash.contextWindow, 1_000_000);
+		assert.equal(glmFlash.maxTokens, 131_072);
+		assert.equal(glmFlash.reasoning, true);
+		assert.deepEqual(glmFlash.input, ["text", "image"]);
+		assert.equal(glmFlash.thinkingLevelMap.low, "low");
+		assert.equal(glmFlash.thinkingLevelMap.high, "high");
+		assert.equal(glmFlash.thinkingLevelMap.max, "max");
+		assert.equal(glmFlash.compat.thinkingFormat, "zai");
 		assert.equal(JSON.stringify(models).includes("configured"), false, "generated model metadata must not contain credentials");
 
 		writeResearchPiAgentConfig(agentDir, resolveResearchPiConfig({ activeProfile: "opencode-go-flash" }), {
@@ -118,10 +139,16 @@ test("config persistence creates a private file, schema, and generated Pi adapte
 			"opencode-go/kimi-k3:max",
 			"opencode-go/mimo-v2.5:high",
 			"opencode-go/minimax-m3:high",
-			"opencode-go/ox-alpha-free:max",
 			"opencode-go/qwen3.7-plus:high",
 			"opencode-go/qwen3.8-max:high",
 		]);
+
+		writeResearchPiAgentConfig(agentDir, resolveResearchPiConfig({ activeProfile: "zai-glm-5.3-flash" }), {
+			coreVersion: "0.84.2",
+			environment: { ZAI_API_KEY: "configured" },
+		});
+		const zaiSettings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"));
+		assert.deepEqual(zaiSettings.enabledModels.sort(), ["zai/glm-5.3-flash:max", "zai/glm-5.3:max"]);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -145,9 +172,11 @@ test("config exports one deterministic environment for runtime consumers", () =>
 test("provider credentials and native search are independent", () => {
 	const official = resolveResearchPiConfig({ activeProfile: "deepseek-flash" });
 	const go = resolveResearchPiConfig({ activeProfile: "opencode-go-flash" });
+	const zai = resolveResearchPiConfig({ activeProfile: "zai-glm-5.3-flash" });
 	assert.equal(researchPiProfileCredential(official).environmentVariable, "DEEPSEEK_API_KEY");
 	assert.equal(researchPiProfileCredential(go).environmentVariable, "OPENCODE_API_KEY");
-	assert.deepEqual(researchPiCredentialEnvironmentNames(go).sort(), ["DEEPSEEK_API_KEY", "OPENCODE_API_KEY"]);
+	assert.equal(researchPiProfileCredential(zai).environmentVariable, "ZAI_API_KEY");
+	assert.deepEqual(researchPiCredentialEnvironmentNames(go).sort(), ["DEEPSEEK_API_KEY", "OPENCODE_API_KEY", "ZAI_API_KEY"]);
 	assert.equal(researchPiDeepSeekSearchEnabled(go, { OPENCODE_API_KEY: "go-key" }), false);
 	assert.equal(researchPiDeepSeekSearchEnabled(go, { OPENCODE_API_KEY: "go-key", DEEPSEEK_API_KEY: "ds-key" }), true);
 	assert.equal(researchPiDeepSeekSearchEnabled(resolveResearchPiConfig({ research: { search: { enabled: "off" } } }), {}), false);
@@ -200,7 +229,7 @@ test("Codex, compact, and search modules consume the configured environment", ()
 
 test("model scope and status come from the single Research Pi profile catalog", async () => {
 	const config = defaultResearchPiConfig();
-	assert.equal(Object.keys(config.profiles).length, 14);
+	assert.equal(Object.keys(config.profiles).length, 15);
 	assert.equal(compactConfigPath("/Users/polaris/Documents/Utils/Pi/.worktrees/runtime-next/.pi/config.json"), "…/.worktrees/runtime-next/.pi/config.json");
 	const status = formatProfileStatus(config, {
 		model: { provider: "deepseek", id: "deepseek-v4-flash" },

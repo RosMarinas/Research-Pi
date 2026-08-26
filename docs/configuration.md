@@ -18,7 +18,7 @@ pi config path
 pi config show
 ```
 
-API keys, passwords, private keys and other credentials do not belong in this file. Credential-like field names are rejected. `pi setup` creates placeholders for `DEEPSEEK_API_KEY` and `OPENCODE_API_KEY` in the separate credentials file and preserves existing values when a later update adds another provider. Safety boundaries and recovery invariants are code policy rather than convenience toggles.
+API keys, passwords, private keys and other credentials do not belong in this file. Credential-like field names are rejected. `pi setup` creates placeholders for `DEEPSEEK_API_KEY`, `ZAI_API_KEY`, and `OPENCODE_API_KEY` in the separate credentials file and preserves existing values when a later update adds another provider. Safety boundaries and recovery invariants are code policy rather than convenience toggles.
 
 ## Model profiles
 
@@ -40,6 +40,20 @@ API keys, passwords, private keys and other credentials do not belong in this fi
       "description": "Lower latency for bounded work.",
       "provider": "deepseek",
       "model": "deepseek-v4-flash",
+      "thinking": "max"
+    },
+    "zai-glm-5.3": {
+      "label": "ZAI Coding Plan · GLM-5.3",
+      "description": "Flagship Coding Plan route for difficult research and engineering work.",
+      "provider": "zai",
+      "model": "glm-5.3",
+      "thinking": "max"
+    },
+    "zai-glm-5.3-flash": {
+      "label": "ZAI Coding Plan · GLM-5.3 Flash",
+      "description": "Fast multimodal Coding Plan route with 1M context and Max reasoning.",
+      "provider": "zai",
+      "model": "glm-5.3-flash",
       "thinking": "max"
     },
     "opencode-go-flash": {
@@ -72,7 +86,8 @@ Persistent switching:
 ```sh
 pi config list
 pi config use opencode-go-flash
-pi config use opencode-go-ox-alpha
+pi config use zai-glm-5.3
+pi config use zai-glm-5.3-flash
 ```
 
 One-launch override:
@@ -87,12 +102,13 @@ Pi Core's lower-level `/scoped-models` command is hidden from Research Pi comman
 
 Explicit Pi CLI `--provider`, `--model`, and `--thinking` arguments are appended after the selected profile and therefore win for that invocation.
 
-The profile list is intentionally curated instead of mirroring every model in OpenCode Go. It contains the two official DeepSeek routes plus twelve Go routes requested for Research Pi: `ox-alpha-free`, `mimo-v2.5`, `deepseek-v4-flash`, `qwen3.7-plus`, `minimax-m3`, `gpt-5.6-luna`, `deepseek-v4-pro`, `glm-5.2`, `qwen3.8-max`, `grok-4.5`, `kimi-k3`, and `hy3`. Ox Alpha is supplied as a small Research Pi model definition because the pinned Pi Core catalog predates it; it reuses `OPENCODE_API_KEY`, declares a 1M context window and 131072-token provider output limit, and exposes the model's `high` and `max` reasoning levels. Muse Spark is excluded because the pinned Pi catalog does not define it and its provider terms permit training on prompts/completions. Pi Core owns endpoint/model metadata for the other routes. To add another built-in Go model, copy a profile and change only `label`, `provider`, `model`, and `thinking`; use `provider: "opencode-go"` and a model ID supported by the pinned Pi Core.
+The profile list is intentionally curated instead of mirroring every model in OpenCode Go. It contains the two official DeepSeek routes, both canonical GLM Coding Plan routes (`glm-5.3` and `glm-5.3-flash`), and eleven Go routes: `mimo-v2.5`, `deepseek-v4-flash`, `qwen3.7-plus`, `minimax-m3`, `gpt-5.6-luna`, `deepseek-v4-pro`, `glm-5.2`, `qwen3.8-max`, `grok-4.5`, `kimi-k3`, and `hy3`. Z.AI routes use the global Coding Plan endpoint. Pi Core owns the built-in `glm-5.3` metadata; Research Pi temporarily supplies the newly released multimodal `glm-5.3-flash` definition until the pinned Core catalog includes it. Historical Ox Alpha profiles are removed during config resolution because that preview became GLM-5.3-Flash. Muse Spark remains excluded because its provider terms permit training on prompts/completions.
 
 Credentials remain provider-specific:
 
 ```dotenv
 DEEPSEEK_API_KEY=...  # official DeepSeek leader and/or native Web Search
+ZAI_API_KEY=...       # global ZAI GLM Coding Plan profiles
 OPENCODE_API_KEY=...  # all OpenCode Go profiles
 ```
 
