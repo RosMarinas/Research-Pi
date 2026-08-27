@@ -5,6 +5,11 @@ import { join } from "node:path";
 import test from "node:test";
 import projectBoundaryExtension from "../.pi/extensions/project-boundary.ts";
 import {
+	createCapabilityGrant,
+	prepareCapabilityRequest,
+	resolveCapabilityContext,
+} from "../.pi/lib/host-capabilities.mjs";
+import {
 	CODEX_EXECUTOR_PROFILE,
 	analysisSshCommandPolicy,
 	assertWslSandboxDependencies,
@@ -44,6 +49,59 @@ test("project boundary exposes one opaque host-capability tool", () => {
 	assert.match(JSON.stringify(hostTool.parameters), /grantId/);
 	assert.deepEqual(commands, ["boundary"]);
 	assert.equal(typeof getHostCapabilityUiAdapter()?.review, "function");
+});
+
+test("project boundary reuses an approved external-read grant", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-boundary-external-read-"));
+	const project = join(root, "project");
+	const outside = join(root, "outside");
+	const capabilityDir = join(root, "capabilities");
+	const sessionId = "session-external-read";
+	const handlers = {};
+	const notifications = [];
+	const previousCapabilityDir = process.env.PI_RESEARCH_CAPABILITY_DIR;
+	try {
+		mkdirSync(join(project, ".git"), { recursive: true });
+		mkdirSync(outside, { recursive: true });
+		const externalFile = join(outside, "briefing.md");
+		writeFileSync(externalFile, "synthetic briefing\n");
+		process.env.PI_RESEARCH_CAPABILITY_DIR = capabilityDir;
+
+		projectBoundaryExtension({
+			registerTool() {},
+			registerCommand() {},
+			on(name, handler) {
+				handlers[name] = handler;
+			},
+		});
+		const ctx = {
+			cwd: project,
+			hasUI: true,
+			sessionManager: {
+				getSessionId: () => sessionId,
+				getBranch: () => [],
+			},
+			ui: {
+				theme: { fg: (_color, text) => text },
+				setStatus() {},
+				notify(message) { notifications.push(message); },
+				select() { throw new Error("existing grant should avoid prompting"); },
+			},
+		};
+		await handlers.session_start({}, ctx);
+		const capabilityContext = await resolveCapabilityContext(project, sessionId, { stateRoot: capabilityDir });
+		const request = await prepareCapabilityRequest(capabilityContext, { kind: "external-read", path: externalFile });
+		const grant = await createCapabilityGrant(capabilityContext, request, "session");
+
+		const result = await handlers.tool_call({ toolName: "read", input: { path: externalFile } }, ctx);
+		assert.equal(result, undefined);
+		assert.ok(notifications.some((message) => message.includes(`Using ${grant.id}`)));
+	} finally {
+		await handlers.session_shutdown?.();
+		if (previousCapabilityDir === undefined) delete process.env.PI_RESEARCH_CAPABILITY_DIR;
+		else process.env.PI_RESEARCH_CAPABILITY_DIR = previousCapabilityDir;
+		rmSync(root, { recursive: true, force: true });
+	}
 });
 
 test("path resolution accepts project paths and detects traversal plus symlink escapes", async () => {
