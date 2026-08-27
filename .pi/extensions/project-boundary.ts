@@ -11,6 +11,7 @@ import {
 	capabilityGrantSummary,
 	createCapabilityGrant,
 	executeGrantedCapability,
+	findCapabilityGrant,
 	inspectCapabilityAuthorization,
 	isForbiddenCredentialRead,
 	listCapabilityGrants,
