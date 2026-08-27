@@ -9,9 +9,11 @@ import {
 	commitProjectState,
 	materializeProjectViewDelta,
 	migrateLatestProjectState,
+	projectViewDeltaCursor,
 	projectViewFingerprint,
 	projectViewRefreshFingerprint,
 	renderProjectView,
+	renderProjectViewDelta,
 } from "../.pi/lib/project-view.mjs";
 import { RESEARCH_COMPACTION_KIND, RESEARCH_COMPACTION_VERSION } from "../.pi/lib/research-compact.mjs";
 import {
@@ -456,7 +458,7 @@ test("ProjectView is concise, validity-labelled, and transient fallback updates 
 	assert.equal(materializeProjectViewDelta(messages, text).filter((message) => message.customType === PROJECT_VIEW_KIND).length, 1);
 });
 
-test("Analysis ProjectView keeps project context without directed mailbox contents", () => {
+test("ProjectView never duplicates Runtime mailbox bodies", () => {
 	const view = buildProjectView({
 		runtime: { projectKey: "project-analysis-view", workspaceRoot: "/workspace" },
 		snapshot: {
@@ -466,9 +468,28 @@ test("Analysis ProjectView keeps project context without directed mailbox conten
 		git: {}, experiments: [],
 	});
 	const analysisText = renderProjectView(view, { includeDirectedMessages: false });
-	assert.match(analysisText, /Open directed Runtime messages: 1/);
+	assert.match(analysisText, /directed message contents belong only to the addressed Leader Session/);
 	assert.doesNotMatch(analysisText, /PRIVATE_LEADER_MAILBOX_BODY|leader-only|analysis:one/);
-	assert.match(renderProjectView(view), /PRIVATE_LEADER_MAILBOX_BODY/);
+	const leaderText = renderProjectView(view);
+	assert.match(leaderText, /separate single-delivery Runtime event channel/);
+	assert.doesNotMatch(leaderText, /PRIVATE_LEADER_MAILBOX_BODY|leader-only|analysis:one/);
+});
+
+test("ProjectView delta emits a completed handoff only once per receipt", () => {
+	const view = buildProjectView({
+		runtime: { projectKey: "project-handoff-delta", workspaceRoot: "/workspace" },
+		snapshot: {
+			actors: [], actions: [], messages: [], evidence: [], transitions: [], revision: 0,
+			handoffs: [{ id: "handoff-1", task: "Inspect the route", summary: "HANDOFF_RESULT_ONCE", recordedAt: "2026-08-27T00:00:00Z" }],
+		},
+		git: {}, experiments: [],
+	});
+	const emptyActions = projectViewDeltaCursor({ ...view, actions: [] }).actionsFingerprint;
+	const first = renderProjectViewDelta(view, { projectRevision: 0, latestHandoffId: null, actionsFingerprint: emptyActions });
+	assert.match(first, /HANDOFF_RESULT_ONCE/);
+	const repeated = renderProjectViewDelta(view, projectViewDeltaCursor(view));
+	assert.doesNotMatch(repeated, /HANDOFF_RESULT_ONCE|Latest completed work handoff/);
+	assert.match(repeated, /contains no new research evidence or work handoff/);
 });
 
 test("newer Runtime activity prevents an old next experiment from being presented as current", () => {
@@ -558,7 +579,7 @@ test("ProjectView refresh and prompt fingerprints ignore lifecycle-only churn", 
 		projectViewRefreshFingerprint({ ...base, activations: [{ id: "activation-1", status: "active" }], ledgerEventCount: 10 }),
 		projectViewRefreshFingerprint({ ...base, activations: [{ id: "activation-2", status: "settled" }], ledgerEventCount: 12 }),
 	);
-	assert.notEqual(
+	assert.equal(
 		projectViewRefreshFingerprint(base),
 		projectViewRefreshFingerprint({ ...base, messages: [{ id: "m1", status: "queued", type: "result", from: "codex", body: "done" }] }),
 	);

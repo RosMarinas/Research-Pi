@@ -93,3 +93,39 @@ test("the full side overlay has an explicit close path", () => {
 	overlay.handleInput("q");
 	assert.equal(closed, true);
 });
+
+test("side model calls omit tool schemas when tool choice is none", async () => {
+	let sideCommand;
+	let request;
+	researchSideExtension({
+		registerEntryRenderer() {},
+		registerMessageRenderer() {},
+		registerCommand(name, command) { if (name === "side") sideCommand = command; },
+		appendEntry() {},
+		sendMessage() {},
+	});
+	const notices = [];
+	await sideCommand.handler("Explain the isolated question", {
+		waitForIdle: async () => {},
+		model: { provider: "deepseek", id: "deepseek-v4-flash", maxTokens: 32_000 },
+		thinkingLevel: "max",
+		signal: undefined,
+		getSystemPrompt: () => "stable system",
+		modelRegistry: {
+			async complete(_model, nextRequest, options) {
+				request = { nextRequest, options };
+				return { content: [{ type: "text", text: "isolated answer" }], usage: {} };
+			},
+		},
+		sessionManager: {
+			getBranch: () => [],
+			getLeafId: () => "leaf-1",
+			getSessionId: () => "session-1",
+			buildContextEntries: () => [],
+		},
+		ui: { notify(message) { notices.push(message); } },
+	});
+	assert.deepEqual(request.nextRequest.tools, []);
+	assert.equal(request.options.toolChoice, "none");
+	assert.ok(notices.some((message) => /Saved side-/.test(message)));
+});

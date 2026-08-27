@@ -232,12 +232,6 @@ export default function (pi: ExtensionAPI) {
 					.buildContextEntries()
 					.flatMap((entry) => sessionEntryToContextMessages(entry));
 				const messages = convertToLlm(contextMessages);
-				const toolInfo = new Map(pi.getAllTools().map((tool) => [tool.name, tool]));
-				const tools = pi
-					.getActiveTools()
-					.map((name) => toolInfo.get(name))
-					.filter((tool) => tool !== undefined)
-					.map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
 				messages.push({
 					role: "user",
 					content: [
@@ -256,7 +250,7 @@ export default function (pi: ExtensionAPI) {
 				});
 				const response = await ctx.modelRegistry.complete(
 					ctx.model,
-					{ systemPrompt: ctx.getSystemPrompt(), messages, tools },
+					{ systemPrompt: ctx.getSystemPrompt(), messages, tools: [] },
 					{
 						maxTokens: Math.min(16_000, ctx.model.maxTokens || 16_000),
 						reasoningEffort: ctx.thinkingLevel ?? "max",

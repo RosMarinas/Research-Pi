@@ -14,6 +14,7 @@ import {
 	normalizeResearchState,
 	parseResearchCompactionResponse,
 	RESEARCH_HARD_COMPACT_TOKENS,
+	RESEARCH_COMPACTION_SYSTEM_PROMPT,
 	RESEARCH_SUMMARY_MAX_TOKENS,
 	renderResearchSummary,
 	RESEARCH_COMPACTION_KIND,
@@ -193,8 +194,9 @@ export default function (pi: ExtensionAPI) {
 		try {
 			const requestState = async (requestPrompt: string) => await ctx.modelRegistry.complete(
 				ctx.model,
-				{
-					messages: [
+					{
+						systemPrompt: RESEARCH_COMPACTION_SYSTEM_PROMPT,
+						messages: [
 						{
 							role: "user",
 							content: [{ type: "text", text: requestPrompt }],
@@ -209,7 +211,7 @@ export default function (pi: ExtensionAPI) {
 						? { type: "function", function: { name: RESEARCH_STATE_TOOL.name } }
 						: undefined,
 					signal,
-					cacheRetention: "none",
+						cacheRetention: "short",
 					sessionId: randomUUID(),
 				},
 			);

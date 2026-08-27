@@ -116,6 +116,26 @@ export const RESEARCH_RECENT_TAIL_SCHEDULE = Object.freeze(configuredTailSchedul
 export const RESEARCH_SUMMARY_TARGET_TOKENS = configuredPositiveInteger("RESEARCH_PI_COMPACT_SUMMARY_TARGET_TOKENS", 8 * 1024);
 export const RESEARCH_SUMMARY_MAX_TOKENS = configuredPositiveInteger("RESEARCH_PI_COMPACT_SUMMARY_MAX_TOKENS", 16 * 1024);
 
+export const RESEARCH_COMPACTION_SYSTEM_PROMPT = `You maintain working state for computational AI/communications research. Submit the result by calling ${RESEARCH_STATE_TOOL_NAME} exactly once. Do not emit the state as prose. If tool calling is unavailable, return one JSON object only.
+
+This is not a software-development progress summary. Preserve competing hypotheses, distinguishing predictions, observations versus interpretations, negative-result validity, unresolved confounders, reversibility, and the next highest-information experiment. Exploratory code is disposable unless it affects interpretation or continuation.
+
+The structured state is a concise index, not a replacement transcript. Target at most ${RESEARCH_SUMMARY_TARGET_TOKENS.toLocaleString()} output tokens; follow the supplied tool schema and omit low-value operational detail.
+
+Rules:
+1. Invalid or inconclusive experiments do not update a hypothesis.
+2. supported requires valid confirmatory evidence with a real observation-before prediction; preregistered also requires registrationRef.
+3. weakened or rejected requires a valid confirmatory or diagnostic experiment. Exploratory findings may motivate hypotheses or decisions but cannot alone create a strong status; validity_failure cannot update one.
+4. Use only supplied provenance. Never invent run IDs, paths, results, predictions, registrations, or evidence modes.
+5. Preserve previous hypothesis IDs and explicit status changes; do not silently omit a changed hypothesis.
+6. Separate observation from interpretation and match the dominant conversation language.
+7. An archived/superseded transition retires the old route; parallel does not. Retired evidence remains history but its claim and next experiment are not current.
+8. Respect experiment track provenance. Evidence from another route cannot establish that the current route's intervention occurred.
+9. runGitCommit identifies executed code; recordedAtGit identifies record-time workspace. Never substitute them.
+10. A clean/Analysis Session summary is candidate synthesis, not Project authority or experimental evidence.
+11. researchQuestion is the project direction and scientific frontier, not the latest coding/debugging task unless the objective truly changed.
+12. criticalContext preserves stage, route guardrails, non-goals, and continuation principles. nextExperiment is a discriminating research intervention, not an inherited coding TODO.`;
+
 const MAX_HYPOTHESES = 24;
 const MAX_OBSERVATIONS = 32;
 const MAX_DECISIONS = 24;
@@ -839,61 +859,7 @@ export function buildResearchCompactionPrompt({
 	projectTransitions = [],
 	customInstructions,
 }) {
-	return `You maintain working state for computational AI/communications research. Submit the result by calling ${RESEARCH_STATE_TOOL_NAME} exactly once. Do not emit the state as prose. If tool calling is unavailable, return one JSON object only.
-
-This is not a software-development progress summary. Preserve competing hypotheses, distinguishing predictions, observations versus interpretations, negative-result validity, unresolved confounders, reversibility, and the next highest-information experiment. Exploratory code is disposable unless it affects interpretation or continuation.
-
-The structured state is an index, not a replacement transcript. Target at most ${RESEARCH_SUMMARY_TARGET_TOKENS.toLocaleString()} output tokens. Prefer concise evidence references and omit low-value operational detail; do not consume the full output allowance merely because it is available.
-
-Rules:
-1. Never turn an invalid or inconclusive experiment into evidence against a hypothesis.
-2. Mark a hypothesis supported only from a valid confirmatory experiment with a real observation-before prediction. A preregistered prediction must also have registrationRef.
-3. Mark a hypothesis weakened or rejected only from a valid confirmatory or diagnostic experiment. Exploratory observations may motivate hypotheses, decisions, and confirmation runs, but cannot alone create a strong hypothesis status. validity_failure records cannot update a hypothesis.
-4. Use only provenance references present below. Do not invent run IDs, paths, results, predictions, registration references, or evidence modes.
-5. Preserve previous hypothesis IDs. If a previous hypothesis changed, include it with the new status and evidence; do not silently omit it.
-6. Separate what was observed from how it was interpreted.
-7. Match the dominant language of the conversation.
-8. A recorded project transition with archived/superseded disposition changes the active research route. Keep the old route as retrievable history, but do not present its claim or next experiment as current. A parallel disposition does not retire it.
-9. Experiment trackRef/trackLabel identify route provenance. Evidence from a retired route may remain scientifically relevant, but do not silently use it as evidence that the current route's intervention occurred.
-10. runGitCommit identifies code that produced a run; recordedAtGit only identifies the workspace when the memo was written. Never substitute one for the other.
-11. An independent clean or Analysis Session summary is a candidate synthesis, not Project authority or experimental evidence. Retain useful hypotheses, but require normal provenance before making strong updates.
-12. researchQuestion anchors the project-level direction and current scientific frontier. Do not replace it with the most recent coding, debugging, infrastructure, or documentation task unless that task truly changed the research objective.
-13. criticalContext should preserve the current stage, route guardrails, meaningful non-goals, and continuation principles needed by a new Session. nextExperiment is a research intervention selected for information gain, not an inherited coding TODO.
-
-Required schema:
-{
-  "researchQuestion": "string",
-  "currentClaim": "string",
-  "hypotheses": [{
-    "id": "H1",
-    "statement": "string",
-    "status": "active|supported|weakened|rejected|inconclusive",
-    "predictions": ["string"],
-    "rationale": "string",
-    "evidenceRefs": ["S:<session>/E:<entry>"]
-  }],
-  "observations": [{
-    "statement": "string",
-    "interpretation": "string",
-    "validity": "valid|invalid|inconclusive|unverified",
-    "evidenceRefs": ["S:<session>/E:<entry>"]
-  }],
-  "decisions": [{
-    "decision": "string",
-    "rationale": "string",
-    "reversible": true,
-    "evidenceRefs": ["S:<session>/E:<entry>"]
-  }],
-  "unresolvedConfounders": ["string"],
-  "openQuestions": ["string"],
-  "nextExperiment": {
-    "question": "string",
-    "intervention": "string",
-    "distinguishingOutcomes": ["string"],
-    "validityChecks": ["string"]
-  },
-  "criticalContext": ["string"]
-}
+	return `Synthesize the following bounded evidence into the supplied research-state tool schema.
 
 Previous structured research state:
 ${JSON.stringify(previousState ?? null)}

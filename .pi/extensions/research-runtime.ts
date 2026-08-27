@@ -16,6 +16,7 @@ import {
 	materializeProjectViewDelta,
 	migrateLatestProjectState,
 	projectViewFingerprint,
+	projectViewDeltaCursor,
 	projectViewRefreshFingerprint,
 	readRecentExperiments,
 	renderProjectView,
@@ -90,6 +91,8 @@ type ProjectViewReceipt = {
 	gitFingerprint: string;
 	fingerprint: string;
 	freshness: string;
+	latestHandoffId: string | null;
+	actionsFingerprint: string;
 };
 
 class RuntimeLeaderBusyError extends Error {
@@ -190,12 +193,13 @@ export async function reconcileStaleCodexMailbox(
 	return changed ? await readRuntimeSnapshot(runtime) : snapshot;
 }
 
-function analysisSessionContext(content: string): string {
-	return [
-		"# Session role: Analysis Session",
-		"You are a read-only research thinking partner. Discuss, explain, compare hypotheses, and inspect local or approved remote evidence. Do not modify code, start experiments, steer workers, consume the Leader mailbox, or update Project State. Treat new interpretations as proposals, not evidence. Use analysis_send_to_leader when the working Leader should receive a concise synthesis; the user can explicitly promote this Session if execution is needed.",
-		content,
-	].filter(Boolean).join("\n\n");
+function sessionRoleContext(role: "analysis" | "leader", content: string): string {
+	const rolePrompt = role === "analysis"
+		? "You are the current read-only Analysis Session. Discuss, explain, compare hypotheses, and inspect local or approved remote evidence. Do not modify code, start experiments, steer workers, consume the Leader mailbox, or update Project State. Treat new interpretations as proposals, not evidence. Use analysis_send_to_leader for a useful synthesis; execution requires explicit user promotion."
+		: "You are the currently attached Leader Session. This role block supersedes any earlier Analysis Session role block in this conversation. Execution tools, Project State writes, Codex coordination, and the durable Leader mailbox are active within their normal authority boundaries.";
+	return [`# Session role: ${role === "analysis" ? "Analysis" : "Leader"} Session`, rolePrompt, content]
+		.filter(Boolean)
+		.join("\n\n");
 }
 
 function compact(text: string, limit = 160): string {
@@ -449,6 +453,7 @@ function projectViewReceipt(
 		gitFingerprint: projectViewGitFingerprint(view),
 		fingerprint: projectViewFingerprint(view),
 		freshness: view.freshness,
+		...projectViewDeltaCursor(view),
 	};
 }
 
@@ -1161,8 +1166,8 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			? isAnalysisSession()
 				? renderProjectView(view, { includeDirectedMessages: false })
 				: projectViewText
-			: renderProjectViewDelta(view, previous?.projectRevision ?? 0);
-		const content = isAnalysisSession() ? analysisSessionContext(rawContent) : rawContent;
+			: renderProjectViewDelta(view, previous);
+		const content = sessionRoleContext(isAnalysisSession() ? "analysis" : "leader", rawContent);
 		persistedProjectView = projectViewReceipt(view, mode);
 		return {
 			message: {
@@ -1320,9 +1325,9 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			|| projectViewGitFingerprint(view) !== persistedProjectView.gitFingerprint
 			|| projectViewFingerprint(view) !== persistedProjectView.fingerprint
 		) {
-			updateText = renderProjectViewDelta(view, persistedProjectView?.projectRevision ?? 0);
+			updateText = renderProjectViewDelta(view, persistedProjectView);
 		}
-		if (isAnalysisSession() && updateText) updateText = analysisSessionContext(updateText);
+		if (updateText) updateText = sessionRoleContext(isAnalysisSession() ? "analysis" : "leader", updateText);
 		return {
 			messages: materializeProjectViewDelta(messages, updateText, {
 				fingerprint: projectViewHash,
