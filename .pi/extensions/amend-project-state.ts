@@ -76,9 +76,8 @@ export default function amendProjectStateExtension(pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Use amend_project_state only when the existing ProjectView is narrowly wrong, incomplete, or out of date and the correction is supported by an explicit user decision, experiment, run, or authority document.",
 			"Do not use it to create initial Project State or to change the active research route; use /compact for initial synthesis and record_research_transition for route changes.",
-			"Copy basedOnRevision from the latest ProjectView, provide why the correction is justified, and omit every unchanged field. Array fields replace that entire array; nextExperiment merges only supplied sub-fields.",
-			"If ProjectView is stale, account for every listed freshness reason before amending: omitted fields are an explicit decision to retain them at the current Project revision.",
-			"Never manufacture evidenceRefs. Strong hypothesis updates and valid observations need actual evidence references. Clean Sessions must use /runtime inherit before amending Project State.",
+			"Copy the latest basedOnRevision, justify the correction, and omit unchanged fields. Array fields replace the array; nextExperiment merges supplied sub-fields. If stale, account for every freshness reason before retaining omitted fields.",
+			"Never manufacture evidenceRefs. Strong updates need actual references, and clean Sessions must use /runtime inherit before amendment.",
 		],
 		parameters: Type.Object({
 			basedOnRevision: Type.Integer({

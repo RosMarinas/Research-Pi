@@ -5,6 +5,7 @@ import {
 	applyResearchStatePatch,
 	buildResearchCompactionDetails,
 	buildResearchCompactionPrompt,
+	RESEARCH_COMPACTION_SYSTEM_PROMPT,
 	collectResearchEvidence,
 	mergeProjectRuntimeEvidence,
 	normalizeResearchState,
@@ -476,10 +477,11 @@ test("research compaction uses bounded staged recent tails", () => {
 	assert.equal(RESEARCH_HARD_COMPACT_TOKENS, 384 * 1024);
 	assert.equal(RESEARCH_SUMMARY_TARGET_TOKENS, 8 * 1024);
 	assert.equal(RESEARCH_SUMMARY_MAX_TOKENS, 16 * 1024);
+	assert.match(RESEARCH_COMPACTION_SYSTEM_PROMPT, /Target at most 8,192 output tokens/);
 	assert.match(buildResearchCompactionPrompt({
 		conversationText: "recent work",
 		experiments: [],
 		checkpoints: [],
 		sourceCatalog: [],
-	}), /Target at most 8,192 output tokens/);
+	}), /Conversation being compacted/);
 });

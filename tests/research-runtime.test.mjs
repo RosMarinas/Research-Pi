@@ -1356,6 +1356,9 @@ test("Analysis Session observes Project state without stealing the Leader, then 
 		assert.deepEqual(new Set(sent.map((item) => item.message.details.messageId)), new Set([existingMessage.id, analysisMessage.id]));
 		assert.equal(handlers.get("tool_call")({ toolName: "bash", input: { command: "echo execute" } }), undefined);
 		assert.ok(notices.some((message) => /now the Leader Session/.test(message)));
+		const leaderInjected = await handlers.get("before_agent_start")({ type: "before_agent_start" }, ctx);
+		assert.match(leaderInjected.message.content, /Session role: Leader Session/);
+		assert.match(leaderInjected.message.content, /supersedes any earlier Analysis Session role block/);
 	} finally {
 		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
 		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;

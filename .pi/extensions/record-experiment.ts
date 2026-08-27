@@ -120,10 +120,8 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Record a decision-changing experiment result in the project research ledger",
 		promptGuidelines: [
 			"Use record_experiment only after a result materially changes a research judgment; choose evidenceMode honestly: confirmatory for an ex-ante prediction, exploratory for unplanned findings, diagnostic for a mechanism/failure-localization check, and validity_failure when the intended experiment cannot be interpreted.",
-			"Never reconstruct a hypothesis, prediction, validity check, or next step merely to satisfy the tool. Only confirmatory records require a hypothesis and observation-before prediction; a valid record requires at least one actual validity check.",
-			"A preregistered prediction must include registrationRef pointing to the frozen registration or exact prior record. Omit prediction when none existed; it will be preserved as predictionStatus=not_recorded.",
-			"If this result was produced under an earlier research route after the Project changed direction, provide that exact trackRef from ProjectView or the originating Codex job; the harness validates it before writing.",
-			"Provide runGitCommit when the executed artifact's Git commit is known, especially for remote or delayed runs. recordedAtGit is captured separately and never substitutes for run identity.",
+			"Never reconstruct a hypothesis, prediction, validity check, registration, or next step to satisfy the tool. Confirmatory evidence needs a real observation-before prediction; preregistered needs registrationRef; valid needs an actual validity check.",
+			"For an older route, provide its exact trackRef. Provide runGitCommit when known; recordedAtGit never substitutes for executed-code identity.",
 		],
 		parameters: Type.Object({
 			question: Type.String({ description: "Research question or concrete design uncertainty" }),

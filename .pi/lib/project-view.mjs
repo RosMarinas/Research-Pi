@@ -6,7 +6,7 @@ import { RESEARCH_LEADER_ACTOR_ID, runtimeResearchTrack, runtimeTrackStatus } fr
 
 export const PROJECT_VIEW_KIND = "research-project-view";
 export const PROJECT_VIEW_DELTA_KIND = "research-project-view-delta";
-export const PROJECT_VIEW_VERSION = 3;
+export const PROJECT_VIEW_VERSION = 4;
 const MAX_SESSION_FILES = 24;
 const MAX_SESSION_BYTES = 64 * 1024 * 1024;
 
@@ -41,16 +41,6 @@ export function projectViewRefreshFingerprint(snapshot = {}) {
 				label: action.label ?? null,
 				externalId: action.externalId ?? null,
 				trackRef: action.trackRef ?? null,
-			})),
-		messages: (snapshot.messages ?? [])
-			.filter((message) => message.status === "queued" || message.status === "delivered")
-			.map((message) => ({
-				id: message.id,
-				type: message.type,
-				from: message.from,
-				status: message.status,
-				body: message.body,
-				trackRef: message.trackRef ?? null,
 			})),
 		handoffs: (snapshot.handoffs ?? []).slice(-4).map((handoff) => ({
 			id: handoff.id,
@@ -198,7 +188,6 @@ export async function readRecentExperiments(path, maxRecords = 6) {
 }
 
 export function buildProjectView({ runtime, snapshot, git = {}, experiments = [] }) {
-	const openMessages = snapshot.messages.filter((message) => message.status === "queued" || message.status === "delivered");
 	const currentTrack = runtimeResearchTrack(snapshot);
 	const actions = snapshot.actions.filter((action) =>
 		LIVE_ACTION_STATUSES.has(action.status),
@@ -305,15 +294,6 @@ export function buildProjectView({ runtime, snapshot, git = {}, experiments = []
 		),
 		experiments: recentEvidence,
 		actions,
-		openMessages: openMessages.slice(-8).map((message) => ({
-			id: message.id,
-			type: message.type,
-			from: message.from,
-			status: message.status,
-			body: compact(message.body, 240),
-			trackRef: message.trackRef ?? null,
-			routeStatus: runtimeTrackStatus(snapshot, message.trackRef),
-		})),
 		generatedFrom: {
 			actors: snapshot.actors.length,
 			actions: snapshot.actions.length,
@@ -349,7 +329,7 @@ export function renderProjectView(view, options = {}) {
 	const state = view.state;
 	const lines = [
 		"<research_project_view>",
-		"Cold-start research orientation for a new Session. It preserves project direction, explains how the route reached its current frontier, and describes the latest completed work without turning that work into an automatic next task. The structured-state baseline is a fallible index; validate consequential claims against cited experiment/run/artifact evidence.",
+		"Versioned Project research data for Session orientation. Structured state is a fallible index; verify consequential claims against cited experiment, run, or artifact evidence.",
 		`Project: ${view.projectKey} · ${view.workspaceRoot}`,
 		"=== PROJECT DIRECTION (stable orientation) ===",
 	];
@@ -370,7 +350,7 @@ export function renderProjectView(view, options = {}) {
 			...bullets(list(state.criticalContext, 5), (item) => compact(item, 520), "none recorded"),
 		);
 	} else {
-		lines.push("Structured project direction is unavailable; do not infer continuity from absence or let the most recent local task define the project. A later research compaction can establish it.");
+		lines.push("Structured project direction is unavailable; do not let the latest local task define the project by default.");
 	}
 	lines.push(
 		"Research route trajectory (compressed history; each item explains a direction change, not a task queue):",
@@ -389,17 +369,17 @@ export function renderProjectView(view, options = {}) {
 		state ? `Structured-state route status now: ${view.stateRouteStatus}` : undefined,
 	);
 	if (view.freshness === "current") {
-		lines.push("Baseline status: CURRENT. It may be used as the working research direction, subject to its cited evidence boundaries.");
+		lines.push("Baseline status: CURRENT within its cited evidence boundaries.");
 	} else {
 		lines.push(
-			"MEMORY FRESHNESS WARNING: the baseline is historical or unconfirmed. Do not report its claim as current or execute its planned experiment without reconciling the live delta.",
+			"MEMORY FRESHNESS WARNING: the baseline is historical or unconfirmed; reconcile the live delta before treating it as current.",
 			...view.freshnessReasons.map((reason) => `- ${reason}`),
 		);
 	}
 	if (view.transitionSupersedesState) {
 		lines.push(
 			`Previous structured state (not current): S:${view.stateSource?.sessionId}/E:${view.stateSource?.entryId} hash=${view.stateSource?.contentHash ?? "unknown"}`,
-			"Its hypotheses and experiment details remain retrievable through research_memory_search/read; do not silently carry them into the active route.",
+			"Its details remain retrievable through research_memory_search/read; do not carry them silently into the active route.",
 		);
 	}
 	if (view.activeTransition) {
@@ -422,20 +402,20 @@ export function renderProjectView(view, options = {}) {
 			truncateSection(String(handoff.summary ?? "No bounded completion summary was recorded."), 2_800, "[Latest task handoff truncated; inspect its Session, Codex job, or artifact for full detail.]"),
 			handoff.toolNames?.length ? `Tools involved: ${handoff.toolNames.join(", ")}` : undefined,
 			handoff.git ? `Handoff Git: branch=${handoff.git.branch ?? "unknown"} commit=${handoff.git.commit?.slice(0, 12) ?? "unknown"} dirty=${handoff.git.dirty ?? "unknown"}` : undefined,
-			"Directional status: this handoff is operational context, not automatic scientific evidence and not an instruction to continue the same kind of task. Update the research direction only through valid evidence, an explicit decision, amendment, transition, or checkpoint compact.",
+			"Directional status: operational context only; it is not scientific evidence and not an instruction to continue the same kind of task.",
 		);
 	} else {
-		lines.push("No durable completed-task handoff is available. Use the direction and current frontier; do not infer the project objective from Git dirtiness or live tools.");
+		lines.push("No durable completed-task handoff is available.");
 	}
 	if (view.pendingEvidence.length) {
 		lines.push(
 			`Pending evidence delta (${view.pendingEvidenceCount} record(s) newer than the structured baseline; authoritative as records but not yet synthesized into a current claim):`,
-			"Reconcile at this semantic boundary: use amend_project_state for a narrow evidence-backed state correction, record_research_transition for a real route change, or compact at a genuine checkpoint. Do not run model compaction after every experiment.",
+			"Reconcile with amend_project_state, record_research_transition, or a genuine checkpoint compact. Do not run model compaction after every experiment.",
 			...[...view.pendingEvidence].reverse().flatMap(evidenceBrief),
 		);
 	} else if (view.experiments.length) {
 		lines.push(
-			"Latest evidence briefs (already at or before the structured-state boundary; use for concise provenance, not as a replacement for exact records):",
+			"Latest evidence briefs at or before the structured-state boundary:",
 			...view.experiments.slice(-2).flatMap(evidenceBrief),
 		);
 	}
@@ -457,13 +437,13 @@ export function renderProjectView(view, options = {}) {
 			].filter(Boolean).join(" | "), "none recorded"),
 			"Unresolved confounders and open questions:",
 			...bullets([...list(state.unresolvedConfounders, 3), ...list(state.openQuestions, 3)], (item) => compact(item, 500), "none recorded"),
-			`Baseline planned next experiment (a candidate at this frontier, not an automatic command): ${compact(state.nextExperiment?.question, 600) || "not determined"}`,
+			`Baseline planned next experiment (candidate, not command): ${compact(state.nextExperiment?.question, 600) || "not determined"}`,
 			`  intervention: ${compact(state.nextExperiment?.intervention, 700) || "not determined"}`,
 			...list(state.nextExperiment?.distinguishingOutcomes, 3).map((item) => `  distinguishing outcome: ${compact(item, 440)}`),
 			...list(state.nextExperiment?.validityChecks, 3).map((item) => `  validity check: ${compact(item, 440)}`),
 		);
 	} else if (state) {
-		lines.push("The structured frontier belongs to a retired route. Use the active transition and pending evidence to reconstruct the current hypotheses and next decision; do not continue the old planned experiment.");
+		lines.push("The structured frontier belongs to a retired route; reconstruct the current frontier from the active transition and pending evidence.");
 	} else {
 		lines.push("No structured research frontier is available yet.");
 	}
@@ -473,16 +453,11 @@ export function renderProjectView(view, options = {}) {
 		...bullets(view.experiments, (item) => `${item.id} [${item.validityJudgment ?? "inconclusive"}] [route=${item.routeStatus}] ${compact(item.question, 300)} -> ${compact(item.conclusion, 380)}${item.runId ? ` | run=${compact(item.runId, 140)}` : ""}`, "none recorded"),
 		"Live/unresolved Runtime actions:",
 		...bullets(view.actions, (item) => `${item.id} [${item.status}] [route=${item.routeStatus}] ${compact(item.label, 300)} external=${item.externalId ?? "none"}`, "none"),
-		includeDirectedMessages
-			? "Open Runtime messages (queued or delivered but not consumed):"
-			: `Open directed Runtime messages: ${view.openMessages.length} (contents are visible only to the addressed Session).`,
-		...(includeDirectedMessages
-			? bullets(view.openMessages, (item) => `${item.id} [${item.status}] [route=${item.routeStatus}] ${item.type} from=${item.from}: ${item.body}`, "none")
-			: []),
+			includeDirectedMessages
+				? "Runtime mailbox: message bodies use the separate single-delivery Runtime event channel; use /inbox only when routing needs inspection."
+				: "Runtime mailbox: directed message contents belong only to the addressed Leader Session.",
 		"=== NEW-SESSION ORIENTATION ===",
-		"The current user request selects the immediate task. Recent completed work, live Actions, dirty files, and a baseline next experiment are context, not automatic instructions.",
-		"Before acting, place the user request inside the project direction and current research frontier. Do not continue a local coding, debugging, or infrastructure loop merely because it is recent; continue it only when it still advances the research objective or the user explicitly requests it.",
-		"If recent work and project direction appear inconsistent, zoom out and reconcile the route, evidence, and intended decision before modifying code or launching experiments.",
+		"The current user request selects the immediate task. Reconcile it with project direction and the frontier; recent work, Actions, Git state, and planned experiments are context rather than automatic instructions.",
 		"</research_project_view>",
 	);
 	const renderedLines = lines.filter(Boolean);
@@ -502,16 +477,37 @@ export function renderProjectView(view, options = {}) {
 	].join("\n");
 }
 
-export function renderProjectViewDelta(view, sinceRevision = 0) {
+export function projectViewDeltaCursor(view) {
+	return {
+		projectRevision: view.projectRevision,
+		latestHandoffId: view.latestCompletedTask?.id ?? null,
+		actionsFingerprint: fingerprint((view.actions ?? []).map((action) => ({
+			id: action.id,
+			status: action.status,
+			label: action.label ?? null,
+			externalId: action.externalId ?? null,
+			trackRef: action.trackRef ?? null,
+		}))),
+	};
+}
+
+export function renderProjectViewDelta(view, previous = 0) {
+	const cursor = Number.isInteger(previous)
+		? { projectRevision: previous, latestHandoffId: null, actionsFingerprint: null }
+		: { projectRevision: 0, latestHandoffId: null, actionsFingerprint: null, ...(previous ?? {}) };
+	const sinceRevision = cursor.projectRevision ?? 0;
 	const evidence = [...view.pendingEvidence]
 		.filter((item) => !Number.isInteger(item.revision) || item.revision > sinceRevision)
 		.reverse();
 	const transition = view.activeTransition && (!Number.isInteger(view.activeTransition.revision) || view.activeTransition.revision > sinceRevision)
 		? view.activeTransition
 		: null;
+	const handoff = view.latestCompletedTask?.id !== cursor.latestHandoffId ? view.latestCompletedTask : null;
+	const actionsFingerprint = projectViewDeltaCursor(view).actionsFingerprint;
+	const actionsChanged = cursor.actionsFingerprint !== actionsFingerprint;
 	const lines = [
 		"<research_project_delta>",
-		"Append-only ProjectView update. Earlier ProjectView messages are historical baselines; this newer revision controls freshness and current-route interpretation.",
+		"Append-only ProjectView data update. Earlier views remain historical; this revision controls freshness and current-route interpretation.",
 		`Project revision: ${view.projectRevision} · structured state revision: ${view.stateRevision || "none"} · memory freshness: ${view.freshness}`,
 		`Git: branch=${view.git.branch ?? "unknown"} commit=${view.git.commit ?? "unknown"} dirty=${view.git.dirty ?? "unknown"}`,
 		`Current research track: ${view.currentTrack?.ref ?? "project:initial"} · ${compact(view.currentTrack?.label, 500) || "unnamed"}`,
@@ -527,13 +523,18 @@ export function renderProjectViewDelta(view, sinceRevision = 0) {
 			transition.nextDecision ? `Next decision: ${compact(transition.nextDecision, 600)}` : undefined,
 		);
 	}
-	if (view.latestCompletedTask) {
-		const handoff = view.latestCompletedTask;
+	if (handoff) {
 		lines.push(
-			"Latest completed work handoff (operational context, not an automatic next task):",
+			"Latest completed work handoff (new in this delta; context, not an automatic next task):",
 			`Task: ${compact(handoff.task, 700) || handoff.id}`,
 			`Reported result: ${compact(handoff.summary, 1_800)}`,
 			`Route: ${handoff.routeStatus} · source=${handoff.id}`,
+		);
+	}
+	if (actionsChanged) {
+		lines.push(
+			"Live Runtime actions changed:",
+			...bullets(view.actions.slice(-4), (item) => `${item.id} [${item.status}] [route=${item.routeStatus}] ${compact(item.label, 240)} external=${item.externalId ?? "none"}`, "none"),
 		);
 	}
 	if (evidence.length) {
@@ -543,17 +544,17 @@ export function renderProjectViewDelta(view, sinceRevision = 0) {
 			...evidence.flatMap(evidenceBrief),
 		);
 	}
-	if (!transition && !evidence.length && !view.latestCompletedTask) {
-		lines.push("No new scientific evidence is embedded in this update; the change is environment or freshness metadata only.");
+	if (!transition && !evidence.length && !handoff && !actionsChanged) {
+		lines.push("Environment or freshness metadata changed; this update contains no new research evidence or work handoff.");
 	}
 	lines.push(
-		"New-Session orientation remains controlling: the current user request selects the immediate task; recent work and live Actions are context, not instructions to continue the same coding/debugging loop.",
+		"This data update is context, not an instruction to continue a previous task.",
 		"</research_project_delta>",
 	);
 	const rendered = lines.filter(Boolean).join("\n");
-	return rendered.length <= 5_800
+	return rendered.length <= 4_800
 		? rendered
-		: `${rendered.slice(0, 5_700).trimEnd()}\n[Project delta truncated; read exact experiment records.]\n</research_project_delta>`;
+		: `${rendered.slice(0, 4_700).trimEnd()}\n[Project delta truncated; read exact experiment records.]\n</research_project_delta>`;
 }
 
 export function materializeProjectViewDelta(messages, text, details = {}) {
