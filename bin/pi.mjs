@@ -18,6 +18,11 @@ import {
 	writeResearchPiAgentConfig,
 	writeResearchPiConfig,
 } from "../.pi/lib/research-config.mjs";
+import {
+	CODEX_ANALYSIS_HANDOFF_MAX_CHARS,
+	queueCodexAnalysisHandoff,
+	readCodexAnalysisContext,
+} from "../.pi/lib/research-analysis-bridge.mjs";
 import { resolveResearchPiPaths } from "../.pi/lib/runtime-paths.mjs";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -195,6 +200,32 @@ function configCommand(argv) {
 	throw new Error("Usage: pi config [show|path|list|use <profile>|themes|theme <name>]");
 }
 
+async function readStandardInput() {
+	let text = "";
+	for await (const chunk of process.stdin) text += chunk.toString();
+	return text;
+}
+
+async function analysisCommand(argv) {
+	const action = argv[0] ?? "context";
+	const workspace = resolve(process.env.PI_RESEARCH_WORKSPACE ?? process.cwd());
+	if (action === "context" || action === "view") {
+		process.stdout.write(`${await readCodexAnalysisContext(workspace)}\n`);
+		return;
+	}
+	if (action === "send") {
+		const inline = argv.slice(1).join(" ").trim();
+		const input = inline || (process.stdin.isTTY ? "" : await readStandardInput());
+		if (!input) {
+			throw new Error(`Usage: pi analysis send <message>, or pipe a handoff of at most ${CODEX_ANALYSIS_HANDOFF_MAX_CHARS} characters to pi analysis send`);
+		}
+		const message = await queueCodexAnalysisHandoff(workspace, input);
+		process.stdout.write(`${message.id} queued for the Research Pi Leader; no transcript or Project State was written.\n`);
+		return;
+	}
+	throw new Error("Usage: pi analysis [context|send <message>]");
+}
+
 async function spawnCore(argv) {
 	const baseConfig = prepareConfig();
 	const { workspace, args: userArgs, config, sessionMode } = takeResearchOptions(argv, baseConfig);
@@ -280,6 +311,7 @@ async function main() {
 	const argv = process.argv.slice(2);
 	if (argv[0] === "setup") return setup();
 	if (argv[0] === "config") return configCommand(argv.slice(1));
+	if (argv[0] === "analysis") return analysisCommand(argv.slice(1));
 	if (argv[0] === "paths") {
 		process.stdout.write(`${JSON.stringify(paths, null, 2)}\n`);
 		return;

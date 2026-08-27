@@ -32,6 +32,7 @@ for (const required of [
 	".pi/themes/research-pi.json",
 	".pi/extensions/research-config.ts",
 	".pi/lib/research-config.mjs",
+	".pi/lib/research-analysis-bridge.mjs",
 	"docs/configuration.md",
 	".pi/extensions/project-boundary.ts",
 	".pi/lib/project-boundary.mjs",

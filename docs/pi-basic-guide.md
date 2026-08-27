@@ -25,6 +25,22 @@ Analysis Session 可以使用项目内只读工具，也可以通过 `host_capab
 
 前者只把“候选分析”放进 Leader mailbox，不会自动成为科研事实；当前 attached Leader 空闲时会由 Runtime 自动唤醒处理，正在运行时则等该轮 settled 后安全投递，不需要用户再发一条消息来刷新 inbox。后者显式接管 Leader 角色并恢复执行工具。需要同时保留原 Leader 并行工作时，应从另一个终端运行 `pi --analysis`；同一 TUI 内的 `/runtime analysis` 适合把当前 Session 原地降为只读讨论。
 
+也可以把第二个终端留给原生 Codex Session，不把它纳入 `codex_delegate` job。先在同一个科研项目目录启动 `codex`，给它一次明确约定：
+
+```text
+先运行 pi analysis context 读取 Research Pi 的当前 ProjectView；只和我讨论，不接管 Leader。只有我明确说“投递”时，才把判断、最强依据和建议下一步压缩后交给 Research Pi。
+```
+
+Codex 投递时调用：
+
+```sh
+pi analysis send '判断：...；依据：...；建议：...'
+# 长一点的内容也可通过 stdin，但上限仍是 1200 字符：
+printf '%s\n' '判断：...' '依据：...' '建议：...' | pi analysis send
+```
+
+这个入口直接复用 Analysis Session 的 durable Leader mailbox。它只保存最终 handoff，不复制 Codex transcript，不写 Project State，也不创建 Codex executor Action；超过 1200 字符会要求 Codex 先压缩，而不是截断后投递。
+
 第一次交互式启动若出现 project trust 提示，确认信任本项目的 `.pi` 配置。进入界面后直接输入自然语言任务并按 Enter。
 
 源码开发时，可以从 harness 目录显式启动：
