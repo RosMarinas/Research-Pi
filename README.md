@@ -1,32 +1,50 @@
 # Research Pi
 
-> 面向Project设计的Research harness，拒绝一个session干到底。
+> Session is not enough for research. Project is.
 
-Research Pi 是面向 AI、机器人、通信、优化与仿真等计算实验科研的 Pi Harness。它把代码视为检验假设的实验工具，优先追求可靠信息、有效证据和高信息增益实验；只有当研究方向得到支持后，才提高工程化与稳定交付强度。
+Coding Agent不一定是好用的Research Agent。
 
-它不是一段“科研提示词”，而是一套 Project-centric Runtime：长期研究状态、实验记录、Agent 协作、权限和 Session 交接不再完全依赖单次模型上下文。
+Research Pi 面向 AI、机器人、通信、优化与仿真等计算实验科研。它最关心的不是“代码写的对不对”，而是：**代码能否支撑实验？这个实验告诉了我们什么？下一步高信息增益的实验是什么？**
 
-`Pi Core 0.84.2` · `DeepSeek / ZAI Coding Plan / OpenCode Go` · `Codex App Server` · `macOS / Linux / WSL2`
+它不是一段更长的科研提示词，也不是一个号称能自动完成科研的 skill。它把项目进度、实验记录、讨论和 Agent 协作留在 Project 中，因此换一个 Session、换一个模型，也不用从头讲起。
+
+`Pi Core 0.84.2` ·  `macOS / Linux / WSL2`
 
 ## 设计原则
 
-1. **Project 不等于 Session**：Project 保存长期研究状态；Session 是可替换的临时工作集。
-2. **Message、State、Context 分开管理**：事件、当前判断和某次模型调用所需内容不是同一件事。
-3. **执行完成不等于科学结论成立**：命令、提交和 run 可以自动记录；证据是否有效仍需科研判断。
-4. **Leader 与 Executor 分工**：Pi 负责研究规划、解释和用户沟通；Codex 负责工具密集或长程执行。
-5. **默认高探索、强可逆、重证据**：先回答“想法是否成立”，再考虑把实现做得漂亮。
+1. **项目比对话更长寿**：Session 可以结束，模型可以更换，但研究问题、实验结果和关键决定应该留下来。
+2. **科研必须要人参与**：Agent 可以查资料、写代码、跑实验和整理证据，但不会因为命令成功就擅自宣布“方向成立”。
+3. **记住真正有用的东西**：重点保留问题、假设、证据、失败路线和下一步，而不是把所有聊天都塞回模型上下文。
+4. **让不同模型做擅长的事**：Pi 把握研究主线，Codex 负责长程执行，Pi-analysis 陪用户理解、质疑和讨论。它们交换的是短消息，不是彼此整段复制上下文。
+5. **先找到对的方向，再把代码写漂亮**：探索阶段允许大胆替换、快速试错和整体回滚；方向值得保留后，再补工程质量与复现能力。
 
-```mermaid
-flowchart LR
-    U[User] <--> P[Pi Leader Session]
-    P <--> R[Project Runtime]
-    R --> V[ProjectView]
-    R --> E[Evidence / Memory]
-    R --> M[Actors / Actions / Mailbox]
-    P <--> C[Codex Advisor / Executor]
-    C --> X[Code / Runs / Artifacts]
-    X --> E
+## 我最喜欢的设计：双 Session 工作流
+
+Research Pi 可以同时开两扇窗口：一边让 **Pi Leader** 安静推进实验，另一边在 **Pi-analysis** 里随时追问、质疑和展开想法。
+
+![Research Pi 双 Session 工作台：Pi Leader 推进实验，Pi-analysis 独立讨论，只向主线投递一张短便签](docs/assets/dual-session-workbench.png)
+
+Pi-analysis 的长对话留在自己的窗口里，不会挤进 Leader 的上下文。只有当讨论形成了值得主线知道的判断，才把它整理成一张短便签送过去。
+
+用户可以在一个终端让 Pi Leader 持续工作，在另一个终端随时进入 Pi-analysis：
+
+```sh
+# Terminal A：持续推进科研主线
+pi
+
+# Terminal B：跟进、理解和讨论，不干扰 Leader
+pi --analysis
 ```
+
+Pi-analysis 看到的是同一个项目的最新工作视图，但它有自己的对话空间。讨论可以很长，真正发给 Leader 的只需要是一张简短“便签”：
+
+```text
+/analysis send 当前判断、关键依据、仍存不确定性与建议下一步
+```
+
+这张便签通过 mailbox 交给 Leader，只包含讨论后的判断、依据和建议，不会把整段聊天塞进主线。Leader 空闲时可以立即看到；如果它正在工作，便签会等到合适的时机再送达。
+
+于是主线可以安静地跑，用户也始终有一张可以放心提问和思考的桌子。独立 Codex 讨论 Session 也能通过 `pi analysis context` / `pi analysis send` 使用同一张“便签”。
 
 ## 快速开始
 
@@ -72,6 +90,7 @@ pi --analysis
 |---|---|
 | Research Contract | 让 Agent 默认采用探索、证伪、有效性检查和证据驱动收敛 |
 | Project Runtime | 维护 Project State、Actors、Actions、mailbox 与 Leader Session 所有权 |
+| Dual Session | Leader 持续推进主线，Pi-analysis 独立跟进与讨论，并只把最终短综合投递给 Leader |
 | ProjectView | 将 structured state 与最新 evidence delta 追加到模型上下文，避免旧状态冒充当前结论 |
 | Research Memory | 对历史 Session 和实验记录做本地全文检索，不依赖向量数据库 |
 | Research Compaction | 在模型 settled 后生成带 provenance 的结构化状态，而不只摘要聊天文本 |
@@ -90,6 +109,7 @@ ProjectView 使用 append-only snapshot/delta：研究 revision 或 Git identity
 | `/runtime rotate` | 新建不复制旧 transcript、但继承 Project 状态的 Leader Session |
 | `pi --analysis` | 新开只读 Analysis Session；不抢占 Leader，不接收其 mailbox |
 | `/analysis send <摘要>` | 把有价值的讨论投递给 Leader；用 `/runtime promote <原因>` 转为 Leader |
+| `pi analysis context/send` | 让独立 Codex Session 读取 ProjectView 或向 Leader 投递不超过 1200 字符的综合 |
 | `/runtime context <on\|off>` | Analysis 保持只读角色，只切换后续轮次是否注入 ProjectView |
 | `/runtime new clean` | 新建不继承 ProjectView 的纯净 Session；用 `/runtime inherit` 恢复 |
 | `/memory <query>` | 搜索当前 Project 的历史 Session 与实验记录 |
@@ -154,9 +174,9 @@ npm run test:package
 - [统一配置说明](docs/configuration.md)
 - [Project Runtime 测试与恢复](docs/research-runtime-test-guide.md)
 - [安全模型与本地数据](docs/security-model.md)
-- [设计思想与阶段成果汇报](thesis/ResearchPi.pdf)
+- [设计思想](thesis/ResearchPi.pdf)
 
-当前版本是可日常使用的 Research Runtime，不是全自动 AI Scientist。它不会替用户冻结科研结论，也不会在缺少证据时自动选择研究路线。
+
 
 ## License
 
