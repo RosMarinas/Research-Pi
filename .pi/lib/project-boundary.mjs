@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { mkdir, realpath, stat } from "node:fs/promises";
+import { constants, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { access, mkdir, realpath, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { normalizeSystemRuntimePolicy } from "./security-policy.mjs";
 
@@ -276,6 +276,37 @@ export function sanitizeBoundaryEnvironment(source = process.env) {
 	return env;
 }
 
+function executableCandidates(command, environment, platform) {
+	if (isAbsolute(command) || command.includes("/") || command.includes("\\")) return [command];
+	const pathEntries = String(environment.PATH ?? "").split(delimiter).filter(Boolean);
+	if (platform !== "win32") return pathEntries.map((entry) => join(entry, command));
+	const extensions = command.includes(".")
+		? [""]
+		: String(environment.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
+	return pathEntries.flatMap((entry) => extensions.map((extension) => join(entry, `${command}${extension.toLowerCase()}`)));
+}
+
+export async function resolveExecutablePath(command, options = {}) {
+	const requested = String(command ?? "").trim();
+	if (!requested || requested.includes("\0")) throw new Error("Codex executable is empty or invalid");
+	const environment = options.environment ?? process.env;
+	const platform = options.platform ?? process.platform;
+	const cwd = options.cwd ?? process.cwd();
+	for (const candidate of executableCandidates(requested, environment, platform)) {
+		const absolute = isAbsolute(candidate) ? candidate : resolve(cwd, candidate);
+		try {
+			await access(absolute, platform === "win32" ? constants.F_OK : constants.X_OK);
+			const canonical = await realpath(absolute);
+			if (!(await stat(canonical)).isFile()) continue;
+			return canonical;
+		} catch {
+			// Continue PATH resolution. The final error names the requested command
+			// without leaking unrelated PATH entries into model-visible output.
+		}
+	}
+	throw new Error(`Codex executable is unavailable or not executable: ${requested}`);
+}
+
 export async function readGitIdentity(cwd) {
 	const readValue = async (key) => {
 		try {
@@ -473,8 +504,31 @@ export async function runCodexSandboxPreflight(options) {
 		GIT_OPTIONAL_LOCKS: "0",
 	};
 	try {
+		const codexBin = await resolveExecutablePath(options.codexBin ?? "codex", {
+			cwd,
+			environment,
+		});
+		const selfProbe = await execFileAsync(
+			codexBin,
+			[
+				...permissionArgs,
+				"sandbox",
+				"-P",
+				profile,
+				"-C",
+				cwd,
+				codexBin,
+				"--version",
+			],
+			{
+				cwd,
+				env: environment,
+				timeout: options.timeoutMs ?? 20_000,
+				maxBuffer: 64 * 1024,
+			},
+		);
 		const { stdout, stderr } = await execFileAsync(
-			options.codexBin ?? "codex",
+			codexBin,
 			[
 				...permissionArgs,
 				"sandbox",
@@ -497,8 +551,10 @@ export async function runCodexSandboxPreflight(options) {
 			ok: true,
 			mode,
 			profile,
+			codexBin,
+			codexVersion: selfProbe.stdout.trim(),
 			stdout: stdout.trim(),
-			stderr: stderr.trim(),
+			stderr: [selfProbe.stderr, stderr].filter(Boolean).join("\n").trim(),
 			runtimePolicy,
 		};
 	} catch (error) {
@@ -547,8 +603,9 @@ function discoverSensitiveProjectPaths(root, maxDepth = 4) {
 	return [...found];
 }
 
-export function buildSandboxRuntimeConfig(root, environment = process.env, runtimePolicy) {
+export function buildSandboxRuntimeConfig(root, environment = process.env, runtimePolicy, options = {}) {
 	const normalizedRuntime = normalizeSystemRuntimePolicy(runtimePolicy);
+	const access = options.access === "read" ? "read" : "write";
 	const trustedReadRoots = [...new Set([...normalizedRuntime.readRoots, ...normalizedRuntime.instructionRoots])];
 	const userParent = dirname(homedir());
 	const deniedRegions = new Set([userParent, ...canonicalTemporaryPaths()]);
@@ -573,16 +630,20 @@ export function buildSandboxRuntimeConfig(root, environment = process.env, runti
 		join(homedir(), ".claude", "debug"),
 	];
 	return {
-		network: {
+			network: {
 			allowedDomains: [],
 			deniedDomains: [],
-			strictAllowlist: false,
+			strictAllowlist: access === "read",
 			allowLocalBinding: true,
 		},
 		filesystem: {
 			denyRead: [...deniedRegions, ...sensitive],
 			allowRead: [root, ...trustedReadRoots, ...macOSXcrunCachePaths()],
-			allowWrite: [root, ...macOSXcrunCachePaths()],
+			allowWrite: [
+				...(access === "write" ? [root] : []),
+				...(options.runtimeTmp ? [options.runtimeTmp] : []),
+				...macOSXcrunCachePaths(),
+			],
 			denyWrite: [...externalDefaultWrites, ...sensitive],
 			allowGitConfig: true,
 		},

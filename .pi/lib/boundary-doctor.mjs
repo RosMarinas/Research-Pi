@@ -71,13 +71,16 @@ export async function runBoundaryDoctor(options) {
 }
 
 export function formatBoundaryDoctor(result) {
+	const codexProbe = (probe) => probe.ok
+		? `${probe.codexVersion || "ok"}${probe.codexBin ? ` · ${probe.codexBin}` : ""}`
+		: probe.error;
 	return [
 		`Research Pi boundary doctor: ${result.ok ? "PASS" : "FAIL"}`,
 		`Project: ${result.projectRoot}`,
 		`Host Git: ${result.hostGit.ok ? "ok" : result.hostGit.error}`,
 		`Host Python: ${result.hostPython.ok ? result.hostPython.stdout || "ok" : `optional/unavailable: ${result.hostPython.error}`}`,
-		`Codex advisor: ${result.codexAdvisor.ok ? result.codexAdvisor.stdout || "ok" : result.codexAdvisor.error}`,
-		`Codex executor: ${result.codexExecutor.ok ? result.codexExecutor.stdout || "ok" : result.codexExecutor.error}`,
+		`Codex advisor: ${codexProbe(result.codexAdvisor)}`,
+		`Codex executor: ${codexProbe(result.codexExecutor)}`,
 		...result.systemRuntime.diagnostics,
 	].join("\n");
 }

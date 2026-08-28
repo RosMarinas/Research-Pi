@@ -12,9 +12,9 @@ pi
 Research Pi 有两个直观的项目角色：
 
 - **Leader Session**：默认入口 `pi`。可以修改项目、运行实验、调度 Codex、更新 Project State，并独占 durable Leader mailbox。
-- **Analysis Session**：入口 `pi --analysis`。读取同一 ProjectView 并讨论问题，但不抢占 Leader、不接收 Codex ASK/result，也不能修改代码、启动实验或更新 Project State。
+- **Analysis Session**：入口 `pi --analysis`。读取同一 ProjectView 并讨论问题，但不抢占 Leader、不接收 Codex ASK/result，也不能修改代码、启动实验或更新 Project State。可以在 OS 强制的项目只读沙箱中运行本地 shell；只有项目内 Runtime 临时目录可写。
 
-Analysis Session 可以使用项目内只读工具，也可以通过 `host_capability` 读取已批准的外部文件或执行 SSH 检查。`cat/head/tail/grep/rg/find/ls/stat`、只读 Git、调度器和 `nvidia-smi` 查询等保守语法可在受信 SSH target 上直接执行；其他远端命令会向用户展示完整命令并申请一次性或当前 Session 的精确授权，不会把该授权泛化成整个 SSH target 的信任。凭据路径始终禁止进入模型上下文。
+Analysis Session 可以使用项目内只读工具和本地只读 shell，也可以通过 `host_capability` 读取已批准的外部文件或执行 SSH 检查。`cat/head/tail/grep/rg/find/ls/stat`、只读 Git、调度器和 `nvidia-smi` 查询等保守语法可在受信 SSH target 上直接执行；其他远端命令会向用户展示完整命令并申请一次性或当前 Session 的精确授权，不会把该授权泛化成整个 SSH target 的信任。凭据路径始终禁止进入模型上下文。
 
 讨论形成可操作结论后，有两条路：
 
@@ -152,9 +152,9 @@ Pi 会自行选择工具。若想明确控制，可以直接说：
 
 `!!command` 会运行命令但不把输出加入模型上下文。`!` / `!!` 是人工直执行通道，会以你的系统权限运行并在首次使用时警告；模型的 `bash` 则受当前项目边界约束。输入 `/boundary` 可查看生效根目录和权限。
 
-安装、升级或权限异常后先运行 `pi doctor`；交互会话内可运行 `/boundary doctor`。它们不调用模型，会验证项目、Git、Python 与 Codex sandbox 的真实权限。每个 Codex job 也会在模型启动前自动执行 preflight。
+安装、升级或权限异常后先运行 `pi doctor`；交互会话内可运行 `/boundary doctor`。它们不调用模型，会解析 Codex 的真实可执行路径，并验证 Codex self-reexec、项目、Git、Python 与 sandbox 权限。每个 Codex job 也会在模型启动前自动执行同一 preflight。
 
-模型 shell 可读写当前项目（包括正常 Git commit 所需的 `.git` 数据），并可访问公网。项目内的 `uv`、Python、shell、Node、Git 和测试命令可直接运行，`sh -c` 或 `python3 -c` 不会仅因语法形式被拒绝。其他项目、宿主凭据和 Unix socket 仍在 sandbox 外；需要 SSH 或宿主权限时，Pi 会通过 `host_capability` 请求一次/session 授权，或复用当前项目已信任的 SSH target/command prefix，而不是默认让你复制命令到终端。
+Leader 模型 shell 可读写当前项目（包括正常 Git commit 所需的 `.git` 数据）并访问公网；Analysis 模型 shell 读取同一项目，但写入只限项目内 Runtime 临时目录，且 shell 网络关闭，公开资料使用 `web_search`，SSH 检查使用 `host_capability`。项目内的 `uv`、Python、shell、Node、Git 和测试命令不会仅因 `sh -c` 或 `python3 -c` 之类的语法形式被拒绝；Analysis 仍不得借只读 shell 启动实验或产生外部副作用。其他项目、宿主凭据和 Unix socket 保持在 sandbox 外；需要 SSH 或宿主权限时，Pi 会通过 `host_capability` 请求一次/session 授权，或复用当前项目已信任的 SSH target/command prefix，而不是默认让你复制命令到终端。
 
 常用预授权示例：
 

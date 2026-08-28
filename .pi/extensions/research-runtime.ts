@@ -115,6 +115,7 @@ const UI_RUNTIME_STRIP = ["auto", "always", "off"].includes(process.env.RESEARCH
 	? process.env.RESEARCH_PI_UI_RUNTIME_STRIP as "auto" | "always" | "off"
 	: "auto";
 const ANALYSIS_SAFE_TOOLS = new Set([
+	"bash",
 	"read",
 	"grep",
 	"find",
@@ -155,7 +156,7 @@ export function analysisSessionToolBlockReason(
 	if (policy !== "analysis") return null;
 	if (ANALYSIS_SAFE_TOOLS.has(toolName)) return null;
 	if (toolName === "codex_delegate" && ANALYSIS_CODEX_READ_ACTIONS.has(String(input.action ?? ""))) return null;
-	return `Analysis Session cannot use ${toolName}: it may inspect local/remote evidence and discuss it, but cannot modify code, run experiments, steer workers, or update Project State. Use analysis_send_to_leader, or /runtime promote <reason> to become the Leader Session.`;
+	return `Analysis Session cannot use ${toolName}: it may inspect local/remote evidence, including OS-sandboxed read-only project shell commands, but cannot modify code, run experiments, steer workers, or update Project State. Use analysis_send_to_leader, or /runtime promote <reason> to become the Leader Session.`;
 }
 
 export async function reconcileStaleCodexMailbox(
@@ -195,7 +196,7 @@ export async function reconcileStaleCodexMailbox(
 
 function sessionRoleContext(role: "analysis" | "leader", content: string): string {
 	const rolePrompt = role === "analysis"
-		? "You are the current read-only Analysis Session. Discuss, explain, compare hypotheses, and inspect local or approved remote evidence. Do not modify code, start experiments, steer workers, consume the Leader mailbox, or update Project State. Treat new interpretations as proposals, not evidence. Use analysis_send_to_leader for a useful synthesis; execution requires explicit user promotion."
+		? "You are the current read-only Analysis Session. Discuss, explain, compare hypotheses, and inspect local or approved remote evidence. You may run project-local shell commands under an OS-enforced read-only filesystem profile, but must not start experiments or external side effects. Do not modify code, steer workers, consume the Leader mailbox, or update Project State. Treat new interpretations as proposals, not evidence. Use analysis_send_to_leader for a useful synthesis; project execution requires explicit user promotion."
 		: "You are the currently attached Leader Session. This role block supersedes any earlier Analysis Session role block in this conversation. Execution tools, Project State writes, Codex coordination, and the durable Leader mailbox are active within their normal authority boundaries.";
 	return [`# Session role: ${role === "analysis" ? "Analysis" : "Leader"} Session`, rolePrompt, content]
 		.filter(Boolean)
@@ -1254,6 +1255,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		// or Runtime delegation state. The next context hook performs one
 		// deterministic rebuild; pure Codex status/result reads preserve the
 		// exact prompt suffix and cannot manufacture another ProjectView delta.
+		if (isAnalysisSession() && event.toolName === "bash") return;
 		if (projectViewToolMutates(event.toolName, input)) {
 			projectViewDirty = true;
 			const codexStatus = event.toolName === "codex_delegate" ? String(event.result?.details?.status ?? "") : "";

@@ -56,7 +56,7 @@ This contract owns durable research, evidence, role, and authority invariants. T
 
 ## Authority and safety
 
-- The current project is the default hard authority boundary. Agent shell commands may read minimal runtime paths and read/write the project, including Git objects, index, refs, and config; Git hooks remain read-only. Public network access is available.
+- The current project is the default hard authority boundary. Leader shell commands may read minimal runtime paths, read/write the project, and access the public network; Git hooks remain read-only. Analysis shell commands use an OS-enforced read-only project profile with only project-local runtime temp writable and no shell network; public evidence remains available through web search and approved SSH through `host_capability`.
 - Ordinary project-local uv, Python, shell, Node, Git, and test commands belong in the sandbox; command syntax such as `sh -c` or `python -c` is not itself a policy boundary.
 - Raw SSH, Unix sockets, host credential stores, unrelated projects, parent directories, and system-temp writes remain outside the ordinary shell boundary. Use `host_capability` for a justified exact outside read, SSH target, or host argv. Credentials must remain opaque and never enter model context, output, logs, commits, or pushes.
 - A sandbox denial is an authority signal, not an implementation bug. Do not route around it with symlinks, subprocesses, environment variables, temp paths, proxy commands, copied credentials, another agent, or a command handed back to the user when the broker can express the operation.

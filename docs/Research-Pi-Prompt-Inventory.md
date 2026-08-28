@@ -102,11 +102,11 @@ Pi Core 会把工作区中的项目指令文件和可用 skill catalog 加进原
 源码：[`project-boundary.ts`](../.pi/extensions/project-boundary.ts#L427-L439)
 
 ```text
-snippet: Execute shell commands inside the current project boundary; public network is available
+snippet: Execute shell commands inside the current project boundary with role-scoped write and network authority
 
 guidelines:
-- Agent-initiated shell commands may read minimal system runtime paths and may read/write the current project, including Git metadata; they cannot access other user directories or write system temp paths.
-- Public network access is available without a domain allowlist. Arbitrary project-local uv, Python, shell, Node, Git, and test commands are allowed; command syntax is not a policy boundary.
+- Leader shell may read/write the current project, including Git metadata. Analysis shell uses an OS-enforced read-only project profile with only project-local runtime temp writable. Neither role can access other user directories or write system temp paths.
+- Leader project shell has public network access. Analysis local shell has no network; use web_search for public evidence and host_capability for approved SSH inspection. Command syntax is not a policy boundary.
 - Unix sockets and host credential files remain outside the project sandbox. If a justified operation needs them, use host_capability command or a project-trusted SSH target instead of asking the user to copy a terminal command.
 ```
 
@@ -122,7 +122,7 @@ description: Use a host capability when a justified project operation needs SSH 
 snippet: Use project-trusted SSH or host-command capabilities instead of handing executable commands back to the user
 
 guidelines:
-- Leader work normally uses project bash. Analysis uses read tools or read-only SSH inspection; a broader exact Analysis SSH command requires user approval through this tool.
+- Leader project bash is writable. Analysis project bash is OS-enforced read-only; a broader exact Analysis SSH command requires user approval through this tool.
 - For justified host authority, send the exact target or argv. Reuse a listed grantId so its approved cwd is restored; on cwd mismatch retry the same capability rather than switching kind or adding a shell wrapper.
 - SSH credentials remain opaque. Host commands must match approved authority; never request, read, print, copy, or transmit private keys, tokens, or credential stores.
 - A missing capability is a user authorization boundary. Do not route around it with bash, symlinks, proxy commands, copied credentials, or another agent.

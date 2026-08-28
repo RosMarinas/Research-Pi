@@ -15,7 +15,7 @@ import {
 	updateJobFile,
 	writeJsonAtomic,
 } from "./codex-jobs.mjs";
-import { codexPermissionConfigArguments, runCodexSandboxPreflight } from "./project-boundary.mjs";
+import { codexPermissionConfigArguments, resolveExecutablePath, runCodexSandboxPreflight } from "./project-boundary.mjs";
 import { resolveSystemRuntimePolicy } from "./security-policy.mjs";
 
 function now() {
@@ -765,6 +765,10 @@ async function main() {
 		if (cancelledBeforeStart) return;
 
 		const systemRuntime = await resolveSystemRuntimePolicy();
+		const codexBin = await resolveExecutablePath(request.codexBin, {
+			cwd: request.boundaryRoot ?? request.cwd,
+			environment: process.env,
+		});
 		const permissionArgs = codexPermissionConfigArguments(
 			request.mode,
 			request.boundaryRoot ?? request.cwd,
@@ -779,7 +783,7 @@ async function main() {
 				lastActivityAt: now(),
 			}));
 			await runCodexSandboxPreflight({
-				codexBin: request.codexBin,
+				codexBin,
 				mode: request.mode,
 				cwd: request.boundaryRoot ?? request.cwd,
 				runtimeTmp: request.runtimeTmp,
@@ -799,7 +803,7 @@ async function main() {
 		// The worker retains the opaque SSH agent handle for research_pi_host;
 		// the sandboxed Codex process itself must not even inherit its path.
 		delete codexChildEnvironment.SSH_AUTH_SOCK;
-		child = spawn(request.codexBin, appServerArgs, {
+		child = spawn(codexBin, appServerArgs, {
 			cwd: request.cwd,
 			detached: false,
 			shell: false,
