@@ -132,6 +132,9 @@ export async function runBoundaryDoctor(options) {
 }
 
 export function formatBoundaryDoctor(result) {
+	const codexProbe = (probe) => probe.ok
+		? `${probe.codexVersion || "ok"}${probe.codexBin ? ` · ${probe.codexBin}` : ""}`
+		: probe.error;
 	return [
 		`Research Pi boundary doctor: ${result.ok ? "PASS" : "FAIL"}`,
 		`Project: ${result.projectRoot}`,
@@ -140,8 +143,8 @@ export function formatBoundaryDoctor(result) {
 		result.wsl?.applicable
 			? `WSL${result.wsl.version} boundary: ${result.wsl.ok ? result.wsl.stdout || "ok" : result.wsl.error}`
 			: undefined,
-		`Codex advisor: ${result.codexAdvisor.ok ? result.codexAdvisor.stdout || "ok" : result.codexAdvisor.error}`,
-		`Codex executor: ${result.codexExecutor.ok ? result.codexExecutor.stdout || "ok" : result.codexExecutor.error}`,
+		`Codex advisor: ${codexProbe(result.codexAdvisor)}`,
+		`Codex executor: ${codexProbe(result.codexExecutor)}`,
 		...result.systemRuntime.diagnostics,
 	].filter(Boolean).join("\n");
 }

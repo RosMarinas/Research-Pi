@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -23,6 +23,7 @@ import {
 	isWslHostMount,
 	permissionProfileDefinition,
 	resolveBoundaryPath,
+	resolveExecutablePath,
 	resolveProjectRoot,
 	sanitizeBoundaryEnvironment,
 	sanitizeWslInteropEnvironment,
@@ -127,6 +128,23 @@ test("path resolution accepts project paths and detects traversal plus symlink e
 	}
 });
 
+test("Codex executable resolution pins the canonical target behind PATH symlinks", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-bin-"));
+	try {
+		const target = join(root, "codex-real");
+		const link = join(root, "codex");
+		writeFileSync(target, "#!/bin/sh\nexit 0\n");
+		chmodSync(target, 0o755);
+		symlinkSync(target, link);
+		assert.equal(
+			await resolveExecutablePath("codex", { environment: { PATH: root }, platform: "darwin" }),
+			realpathSync(target),
+		);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("credential-like project paths require the same one-shot gate", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-boundary-secret-"));
 	try {
@@ -195,6 +213,20 @@ test("WSL policy refuses host-mounted projects and degraded interop isolation", 
 			undefined,
 		),
 	);
+});
+
+test("Analysis shell keeps the project read-only with only Runtime temp writable", () => {
+	const root = "/Users/example/research-project";
+	const runtimeTmp = `${root}/.git/research-pi/tmp`;
+	const config = buildSandboxRuntimeConfig(root, { PATH: "/bin" }, undefined, {
+		access: "read",
+		runtimeTmp,
+	});
+	assert.ok(config.filesystem.allowRead.includes(root));
+	assert.ok(config.filesystem.allowWrite.includes(runtimeTmp));
+	assert.ok(!config.filesystem.allowWrite.includes(root));
+	assert.ok(config.filesystem.denyRead.includes("/Users"));
+	assert.equal(config.network.strictAllowlist, true);
 });
 
 test("sandboxed commands do not inherit secret-named variables", () => {

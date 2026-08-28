@@ -125,13 +125,12 @@ test("Runtime status reports live activation instead of historical Actor count",
 	assert.match(actorLines(snapshot, false), /mission-1 · codex · suspended \(completed\)/);
 });
 
-test("Analysis Session exposes inspection tools but blocks work and Project mutation", () => {
+test("Analysis Session exposes read-only shell inspection but blocks work and Project mutation", () => {
 	assert.equal(runtimeSessionInheritancePolicy([], null, null, "analysis"), "analysis");
-	for (const tool of ["read", "grep", "find", "ls", "research_memory_search", "research_memory_read", "web_search", "host_capability", "analysis_send_to_leader"]) {
+	for (const tool of ["bash", "read", "grep", "find", "ls", "research_memory_search", "research_memory_read", "web_search", "host_capability", "analysis_send_to_leader"]) {
 		assert.equal(analysisSessionToolBlockReason("analysis", tool), null, tool);
 	}
 	assert.equal(analysisSessionToolBlockReason("analysis", "codex_delegate", { action: "result" }), null);
-	assert.match(analysisSessionToolBlockReason("analysis", "bash"), /cannot use bash/);
 	assert.match(analysisSessionToolBlockReason("analysis", "edit"), /cannot use edit/);
 	assert.match(analysisSessionToolBlockReason("analysis", "record_experiment"), /cannot use record_experiment/);
 	assert.match(analysisSessionToolBlockReason("analysis", "codex_delegate", { action: "start", mode: "advisor" }), /cannot use codex_delegate/);
@@ -1297,7 +1296,7 @@ test("Analysis Session observes Project state without stealing the Leader, then 
 		await handlers.get("agent_start")({ type: "agent_start" }, ctx);
 		assert.equal(aborts, 0, "Analysis Session can reason without owning the Leader attachment");
 		assert.equal(handlers.get("tool_call")({ toolName: "read", input: {} }), undefined);
-		assert.equal(handlers.get("tool_call")({ toolName: "bash", input: { command: "echo mutate" } }).block, true);
+		assert.equal(handlers.get("tool_call")({ toolName: "bash", input: { command: "git status --short" } }), undefined);
 		await commands.get("steer").handler("@research-leader do work", ctx);
 		assert.equal(runtimeActorAttachment(await readRuntimeSnapshot(runtime), RESEARCH_LEADER_ACTOR_ID)?.sessionId, "session-leader");
 		assert.ok(notices.some((message) => /cannot steer project Actors/.test(message)));
@@ -1316,7 +1315,7 @@ test("Analysis Session observes Project state without stealing the Leader, then 
 			assert.equal(runtimeSessionInheritancePolicy(branch), "analysis");
 			assert.equal(runtimeSessionProjectContext(branch, "analysis"), "none");
 			assert.equal(await handlers.get("before_agent_start")({ type: "before_agent_start" }, ctx), undefined);
-			assert.equal(handlers.get("tool_call")({ toolName: "bash", input: { command: "echo mutate" } }).block, true);
+			assert.equal(handlers.get("tool_call")({ toolName: "bash", input: { command: "git status --short" } }), undefined);
 			const contextOff = await handlers.get("context")({
 				type: "context",
 				messages: [

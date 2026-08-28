@@ -10,6 +10,7 @@ import {
 	CODEX_EXECUTOR_PROFILE,
 	prepareBoundaryRuntime,
 	readGitIdentity,
+	resolveExecutablePath,
 	resolveProjectRoot,
 	sanitizeWslInteropEnvironment,
 	secretEnvironmentNames,
@@ -483,6 +484,10 @@ export async function startCodexJob(options) {
 	await access(schemaPath);
 	const workerPath = resolve(options.workerPath ?? CODEX_JOB_WORKER_PATH);
 	await access(workerPath);
+	const codexBin = await resolveExecutablePath(options.codexBin ?? process.env.PI_CODEX_BIN ?? "codex", {
+		cwd,
+		environment: process.env,
+	});
 	const boundaryRoot = workspaceRoot;
 	const hostCapabilityContext = options.hostCapabilityContext ?? (options.leaderSessionId
 		? await resolveCapabilityContext(boundaryRoot, options.leaderSessionId)
@@ -543,7 +548,7 @@ export async function startCodexJob(options) {
 			continuationThreadId: options.continuationThreadId,
 			threadRefresh: options.threadRefresh ?? null,
 			timeoutMinutes: options.timeoutMinutes ?? null,
-			codexBin: options.codexBin ?? process.env.PI_CODEX_BIN ?? "codex",
+			codexBin,
 			schemaPath,
 			lockPath,
 			workerInstanceId,

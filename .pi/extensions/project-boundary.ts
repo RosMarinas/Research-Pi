@@ -304,7 +304,33 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 	let initializationError: string | undefined;
 	let userOverrideNoticeShown = false;
 	let wslIsolation: Awaited<ReturnType<typeof verifyWslHostInteropBlocked>>;
+	let sandboxAccess: "read" | "write" | undefined;
+	let sandboxUpdate = Promise.resolve();
+	const inheritedSandboxTmp = process.env.CLAUDE_CODE_TMPDIR;
 	const baseBash = createBashTool(process.cwd());
+
+	const ensureProjectSandbox = async (ctx: any) => {
+		if (!runtime || !systemRuntime) throw new Error(initializationError ?? "Project boundary is not initialized");
+		const access = currentSessionPolicy(ctx) === "analysis" ? "read" : "write";
+		if (sandboxAccess === access) return;
+		const update = sandboxUpdate.catch(() => undefined).then(async () => {
+			if (sandboxAccess === access) return;
+			// A write-to-read transition must fail closed if the previous sandbox
+			// grants cannot be revoked, especially on Windows where ACLs persist.
+			await SandboxManager.reset();
+			await SandboxManager.initialize(
+				buildSandboxRuntimeConfig(runtime!.root, process.env, systemRuntime, {
+					access,
+					runtimeTmp: runtime!.runtimeTmp,
+				}),
+				async () => true,
+				process.platform === "darwin",
+			);
+			sandboxAccess = access;
+		});
+		sandboxUpdate = update;
+		await update;
+	};
 
 	const refreshBoundaryStatus = async (ctx: any) => {
 		if (!ctx.hasUI) return;
@@ -389,13 +415,13 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 		description: [
 			"Use a host capability when a justified project operation needs SSH credentials or host-user authority.",
 			"read accesses an approved external file; ssh uses an approved exact target with opaque credentials; command runs an argv inside the project cwd with host authority; script is the legacy strict exact-script mode.",
-			"In an Analysis Session, exact external reads and conservative SSH inspection are available; broader exact SSH commands can be requested from the user without promoting the Session.",
+			"In an Analysis Session, project-local shell runs in an OS-enforced read-only profile; exact external reads and conservative SSH inspection are available, while broader exact SSH commands can be requested from the user without promoting the Session.",
 			"Project-trusted SSH targets and command prefixes run without repeated approval. Never use this tool to inspect private keys, tokens, or credential stores.",
 			"Under WSL2, SSH target trust may persist, but host commands and project scripts require one-shot approval and cannot invoke Windows interop.",
 		].join(" "),
 		promptSnippet: "Use project-trusted SSH or host-command capabilities instead of handing executable commands back to the user",
 		promptGuidelines: [
-			"Leader work normally uses project bash. Analysis uses read tools or read-only SSH inspection; a broader exact Analysis SSH command requires user approval through this tool.",
+			"Leader project bash is writable. Analysis project bash is OS-enforced read-only; a broader exact Analysis SSH command requires user approval through this tool.",
 			"For justified host authority, send the exact target or argv. Reuse a listed grantId so its approved cwd is restored; on cwd mismatch retry the same capability rather than switching kind or adding a shell wrapper.",
 			"SSH credentials remain opaque. Host commands must match approved authority; never request, read, print, copy, or transmit private keys, tokens, or credential stores.",
 			"A missing capability is a user authorization boundary. Do not route around it with bash, symlinks, proxy commands, copied credentials, or another agent.",
@@ -460,21 +486,15 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		...baseBash,
 		label: "bash (project boundary)",
-		promptSnippet: "Execute shell commands inside the current project boundary; public network is available",
+		promptSnippet: "Execute shell commands inside the current project boundary with role-scoped write and network authority",
 		promptGuidelines: [
-			"Agent-initiated shell commands may read minimal system runtime paths and may read/write the current project, including Git metadata; they cannot access other user directories or write system temp paths.",
-			"Public network access is available without a domain allowlist. Arbitrary project-local uv, Python, shell, Node, Git, and test commands are allowed; command syntax is not a policy boundary.",
+			"Leader shell may read/write the current project, including Git metadata. Analysis shell uses an OS-enforced read-only project profile with only project-local runtime temp writable. Neither role can access other user directories or write system temp paths.",
+			"Leader project shell has public network access. Analysis local shell has no network; use web_search for public evidence and host_capability for approved SSH inspection. Command syntax is not a policy boundary.",
 			"Unix sockets and host credential files remain outside the project sandbox. If a justified operation needs them, use host_capability command or a project-trusted SSH target instead of asking the user to copy a terminal command.",
 			"Under WSL2, Windows host mounts and Windows executable interop remain outside the agent boundary. Do not invoke powershell.exe, cmd.exe, wsl.exe, or paths below /mnt; Windows-native operations remain a direct human action, while Linux host commands for SSH-backed work require one-shot approval.",
 			"Do not attempt an indirect boundary bypass. Request the exact brokered target or argv and continue after approval; use ! only if the broker cannot express the operation.",
 		],
 		async execute(id, params, signal, onUpdate, ctx) {
-			if (currentSessionPolicy(ctx) === "analysis") {
-				return {
-					content: [{ type: "text", text: "Analysis Session cannot use project bash because an arbitrary command could modify code or start work. Use read/grep/find/ls, approved external reads, or host_capability ssh with a read-only inspection command." }],
-					isError: true,
-				};
-			}
 			if (!runtime) {
 				return {
 					content: [
@@ -483,6 +503,14 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 							text: `Research Pi project sandbox is unavailable and failed closed: ${initializationError ?? "not initialized"}`,
 						},
 					],
+					isError: true,
+				};
+			}
+			try {
+				await ensureProjectSandbox(ctx);
+			} catch (error) {
+				return {
+					content: [{ type: "text", text: `Research Pi project sandbox failed closed: ${error instanceof Error ? error.message : String(error)}` }],
 					isError: true,
 				};
 			}
@@ -552,19 +580,19 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		try {
 			runtime = await prepareBoundaryRuntime(ctx.cwd);
+			// sandbox-runtime bakes TMPDIR into its wrapped command from this
+			// harness variable, so set it before initialization and wrapping.
+			process.env.CLAUDE_CODE_TMPDIR = runtime.runtimeTmp;
 			systemRuntime = await resolveSystemRuntimePolicy();
 			capabilityContext = await resolveCapabilityContext(runtime.root, ctx.sessionManager.getSessionId());
 			gitIdentity = await readGitIdentity(runtime.root);
-			await SandboxManager.initialize(
-				buildSandboxRuntimeConfig(runtime.root, process.env, systemRuntime),
-				async () => true,
-				process.platform === "darwin",
-			);
+			await ensureProjectSandbox(ctx);
 			wslIsolation = await verifyWslHostInteropBlocked(runtime, gitIdentity);
 			initializationError = undefined;
 			await refreshBoundaryStatus(ctx);
 		} catch (error) {
 			await SandboxManager.reset().catch(() => undefined);
+			sandboxAccess = undefined;
 			runtime = undefined;
 			systemRuntime = undefined;
 			wslIsolation = undefined;
@@ -576,7 +604,11 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async () => {
+		await sandboxUpdate.catch(() => undefined);
 		await SandboxManager.reset().catch(() => undefined);
+		sandboxAccess = undefined;
+		if (inheritedSandboxTmp === undefined) delete process.env.CLAUDE_CODE_TMPDIR;
+		else process.env.CLAUDE_CODE_TMPDIR = inheritedSandboxTmp;
 		runtime = undefined;
 		capabilityContext = undefined;
 		systemRuntime = undefined;
@@ -629,8 +661,8 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 						[
 							"Research Pi boundary doctor passed.",
 							"Pi shell: project/Git/runtime OK.",
-							`Codex advisor: ${advisorProbe.stdout || "project/Git/runtime OK"}.`,
-							`Codex executor: ${executorProbe.stdout || "project/Git/runtime OK"}.`,
+							`Codex advisor: ${advisorProbe.codexVersion || "version unknown"} · ${advisorProbe.codexBin} · project/Git/runtime OK.`,
+							`Codex executor: ${executorProbe.codexVersion || "version unknown"} · ${executorProbe.codexBin} · project/Git/runtime OK.`,
 							...systemRuntime.diagnostics,
 						].join("\n"),
 						"info",
@@ -746,7 +778,9 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 				? [
 						"Research Pi project boundary is active.",
 						`Project root: ${runtime.root}`,
-						"Agent shell: project read/write; .git commit/config/refs writable; .git/hooks read-only.",
+						currentSessionPolicy(ctx) === "analysis"
+							? "Agent shell: Analysis project read-only; project-local runtime temp writable; host authority remains brokered."
+							: "Agent shell: project read/write; .git commit/config/refs writable; .git/hooks read-only.",
 						`System runtime: ${(systemRuntime?.readRoots ?? []).join(", ") || "platform minimal runtime"} (read-only).`,
 						wslIsolation
 							? "Network: public web is open; project-trusted SSH targets run without repeated approval; host commands are one-shot."
