@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -28,7 +28,10 @@ test("packaged launcher creates external config/state and runs the pinned core",
 		assert.match(readFileSync(credentials, "utf8"), /ZAI_API_KEY=/);
 		assert.equal(statSync(credentials).mode & 0o777, 0o600);
 		const configPath = join(config, "config.json");
-		assert.equal(JSON.parse(readFileSync(configPath, "utf8")).activeProfile, "deepseek-pro");
+		const persistedConfig = JSON.parse(readFileSync(configPath, "utf8"));
+		assert.equal(persistedConfig.version, 2);
+		assert.equal(Object.hasOwn(persistedConfig, "activeProfile"), false);
+		assert.equal(Object.hasOwn(persistedConfig, "profiles"), false);
 		assert.equal(statSync(configPath).mode & 0o777, 0o600);
 		assert.ok(statSync(join(config, "schemas", "research-pi-config.schema.json")).isFile());
 
@@ -39,28 +42,19 @@ test("packaged launcher creates external config/state and runs the pinned core",
 		assert.ok(!parsed.stateRoot.startsWith(root));
 		assert.equal(parsed.configPath, configPath);
 
-		const switchProfile = spawnSync(process.execPath, [launcher, "config", "use", "deepseek-flash"], { encoding: "utf8", env: environment });
-		assert.equal(switchProfile.status, 0, switchProfile.stderr);
-		assert.match(switchProfile.stdout, /deepseek-flash/);
-		assert.equal(JSON.parse(readFileSync(configPath, "utf8")).activeProfile, "deepseek-flash");
-		assert.equal(JSON.parse(readFileSync(join(state, "agent", "settings.json"), "utf8")).defaultModel, "deepseek-v4-flash");
-
-		const switchGo = spawnSync(process.execPath, [launcher, "config", "use", "opencode-go-flash"], { encoding: "utf8", env: environment });
-		assert.equal(switchGo.status, 0, switchGo.stderr);
-		assert.match(switchGo.stdout, /opencode-go\/deepseek-v4-flash/);
-		assert.equal(JSON.parse(readFileSync(configPath, "utf8")).activeProfile, "opencode-go-flash");
-		assert.equal(JSON.parse(readFileSync(join(state, "agent", "settings.json"), "utf8")).defaultProvider, "opencode-go");
-
-		const switchGlm = spawnSync(process.execPath, [launcher, "config", "use", "zai-glm-5.3-flash"], { encoding: "utf8", env: environment });
-		assert.equal(switchGlm.status, 0, switchGlm.stderr);
-		assert.match(switchGlm.stdout, /zai\/glm-5\.3-flash/);
-		assert.equal(JSON.parse(readFileSync(configPath, "utf8")).activeProfile, "zai-glm-5.3-flash");
-		assert.equal(JSON.parse(readFileSync(join(state, "agent", "settings.json"), "utf8")).defaultProvider, "zai");
+		const obsoleteProfileCommand = spawnSync(process.execPath, [launcher, "config", "use", "deepseek-flash"], { encoding: "utf8", env: environment });
+		assert.notEqual(obsoleteProfileCommand.status, 0);
+		assert.match(obsoleteProfileCommand.stderr, /pi config \[show\|path\|themes\|theme/);
+		const settings = JSON.parse(readFileSync(join(state, "agent", "settings.json"), "utf8"));
+		assert.equal(Object.hasOwn(settings, "defaultProvider"), false);
+		assert.equal(Object.hasOwn(settings, "defaultModel"), false);
+		assert.equal(Object.hasOwn(settings, "enabledModels"), false);
+		assert.equal(existsSync(join(state, "agent", "models.json")), false);
 
 		const version = spawnSync(process.execPath, [launcher, "--version"], { encoding: "utf8", env: environment });
 		assert.equal(version.status, 0, version.stderr);
 		assert.match(version.stdout, /0\.84\.2/);
-		assert.ok(statSync(join(state, "agent", "models.json")).isFile());
+		assert.equal(existsSync(join(state, "agent", "models.json")), false);
 	} finally {
 		rmSync(temp, { recursive: true, force: true });
 	}

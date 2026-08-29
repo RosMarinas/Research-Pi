@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 const LIB_DIR = dirname(fileURLToPath(import.meta.url));
 export const RESEARCH_PI_DEFAULT_CONFIG_PATH = resolve(LIB_DIR, "../config.defaults.json");
 export const RESEARCH_PI_CONFIG_SCHEMA_PATH = resolve(LIB_DIR, "../schemas/research-pi-config.schema.json");
-export const RESEARCH_PI_CONFIG_VERSION = 1;
+export const RESEARCH_PI_CONFIG_VERSION = 2;
 export const RESEARCH_PI_PROVIDER_CREDENTIALS = Object.freeze({
 	deepseek: "DEEPSEEK_API_KEY",
 	zai: "ZAI_API_KEY",
@@ -19,57 +19,16 @@ export const RESEARCH_PI_THEME_CHOICES = Object.freeze([
 	{ name: "light", label: "Pi Light", description: "Pi Core built-in light palette for light terminals." },
 ]);
 
-const RESEARCH_PI_CUSTOM_MODELS = Object.freeze({
-	zai: [
-		{
-			id: "glm-5.3-flash",
-			name: "GLM-5.3 Flash",
-			api: "openai-completions",
-			baseUrl: "https://api.z.ai/api/coding/paas/v4",
-			reasoning: true,
-			thinkingLevelMap: {
-				off: "low",
-				minimal: "low",
-				low: "low",
-				medium: "high",
-				high: "high",
-				xhigh: "max",
-				max: "max",
-			},
-			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 1_000_000,
-			maxTokens: 131_072,
-			compat: {
-				supportsStore: false,
-				supportsDeveloperRole: false,
-				supportsReasoningEffort: true,
-				maxTokensField: "max_tokens",
-				thinkingFormat: "zai",
-			},
-		},
-	],
-});
-
-const RETIRED_PROFILE_FALLBACKS = Object.freeze({
-	"opencode-go-ox-alpha": "opencode-go-flash",
-});
-
 const TOP_LEVEL_KEYS = new Set([
 	"$schema",
 	"version",
-	"activeProfile",
-	"profiles",
 	"pi",
 	"codex",
 	"research",
 	"resources",
 	"ui",
 	"diagnostics",
-	"providerCompat",
 ]);
-const PROFILE_KEYS = new Set(["label", "description", "provider", "model", "thinking"]);
-const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const CODEX_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max", "ultra"]);
 const UI_DENSITIES = new Set(["compact", "balanced"]);
 const RUNTIME_STRIP_MODES = new Set(["auto", "always", "off"]);
@@ -127,22 +86,6 @@ export function validateResearchPiConfig(config) {
 	if (config.version !== RESEARCH_PI_CONFIG_VERSION) {
 		throw new Error(`Unsupported Research Pi config version: ${config.version}`);
 	}
-	if (!plainObject(config.profiles) || !Object.keys(config.profiles).length) {
-		throw new Error("Research Pi config requires at least one model profile");
-	}
-	for (const [name, profile] of Object.entries(config.profiles)) {
-		if (!SAFE_ID.test(name)) throw new Error(`Invalid model profile name: ${name}`);
-		if (!plainObject(profile)) throw new Error(`Model profile ${name} must be an object`);
-		for (const key of Object.keys(profile)) {
-			if (!PROFILE_KEYS.has(key)) throw new Error(`Unknown key profiles.${name}.${key}`);
-		}
-		if (!SAFE_ID.test(String(profile.provider ?? ""))) throw new Error(`profiles.${name}.provider is invalid`);
-		if (!SAFE_ID.test(String(profile.model ?? ""))) throw new Error(`profiles.${name}.model is invalid`);
-		if (!THINKING_LEVELS.has(profile.thinking)) throw new Error(`profiles.${name}.thinking is invalid`);
-	}
-	if (!config.profiles[config.activeProfile]) {
-		throw new Error(`activeProfile does not exist: ${config.activeProfile}`);
-	}
 	validateCodexRole("advisor", config.codex?.advisor);
 	validateCodexRole("executor", config.codex?.executor);
 	const compact = config.research?.compaction;
@@ -173,7 +116,6 @@ export function validateResearchPiConfig(config) {
 	if (!plainObject(config.pi?.settings)) throw new Error("pi.settings must be an object");
 	if (!UI_DENSITIES.has(config.ui?.density)) throw new Error("ui.density must be compact or balanced");
 	if (!RUNTIME_STRIP_MODES.has(config.ui?.runtimeStrip)) throw new Error("ui.runtimeStrip must be auto, always, or off");
-	if (typeof config.ui?.showProfileStatus !== "boolean") throw new Error("ui.showProfileStatus must be boolean");
 	if (!Number.isInteger(config.ui?.configPanelRows) || config.ui.configPanelRows < 3 || config.ui.configPanelRows > 20) {
 		throw new Error("ui.configPanelRows must be between 3 and 20");
 	}
@@ -187,12 +129,37 @@ export function defaultResearchPiConfig() {
 	return validateResearchPiConfig(JSON.parse(readFileSync(RESEARCH_PI_DEFAULT_CONFIG_PATH, "utf8")));
 }
 
+function migrateLegacyConfig(input = {}) {
+	const migrated = clone(input);
+	let legacyModelDefault;
+	if (migrated.version === 1 || migrated.activeProfile || migrated.profiles) {
+		const profile = plainObject(migrated.profiles) ? migrated.profiles[migrated.activeProfile] : null;
+		if (plainObject(profile) && SAFE_ID.test(String(profile.provider ?? "")) && SAFE_ID.test(String(profile.model ?? ""))) {
+			legacyModelDefault = {
+				provider: String(profile.provider),
+				model: String(profile.model),
+				thinking: ["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(profile.thinking)
+					? profile.thinking
+					: "high",
+			};
+		}
+		delete migrated.activeProfile;
+		delete migrated.profiles;
+		delete migrated.providerCompat;
+		if (plainObject(migrated.ui)) delete migrated.ui.showProfileStatus;
+		migrated.version = RESEARCH_PI_CONFIG_VERSION;
+	}
+	return { migrated, legacyModelDefault };
+}
+
 export function resolveResearchPiConfig(input = {}) {
 	const defaults = defaultResearchPiConfig();
-	const resolved = merge(defaults, input);
-	for (const name of Object.keys(RETIRED_PROFILE_FALLBACKS)) delete resolved.profiles?.[name];
-	resolved.activeProfile = RETIRED_PROFILE_FALLBACKS[resolved.activeProfile] ?? resolved.activeProfile;
-	return validateResearchPiConfig(resolved);
+	const { migrated, legacyModelDefault } = migrateLegacyConfig(input);
+	const resolved = validateResearchPiConfig(merge(defaults, migrated));
+	if (legacyModelDefault) {
+		Object.defineProperty(resolved, "legacyModelDefault", { value: legacyModelDefault, enumerable: false });
+	}
+	return resolved;
 }
 
 export function writeResearchPiConfig(path, config) {
@@ -205,12 +172,18 @@ export function writeResearchPiConfig(path, config) {
 
 export function ensureResearchPiConfig(path, options = {}) {
 	if (!existsSync(path)) writeResearchPiConfig(path, options.defaults ?? defaultResearchPiConfig());
-	const schemaDestination = join(dirname(path), "schemas", "research-pi-config.schema.json");
-	if (!existsSync(schemaDestination)) {
-		mkdirSync(dirname(schemaDestination), { recursive: true, mode: 0o700 });
-		copyFileSync(options.schemaPath ?? RESEARCH_PI_CONFIG_SCHEMA_PATH, schemaDestination);
+	const raw = JSON.parse(readFileSync(path, "utf8"));
+	const resolved = resolveResearchPiConfig(raw);
+	if (raw.version !== RESEARCH_PI_CONFIG_VERSION || Object.hasOwn(raw, "activeProfile") || Object.hasOwn(raw, "profiles")) {
+		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+		writeFileSync(path, `${JSON.stringify(resolved, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+		chmodSync(path, 0o600);
 	}
-	return readResearchPiConfig(path);
+	const schemaDestination = join(dirname(path), "schemas", "research-pi-config.schema.json");
+	mkdirSync(dirname(schemaDestination), { recursive: true, mode: 0o700 });
+	const schemaSource = resolve(options.schemaPath ?? RESEARCH_PI_CONFIG_SCHEMA_PATH);
+	if (schemaSource !== resolve(schemaDestination)) copyFileSync(schemaSource, schemaDestination);
+	return resolved;
 }
 
 export function readResearchPiConfig(path) {
@@ -224,29 +197,8 @@ export function readResearchPiConfig(path) {
 	return resolveResearchPiConfig(parsed);
 }
 
-export function researchPiProfile(config, name = config.activeProfile) {
-	const profile = config.profiles[name];
-	if (!profile) throw new Error(`Unknown Research Pi model profile: ${name}`);
-	return { name, ...profile };
-}
-
-export function researchPiProfileForModel(config, provider, model) {
-	const matches = Object.entries(config.profiles).filter(([, profile]) => profile.provider === provider && profile.model === model);
-	return matches.length === 1 ? researchPiProfile(config, matches[0][0]) : null;
-}
-
-export function researchPiProfileCredential(config, name = config.activeProfile) {
-	const profile = researchPiProfile(config, name);
-	const environmentVariable = RESEARCH_PI_PROVIDER_CREDENTIALS[profile.provider];
-	return environmentVariable ? { profile, environmentVariable } : { profile, environmentVariable: undefined };
-}
-
 export function researchPiCredentialEnvironmentNames(config) {
-	const names = new Set();
-	for (const profile of Object.values(config.profiles)) {
-		const name = RESEARCH_PI_PROVIDER_CREDENTIALS[profile.provider];
-		if (name) names.add(name);
-	}
+	const names = new Set(Object.values(RESEARCH_PI_PROVIDER_CREDENTIALS));
 	if (config.research.search.enabled !== "off") names.add("DEEPSEEK_API_KEY");
 	return [...names];
 }
@@ -261,58 +213,40 @@ export function researchPiDeepSeekSearchEnabled(config, environment = process.en
 	return available;
 }
 
-export function researchPiCoreSettings(config, coreVersion, environment) {
-	const profile = researchPiProfile(config);
-	const configuredProfiles = environment
-		? Object.entries(config.profiles).filter(([name, item]) => {
-			if (name === config.activeProfile) return true;
-			const credentialName = RESEARCH_PI_PROVIDER_CREDENTIALS[item.provider];
-			return !credentialName || Boolean(environment[credentialName]?.trim());
-		})
-		: Object.entries(config.profiles);
-	const enabledModels = [...new Set(configuredProfiles.map(([, item]) => `${item.provider}/${item.model}:${item.thinking}`))];
-	return {
-		...clone(config.pi.settings),
-		...(coreVersion ? { lastChangelogVersion: coreVersion } : {}),
-		defaultProvider: profile.provider,
-		defaultModel: profile.model,
-		defaultThinkingLevel: profile.thinking,
-		enabledModels,
-	};
-}
-
-export function researchPiModels(config) {
-	const providers = {};
-	for (const [provider, models] of Object.entries(config.providerCompat ?? {})) {
-		providers[provider] = { modelOverrides: {} };
-		for (const [model, compat] of Object.entries(models)) {
-			providers[provider].modelOverrides[model] = { compat: clone(compat) };
-		}
+export function researchPiCoreSettings(config, coreVersion, existing = {}) {
+	const settings = merge(plainObject(existing) ? existing : {}, config.pi.settings);
+	if (config.legacyModelDefault) {
+		settings.defaultProvider ??= config.legacyModelDefault.provider;
+		settings.defaultModel ??= config.legacyModelDefault.model;
+		settings.defaultThinkingLevel ??= config.legacyModelDefault.thinking;
+		// v1 generated a curated scope on every launch. Remove it once so Pi's
+		// native /model and /scoped-models regain the full authenticated catalog.
+		delete settings.enabledModels;
 	}
-	for (const [provider, models] of Object.entries(RESEARCH_PI_CUSTOM_MODELS)) {
-		providers[provider] ??= {};
-		providers[provider].models = clone(models);
-	}
-	return { providers };
+	if (coreVersion) settings.lastChangelogVersion = coreVersion;
+	return settings;
 }
 
 export function writeResearchPiAgentConfig(agentDir, config, options = {}) {
 	mkdirSync(agentDir, { recursive: true, mode: 0o700 });
-	for (const [name, value] of [
-		["settings.json", researchPiCoreSettings(config, options.coreVersion, options.environment)],
-		["models.json", researchPiModels(config)],
-	]) {
-		const path = join(agentDir, name);
-		writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-		chmodSync(path, 0o600);
+	const settingsPath = join(agentDir, "settings.json");
+	let existingSettings = {};
+	if (existsSync(settingsPath)) {
+		try {
+			existingSettings = JSON.parse(readFileSync(settingsPath, "utf8"));
+		} catch {
+			throw new Error(`Pi native settings are not valid JSON: ${settingsPath}`);
+		}
 	}
+	const settings = researchPiCoreSettings(config, options.coreVersion, existingSettings);
+	writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+	chmodSync(settingsPath, 0o600);
 }
 
 export function researchPiEnvironment(config) {
 	const compact = config.research.compaction;
 	const search = config.research.search;
 	return {
-		RESEARCH_PI_ACTIVE_PROFILE: config.activeProfile,
 		RESEARCH_PI_CODEX_ADVISOR_MODEL: config.codex.advisor.model,
 		RESEARCH_PI_CODEX_ADVISOR_EFFORT: config.codex.advisor.reasoningEffort,
 		RESEARCH_PI_CODEX_EXECUTOR_MODEL: config.codex.executor.model,
@@ -329,7 +263,6 @@ export function researchPiEnvironment(config) {
 		RESEARCH_PI_SEARCH_DEFAULT_MAX_USES: String(search.defaultMaxUses),
 		RESEARCH_PI_UI_DENSITY: config.ui.density,
 		RESEARCH_PI_UI_RUNTIME_STRIP: config.ui.runtimeStrip,
-		RESEARCH_PI_UI_SHOW_PROFILE_STATUS: config.ui.showProfileStatus ? "1" : "0",
 		RESEARCH_PI_UI_CONFIG_PANEL_ROWS: String(config.ui.configPanelRows),
 		RESEARCH_PI_TRACE: config.diagnostics.trace ? "1" : "0",
 		PI_CODEX_SQLITE_LOGS: config.diagnostics.codexSqliteLogs ? "1" : "0",
@@ -337,16 +270,14 @@ export function researchPiEnvironment(config) {
 }
 
 export function researchPiConfigSummary(config, path) {
-	const profile = researchPiProfile(config);
 	return [
 		`Research Pi config v${config.version}`,
 		`Path: ${path}`,
-		`Leader: ${config.activeProfile} · ${profile.provider}/${profile.model} · thinking ${profile.thinking}`,
+		"Leader model/auth: Pi Core native settings (/login, /model, /scoped-models, /settings)",
 		`Codex advisor: ${config.codex.advisor.model}/${config.codex.advisor.reasoningEffort}`,
 		`Codex executor: ${config.codex.executor.model}/${config.codex.executor.reasoningEffort}`,
 		`Research compact: ${config.research.compaction.softTokens}/${config.research.compaction.hardTokens} tokens · summary target/max ${config.research.compaction.summaryTargetTokens}/${config.research.compaction.summaryMaxTokens}`,
 		`Search: ${config.research.search.enabled} · deepseek/${config.research.search.model} · max ${config.research.search.maxSources} sources`,
 		`UI: theme ${config.pi.settings.theme ?? "research-pi"} · ${config.ui.density} · runtime strip ${config.ui.runtimeStrip}`,
-		`Profiles: ${Object.keys(config.profiles).join(", ")}`,
 	].join("\n");
 }

@@ -11,14 +11,15 @@ import {
 import {
 	PROJECT_VIEW_DELTA_KIND,
 	PROJECT_VIEW_KIND,
+	PROJECT_VIEW_VERSION,
 	buildProjectView,
 	commitProjectState,
-	materializeProjectViewDelta,
+	materializeProjectViewContext,
 	migrateLatestProjectState,
 	projectViewFingerprint,
-	projectViewDeltaCursor,
 	projectViewRefreshFingerprint,
 	readRecentExperiments,
+	renderProjectBrief,
 	renderProjectView,
 	renderProjectViewDelta,
 } from "../lib/project-view.mjs";
@@ -84,15 +85,9 @@ type ProjectContextMode = "project" | "none";
 type ProjectViewReceipt = {
 	version: number;
 	persistent: true;
-	mode: "snapshot" | "delta";
-	projectRevision: number;
-	stateRevision: number;
-	trackRef: string;
-	gitFingerprint: string;
+	mode: "brief";
+	briefRevision: number;
 	fingerprint: string;
-	freshness: string;
-	latestHandoffId: string | null;
-	actionsFingerprint: string;
 };
 
 class RuntimeLeaderBusyError extends Error {
@@ -423,10 +418,6 @@ function inboxLines(snapshot: Awaited<ReturnType<typeof readRuntimeSnapshot>>, i
 		.join("\n\n");
 }
 
-function projectViewGitFingerprint(view: Awaited<ReturnType<typeof buildProjectView>>): string {
-	return `${view.git.branch ?? "unknown"}:${view.git.commit ?? "unknown"}:${String(view.git.dirty ?? "unknown")}`;
-}
-
 function latestProjectViewReceipt(entries: any[]): ProjectViewReceipt | undefined {
 	let afterCompaction = 0;
 	for (const [index, entry] of entries.entries()) if (entry?.type === "compaction") afterCompaction = index + 1;
@@ -434,46 +425,20 @@ function latestProjectViewReceipt(entries: any[]): ProjectViewReceipt | undefine
 		const entry = entries[index];
 		if (entry?.type !== "custom_message" || entry.customType !== PROJECT_VIEW_KIND) continue;
 		const details = entry.details;
-		if (details?.persistent !== true || !Number.isInteger(details.projectRevision)) continue;
+		if (details?.persistent !== true || details.version !== PROJECT_VIEW_VERSION || details.mode !== "brief") continue;
 		return details as ProjectViewReceipt;
 	}
 	return undefined;
 }
 
-function projectViewReceipt(
-	view: Awaited<ReturnType<typeof buildProjectView>>,
-	mode: ProjectViewReceipt["mode"],
-): ProjectViewReceipt {
+function projectViewReceipt(view: Awaited<ReturnType<typeof buildProjectView>>): ProjectViewReceipt {
 	return {
 		version: view.version,
 		persistent: true,
-		mode,
-		projectRevision: view.projectRevision,
-		stateRevision: view.stateRevision,
-		trackRef: view.currentTrack?.ref ?? "project:initial",
-		gitFingerprint: projectViewGitFingerprint(view),
+		mode: "brief",
+		briefRevision: view.briefRevision ?? 0,
 		fingerprint: projectViewFingerprint(view),
-		freshness: view.freshness,
-		...projectViewDeltaCursor(view),
 	};
-}
-
-function projectViewPersistenceMode(
-	view: Awaited<ReturnType<typeof buildProjectView>>,
-	previous?: ProjectViewReceipt,
-): ProjectViewReceipt["mode"] | null {
-	if (!previous) return "snapshot";
-	if (previous.version !== view.version) return "snapshot";
-	const gitChanged = previous.gitFingerprint !== projectViewGitFingerprint(view);
-	const revisionChanged = previous.projectRevision !== view.projectRevision;
-	const viewChanged = previous.fingerprint !== projectViewFingerprint(view);
-	if (!gitChanged && !revisionChanged && !viewChanged) return null;
-	if (
-		view.projectRevision < previous.projectRevision
-		|| view.stateRevision !== previous.stateRevision
-		|| (view.currentTrack?.ref ?? "project:initial") !== previous.trackRef
-	) return "snapshot";
-	return "delta";
 }
 
 export default function researchRuntimeExtension(pi: ExtensionAPI) {
@@ -590,7 +555,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		]);
 		const view = buildProjectView({ runtime: activeRuntime, snapshot, git, experiments });
 		latestProjectView = view;
-		projectViewText = renderProjectView(view);
+		projectViewText = renderProjectBrief(view);
 		projectViewHash = projectViewFingerprint(view);
 		projectViewSnapshotHash = projectViewRefreshFingerprint(snapshot);
 		projectViewDirty = false;
@@ -704,7 +669,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 				overlayOptions: { anchor: "center", width: "94%", maxHeight: "92%", margin: 1 },
 			},
 		);
-		if (result === "view") ctx.ui.notify(projectViewText, "info");
+		if (result === "view") ctx.ui.notify(latestProjectView ? renderProjectView(latestProjectView, { includeDirectedMessages: !isAnalysisSession() }) : projectViewText, "info");
 		else if (result && typeof result === "object" && result.action === "watch") {
 			const watch = getCodexWatchAdapter();
 			if (watch) await watch.open(ctx, result.selector);
@@ -1160,20 +1125,15 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		// Re-read receipts after compaction/tree changes. A receipt before the
 		// latest compaction is no longer present in provider context.
 		persistedProjectView = latestProjectViewReceipt(ctx.sessionManager.getBranch());
-		const previous = persistedProjectView;
-		const mode = projectViewPersistenceMode(view, previous);
-		if (!mode) return;
-		const rawContent = mode === "snapshot"
-			? isAnalysisSession()
-				? renderProjectView(view, { includeDirectedMessages: false })
-				: projectViewText
-			: renderProjectViewDelta(view, previous);
-		const content = sessionRoleContext(isAnalysisSession() ? "analysis" : "leader", rawContent);
-		persistedProjectView = projectViewReceipt(view, mode);
+		if (persistedProjectView) return;
+		// Persist exactly one compact-boundary Brief. It carries no live role or
+		// progress text, so its bytes remain an immutable cache prefix until the
+		// next compaction removes it from provider context.
+		persistedProjectView = projectViewReceipt(view);
 		return {
 			message: {
 				customType: PROJECT_VIEW_KIND,
-				content,
+				content: projectViewText,
 				display: false,
 				details: persistedProjectView,
 			},
@@ -1313,26 +1273,13 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			return true;
 		});
 		const view = latestProjectView ?? (await refreshProjectView(ctx, snapshot)).view;
-		const hasPersistentView = messages.some((message) =>
-			message.role === "custom" && message.customType === PROJECT_VIEW_KIND && message.details?.persistent === true,
+		const deltaText = sessionRoleContext(
+			isAnalysisSession() ? "analysis" : "leader",
+			renderProjectViewDelta(view, { includeDirectedMessages: !isAnalysisSession() }),
 		);
-		let updateText = "";
-		if (!hasPersistentView) {
-			updateText = isAnalysisSession()
-				? renderProjectView(view, { includeDirectedMessages: false })
-				: projectViewText;
-		} else if (
-			!persistedProjectView
-			|| view.projectRevision !== persistedProjectView.projectRevision
-			|| projectViewGitFingerprint(view) !== persistedProjectView.gitFingerprint
-			|| projectViewFingerprint(view) !== persistedProjectView.fingerprint
-		) {
-			updateText = renderProjectViewDelta(view, persistedProjectView);
-		}
-		if (updateText) updateText = sessionRoleContext(isAnalysisSession() ? "analysis" : "leader", updateText);
 		return {
-			messages: materializeProjectViewDelta(messages, updateText, {
-				fingerprint: projectViewHash,
+			messages: materializeProjectViewContext(messages, projectViewText, deltaText, {
+				briefFingerprint: projectViewHash,
 				projectRevision: view.projectRevision,
 			}),
 		};
@@ -1668,7 +1615,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 					}
 					return;
 				}
-				if (mode === "view") ctx.ui.notify(projectViewText, "info");
+				if (mode === "view") ctx.ui.notify(renderProjectView(view, { includeDirectedMessages: !isAnalysisSession() }), "info");
 				else {
 					const health = runtimeHealth(snapshot, ctx.getContextUsage(), ctx.sessionManager.getBranch(), sessionInheritancePolicy);
 					ctx.ui.notify(mode === "recommend" ? `${health.recommendation}: ${health.reason}\nNo lifecycle action was taken.` : formatRuntimeHealth(health), health.unknown ? "warning" : "info");

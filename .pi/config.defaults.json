@@ -1,114 +1,6 @@
 {
   "$schema": "./schemas/research-pi-config.schema.json",
-  "version": 1,
-  "activeProfile": "deepseek-pro",
-  "profiles": {
-    "deepseek-pro": {
-      "label": "DeepSeek V4 Pro",
-      "description": "Best quality for research leadership.",
-      "provider": "deepseek",
-      "model": "deepseek-v4-pro",
-      "thinking": "max"
-    },
-    "deepseek-flash": {
-      "label": "DeepSeek V4 Flash",
-      "description": "Lower latency for bounded work.",
-      "provider": "deepseek",
-      "model": "deepseek-v4-flash",
-      "thinking": "max"
-    },
-    "zai-glm-5.3": {
-      "label": "ZAI Coding Plan · GLM-5.3",
-      "description": "Flagship Coding Plan route for difficult research and engineering work.",
-      "provider": "zai",
-      "model": "glm-5.3",
-      "thinking": "max"
-    },
-    "zai-glm-5.3-flash": {
-      "label": "ZAI Coding Plan · GLM-5.3 Flash",
-      "description": "Fast multimodal Coding Plan route with 1M context and Max reasoning.",
-      "provider": "zai",
-      "model": "glm-5.3-flash",
-      "thinking": "max"
-    },
-    "opencode-go-flash": {
-      "label": "OpenCode Go · DeepSeek V4 Flash",
-      "description": "Recommended subscription route for routine research leadership.",
-      "provider": "opencode-go",
-      "model": "deepseek-v4-flash",
-      "thinking": "max"
-    },
-    "opencode-go-mimo": {
-      "label": "OpenCode Go · MiMo V2.5",
-      "description": "Highest-quota routine coordinator; evaluate on real project judgment before making it the default.",
-      "provider": "opencode-go",
-      "model": "mimo-v2.5",
-      "thinking": "high"
-    },
-    "opencode-go-luna": {
-      "label": "OpenCode Go · GPT 5.6 Luna",
-      "description": "Fast general project coordination with lower reasoning cost.",
-      "provider": "opencode-go",
-      "model": "gpt-5.6-luna",
-      "thinking": "high"
-    },
-    "opencode-go-qwen": {
-      "label": "OpenCode Go · Qwen3.7 Plus",
-      "description": "Long-context alternative for routine coordination and handoffs.",
-      "provider": "opencode-go",
-      "model": "qwen3.7-plus",
-      "thinking": "high"
-    },
-    "opencode-go-minimax": {
-      "label": "OpenCode Go · MiniMax M3",
-      "description": "Economical long-context alternative for routine project coordination.",
-      "provider": "opencode-go",
-      "model": "minimax-m3",
-      "thinking": "high"
-    },
-    "opencode-go-pro": {
-      "label": "OpenCode Go · DeepSeek V4 Pro",
-      "description": "Higher-quality DeepSeek route through the Go subscription.",
-      "provider": "opencode-go",
-      "model": "deepseek-v4-pro",
-      "thinking": "max"
-    },
-    "opencode-go-glm": {
-      "label": "OpenCode Go · GLM-5.2",
-      "description": "Alternative long-context reasoning route.",
-      "provider": "opencode-go",
-      "model": "glm-5.2",
-      "thinking": "high"
-    },
-    "opencode-go-qwen-max": {
-      "label": "OpenCode Go · Qwen3.8 Max",
-      "description": "Higher-cost Qwen route for difficult project-level synthesis.",
-      "provider": "opencode-go",
-      "model": "qwen3.8-max",
-      "thinking": "high"
-    },
-    "opencode-go-grok": {
-      "label": "OpenCode Go · Grok 4.5",
-      "description": "High-cost alternative for occasional cross-model review.",
-      "provider": "opencode-go",
-      "model": "grok-4.5",
-      "thinking": "high"
-    },
-    "opencode-go-kimi": {
-      "label": "OpenCode Go · Kimi K3",
-      "description": "High-cost long-context alternative with model-native Max reasoning.",
-      "provider": "opencode-go",
-      "model": "kimi-k3",
-      "thinking": "max"
-    },
-    "opencode-go-hy3": {
-      "label": "OpenCode Go · Hy3",
-      "description": "Lower-cost short-context alternative; Research Pi compacts earlier for this model.",
-      "provider": "opencode-go",
-      "model": "hy3",
-      "thinking": "high"
-    }
-  },
+  "version": 2,
   "pi": {
     "settings": {
       "theme": "research-pi",
@@ -163,21 +55,10 @@
   "ui": {
     "density": "balanced",
     "runtimeStrip": "auto",
-    "showProfileStatus": false,
     "configPanelRows": 8
   },
   "diagnostics": {
     "trace": false,
     "codexSqliteLogs": false
-  },
-  "providerCompat": {
-    "deepseek": {
-      "deepseek-v4-flash": {
-        "maxTokensField": "max_tokens"
-      },
-      "deepseek-v4-pro": {
-        "maxTokensField": "max_tokens"
-      }
-    }
   }
 }

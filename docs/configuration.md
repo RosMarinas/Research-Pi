@@ -1,120 +1,60 @@
 # Research Pi Configuration
 
-Research Pi uses one user-facing, non-secret `config.json`.
+Research Pi has one non-secret configuration for the research runtime. Leader model discovery, provider authentication, model scope and thinking controls belong to Pi Core rather than a second Research Pi profile system.
 
 ## Locations
 
-| Runtime | Config | Credentials |
+| Runtime | Research Pi config | Optional environment credentials |
 |---|---|---|
 | Source checkout | `<harness>/.pi/config.json` | `<harness>/.env` |
 | Stable package | `~/.config/research-pi/config.json` | `~/.config/research-pi/credentials.env` |
 
-Source worktrees intentionally have separate configs and state. The reviewed initial template is `.pi/config.defaults.json`; the local `config.json` is generated with mode `0600` and ignored by Git.
+Source worktrees intentionally have separate config and state. `.pi/config.defaults.json` is the reviewed template. The local `config.json` is ignored by Git and written with mode `0600`.
 
-Find the effective path and configuration with:
+Inspect the effective paths and Research Pi settings with:
 
 ```sh
+pi paths
 pi config path
 pi config show
 ```
 
-API keys, passwords, private keys and other credentials do not belong in this file. Credential-like field names are rejected. `pi setup` creates placeholders for `DEEPSEEK_API_KEY`, `ZAI_API_KEY`, and `OPENCODE_API_KEY` in the separate credentials file and preserves existing values when a later update adds another provider. Safety boundaries and recovery invariants are code policy rather than convenience toggles.
+API keys, passwords, private keys and other credentials do not belong in `config.json`; credential-like field names are rejected. Safety boundaries and recovery invariants are code policy rather than convenience toggles.
 
-## Model profiles
+## Leader models and providers: use Pi directly
 
-`activeProfile` is the persistent default for the Research Leader. Every profile identifies one provider/model/thinking tuple:
+Research Pi does not keep `activeProfile`, a curated provider catalog, generated model definitions, or a second `/model` implementation. Use the native Pi commands:
 
-```json
-{
-  "activeProfile": "deepseek-pro",
-  "profiles": {
-    "deepseek-pro": {
-      "label": "DeepSeek V4 Pro",
-      "description": "Best default quality for research leadership.",
-      "provider": "deepseek",
-      "model": "deepseek-v4-pro",
-      "thinking": "max"
-    },
-    "deepseek-flash": {
-      "label": "DeepSeek V4 Flash",
-      "description": "Lower latency for bounded work.",
-      "provider": "deepseek",
-      "model": "deepseek-v4-flash",
-      "thinking": "max"
-    },
-    "zai-glm-5.3": {
-      "label": "ZAI Coding Plan · GLM-5.3",
-      "description": "Flagship Coding Plan route for difficult research and engineering work.",
-      "provider": "zai",
-      "model": "glm-5.3",
-      "thinking": "max"
-    },
-    "zai-glm-5.3-flash": {
-      "label": "ZAI Coding Plan · GLM-5.3 Flash",
-      "description": "Fast multimodal Coding Plan route with 1M context and Max reasoning.",
-      "provider": "zai",
-      "model": "glm-5.3-flash",
-      "thinking": "max"
-    },
-    "opencode-go-flash": {
-      "label": "OpenCode Go · DeepSeek V4 Flash",
-      "description": "Recommended subscription route for routine research leadership.",
-      "provider": "opencode-go",
-      "model": "deepseek-v4-flash",
-      "thinking": "max"
-    },
-    "opencode-go-luna": {
-      "label": "OpenCode Go · GPT 5.6 Luna",
-      "description": "Fast general project coordination with lower reasoning cost.",
-      "provider": "opencode-go",
-      "model": "gpt-5.6-luna",
-      "thinking": "high"
-    },
-    "opencode-go-qwen": {
-      "label": "OpenCode Go · Qwen3.7 Plus",
-      "description": "Long-context alternative for routine coordination and handoffs.",
-      "provider": "opencode-go",
-      "model": "qwen3.7-plus",
-      "thinking": "high"
-    }
-  }
-}
-```
+| Need | Command |
+|---|---|
+| Authenticate a provider/subscription | `/login` and `/logout` |
+| Select the active model | `/model` or `Ctrl+L` |
+| Choose which models enter cycling | `/scoped-models` |
+| Adjust thinking and other Core settings | `/settings` |
+| Refresh Pi's model catalog after an update | `pi update --models` |
 
-Persistent switching:
+This has two practical consequences:
 
-```sh
-pi config list
-pi config use opencode-go-flash
-pi config use zai-glm-5.3
-pi config use zai-glm-5.3-flash
-```
+- a newly available subscription model can be selected as soon as Pi Core/provider metadata exposes it; Research Pi need not add another profile;
+- native `settings.json`, authentication state and `models.json` remain authoritative and are not reconstructed on every Research Pi launch.
 
-One-launch override:
+Run `pi paths` to find the effective `agentDir` that owns those Pi-native files. Research Pi merges only its runtime-owned `pi.settings` defaults into native settings and preserves native provider/model/thinking/model-scope choices. An existing v1 Research Pi profile config is migrated once: its selected model seeds missing Pi defaults, the old generated `enabledModels` scope is removed, and the v2 config no longer contains profiles.
 
-```sh
-pi --profile opencode-go-luna
-```
-
-Inside the TUI, `/model` or `Ctrl+L` is the single model picker. It opens on the generated scoped catalog; selecting a known model or cycling with Ctrl+P persists the matching `activeProfile` and its configured thinking level. A later Shift+Tab change updates that profile's default thinking. Session restore does not rewrite the global default. `/config use <name>` remains a compatibility command, while `/config` itself now shows the non-model configuration summary.
-
-Pi Core's lower-level `/scoped-models` command is hidden from Research Pi command completion because `profiles` already owns that list. Direct invocation still works as an escape hatch, but its generated-settings change is replaced from `config.json` at the next Research Pi launch. The native `/model` selector retains its `all/scoped` Tab as a Core escape hatch; ordinary Research Pi use stays on `scoped`.
-
-Explicit Pi CLI `--provider`, `--model`, and `--thinking` arguments are appended after the selected profile and therefore win for that invocation.
-
-The profile list is intentionally curated instead of mirroring every model in OpenCode Go. It contains the two official DeepSeek routes, both canonical GLM Coding Plan routes (`glm-5.3` and `glm-5.3-flash`), and eleven Go routes: `mimo-v2.5`, `deepseek-v4-flash`, `qwen3.7-plus`, `minimax-m3`, `gpt-5.6-luna`, `deepseek-v4-pro`, `glm-5.2`, `qwen3.8-max`, `grok-4.5`, `kimi-k3`, and `hy3`. Z.AI routes use the global Coding Plan endpoint. Pi Core owns the built-in `glm-5.3` metadata; Research Pi temporarily supplies the newly released multimodal `glm-5.3-flash` definition until the pinned Core catalog includes it. Historical Ox Alpha profiles are removed during config resolution because that preview became GLM-5.3-Flash. Muse Spark remains excluded because its provider terms permit training on prompts/completions.
-
-Credentials remain provider-specific:
+The optional credential file remains for API-key workflows and backward compatibility:
 
 ```dotenv
-DEEPSEEK_API_KEY=...  # official DeepSeek leader and/or native Web Search
-ZAI_API_KEY=...       # global ZAI GLM Coding Plan profiles
-OPENCODE_API_KEY=...  # all OpenCode Go profiles
+DEEPSEEK_API_KEY=...  # official DeepSeek API and/or bounded native Web Search
+ZAI_API_KEY=...       # optional API-key provider route
+OPENCODE_API_KEY=...  # optional OpenCode route
 ```
 
-## Pi Core settings
+If native `/login` already manages authentication, the matching placeholder may remain empty. `DEEPSEEK_API_KEY` is still required when Research Pi's native DeepSeek search is explicitly enabled.
 
-`pi.settings` is passed through to the generated Pi Core `settings.json`. It can contain supported Pi settings such as theme, TUI mode, retry, cache notices, editor layout and core fallback compaction:
+Explicit Pi CLI model/provider/thinking flags remain native Pi options and flow through unchanged.
+
+## Pi Core defaults owned by Research Pi
+
+`pi.settings` contains the small set of Core defaults Research Pi intentionally supplies, such as theme, TUI mode, retry policy and fallback compaction:
 
 ```json
 {
@@ -122,7 +62,6 @@ OPENCODE_API_KEY=...  # all OpenCode Go profiles
     "settings": {
       "theme": "research-pi",
       "tuiMode": "regular",
-      "showCacheMissNotices": true,
       "retry": {
         "enabled": true,
         "maxRetries": 2,
@@ -130,17 +69,22 @@ OPENCODE_API_KEY=...  # all OpenCode Go profiles
           "maxRetries": 0,
           "maxRetryDelayMs": 30000
         }
+      },
+      "compaction": {
+        "enabled": true,
+        "reserveTokens": 16384,
+        "keepRecentTokens": 32768
       }
     }
   }
 }
 ```
 
-Research Pi generates internal `settings.json` and `models.json` adapters in the runtime agent directory on startup. Do not edit those generated files; the next startup reconstructs them from `config.json`.
+These values do not define or filter models. Research Pi never creates or overwrites native `models.json`.
 
 ## Codex defaults
 
-Advisor and executor defaults are independent:
+Advisor and executor defaults remain Research Pi settings because they configure delegated Codex Actors rather than the Leader model:
 
 ```json
 {
@@ -151,9 +95,9 @@ Advisor and executor defaults are independent:
 }
 ```
 
-An individual `codex_delegate` call can still override model or effort. Existing Codex Actors/threads retain the model recorded for their Action; changing config affects newly started Actions.
+An individual `codex_delegate` call can override model or effort. Existing Codex Actors/threads retain the model recorded for their Action; config changes affect newly started Actions.
 
-## Research compact and search
+## Research compact and ProjectView
 
 ```json
 {
@@ -161,8 +105,28 @@ An individual `codex_delegate` call can still override model or effort. Existing
     "compaction": {
       "softTokens": 278528,
       "hardTokens": 393216,
-      "recentTailTokens": [32768, 40960, 49152]
-    },
+      "recentTailTokens": [24576, 32768, 40960],
+      "summaryTargetTokens": 8192,
+      "summaryMaxTokens": 16384
+    }
+  }
+}
+```
+
+Research compaction now produces two deliberately different forms of project memory:
+
+1. **Project Brief** is captured only at a successful compact boundary. It contains a short project overview, final goal, overall approach, durable user priorities, and concise closed phases in `goal -> approach -> result` form. It excludes the active run, current claim, newest route, Git state and next experiment. Its rendered bytes remain stable until the next successful compact.
+2. **ProjectView Delta** is rebuilt at every model context boundary and placed after Session history. It contains current route/freshness, latest handoff, newest evidence, live Actions, structured current frontier and candidate next experiment. Older Delta messages are filtered so exactly one self-contained current Delta reaches the model.
+
+`amend_project_state`, research transitions, evidence records and completed work update the Delta, not the Brief. The next successful compact may update the Brief and move a genuinely closed phase into its short history. The compaction schema requires the complete `projectBrief`; live state-amendment tooling cannot edit it.
+
+The configured token values are caps. For a short-context Leader model, Research Pi derives earlier thresholds from the active model window. `pi.settings.compaction` remains the Pi Core fallback policy; it is not the structured research-state schema or ProjectView policy.
+
+## Bounded search
+
+```json
+{
+  "research": {
     "search": {
       "enabled": "auto",
       "model": "deepseek-v4-flash",
@@ -174,59 +138,66 @@ An individual `codex_delegate` call can still override model or effort. Existing
 }
 ```
 
-These values configure Research Pi's structured compaction and bounded native Web Search. Search is independent of the active Leader profile: `auto` loads the tool only when `DEEPSEEK_API_KEY` exists, `on` fails early when that key is absent, and `off` never loads it. OpenCode Go is not assumed to implement DeepSeek's native search extension. Compact thresholds are caps: for a short-context model such as Hy3, Research Pi derives earlier soft/hard thresholds from the active model window. `pi.settings.compaction` remains the Pi Core fallback policy; it is not the research-state schema or dynamic tail schedule.
-
-## Provider smoke test
-
-After an update, run:
-
-```sh
-pi setup
-pi config list
-pi --profile opencode-go-flash
-```
-
-In the TUI, ask for a one-sentence response without tools, then open `/model` and switch once to `opencode-go/gpt-5.6-luna` or `opencode-go/qwen3.7-plus`. Confirm the footer shows the intended provider/model, `pi config show` reports the matching active profile after exit, and the next response succeeds. Typing `/sc` should not offer `/scoped-models`. If `DEEPSEEK_API_KEY` is also configured, ask for one current fact that requires `web_search`; if it is intentionally absent, confirm `web_search` is not listed among the tools. This is sufficient for ordinary route validation. Tool calls, long-context continuation, compaction and cache behavior should be judged during real project use rather than by an expensive synthetic matrix.
+Search is independent of the Leader provider/model. `auto` loads the tool only when `DEEPSEEK_API_KEY` exists, `on` fails early when that key is absent, and `off` never loads it. Heavy research can still be delegated to Codex; this tool is intended for bounded direct lookup.
 
 ## Skills, UI and diagnostics
 
-Research Pi uses Pi's `--no-skills`, always loads the packaged `research-briefing` skill, and then loads the external allowlist in `resources.skills`. Missing external paths are skipped. A one-off `--skill` argument remains possible.
-
-Research Pi explicitly loads its bundled theme set, so all three palettes are available in both source and packaged installs. `pi.settings.theme` may still select `dark`, `light`, or another explicitly loaded Pi theme.
+Research Pi uses Pi's `--no-skills`, always loads the packaged `research-briefing` skill, and then loads the external allowlist in `resources.skills`. Missing external paths are skipped. One-off `--skill` and explicitly trusted `--extension` paths remain available.
 
 Three Research Pi palettes are bundled:
 
-- `research-pi` (`Ocean`): cyan/indigo/violet;
-- `research-graphite` (`Graphite`): restrained low-saturation aqua;
-- `research-ember` (`Ember`): warm copper/amber with teal.
+- `research-pi` (`Ocean`);
+- `research-graphite` (`Graphite`);
+- `research-ember` (`Ember`).
 
-Pi Core's `dark` and `light` remain available. Persist a selection with `/config theme <name>` in the TUI or `pi config theme <name>` in the shell. `/config themes` and `pi config themes` list choices. Pi's native theme setting remains a session-local alternative, while Research Pi config is the next-launch authority.
-
-The UI policy is intentionally semantic rather than pixel-based:
+Pi Core's `dark` and `light` remain available. Persist a Research Pi theme with `/config theme <name>` or `pi config theme <name>`. `/config themes` lists choices.
 
 ```json
 {
   "ui": {
     "density": "balanced",
     "runtimeStrip": "auto",
-    "showProfileStatus": false,
     "configPanelRows": 8
+  },
+  "diagnostics": {
+    "trace": false,
+    "codexSqliteLogs": false
   }
 }
 ```
 
-`runtimeStrip=auto` shows the compact Project/Actor dock only while work is active or Runtime state needs attention; `always` keeps the single-line idle view and `off` removes it. `density` is `compact` or `balanced`. When several Codex Actions or objective leaf activities run concurrently, the one-line Pi footer keeps only a stable aggregate while the Dock assigns deterministic rows to as many as four Actions and four activities; overflow remains available through `/watch`. `showProfileStatus` controls the optional `◇ profile` footer item; it defaults off because Pi already renders the effective model and thinking level. Terminal breakpoints and Board columns adapt automatically and are not user-configured pixels. `configPanelRows` controls Research Pi selector height, currently used by the theme panel.
+`runtimeStrip=auto` shows the Project/Actor dock only while work is active or Runtime state needs attention; `always` keeps an idle view and `off` removes it. `density` is `compact` or `balanced`.
 
-`diagnostics.trace` enables the sensitive Pi trace extension for ordinary `pi` startup; `pi-traced` remains the explicit one-shot override. `diagnostics.codexSqliteLogs` restores Codex App Server internal TRACE/DEBUG SQLite logging. Both defaults are false and should be returned to false after diagnosis.
+`diagnostics.trace` enables sensitive prompt/tool tracing. `diagnostics.codexSqliteLogs` restores Codex App Server TRACE/DEBUG SQLite logging. Both default to false because they can cause substantial disk writes and should only be enabled briefly for diagnosis.
 
-## Precedence
+## Precedence and migration
 
-From lowest to highest:
+For Research Pi-owned fields:
 
 1. `.pi/config.defaults.json`;
 2. user `config.json`;
-3. a one-launch `--profile`;
-4. explicit Pi CLI model/thinking flags;
-5. explicit environment variables for diagnostic or operational overrides.
+3. explicit diagnostic/operational environment variables.
 
-Manual edits are re-read on each launch and whenever `/config` opens. Invalid JSON, an unknown top-level key, an absent active profile, impossible compact thresholds or credential-like fields fail clearly instead of silently falling back.
+For Leader model/auth/thinking, Pi Core's native precedence applies; Research Pi adds no profile layer and no forced startup model arguments.
+
+Manual Research Pi edits are re-read on launch and whenever `/config` opens. Invalid JSON, unknown top-level keys, impossible compact thresholds or credential-like fields fail clearly. A v1 config is rewritten to v2 on first launch; removed keys are not retained as compatibility behavior.
+
+## Minimal smoke test
+
+After an update:
+
+```sh
+pi setup
+pi paths
+pi
+```
+
+In the TUI:
+
+1. run `/login` if the desired provider is not authenticated;
+2. select any available model with `/model`;
+3. optionally adjust `/scoped-models` and `/settings`;
+4. ask for one short response, exit, relaunch, and confirm Pi retained the native selection;
+5. run `/runtime view` and confirm it shows a stable Project Brief followed by a newer ProjectView Delta.
+
+This is sufficient for an ordinary route check. Long-context continuation, compact quality and cache behavior are best judged during real project use.

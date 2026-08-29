@@ -4,14 +4,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+	PROJECT_VIEW_DELTA_KIND,
 	PROJECT_VIEW_KIND,
+	PROJECT_VIEW_VERSION,
 	buildProjectView,
 	commitProjectState,
-	materializeProjectViewDelta,
+	materializeProjectViewContext,
 	migrateLatestProjectState,
-	projectViewDeltaCursor,
+	projectViewDeltaFingerprint,
 	projectViewFingerprint,
 	projectViewRefreshFingerprint,
+	renderProjectBrief,
 	renderProjectView,
 	renderProjectViewDelta,
 } from "../.pi/lib/project-view.mjs";
@@ -22,6 +25,7 @@ import {
 	appendRuntimeEventAtRevision,
 	initializeResearchRuntime,
 	readRuntimeSnapshot,
+	recordRuntimeEvidence,
 	recordRuntimeHandoff,
 	recordResearchTransition,
 	runtimeActorAttachment,
@@ -38,6 +42,13 @@ function compaction(id = "compact-1") {
 			version: RESEARCH_COMPACTION_VERSION,
 			projectRevision: 0,
 			researchState: {
+				projectBrief: {
+					overview: "A computational research project that tests whether intervention A changes the target mechanism.",
+					finalGoal: "Identify a mechanism that survives the registered validity checks.",
+					overallApproach: "Use discriminating interventions and oracle bypasses before retaining an implementation.",
+					userPriorities: ["Prefer valid evidence over polished experimental code."],
+					previousPhases: [{ goal: "Establish the assay", approach: "Build a diagnostic baseline", result: "The assay is usable but does not yet discriminate H1 from H2." }],
+				},
 				researchQuestion: "Does intervention A distinguish H1 from H2?",
 				currentClaim: "No strong update yet.",
 				hypotheses: [{ id: "H1", status: "active", statement: "A changes the measured mechanism", evidenceRefs: [] }],
@@ -158,9 +169,9 @@ test("a research transition makes the old state stale and blocks a stale compact
 		const view = buildProjectView({ runtime, snapshot, git: {}, experiments: [] });
 		const text = renderProjectView(view);
 		assert.equal(view.freshness, "stale");
-		assert.match(text, /Active research track: CSB-Parameterized-v0 Q1/);
-		assert.match(text, /Previous structured state \(not current\)/);
-		assert.doesNotMatch(text, /^Next experiment:/m);
+		assert.match(text, /Current research track: .*CSB-Parameterized-v0 Q1/);
+		assert.match(text, /structured frontier belongs to a retired route/);
+		assert.doesNotMatch(text, /Candidate next experiment:/);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -193,9 +204,9 @@ test("a parallel research transition keeps the previous route current while addi
 		const text = renderProjectView(view);
 		assert.equal(transition.fromTrackRef, "project:initial");
 		assert.equal(view.transitionSupersedesState, false);
-		assert.match(text, /Active research track: route B/);
-		assert.match(text, /Baseline research question: Does intervention A/);
-		assert.doesNotMatch(text, /Previous compacted state \(not current\)/);
+		assert.match(text, /Current research track: .*route B/);
+		assert.match(text, /Current question: Does intervention A/);
+		assert.doesNotMatch(text, /structured frontier belongs to a retired route/);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -250,7 +261,7 @@ test("a superseded state stays retired when the latest transition is parallel", 
 	const view = buildProjectView({ runtime: { projectKey: "project-routes", workspaceRoot: "/workspace" }, snapshot, git: {}, experiments: [] });
 	assert.equal(view.stateRouteStatus, "retired");
 	assert.equal(view.transitionSupersedesState, true);
-	assert.match(renderProjectView(view), /Previous structured state \(not current\)/);
+	assert.match(renderProjectView(view), /structured frontier belongs to a retired route/);
 });
 
 test("Project State amendments are partial, provenance-labelled, and revision guarded", async () => {
@@ -291,7 +302,7 @@ test("Project State amendments are partial, provenance-labelled, and revision gu
 		assert.equal(snapshot.projectState.source.kind, "amendment");
 		assert.deepEqual(snapshot.projectState.amendment.authorityRefs, ["user-decision:2026-08-20", "run:R2a-v2"]);
 		const rendered = renderProjectView(buildProjectView({ runtime, snapshot, git: {}, experiments: [] }));
-		assert.match(rendered, /Latest state amendment:/);
+		assert.match(rendered, /Latest structured-state amendment:/);
 		assert.match(rendered, /user-decision:2026-08-20/);
 
 		await assert.rejects(
@@ -428,34 +439,46 @@ test("research transitions use Project revision compare-and-append", async () =>
 	}
 });
 
-test("ProjectView is concise, validity-labelled, and transient fallback updates stay at the prompt tail", () => {
+test("ProjectView materializes one stable Brief and one live Delta at the prompt tail", () => {
 	const view = buildProjectView({
 		runtime: { projectKey: "project-fixture", workspaceRoot: "/workspace" },
 			snapshot: {
-			projectState: { state: compaction().details.researchState, source: { sessionId: "s1", entryId: "e1", contentHash: "abc" } },
+			projectState: { state: compaction().details.researchState, source: { sessionId: "s1", entryId: "e1", contentHash: "abc" }, revision: 1 },
+			projectBrief: { state: compaction().details.researchState, source: { sessionId: "s1", entryId: "e1", contentHash: "abc" }, revision: 1, transitions: [], handoffs: [] },
 			actors: [],
 			actions: [{ id: "a1", status: "outcome_unknown", label: "executor", externalId: "j1" }],
 			messages: [],
-			evidence: [],
+			evidence: [{
+				id: "exp-1",
+				revision: 2,
+				timestamp: "2026-08-21T00:00:00Z",
+				question: "Did A work?",
+				validityJudgment: "invalid",
+				observation: "metric moved",
+				conclusion: "cannot update H1",
+			}],
 			transitions: [],
 			revision: 1,
 		},
 		git: { branch: "main", commit: "a".repeat(40), dirty: true },
-		experiments: [{ id: "exp-1", question: "Did A work?", validityJudgment: "invalid", observation: "metric moved", conclusion: "cannot update H1" }],
+		experiments: [],
 	});
-	const text = renderProjectView(view);
-	assert.match(text, /\[invalid\]/);
-	assert.match(text, /outcome_unknown/);
-	assert.match(text, /fallible/);
-	assert.match(text, /observation: metric moved/);
-	const messages = materializeProjectViewDelta([
+	const brief = renderProjectBrief(view);
+	const delta = renderProjectViewDelta(view);
+	assert.match(brief, /PROJECT OVERVIEW AND FINAL GOAL/);
+	assert.doesNotMatch(brief, /outcome_unknown|metric moved|branch=main/);
+	assert.match(delta, /outcome_unknown/);
+	assert.match(delta, /observation: metric moved/);
+	const messages = materializeProjectViewContext([
 		{ role: "assistant", content: "old" },
+		{ role: "custom", content: "obsolete", customType: PROJECT_VIEW_DELTA_KIND, details: { transient: true } },
 		{ role: "user", content: "new question" },
-	], text, { fingerprint: "fixture" });
-	assert.equal(messages.length, 3);
-	assert.equal(messages[2].customType, PROJECT_VIEW_KIND);
-	assert.equal(messages[2].details.transient, true);
-	assert.equal(materializeProjectViewDelta(messages, text).filter((message) => message.customType === PROJECT_VIEW_KIND).length, 1);
+	], brief, delta, { fingerprint: "fixture" });
+	assert.equal(messages.filter((message) => message.customType === PROJECT_VIEW_KIND).length, 1);
+	assert.equal(messages.filter((message) => message.customType === PROJECT_VIEW_DELTA_KIND).length, 1);
+	assert.equal(messages.at(-1).customType, PROJECT_VIEW_DELTA_KIND);
+	assert.equal(messages.at(-1).details.transient, true);
+	assert.equal(messages.find((message) => message.customType === PROJECT_VIEW_KIND).details.version, PROJECT_VIEW_VERSION);
 });
 
 test("ProjectView never duplicates Runtime mailbox bodies", () => {
@@ -468,14 +491,14 @@ test("ProjectView never duplicates Runtime mailbox bodies", () => {
 		git: {}, experiments: [],
 	});
 	const analysisText = renderProjectView(view, { includeDirectedMessages: false });
-	assert.match(analysisText, /directed message contents belong only to the addressed Leader Session/);
+	assert.match(analysisText, /Directed Runtime message contents belong only to the addressed Leader Session/);
 	assert.doesNotMatch(analysisText, /PRIVATE_LEADER_MAILBOX_BODY|leader-only|analysis:one/);
 	const leaderText = renderProjectView(view);
-	assert.match(leaderText, /separate single-delivery Runtime event channel/);
+	assert.match(leaderText, /separate single-delivery channel/);
 	assert.doesNotMatch(leaderText, /PRIVATE_LEADER_MAILBOX_BODY|leader-only|analysis:one/);
 });
 
-test("ProjectView delta emits a completed handoff only once per receipt", () => {
+test("ProjectView Delta is self-contained and always carries the latest completed handoff", () => {
 	const view = buildProjectView({
 		runtime: { projectKey: "project-handoff-delta", workspaceRoot: "/workspace" },
 		snapshot: {
@@ -484,12 +507,11 @@ test("ProjectView delta emits a completed handoff only once per receipt", () => 
 		},
 		git: {}, experiments: [],
 	});
-	const emptyActions = projectViewDeltaCursor({ ...view, actions: [] }).actionsFingerprint;
-	const first = renderProjectViewDelta(view, { projectRevision: 0, latestHandoffId: null, actionsFingerprint: emptyActions });
+	const first = renderProjectViewDelta(view);
 	assert.match(first, /HANDOFF_RESULT_ONCE/);
-	const repeated = renderProjectViewDelta(view, projectViewDeltaCursor(view));
-	assert.doesNotMatch(repeated, /HANDOFF_RESULT_ONCE|Latest completed work handoff/);
-	assert.match(repeated, /contains no new research evidence or work handoff/);
+	const repeated = renderProjectViewDelta(view);
+	assert.equal(repeated, first);
+	assert.equal(projectViewDeltaFingerprint(view), projectViewDeltaFingerprint(view));
 });
 
 test("newer Runtime activity prevents an old next experiment from being presented as current", () => {
@@ -517,8 +539,8 @@ test("newer Runtime activity prevents an old next experiment from being presente
 	const text = renderProjectView(view);
 	assert.equal(view.freshness, "unconfirmed");
 	assert.match(text, /Runtime activity is newer/);
-	assert.match(text, /baseline is historical or unconfirmed/);
-	assert.match(text, /Baseline planned next experiment .*Run the oracle/);
+	assert.match(text, /Do not report an earlier baseline claim as current/);
+	assert.match(text, /Candidate next experiment: Run the oracle/);
 	assert.match(text, /csb-param-v0-q1/);
 });
 
@@ -561,12 +583,11 @@ test("new evidence becomes an immediate semantic delta while the old claim stays
 	const text = renderProjectView(view);
 	assert.equal(view.freshness, "stale");
 	assert.equal(view.pendingEvidenceCount, 1);
-	assert.match(text, /Baseline claim: No strong update yet/);
-	assert.doesNotMatch(text, /^Current claim:/m);
-	assert.match(text, /Pending evidence delta \(1 record/);
+	assert.match(text, /Evidence-bounded position: No strong update yet/);
+	assert.match(text, /New evidence after structured state \(1 total record/);
 	assert.match(text, /observation: The action margin recovered from 0.01 to 0.42/);
 	assert.match(text, /interpretation: The learned encoder, not the decoder/);
-	assert.match(text, /Do not run model compaction after every experiment/);
+	assert.match(text, /Do not report an earlier baseline claim as current/);
 });
 
 test("ProjectView refresh and prompt fingerprints ignore lifecycle-only churn", () => {
@@ -592,6 +613,69 @@ test("ProjectView refresh and prompt fingerprints ignore lifecycle-only churn", 
 	});
 	const second = { ...first, generatedFrom: { actors: 99, actions: 99, messages: 99 } };
 	assert.equal(projectViewFingerprint(first), projectViewFingerprint(second));
+});
+
+test("Project Brief bytes survive live evidence and route changes, then change only at the next compact", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-project-brief-boundary-"));
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace);
+		const runtime = await initializeResearchRuntime(workspace, { sessionId: "session-a" }, { runtimeRoot: join(root, "runtime") });
+		await commitProjectState(runtime, {
+			compactionEntry: compaction("brief-v1"),
+			...await leaderCredentials(runtime),
+			appendRuntimeEvent,
+			appendRuntimeEventAtRevision,
+			readRuntimeSnapshot,
+		});
+		const initialView = buildProjectView({ runtime, snapshot: await readRuntimeSnapshot(runtime), git: {}, experiments: [] });
+		const initialBrief = renderProjectBrief(initialView);
+		const initialFingerprint = projectViewFingerprint(initialView);
+
+		await recordRuntimeEvidence(runtime, {
+			id: "evidence-after-brief",
+			question: "Did the route survive?",
+			intervention: "Run a discriminating probe.",
+			observation: "The route failed its validity gate.",
+			validityChecks: ["The intended route executed."],
+			validityJudgment: "valid",
+			conclusion: "Replace the route.",
+		});
+		await recordRuntimeHandoff(runtime, { id: "handoff-after-brief", task: "Inspect the failure", summary: "The failure is interpretable." });
+		await recordResearchTransition(runtime, {
+			...await leaderCredentials(runtime),
+			id: "transition-after-brief",
+			from: "route A",
+			to: "route B",
+			reason: "The valid probe retired route A.",
+			oldDisposition: "superseded",
+			authorityRefs: ["experiment:evidence-after-brief"],
+		});
+		const liveView = buildProjectView({ runtime, snapshot: await readRuntimeSnapshot(runtime), git: { branch: "route-b" }, experiments: [] });
+		assert.equal(renderProjectBrief(liveView), initialBrief);
+		assert.equal(projectViewFingerprint(liveView), initialFingerprint);
+		assert.match(renderProjectViewDelta(liveView), /route B|failure is interpretable|route failed its validity gate/);
+
+		const successor = compaction("brief-v2");
+		successor.details.projectRevision = (await readRuntimeSnapshot(runtime)).revision;
+		successor.details.researchState.projectBrief = {
+			...successor.details.researchState.projectBrief,
+			overallApproach: "Use route B and retain route A as a closed negative result.",
+			previousPhases: [{ goal: "Test route A", approach: "Run the discriminating probe", result: "Route A failed a valid gate and was retired." }],
+		};
+		await commitProjectState(runtime, {
+			compactionEntry: successor,
+			...await leaderCredentials(runtime),
+			appendRuntimeEvent,
+			appendRuntimeEventAtRevision,
+			readRuntimeSnapshot,
+		});
+		const nextView = buildProjectView({ runtime, snapshot: await readRuntimeSnapshot(runtime), git: {}, experiments: [] });
+		assert.notEqual(renderProjectBrief(nextView), initialBrief);
+		assert.match(renderProjectBrief(nextView), /Route A failed a valid gate and was retired/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });
 
 test("ProjectView keeps the newest live evidence when a large baseline must be truncated", () => {
@@ -629,8 +713,8 @@ test("ProjectView keeps the newest live evidence when a large baseline must be t
 	});
 	const text = renderProjectView(view);
 	assert.ok(text.length <= 12_000);
-	assert.match(text, /Direction and trajectory truncated/);
-	assert.match(text, /--- live project delta/);
+	assert.match(text, /Current frontier truncated; latest progress above is preserved/);
+	assert.match(text, /=== LATEST MEANINGFUL PROGRESS ===/);
 	assert.match(text, /NEWEST_OBSERVATION_MUST_SURVIVE/);
 });
 
@@ -667,11 +751,11 @@ test("ProjectView compresses earlier work but expands the latest handoff under p
 		assert.equal(snapshot.revision, 1, "operational handoffs must not advance scientific Project revision");
 		const view = buildProjectView({ runtime, snapshot, git: {}, experiments: [] });
 		const text = renderProjectView(view);
-		assert.ok(text.indexOf("=== PROJECT DIRECTION") < text.indexOf("=== LATEST COMPLETED WORK"));
-		assert.match(text, /Repair the experiment launcher -> The launcher now preserves/);
+		assert.ok(text.indexOf("=== PROJECT OVERVIEW AND FINAL GOAL ===") < text.indexOf("=== LATEST MEANINGFUL PROGRESS ==="));
+		assert.doesNotMatch(renderProjectBrief(view), /Repair the experiment launcher|Run the oracle bypass diagnostic/);
 		assert.match(text, /Task: Run the oracle bypass diagnostic/);
 		assert.match(text, /The action margin recovered from 0.02 to 0.31/);
-		assert.match(text, /not an instruction to continue the same kind of task/);
+		assert.match(text, /context, not an automatic next task/);
 		assert.match(text, /The current user request selects the immediate task/);
 	} finally {
 		rmSync(root, { recursive: true, force: true });

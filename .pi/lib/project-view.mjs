@@ -6,7 +6,7 @@ import { RESEARCH_LEADER_ACTOR_ID, runtimeResearchTrack, runtimeTrackStatus } fr
 
 export const PROJECT_VIEW_KIND = "research-project-view";
 export const PROJECT_VIEW_DELTA_KIND = "research-project-view-delta";
-export const PROJECT_VIEW_VERSION = 4;
+export const PROJECT_VIEW_VERSION = 5;
 const MAX_SESSION_FILES = 24;
 const MAX_SESSION_BYTES = 64 * 1024 * 1024;
 
@@ -28,8 +28,8 @@ const TERMINAL_ACTION_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 // The Runtime ledger also contains UI/session lifecycle events. Those events
 // must not churn the model-facing ProjectView or its prompt-cache suffix.
-// Research revisions, live Actions, and open mailbox messages are the only
-// snapshot fields that can change the rendered view between explicit refreshes.
+// Research revisions, live Actions, and durable work handoffs are the only
+// snapshot fields that can change the rendered Delta between explicit refreshes.
 export function projectViewRefreshFingerprint(snapshot = {}) {
 	return fingerprint({
 		projectRevision: snapshot.revision ?? 0,
@@ -189,6 +189,7 @@ export async function readRecentExperiments(path, maxRecords = 6) {
 
 export function buildProjectView({ runtime, snapshot, git = {}, experiments = [] }) {
 	const currentTrack = runtimeResearchTrack(snapshot);
+	const briefState = snapshot.projectBrief?.state ?? snapshot.projectState?.state ?? null;
 	const actions = snapshot.actions.filter((action) =>
 		LIVE_ACTION_STATUSES.has(action.status),
 	).slice(-8).map((action) => ({ ...action, routeStatus: runtimeTrackStatus(snapshot, action.trackRef) }));
@@ -267,9 +268,10 @@ export function buildProjectView({ runtime, snapshot, git = {}, experiments = []
 		version: PROJECT_VIEW_VERSION,
 		projectKey: runtime.projectKey,
 		workspaceRoot: runtime.workspaceRoot,
+		briefState,
+		briefRevision: snapshot.projectBrief?.revision ?? stateRevision,
 		git: { branch: git.branch ?? null, commit: git.commit?.slice(0, 12) ?? null, dirty: git.dirty ?? null },
 		state: snapshot.projectState?.state ?? null,
-		stateSource: snapshot.projectState?.source ?? null,
 		stateAmendment: snapshot.projectState?.amendment ?? null,
 		stateRevision,
 		projectRevision: snapshot.revision ?? 0,
@@ -280,12 +282,7 @@ export function buildProjectView({ runtime, snapshot, git = {}, experiments = []
 		stateTrackLabel,
 		stateRouteStatus,
 		activeTransition: snapshot.activeTransition ?? null,
-		researchTrajectory: (snapshot.transitions ?? []).slice(-5).map((transition) => ({
-			...transition,
-			routeStatus: runtimeTrackStatus(snapshot, transition.trackRef),
-		})),
 		latestCompletedTask: completedTasks.at(-1) ?? null,
-		earlierCompletedTasks: completedTasks.slice(-4, -1),
 		pendingEvidenceCount,
 		pendingEvidence: evidenceAfterState.slice(-4),
 		transitionSupersedesState: Boolean(
@@ -324,190 +321,63 @@ function truncateSection(text, limit, marker) {
 	return `${text.slice(0, Math.max(0, limit - marker.length - 1)).trimEnd()}\n${marker}`;
 }
 
-export function renderProjectView(view, options = {}) {
-	const includeDirectedMessages = options.includeDirectedMessages !== false;
-	const state = view.state;
+export function renderProjectBrief(view) {
+	const state = view.briefState;
+	const brief = state?.projectBrief;
 	const lines = [
 		"<research_project_view>",
-		"Versioned Project research data for Session orientation. Structured state is a fallible index; verify consequential claims against cited experiment, run, or artifact evidence.",
+		"Stable Project Brief captured at the latest successful research compaction. It orients a new Agent or user; it intentionally excludes the newest work. The Project Delta at the prompt tail is newer and controls current progress.",
 		`Project: ${view.projectKey} · ${view.workspaceRoot}`,
-		"=== PROJECT DIRECTION (stable orientation) ===",
+		`Brief boundary: Project revision ${view.briefRevision || "none"}`,
+		"=== PROJECT OVERVIEW AND FINAL GOAL ===",
 	];
 	if (state) {
 		lines.push(
-			`State provenance: ${view.stateSource?.kind === "amendment" ? "amendment " : "compaction "}S:${view.stateSource?.sessionId}/E:${view.stateSource?.entryId} hash=${view.stateSource?.contentHash ?? "unknown"}`,
-			view.stateAmendment ? `Latest state amendment: ${compact(view.stateAmendment.reason, 1_000)} | authority=${compact(view.stateAmendment.authorityRefs?.join(" | "), 1_800) || "missing"}` : undefined,
-			`Baseline research track: ${view.stateTrackRef} · ${compact(view.stateTrackLabel, 600)}`,
-			`Baseline research question: ${compact(state.researchQuestion, 1_000) || "unknown"}`,
-			`Baseline claim: ${compact(state.currentClaim, 1_000) || "no supported claim recorded"}`,
-			"Direction-setting decisions:",
-			...bullets(list(state.decisions, 4), (item) => [
-				`${compact(item.decision, 480)} (${item.reversible === false ? "frozen" : "reversible"})`,
-				item.rationale ? `why=${compact(item.rationale, 440)}` : "",
-				item.evidenceRefs?.length ? `refs=${item.evidenceRefs.join(",")}` : "",
-			].filter(Boolean).join(" | "), "none recorded"),
-			"Direction guardrails and continuation principles:",
-			...bullets(list(state.criticalContext, 5), (item) => compact(item, 520), "none recorded"),
+			`Overview: ${compact(brief?.overview, 1_200) || compact(state.researchQuestion, 1_200) || "not established"}`,
+			`Final goal: ${compact(brief?.finalGoal, 1_200) || compact(state.researchQuestion, 1_200) || "not established"}`,
+		);
+		lines.push(
+			"=== OVERALL DIRECTION AND APPROACH ===",
+			compact(brief?.overallApproach, 1_500) || "No enduring overall approach is recorded.",
+			"=== USER PRIORITIES AND GUARDRAILS ===",
+			...bullets(list(brief?.userPriorities, 6), (item) => compact(item, 520), "No enduring user priority or guardrail is recorded."),
 		);
 	} else {
-		lines.push("Structured project direction is unavailable; do not let the latest local task define the project by default.");
+		lines.push(
+			"No compact-boundary Project State exists yet. Establish the project overview, final goal, and user priorities before allowing the latest task to define the project.",
+			"=== OVERALL DIRECTION AND APPROACH ===",
+			"- Not established.",
+			"=== USER PRIORITIES AND GUARDRAILS ===",
+			"- Not established.",
+		);
 	}
-	lines.push(
-		"Research route trajectory (compressed history; each item explains a direction change, not a task queue):",
-		...bullets(view.researchTrajectory, (transition) => [
-			`${compact(transition.from, 240) || "previous route"} -> ${compact(transition.to, 360)}`,
-			`disposition=${transition.oldDisposition}`,
-			`reason=${compact(transition.reason, 520)}`,
-			transition.nextDecision ? `next-decision=${compact(transition.nextDecision, 360)}` : "",
-		].filter(Boolean).join(" | "), "No explicit research transition has been recorded."),
-		"Earlier completed work (compressed; historical context only):",
-		...bullets(view.earlierCompletedTasks, (handoff) => `${compact(handoff.task, 260) || handoff.id} -> ${compact(handoff.summary, 520)} [route=${handoff.routeStatus}]`, "No earlier durable task handoff is available."),
-		"--- live project delta (dynamic suffix) ---",
-		`Git: branch=${view.git.branch ?? "unknown"} commit=${view.git.commit ?? "unknown"} dirty=${view.git.dirty ?? "unknown"}`,
-		`Project revision: ${view.projectRevision} · structured state revision: ${view.stateRevision || "none"} · memory freshness: ${view.freshness}`,
-		`Current research track: ${view.currentTrack?.ref ?? "project:initial"} · ${compact(view.currentTrack?.label, 600) || "unnamed"}`,
-		state ? `Structured-state route status now: ${view.stateRouteStatus}` : undefined,
+	const explicitPhases = list(brief?.previousPhases, 6);
+	const phaseLines = bullets(
+		explicitPhases,
+		(phase) => `${compact(phase.goal, 320) || "previous phase"} -> ${compact(phase.approach, 420) || "approach not recorded"} -> ${compact(phase.result, 520) || "result not recorded"}`,
+		"No closed previous phase is recorded in the latest compact.",
 	);
-	if (view.freshness === "current") {
-		lines.push("Baseline status: CURRENT within its cited evidence boundaries.");
-	} else {
-		lines.push(
-			"MEMORY FRESHNESS WARNING: the baseline is historical or unconfirmed; reconcile the live delta before treating it as current.",
-			...view.freshnessReasons.map((reason) => `- ${reason}`),
-		);
-	}
-	if (view.transitionSupersedesState) {
-		lines.push(
-			`Previous structured state (not current): S:${view.stateSource?.sessionId}/E:${view.stateSource?.entryId} hash=${view.stateSource?.contentHash ?? "unknown"}`,
-			"Its details remain retrievable through research_memory_search/read; do not carry them silently into the active route.",
-		);
-	}
-	if (view.activeTransition) {
-		const transition = view.activeTransition;
-		lines.push(
-			`Active research track: ${compact(transition.to, 600)}`,
-			transition.from ? `Previous track: ${compact(transition.from, 500)} (${transition.oldDisposition})` : undefined,
-			`Transition reason: ${compact(transition.reason, 1200)}`,
-			transition.nextDecision ? `Current next decision: ${compact(transition.nextDecision, 1000)}` : undefined,
-			transition.authorityRefs?.length ? `Transition authority: ${transition.authorityRefs.join(" | ")}` : undefined,
-		);
-	}
-	lines.push("=== LATEST COMPLETED WORK (detailed handoff) ===");
-	if (view.latestCompletedTask) {
-		const handoff = view.latestCompletedTask;
-		lines.push(
-			`Task role: ${handoff.kind ?? "project work"} · route=${handoff.routeStatus} · source=${handoff.id}`,
-			`Task: ${compact(handoff.task, 1_000) || "not recorded"}`,
-			"What was completed and reported:",
-			truncateSection(String(handoff.summary ?? "No bounded completion summary was recorded."), 2_800, "[Latest task handoff truncated; inspect its Session, Codex job, or artifact for full detail.]"),
-			handoff.toolNames?.length ? `Tools involved: ${handoff.toolNames.join(", ")}` : undefined,
-			handoff.git ? `Handoff Git: branch=${handoff.git.branch ?? "unknown"} commit=${handoff.git.commit?.slice(0, 12) ?? "unknown"} dirty=${handoff.git.dirty ?? "unknown"}` : undefined,
-			"Directional status: operational context only; it is not scientific evidence and not an instruction to continue the same kind of task.",
-		);
-	} else {
-		lines.push("No durable completed-task handoff is available.");
-	}
-	if (view.pendingEvidence.length) {
-		lines.push(
-			`Pending evidence delta (${view.pendingEvidenceCount} record(s) newer than the structured baseline; authoritative as records but not yet synthesized into a current claim):`,
-			"Reconcile with amend_project_state, record_research_transition, or a genuine checkpoint compact. Do not run model compaction after every experiment.",
-			...[...view.pendingEvidence].reverse().flatMap(evidenceBrief),
-		);
-	} else if (view.experiments.length) {
-		lines.push(
-			"Latest evidence briefs at or before the structured-state boundary:",
-			...view.experiments.slice(-2).flatMap(evidenceBrief),
-		);
-	}
-	lines.push("=== CURRENT RESEARCH FRONTIER ===");
-	if (state && !view.transitionSupersedesState) {
-		lines.push(
-			"Competing hypotheses:",
-			...bullets(list(state.hypotheses, 6), (item) => [
-				`${item.id} [${item.status}] ${compact(item.statement, 520)}`,
-				item.predictions?.length ? `distinguishing=${list(item.predictions, 2).map((value) => compact(value, 260)).join(" | ")}` : "",
-				item.rationale ? `rationale=${compact(item.rationale, 340)}` : "",
-				item.evidenceRefs?.length ? `refs=${item.evidenceRefs.join(",")}` : "",
-			].filter(Boolean).join(" | "), "none recorded"),
-			"Decision-relevant observations:",
-			...bullets(list(state.observations, 4), (item) => [
-				`[${item.validity}] ${compact(item.statement, 480)}`,
-				item.interpretation ? `interpretation=${compact(item.interpretation, 420)}` : "",
-				item.evidenceRefs?.length ? `refs=${item.evidenceRefs.join(",")}` : "",
-			].filter(Boolean).join(" | "), "none recorded"),
-			"Unresolved confounders and open questions:",
-			...bullets([...list(state.unresolvedConfounders, 3), ...list(state.openQuestions, 3)], (item) => compact(item, 500), "none recorded"),
-			`Baseline planned next experiment (candidate, not command): ${compact(state.nextExperiment?.question, 600) || "not determined"}`,
-			`  intervention: ${compact(state.nextExperiment?.intervention, 700) || "not determined"}`,
-			...list(state.nextExperiment?.distinguishingOutcomes, 3).map((item) => `  distinguishing outcome: ${compact(item, 440)}`),
-			...list(state.nextExperiment?.validityChecks, 3).map((item) => `  validity check: ${compact(item, 440)}`),
-		);
-	} else if (state) {
-		lines.push("The structured frontier belongs to a retired route; reconstruct the current frontier from the active transition and pending evidence.");
-	} else {
-		lines.push("No structured research frontier is available yet.");
-	}
 	lines.push(
-		"=== OPERATIONAL APPENDIX (navigation, not direction) ===",
-		"Recent project evidence index (read exact records on demand):",
-		...bullets(view.experiments, (item) => `${item.id} [${item.validityJudgment ?? "inconclusive"}] [route=${item.routeStatus}] ${compact(item.question, 300)} -> ${compact(item.conclusion, 380)}${item.runId ? ` | run=${compact(item.runId, 140)}` : ""}`, "none recorded"),
-		"Live/unresolved Runtime actions:",
-		...bullets(view.actions, (item) => `${item.id} [${item.status}] [route=${item.routeStatus}] ${compact(item.label, 300)} external=${item.externalId ?? "none"}`, "none"),
-			includeDirectedMessages
-				? "Runtime mailbox: message bodies use the separate single-delivery Runtime event channel; use /inbox only when routing needs inspection."
-				: "Runtime mailbox: directed message contents belong only to the addressed Leader Session.",
-		"=== NEW-SESSION ORIENTATION ===",
-		"The current user request selects the immediate task. Reconcile it with project direction and the frontier; recent work, Actions, Git state, and planned experiments are context rather than automatic instructions.",
+		"=== PREVIOUS PHASES (goal -> approach/result, compressed) ===",
+		...phaseLines,
+		"This Brief stays byte-stable until the next successful /compact. Read the Project Delta after the Session history for current work, evidence, and next decisions.",
 		"</research_project_view>",
 	);
-	const renderedLines = lines.filter(Boolean);
-	const rendered = renderedLines.join("\n");
-	if (rendered.length <= 12_000) return rendered;
-	const deltaIndex = renderedLines.indexOf("--- live project delta (dynamic suffix) ---");
-	const orientationIndex = renderedLines.indexOf("=== NEW-SESSION ORIENTATION ===");
-	const baseline = renderedLines.slice(1, deltaIndex).join("\n");
-	const deltaHead = renderedLines.slice(deltaIndex, orientationIndex).join("\n");
-	const orientation = renderedLines.slice(orientationIndex, -1).join("\n");
-	return [
-		"<research_project_view>",
-		truncateSection(baseline, 5_200, "[Direction and trajectory truncated; use /runtime view or research_memory_read for exact history.]"),
-		truncateSection(deltaHead, 5_000, "[Latest work/frontier delta truncated; inspect /runtime, /inbox, or exact experiment records.]"),
-		truncateSection(orientation, 1_300, "[New-Session orientation truncated.]"),
-		"</research_project_view>",
-	].join("\n");
+	return truncateSection(lines.filter(Boolean).join("\n"), 5_200, "[Project Brief truncated; use /runtime view for the stored compact-boundary orientation.]\n</research_project_view>");
 }
 
-export function projectViewDeltaCursor(view) {
-	return {
-		projectRevision: view.projectRevision,
-		latestHandoffId: view.latestCompletedTask?.id ?? null,
-		actionsFingerprint: fingerprint((view.actions ?? []).map((action) => ({
-			id: action.id,
-			status: action.status,
-			label: action.label ?? null,
-			externalId: action.externalId ?? null,
-			trackRef: action.trackRef ?? null,
-		}))),
-	};
+export function renderProjectView(view, options = {}) {
+	return `${renderProjectBrief(view)}\n\n${renderProjectViewDelta(view, options)}`;
 }
 
-export function renderProjectViewDelta(view, previous = 0) {
-	const cursor = Number.isInteger(previous)
-		? { projectRevision: previous, latestHandoffId: null, actionsFingerprint: null }
-		: { projectRevision: 0, latestHandoffId: null, actionsFingerprint: null, ...(previous ?? {}) };
-	const sinceRevision = cursor.projectRevision ?? 0;
-	const evidence = [...view.pendingEvidence]
-		.filter((item) => !Number.isInteger(item.revision) || item.revision > sinceRevision)
-		.reverse();
-	const transition = view.activeTransition && (!Number.isInteger(view.activeTransition.revision) || view.activeTransition.revision > sinceRevision)
-		? view.activeTransition
-		: null;
-	const handoff = view.latestCompletedTask?.id !== cursor.latestHandoffId ? view.latestCompletedTask : null;
-	const actionsFingerprint = projectViewDeltaCursor(view).actionsFingerprint;
-	const actionsChanged = cursor.actionsFingerprint !== actionsFingerprint;
-	const lines = [
+export function renderProjectViewDelta(view, options = {}) {
+	const includeDirectedMessages = options.includeDirectedMessages !== false;
+	const state = view.state;
+	const evidence = [...view.pendingEvidence].reverse().slice(0, 2);
+	const header = [
 		"<research_project_delta>",
-		"Append-only ProjectView data update. Earlier views remain historical; this revision controls freshness and current-route interpretation.",
+		"Current Project Delta rebuilt at the model boundary. It is the only model-visible live ProjectView suffix and supersedes older progress, plans, and route interpretations.",
+		`Stable Brief boundary: Project revision ${view.briefRevision || "none"}`,
 		`Project revision: ${view.projectRevision} · structured state revision: ${view.stateRevision || "none"} · memory freshness: ${view.freshness}`,
 		`Git: branch=${view.git.branch ?? "unknown"} commit=${view.git.commit ?? "unknown"} dirty=${view.git.dirty ?? "unknown"}`,
 		`Current research track: ${view.currentTrack?.ref ?? "project:initial"} · ${compact(view.currentTrack?.label, 500) || "unnamed"}`,
@@ -516,70 +386,129 @@ export function renderProjectViewDelta(view, previous = 0) {
 			: "The latest structured baseline remains current.",
 		...view.freshnessReasons.map((reason) => `- ${reason}`),
 	];
-	if (transition) {
-		lines.push(
+	if (view.activeTransition) {
+		const transition = view.activeTransition;
+		header.push(
 			`Research transition: ${compact(transition.from, 300) || "previous route"} -> ${compact(transition.to, 420)} (${transition.oldDisposition})`,
 			`Reason: ${compact(transition.reason, 800)}`,
 			transition.nextDecision ? `Next decision: ${compact(transition.nextDecision, 600)}` : undefined,
 		);
 	}
-	if (handoff) {
-		lines.push(
-			"Latest completed work handoff (new in this delta; context, not an automatic next task):",
+	if (view.stateAmendment) {
+		header.push(
+			`Latest structured-state amendment: ${compact(view.stateAmendment.reason, 700) || "reason not recorded"}`,
+			view.stateAmendment.authorityRefs?.length
+				? `Authority: ${view.stateAmendment.authorityRefs.slice(0, 6).map((item) => compact(item, 180)).join(", ")}`
+				: undefined,
+		);
+	}
+
+	// Latest observations precede the compacted frontier deliberately. If the
+	// Delta reaches its bound, old/detail-heavy baseline fields are truncated
+	// before the evidence that made the Delta necessary.
+	const progress = ["=== LATEST MEANINGFUL PROGRESS ==="];
+	if (view.latestCompletedTask) {
+		const handoff = view.latestCompletedTask;
+		progress.push(
+			"Latest completed work handoff (context, not an automatic next task):",
 			`Task: ${compact(handoff.task, 700) || handoff.id}`,
-			`Reported result: ${compact(handoff.summary, 1_800)}`,
+			`Reported result: ${compact(handoff.summary, 1_400)}`,
 			`Route: ${handoff.routeStatus} · source=${handoff.id}`,
 		);
-	}
-	if (actionsChanged) {
-		lines.push(
-			"Live Runtime actions changed:",
-			...bullets(view.actions.slice(-4), (item) => `${item.id} [${item.status}] [route=${item.routeStatus}] ${compact(item.label, 240)} external=${item.externalId ?? "none"}`, "none"),
-		);
+	} else {
+		progress.push("No durable completed-work handoff is available.");
 	}
 	if (evidence.length) {
-		lines.push(
-			`New evidence since Project revision ${sinceRevision} (${view.pendingEvidenceCount} total record(s) still newer than structured state):`,
-			"Treat each record's intervention, observation, validity, and interpretation separately. Reconcile with amend_project_state, record_research_transition, or a real checkpoint compact; do not compact mechanically after every experiment.",
+		progress.push(
+			`New evidence after structured state (${view.pendingEvidenceCount} total record(s); newest two shown):`,
 			...evidence.flatMap(evidenceBrief),
 		);
 	}
-	if (!transition && !evidence.length && !handoff && !actionsChanged) {
-		lines.push("Environment or freshness metadata changed; this update contains no new research evidence or work handoff.");
-	}
-	lines.push(
-		"This data update is context, not an instruction to continue a previous task.",
-		"</research_project_delta>",
+	progress.push(
+		"Live Runtime actions:",
+		...bullets(view.actions.slice(-4), (item) => `${item.id} [${item.status}] [route=${item.routeStatus}] ${compact(item.label, 240)} external=${item.externalId ?? "none"}`, "none"),
 	);
-	const rendered = lines.filter(Boolean).join("\n");
-	return rendered.length <= 4_800
-		? rendered
-		: `${rendered.slice(0, 4_700).trimEnd()}\n[Project delta truncated; read exact experiment records.]\n</research_project_delta>`;
+
+	const frontier = ["=== CURRENT RESEARCH FRONTIER ==="];
+	if (state && !view.transitionSupersedesState) {
+		frontier.push(
+			`Current question: ${compact(state.researchQuestion, 900) || "not established"}`,
+			`Evidence-bounded position: ${compact(state.currentClaim, 900) || "no supported claim recorded"}`,
+			"Competing hypotheses:",
+			...bullets(list(state.hypotheses, 4), (item) => `${item.id} [${item.status}] ${compact(item.statement, 460)}${item.evidenceRefs?.length ? ` | refs=${item.evidenceRefs.join(",")}` : ""}`, "none recorded"),
+			"Open questions and confounders:",
+			...bullets([...list(state.unresolvedConfounders, 2), ...list(state.openQuestions, 3)], (item) => compact(item, 460), "none recorded"),
+			`Candidate next experiment: ${compact(state.nextExperiment?.question, 560) || "not determined"}`,
+			state.nextExperiment?.intervention ? `  intervention: ${compact(state.nextExperiment.intervention, 680)}` : undefined,
+		);
+	} else if (state) {
+		frontier.push("The structured frontier belongs to a retired route. Use the active transition and newer evidence; do not carry its claim or next experiment forward.");
+	} else {
+		frontier.push("No structured current frontier is available yet.");
+	}
+	const footer = [
+		includeDirectedMessages
+			? "Runtime mailbox bodies use the separate single-delivery channel; inspect /inbox only when routing needs attention."
+			: "Directed Runtime message contents belong only to the addressed Leader Session.",
+		"The current user request selects the immediate task. This Delta is current context, not an instruction to continue the previous task.",
+		"</research_project_delta>",
+	];
+	const fixed = [...header, ...progress].filter(Boolean).join("\n");
+	const ending = footer.filter(Boolean).join("\n");
+	const availableFrontier = Math.max(900, 6_400 - fixed.length - ending.length - 2);
+	const boundedFrontier = truncateSection(
+		frontier.filter(Boolean).join("\n"),
+		availableFrontier,
+		"[Current frontier truncated; latest progress above is preserved. Use /runtime view for the full bounded view.]",
+	);
+	return `${fixed}\n${boundedFrontier}\n${ending}`;
 }
 
-export function materializeProjectViewDelta(messages, text, details = {}) {
-	const filtered = messages.filter((message) =>
-		message.role !== "custom"
-		|| (message.customType !== PROJECT_VIEW_DELTA_KIND
-			&& !(message.customType === PROJECT_VIEW_KIND && message.details?.transient === true)),
-	);
-	if (!text) return filtered;
-	const hasPersistentSnapshot = filtered.some((message) =>
-		message.role === "custom" && message.customType === PROJECT_VIEW_KIND,
-	);
-	return [...filtered, {
-		role: "custom",
-		customType: hasPersistentSnapshot ? PROJECT_VIEW_DELTA_KIND : PROJECT_VIEW_KIND,
-		content: text,
-		display: false,
-		details: { version: PROJECT_VIEW_VERSION, transient: true, ...details },
-		timestamp: 0,
-	}];
+export function materializeProjectViewContext(messages, briefText, deltaText, details = {}) {
+	let hasPersistentBrief = false;
+	const filtered = messages.filter((message) => {
+		if (message.role !== "custom") return true;
+		if (message.customType === PROJECT_VIEW_DELTA_KIND) return false;
+		if (message.customType !== PROJECT_VIEW_KIND) return true;
+		if (message.details?.transient === true) return false;
+		const isCurrentBrief = message.details?.persistent === true
+			&& message.details?.version === PROJECT_VIEW_VERSION
+			&& message.details?.mode === "brief";
+		if (!isCurrentBrief) return false;
+		if (hasPersistentBrief) return false;
+		hasPersistentBrief = true;
+		return true;
+	});
+	const result = [...filtered];
+	if (!hasPersistentBrief && briefText) {
+		result.push({
+			role: "custom",
+			customType: PROJECT_VIEW_KIND,
+			content: briefText,
+			display: false,
+			details: { version: PROJECT_VIEW_VERSION, mode: "brief", transient: true, ...details },
+			timestamp: 0,
+		});
+	}
+	if (deltaText) {
+		result.push({
+			role: "custom",
+			customType: PROJECT_VIEW_DELTA_KIND,
+			content: deltaText,
+			display: false,
+			details: { version: PROJECT_VIEW_VERSION, mode: "delta", transient: true, ...details },
+			timestamp: 0,
+		});
+	}
+	return result;
 }
 
 export function projectViewFingerprint(view) {
-	// Hash the exact model-facing bytes, not incidental Runtime timestamps or
-	// metadata that are absent from the prompt. This keeps repeated materialized
-	// messages byte-stable for provider-side prefix/KV caching.
-	return fingerprint(renderProjectView(view));
+	// Only the compact-boundary Brief owns this fingerprint. Live progress is a
+	// replaceable prompt-tail Delta and must never churn the stable prefix.
+	return fingerprint(renderProjectBrief(view));
+}
+
+export function projectViewDeltaFingerprint(view, options = {}) {
+	return fingerprint(renderProjectViewDelta(view, options));
 }

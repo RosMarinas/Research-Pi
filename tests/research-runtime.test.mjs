@@ -1291,8 +1291,13 @@ test("Analysis Session observes Project state without stealing the Leader, then 
 		assert.equal(sent.length, 0, "Analysis Session must not drain the Leader mailbox");
 
 		const injected = await handlers.get("before_agent_start")({ type: "before_agent_start" }, ctx);
-		assert.match(injected.message.content, /Session role: Analysis Session/);
 		assert.match(injected.message.content, /Which mechanism explains the result/);
+		assert.doesNotMatch(injected.message.content, /Session role:/, "the stable Brief must not encode a Session role");
+		const analysisContext = await handlers.get("context")({
+			type: "context",
+			messages: [{ role: "custom", customType: injected.message.customType, content: injected.message.content, details: injected.message.details }],
+		}, ctx);
+		assert.match(String(analysisContext.messages.at(-1)?.content), /Session role: Analysis Session/);
 		await handlers.get("agent_start")({ type: "agent_start" }, ctx);
 		assert.equal(aborts, 0, "Analysis Session can reason without owning the Leader attachment");
 		assert.equal(handlers.get("tool_call")({ toolName: "read", input: {} }), undefined);
@@ -1326,7 +1331,8 @@ test("Analysis Session observes Project state without stealing the Leader, then 
 			assert.deepEqual(contextOff.messages, [{ role: "user", content: "analysis without project context" }]);
 			await commands.get("runtime").handler("context on", ctx);
 			assert.equal(runtimeSessionProjectContext(branch, "analysis"), "project");
-			assert.match((await handlers.get("before_agent_start")({ type: "before_agent_start" }, ctx)).message.content, /Session role: Analysis Session/);
+			const contextOn = await handlers.get("context")({ type: "context", messages: [{ role: "user", content: "resume analysis" }] }, ctx);
+			assert.match(String(contextOn.messages.at(-1)?.content), /Session role: Analysis Session/);
 
 			const revisionBeforeCompact = snapshot.revision;
 		await handlers.get("session_compact")({ type: "session_compact", compactionEntry: { type: "compaction", id: "analysis-compact" } }, ctx);
@@ -1355,9 +1361,9 @@ test("Analysis Session observes Project state without stealing the Leader, then 
 		assert.deepEqual(new Set(sent.map((item) => item.message.details.messageId)), new Set([existingMessage.id, analysisMessage.id]));
 		assert.equal(handlers.get("tool_call")({ toolName: "bash", input: { command: "echo execute" } }), undefined);
 		assert.ok(notices.some((message) => /now the Leader Session/.test(message)));
-		const leaderInjected = await handlers.get("before_agent_start")({ type: "before_agent_start" }, ctx);
-		assert.match(leaderInjected.message.content, /Session role: Leader Session/);
-		assert.match(leaderInjected.message.content, /supersedes any earlier Analysis Session role block/);
+		const leaderContext = await handlers.get("context")({ type: "context", messages: [{ role: "user", content: "execute" }] }, ctx);
+		assert.match(String(leaderContext.messages.at(-1)?.content), /Session role: Leader Session/);
+		assert.match(String(leaderContext.messages.at(-1)?.content), /supersedes any earlier Analysis Session role block/);
 	} finally {
 		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
 		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;
@@ -1564,8 +1570,8 @@ test("a cross-session research transition refreshes ProjectView at the next mode
 			authorityRefs: ["user-decision:safe-boundary"],
 		});
 		const result = await handlers.get("context")({ type: "context", messages: [{ role: "user", content: "continue" }] }, ctx);
-		const projectView = result.messages.find((message) => message.customType === "research-project-view");
-		assert.match(String(projectView?.content), /Active research track: route B/);
+		const projectDelta = result.messages.find((message) => message.customType === "research-project-view-delta");
+		assert.match(String(projectDelta?.content), /Current research track: .*route B/);
 
 		await upsertRuntimeAction(runtime, {
 			id: "cross-session-action",
@@ -1574,8 +1580,8 @@ test("a cross-session research transition refreshes ProjectView at the next mode
 			label: "route B diagnostic",
 		});
 		const activityResult = await handlers.get("context")({ type: "context", messages: [{ role: "user", content: "continue again" }] }, ctx);
-		const refreshedView = activityResult.messages.find((message) => message.customType === "research-project-view");
-		assert.match(String(refreshedView?.content), /cross-session-action \[running\]/);
+		const refreshedDelta = activityResult.messages.find((message) => message.customType === "research-project-view-delta");
+		assert.match(String(refreshedDelta?.content), /cross-session-action \[running\]/);
 	} finally {
 		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
 		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;
@@ -1583,7 +1589,7 @@ test("a cross-session research transition refreshes ProjectView at the next mode
 	}
 });
 
-test("ProjectView persists an append-only snapshot and then a short semantic delta", async () => {
+test("ProjectView persists one fixed Brief while replacing one live tail Delta", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-project-view-persistence-"));
 	const previousRoot = process.env.RESEARCH_PI_RUNTIME_DIR;
 	process.env.RESEARCH_PI_RUNTIME_DIR = join(root, "runtime");
@@ -1620,7 +1626,8 @@ test("ProjectView persists an append-only snapshot and then a short semantic del
 		const first = await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "start" }, ctx);
 		assert.equal(first.message.customType, "research-project-view");
 		assert.equal(first.message.details.persistent, true);
-		assert.equal(first.message.details.mode, "snapshot");
+		assert.equal(first.message.details.mode, "brief");
+		const stableBrief = first.message.content;
 		branch.push({ type: "custom_message", customType: first.message.customType, content: first.message.content, details: first.message.details });
 		assert.equal(await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "unchanged" }, ctx), undefined);
 
@@ -1636,11 +1643,7 @@ test("ProjectView persists an append-only snapshot and then a short semantic del
 			conclusion: "The encoder is the current failure locus.",
 			nextStep: "Test staged encoder training.",
 		});
-		const next = await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "continue" }, ctx);
-		assert.equal(next.message.details.mode, "delta");
-		assert.match(String(next.message.content), /<research_project_delta>/);
-		assert.match(String(next.message.content), /observation: The margin increased from 0.02 to 0.31/);
-		branch.push({ type: "custom_message", customType: next.message.customType, content: next.message.content, details: next.message.details });
+		assert.equal(await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "continue" }, ctx), undefined);
 
 		const context = await handlers.get("context")({
 			type: "context",
@@ -1651,8 +1654,13 @@ test("ProjectView persists an append-only snapshot and then a short semantic del
 				details: entry.details,
 			})),
 		}, ctx);
-		assert.equal(context.messages.filter((message) => message.customType === "research-project-view").length, 2);
-		assert.equal(context.messages.some((message) => message.customType === "research-project-view-delta"), false);
+		const briefs = context.messages.filter((message) => message.customType === "research-project-view");
+		const deltas = context.messages.filter((message) => message.customType === "research-project-view-delta");
+		assert.equal(briefs.length, 1);
+		assert.equal(briefs[0].content, stableBrief);
+		assert.equal(deltas.length, 1);
+		assert.equal(context.messages.at(-1), deltas[0]);
+		assert.match(String(deltas[0].content), /observation: The margin increased from 0.02 to 0.31/);
 	} finally {
 		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
 		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;
@@ -1711,10 +1719,14 @@ test("a completed Leader work turn becomes a durable cross-Session handoff witho
 		assert.match(snapshot.handoffs[0].task, /Repair the local experiment launcher/);
 		assert.match(snapshot.handoffs[0].summary, /research direction is unchanged/);
 
-		const update = await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "new session continues" }, ctx);
-		assert.equal(update.message.details.mode, "delta");
-		assert.match(String(update.message.content), /Latest completed work handoff/);
-		assert.match(String(update.message.content), /context, not an automatic next task/);
+		assert.equal(await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "new session continues" }, ctx), undefined);
+		const update = await handlers.get("context")({
+			type: "context",
+			messages: branch.map((entry) => ({ role: "custom", customType: entry.customType, content: entry.content, details: entry.details })),
+		}, ctx);
+		const delta = update.messages.find((message) => message.customType === "research-project-view-delta");
+		assert.match(String(delta?.content), /Latest completed work handoff/);
+		assert.match(String(delta?.content), /context, not an automatic next task/);
 	} finally {
 		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
 		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;
