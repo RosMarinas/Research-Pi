@@ -154,7 +154,7 @@ Rules:
 5. archived/superseded retires the old route; parallel does not. Retired evidence remains history, but its claim/next experiment is not current. Evidence from another track cannot prove the current intervention ran.
 6. runGitCommit identifies executed code; recordedAtGit identifies record-time workspace. Never substitute them.
 7. Clean/Analysis summaries are candidate synthesis, not Project authority or evidence.
-8. projectBrief is the fixed orientation until the next successful compact. Make it short and clear to a new Agent/user: only overview, final goal, overall approach, enduring user priorities, and closed previous phases. Exclude the active/latest phase, current run/claim, next experiment, Git, and live tasks.
+8. A linked RESEARCH.md Project Anchor is user-maintained authority for durable intent; never rewrite it or treat it as experimental evidence. projectBrief is the compact-generated fixed orientation until the next successful compact. Make it short and clear to a new Agent/user: only overview, final goal, overall approach, enduring user priorities, and closed previous phases. Exclude the active/latest phase, current run/claim, next experiment, Git, and live tasks.
 9. Preserve prior projectBrief wording unless evidence changes its durable fields or closes a phase. previousPhases uses concise goal-approach-result records, never a task log.
 10. researchQuestion, currentClaim, hypotheses, observations, open questions, criticalContext, and nextExperiment form the live Project Delta. nextExperiment is a discriminating intervention, not an inherited coding TODO.`;
 

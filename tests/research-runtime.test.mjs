@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -1596,6 +1596,7 @@ test("ProjectView persists one fixed Brief while replacing one live tail Delta",
 	try {
 		const workspace = join(root, "workspace");
 		mkdirSync(workspace);
+		writeFileSync(join(workspace, "RESEARCH.md"), "# Project Anchor\n\nGoal: preserve the original scientific objective.\n");
 		const handlers = new Map();
 		const branch = [];
 		const pi = {
@@ -1627,6 +1628,7 @@ test("ProjectView persists one fixed Brief while replacing one live tail Delta",
 		assert.equal(first.message.customType, "research-project-view");
 		assert.equal(first.message.details.persistent, true);
 		assert.equal(first.message.details.mode, "brief");
+		assert.match(first.message.content, /preserve the original scientific objective/);
 		const stableBrief = first.message.content;
 		branch.push({ type: "custom_message", customType: first.message.customType, content: first.message.content, details: first.message.details });
 		assert.equal(await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "unchanged" }, ctx), undefined);
@@ -1661,6 +1663,20 @@ test("ProjectView persists one fixed Brief while replacing one live tail Delta",
 		assert.equal(deltas.length, 1);
 		assert.equal(context.messages.at(-1), deltas[0]);
 		assert.match(String(deltas[0].content), /observation: The margin increased from 0.02 to 0.31/);
+
+		writeFileSync(join(workspace, "RESEARCH.md"), "# Project Anchor\n\nGoal: preserve the corrected scientific objective.\n");
+		const replacement = await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "anchor changed" }, ctx);
+		assert.match(replacement.message.content, /preserve the corrected scientific objective/);
+		assert.notEqual(replacement.message.details.fingerprint, first.message.details.fingerprint);
+		branch.push({ type: "custom_message", customType: replacement.message.customType, content: replacement.message.content, details: replacement.message.details });
+		const refreshed = await handlers.get("context")({
+			type: "context",
+			messages: branch.map((entry) => ({ role: "custom", customType: entry.customType, content: entry.content, details: entry.details })),
+		}, ctx);
+		const refreshedBriefs = refreshed.messages.filter((message) => message.customType === "research-project-view");
+		assert.equal(refreshedBriefs.length, 1);
+		assert.match(String(refreshedBriefs[0].content), /corrected scientific objective/);
+		assert.doesNotMatch(String(refreshedBriefs[0].content), /original scientific objective/);
 	} finally {
 		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
 		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;

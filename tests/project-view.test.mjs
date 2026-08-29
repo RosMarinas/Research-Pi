@@ -14,6 +14,7 @@ import {
 	projectViewDeltaFingerprint,
 	projectViewFingerprint,
 	projectViewRefreshFingerprint,
+	readProjectAnchor,
 	renderProjectBrief,
 	renderProjectView,
 	renderProjectViewDelta,
@@ -479,6 +480,44 @@ test("ProjectView materializes one stable Brief and one live Delta at the prompt
 	assert.equal(messages.at(-1).customType, PROJECT_VIEW_DELTA_KIND);
 	assert.equal(messages.at(-1).details.transient, true);
 	assert.equal(messages.find((message) => message.customType === PROJECT_VIEW_KIND).details.version, PROJECT_VIEW_VERSION);
+	const refreshed = materializeProjectViewContext([{
+		role: "custom",
+		customType: PROJECT_VIEW_KIND,
+		content: "stale anchor brief",
+		details: { persistent: true, version: PROJECT_VIEW_VERSION, mode: "brief", fingerprint: "old" },
+	}], "current anchor brief", delta, { briefFingerprint: "new" });
+	const refreshedBriefs = refreshed.filter((message) => message.customType === PROJECT_VIEW_KIND);
+	assert.equal(refreshedBriefs.length, 1);
+	assert.equal(refreshedBriefs[0].content, "current anchor brief");
+	assert.equal(refreshedBriefs[0].details.transient, true);
+});
+
+test("RESEARCH.md is a user-maintained Project Anchor independent of compaction state", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-project-anchor-"));
+	try {
+		writeFileSync(join(root, "RESEARCH.md"), "# Project North Star\n\nGoal: discover a transferable mechanism.\n\nGuardrail: screens are not qualification.\n");
+		const anchor = await readProjectAnchor(root);
+		const input = {
+			runtime: { projectKey: "project-anchor", workspaceRoot: root },
+			snapshot: { projectState: null, actors: [], actions: [], messages: [], evidence: [], transitions: [], handoffs: [], revision: 0 },
+			git: {}, experiments: [],
+		};
+		const view = buildProjectView({ ...input, anchor });
+		const firstBrief = renderProjectBrief(view);
+		assert.match(firstBrief, /USER-MAINTAINED PROJECT ANCHOR/);
+		assert.match(firstBrief, /Linked file: RESEARCH\.md/);
+		assert.match(firstBrief, /discover a transferable mechanism/);
+		assert.match(firstBrief, /screens are not qualification/);
+
+		writeFileSync(join(root, "RESEARCH.md"), "# Project North Star\n\nGoal: discover a causal and transferable mechanism.\n");
+		const changedAnchor = await readProjectAnchor(root);
+		const changedView = buildProjectView({ ...input, anchor: changedAnchor });
+		assert.notEqual(projectViewFingerprint(changedView), projectViewFingerprint(view));
+		assert.match(renderProjectBrief(changedView), /causal and transferable mechanism/);
+		assert.equal((await readProjectAnchor(join(root, "missing"))), null);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });
 
 test("ProjectView never duplicates Runtime mailbox bodies", () => {

@@ -136,7 +136,7 @@ pi --analysis
 | Research Contract | 让 Agent 默认采用探索、证伪、有效性检查和证据驱动收敛 |
 | Project Runtime | 维护 Project State、Actors、Actions、mailbox 与 Leader Session 所有权 |
 | Dual Session | Leader 持续推进主线，Pi-analysis 独立跟进与讨论，并只把最终短综合投递给 Leader |
-| ProjectView | 用 compact 边界冻结一份简短 Project Brief，再把最新进展作为 Session 尾部 Delta 注入；新人能快速上手，旧状态也不会冒充当前结论 |
+| ProjectView | 先链接用户维护的 `RESEARCH.md`，再用 compact 边界冻结 Project Brief，并把最新进展作为 Session 尾部 Delta 注入 |
 | Research Memory | 对历史 Session 和实验记录做本地全文检索，不依赖向量数据库 |
 | Research Compaction | 在模型 settled 后生成带 provenance 的结构化状态，而不只摘要聊天文本 |
 | Experiment Records | 用 `record_experiment` 区分观察、有效性和解释；支持换轨与窄幅状态修订 |
@@ -144,7 +144,24 @@ pi --analysis
 | Project Boundary | 默认把模型命令限制在当前项目；SSH、外部文件和宿主命令通过显式 capability 授权 |
 | Research Briefing | 在重大结果或阶段交接时恢复工作脉络，并把内部术语翻译成用户可判断的报告 |
 
-ProjectView 分成两层：`/compact` 成功后生成一份固定、简短的 Project Brief，只介绍项目、最终目标、总体思路、用户关心的原则和已结束阶段；在下一次 compact 前，它的字节保持不变。当前路线、最新实验、运行状态和下一步放在每次模型调用最末尾的 ProjectView Delta 中，并替换旧 Delta。这样稳定前缀有利于缓存，新 Session 又不会只看到一份过时介绍。
+ProjectView 分成三层：项目根目录可选的 `RESEARCH.md` 是用户维护的 Project Anchor，不由模型或 compact 改写；`/compact` 生成简短的 Project Brief，概括总体方向和已结束阶段；当前路线、最新实验、运行状态和下一步则进入 Session 尾部的 ProjectView Delta。于是“项目为什么存在”不会随摘要漂移，而“项目现在做到哪了”也不会被固定文档拖旧。
+
+建议每个长期科研项目维护一份短 `RESEARCH.md`，只写不容易频繁变化的内容：项目要解决什么、最终成功是什么、总体路线、明确不做什么，以及用户最在意的判断原则。不要把实验流水账、当前 run 或每日 TODO 放进去。Research Pi 会自动链接并注入前 3600 个字符；文件修改后，下一轮会替换旧 Anchor 视图，无需 compact。
+
+```md
+# Project North Star
+
+## Problem and final goal
+...
+
+## Overall approach
+...
+
+## Non-goals and decision principles
+...
+```
+
+ProjectView 本身是派生视图，不提供会误删项目账本的“全局清空”按钮。需要不带项目记忆的独立环境时使用 `/runtime new clean`；Analysis Session 可用 `/runtime context off` 暂停注入。删除或修改 `RESEARCH.md` 只影响 Anchor，实验、Runtime 和历史 Session 都会保留。
 
 ## 常用入口
 
