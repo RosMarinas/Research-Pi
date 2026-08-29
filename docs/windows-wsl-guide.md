@@ -2,6 +2,17 @@
 
 Research Pi 在 Windows 上的推荐入口是 WSL2。Agent、项目文件、Node、Git、Codex 和实验工具都运行在 Linux 环境内；PowerShell 只负责安装或进入 WSL，不解释模型生成的命令。
 
+## `main` 与 Windows 分支怎么选
+
+两个分支的 Research Runtime、ProjectView、compact、Codex 协作和 Pi 原生模型选择保持同步。差别只在 Windows 宿主边界：
+
+| 分支 | 定位 | Host capability |
+|---|---|---|
+| `main` | macOS/Linux 主线，也可在正常 WSL2 中运行 | 按主线规则批准 SSH、外部读取和宿主命令；项目可信 command prefix 可持久复用 |
+| `windows-research-pi` | WSL2 严格隔离预览 | 只允许 SSH target 持久信任；host command/project script 必须 one-shot，并拒绝 `/mnt`、Windows executable 与 interop |
+
+如果你只是把 WSL2 当作 Linux 使用，项目始终在 `/home/...`，可直接安装 `main`。如果 Agent 拥有较高自动执行权限，而且“即使模型或项目脚本出错，也不能碰 Windows 系统盘”是硬要求，选择 `windows-research-pi`。
+
 ## 安全边界
 
 `windows-research-pi` 分支增加以下启动不变量：
@@ -65,36 +76,42 @@ command -v node npm git zsh rg fdfind bwrap socat
 
 关键工具建议安装在 `/usr/bin`、`/usr/local/bin` 或其他 Linux 路径。不要依赖 Windows Node、Windows Git 或位于 `/mnt/c` 的 executable。
 
-Pi 0.84.1 会把 Ubuntu 的 `fdfind` 识别为 `fd`，因此不需要下载 GitHub release，也不需要创建不受包管理器维护的手工副本。这同时避免 GitHub API 限流导致的 `fd not found ... 403` 启动提示。
+当前锁定的 Pi Core 会识别 Ubuntu 的 `fdfind`，因此不需要下载 GitHub release，也不需要创建不受包管理器维护的手工副本。这同时避免 GitHub API 限流导致的 `fd not found ... 403` 启动提示。
 
-## 3. 克隆 Research Pi
+## 3. 安装 Research Pi
 
-仓库必须位于 WSL home：
+日常使用推荐直接全局安装严格 Windows 分支：
 
 ```sh
 mkdir -p ~/research
+cd ~/research
+npm install -g 'git+https://github.com/RosMarinas/Research-Pi.git#windows-research-pi'
+pi setup
+pi paths
+```
+
+进入 TUI 后使用 Pi 原生 `/login` 登录供应商、`/model` 切换模型、`/scoped-models` 管理轮换范围。Research Pi 不维护单独的模型 profile。若供应商使用 API key，或需要 DeepSeek 小型搜索，可在 `pi paths` 返回的 `credentialsPath` 中填写：
+
+```dotenv
+DEEPSEEK_API_KEY=...
+ZAI_API_KEY=...
+OPENCODE_API_KEY=...
+```
+
+凭据文件留在 WSL 文件系统中并禁止进入 Git；模型 shell 不继承这些 key。
+
+需要修改 Harness 源码时再使用开发 checkout：
+
+```sh
 cd ~/research
 git clone --branch windows-research-pi git@github.com:RosMarinas/Research-Pi.git
 cd Research-Pi
 npm install --ignore-scripts
 cp .env.example .env
-```
-
-编辑 `.env`，填入：
-
-```dotenv
-DEEPSEEK_API_KEY=你的_API_key
-```
-
-`.env` 留在 WSL 文件系统中，并已被 Git 忽略。Agent child environment 不继承该 API key。
-
-## 4. 安装命令入口
-
-```sh
 ./install-user.sh
 ```
 
-确认 `~/.local/bin` 在 `PATH`，随后重新打开 WSL shell，或执行：
+源码安装需要确认 `~/.local/bin` 在 `PATH`，随后重新打开 WSL shell，或执行：
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
@@ -102,7 +119,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 Codex delegation 需要在 WSL 内单独安装 Linux Codex CLI 并完成登录。不要让 Research Pi 调用 Windows 侧的 `codex.exe`。
 
-## 5. 放置科研项目
+## 4. 放置科研项目
 
 正确：
 
@@ -123,7 +140,7 @@ pi
 
 Windows 可以通过 `\\wsl$\Ubuntu\home\...` 浏览 WSL 文件，但不要把 Windows 编辑器配置成对整个 WSL home 做自动同步、清理或杀毒重写。
 
-## 6. 检查边界
+## 5. 检查边界
 
 先在普通 WSL shell 中运行无模型 doctor：
 

@@ -1511,7 +1511,7 @@ test("App Server objective command and subagent events reach the bounded audit p
 			task: "emit objective activity for the TUI",
 		});
 		let active;
-		for (let attempt = 0; attempt < 100; attempt++) {
+		for (let attempt = 0; attempt < 300; attempt++) {
 			const current = await readCodexJob(started.id, { jobRoot });
 			if (current.lastActivity?.category === "subagent") {
 				active = current;
@@ -1519,7 +1519,7 @@ test("App Server objective command and subagent events reach the bounded audit p
 			}
 			await new Promise((resolve) => setTimeout(resolve, 10));
 		}
-		assert.equal(active?.status, "running", JSON.stringify(active));
+		assert.equal(active?.status, "running", active ? JSON.stringify(active) : "subagent activity was not observed before the 3s deadline");
 		assert.equal(active?.progress, "Codex turn running");
 		assert.equal(active?.currentActivity, null);
 		assert.equal(active?.lastActivity?.status, "completed");

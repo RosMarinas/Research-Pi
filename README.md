@@ -58,7 +58,7 @@ pi setup
 pi paths
 ```
 
-### Windows（推荐 WSL2）
+### Windows（使用 WSL2）
 
 先在管理员 PowerShell 中安装 Ubuntu：
 
@@ -66,19 +66,40 @@ pi paths
 wsl --install -d Ubuntu
 ```
 
-随后打开 Ubuntu，先安装 Linux 版 Node.js `>=22.19`，再像 Linux 一样安装 `main`：
+随后打开 Ubuntu，安装 Linux 版 Node.js `>=22.19` 和基础依赖：
 
 ```sh
 sudo apt update
-sudo apt install -y git zsh ripgrep fd-find
+sudo apt install -y git zsh ripgrep fd-find bubblewrap socat
 node --version
 npm --version
+```
+
+然后选择一个分支安装：
+
+| 分支 | 适合谁 | 与另一个分支的主要区别 |
+|---|---|---|
+| `main` | 已经把项目严格放在 WSL `/home/...`、希望与 macOS/Linux 保持完全一致 | 更新最快；宿主命令可按项目持久授权，不额外检查 Windows interop |
+| `windows-research-pi` | 希望 Agent 高自动执行，但必须更强地隔离 Windows 系统盘 | WSL2-only 预览；拒绝 `/mnt/*` workspace，阻断 `.exe`/PowerShell/cmd/WSL interop，host command/project script 只能一次批准，缺少 seccomp 时拒绝启动 |
+
+普通 WSL2 使用可以安装 `main`：
+
+```sh
 npm install -g 'git+https://github.com/RosMarinas/Research-Pi.git#main'
 pi setup
+```
+
+需要严格 Windows 宿主隔离时安装 Windows 分支：
+
+```sh
+npm install -g 'git+https://github.com/RosMarinas/Research-Pi.git#windows-research-pi'
+pi setup
+mkdir -p "$HOME/research"
+pi doctor --workspace "$HOME/research"
 pi paths
 ```
 
-WSL2 本身就是 Linux 环境，因此可以直接使用 `main` 并获得最新功能。请把科研项目放在 `~/research/...` 等 WSL 文件系统中，不要放在 `/mnt/c` 或 `/mnt/d`。`windows-research-pi` 是额外阻断 Windows 挂载盘、`.exe` 和 PowerShell interop 的安全预览分支；需要给 Agent 较高自动执行权限时，可用它测试更严格的宿主隔离。
+无论选择哪个分支，都应把 Research Pi 和科研项目放在 `~/research/...` 等 WSL 文件系统中，不要放在 `/mnt/c` 或 `/mnt/d`。`windows-research-pi` 不是功能更多的 Windows 版：它定期跟随 `main` 的 Runtime/ProjectView/模型能力，只额外收紧 WSL 与 Windows 宿主之间的执行和文件边界。详细安装、检查项与限制见 [Windows / WSL2 指南](docs/windows-wsl-guide.md)。
 
 进入 TUI 后用 Pi 原生 `/login` 登录供应商，再用 `/model` 切换模型；Research Pi 不再维护第二套模型/profile 目录。若供应商使用 API key，或需要 DeepSeek 小型搜索，也可以在 `pi paths` 给出的 `credentialsPath` 中填写：
 
@@ -192,9 +213,9 @@ npm run test:package
 
 ### Windows / WSL2
 
-Windows 上的最小、安全迁移路线是 WSL2，而不是让现有 Bash harness 直接由 PowerShell 解释。请使用 `windows-research-pi` 分支，并把科研项目和 Research Pi 都放在 WSL 自身的 `/home/...` 文件系统中；`/mnt/c`、`/mnt/d` 等 Windows host mounts 不可作为 agent workspace。
+Windows 上的最小迁移路线是 WSL2，而不是让现有 Bash harness 直接由 PowerShell 解释。`main` 可以作为普通 WSL2 Linux 环境运行；如果还要求强制阻断 Windows 系统盘和宿主 interop，则使用 `windows-research-pi`。两种情况下都应把科研项目放在 WSL 自身的 `/home/...` 文件系统中。
 
-该分支在启动时要求 WSL2、bubblewrap、socat、ripgrep、`fd`/`fdfind` 和可用的 seccomp helper，并执行无副作用的 Windows host-interop 探针。缺少 seccomp、项目位于 `/mnt` 或 `cmd.exe` 能从沙箱中成功启动时，边界会 fail closed。项目认可的 SSH target 可以持久自动使用；通用 host command/project script 在 WSL 下只能一次性批准，且不能访问 `/mnt` 或调用 Windows/PowerShell executable。安装步骤和边界说明见 [Windows / WSL2 指南](docs/windows-wsl-guide.md)。
+Windows 分支在启动时额外要求 WSL2、bubblewrap、socat、ripgrep、`fd`/`fdfind` 和可用的 seccomp helper，并执行无副作用的 Windows host-interop 探针。缺少 seccomp、项目位于 `/mnt` 或 `cmd.exe` 能从沙箱中成功启动时，边界会 fail closed。项目认可的 SSH target 可以持久自动使用；通用 host command/project script 只能一次性批准。安装步骤、分支对照和边界说明见 [Windows / WSL2 指南](docs/windows-wsl-guide.md)。
 
 ## 文档
 

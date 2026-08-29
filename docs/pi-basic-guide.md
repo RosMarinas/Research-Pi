@@ -164,7 +164,7 @@ Leader 模型 shell 可读写当前项目（包括正常 Git commit 所需的 `.
 
 `trust-*` 按项目持久保存，`grant-*` 只在当前 Pi session 生效。持久规则保存在用户状态目录而不是仓库中；源码开发模式下位于 Git 忽略的 `.pi/capabilities/`。`host-command` 会在授权界面显示 cwd、完整 argv 和建议前缀，授权后的 `/boundary grants` 会显示 grant ID；它以宿主用户权限运行，所以只信任你认可的项目入口。Pi/Codex 后续使用 grant ID 时自动恢复原 cwd；不带 cwd 的调用只有在唯一匹配时才自动恢复，多个 worktree 同时匹配会要求明确选择，不会创建 `bash -lc "cd ..."` 的重复授权。不透明 `ssh-target` 的凭据内容不会进入模型。
 
-WSL2 分支例外：`trust-ssh` 仍可持久使用；`grant-command` 和 `grant-script` 自动收窄为 one-shot，`trust-command` 被禁用。它们不能访问 `/mnt` 或启动 Windows/PowerShell executable。完整安装与实机检查见 [Windows / WSL2 指南](windows-wsl-guide.md)。
+`main` 可在普通 WSL2 中按 Linux 方式运行；严格的 `windows-research-pi` 分支额外规定：`trust-ssh` 仍可持久使用，但 `grant-command` 和 `grant-script` 自动收窄为 one-shot，`trust-command` 被禁用，且不能访问 `/mnt` 或启动 Windows/PowerShell executable。完整分支对照、安装与实机检查见 [Windows / WSL2 指南](windows-wsl-guide.md)。
 
 Codex executor 缺少 grant 时不再先失败后咨询 Leader。`research_pi_host` 会把精确操作保存为结构化 `input_required`，attached Pi TUI 自动弹出相同的授权框；你的选择自动恢复原 Codex tool call。没有可用 TUI 时请求继续保存在 Runtime inbox。权限 ask 只有在批准/拒绝或显式回复已送回 Codex 后才结算，Leader 仅仅读到它不会让请求从 inbox 消失。
 
