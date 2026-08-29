@@ -90,12 +90,21 @@ Advisor and executor defaults remain Research Pi settings because they configure
 {
   "codex": {
     "advisor": { "model": "gpt-5.6-sol", "reasoningEffort": "max" },
-    "executor": { "model": "gpt-5.6-sol", "reasoningEffort": "max" }
+    "executor": { "model": "gpt-5.6-sol", "reasoningEffort": "max" },
+    "retention": { "terminalDays": 30, "keepTerminalJobs": 200 }
   }
 }
 ```
 
 An individual `codex_delegate` call can override model or effort. Existing Codex Actors/threads retain the model recorded for their Action; config changes affect newly started Actions.
+
+Once per day at launch, Research Pi archives a terminal job only when it is both older than `terminalDays` and outside the newest `keepTerminalJobs`. Active, input-required and `outcome_unknown` jobs are never archived. The structured job/result remains readable by exact job ID from one `codex/archive/jobs.jsonl`; per-job token events, stderr and worker files are removed. Codex thread/context SQLite is not changed.
+
+## Project-local experiment records
+
+`record_experiment` appends one canonical memo to `<project>/.pi/research/experiments.jsonl`; it does not create Markdown or copy artifacts. On first Git-backed launch Research Pi adds `/.pi/` to the repository's local `.git/info/exclude` when no existing ignore rule covers it. This leaves shared `.gitignore` and the working tree unchanged, including in linked worktrees.
+
+One coherent experiment batch normally needs no more than a frozen protocol and concise settlement. Routine probes and operational deviations stay in the lightweight ledger, run manifest, or settlement. Git should contain source, configuration, compact summaries and selected figures; generated outputs remain in the project's artifact store.
 
 ## Research compact and ProjectView
 

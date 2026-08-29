@@ -28,6 +28,10 @@
     "executor": {
       "model": "gpt-5.6-sol",
       "reasoningEffort": "max"
+    },
+    "retention": {
+      "terminalDays": 30,
+      "keepTerminalJobs": 200
     }
   },
   "research": {

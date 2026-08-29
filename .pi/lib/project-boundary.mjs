@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { constants, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { access, mkdir, realpath, stat } from "node:fs/promises";
+import { access, appendFile, mkdir, readFile, realpath, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
@@ -722,4 +722,52 @@ export async function prepareBoundaryRuntime(root) {
 
 export function likelySandboxDenial(output) {
 	return /(?:operation not permitted|permission denied|file-(?:read-data|write[^ ]*)|network-outbound)/i.test(output);
+}
+
+export async function ensureProjectLocalStateExcluded(root, options = {}) {
+	const cwd = resolve(root);
+	const environment = sanitizeBoundaryEnvironment(options.environment ?? process.env);
+	try {
+		await execFileAsync("git", ["rev-parse", "--is-inside-work-tree"], {
+			cwd,
+			env: environment,
+			timeout: 5000,
+			maxBuffer: 4096,
+		});
+	} catch {
+		return { status: "not-git", changed: false, path: null };
+	}
+
+	try {
+		await execFileAsync("git", ["check-ignore", "-q", "--no-index", ".pi/research/experiments.jsonl"], {
+			cwd,
+			env: environment,
+			timeout: 5000,
+			maxBuffer: 4096,
+		});
+		return { status: "already-ignored", changed: false, path: null };
+	} catch (error) {
+		if (error?.code !== 1) throw error;
+	}
+
+	const { stdout } = await execFileAsync("git", ["rev-parse", "--git-path", "info/exclude"], {
+		cwd,
+		env: environment,
+		timeout: 5000,
+		maxBuffer: 4096,
+	});
+	const reportedPath = stdout.trim();
+	if (!reportedPath) throw new Error("Git did not report an info/exclude path");
+	const excludePath = isAbsolute(reportedPath) ? reportedPath : resolve(cwd, reportedPath);
+	await mkdir(dirname(excludePath), { recursive: true, mode: 0o700 });
+	const current = await readFile(excludePath, "utf8").catch((error) => {
+		if (error?.code === "ENOENT") return "";
+		throw error;
+	});
+	if (current.split(/\r?\n/).some((line) => ["/.pi/", ".pi/", "/.pi", ".pi"].includes(line.trim()))) {
+		return { status: "already-excluded", changed: false, path: excludePath };
+	}
+	const prefix = current && !current.endsWith("\n") ? "\n" : "";
+	await appendFile(excludePath, `${prefix}# Research Pi local runtime state\n/.pi/\n`, { encoding: "utf8", mode: 0o600 });
+	return { status: "added", changed: true, path: excludePath };
 }

@@ -17,7 +17,24 @@
       },
       "additionalProperties": false
     },
-    "codex": { "type": "object" },
+    "codex": {
+      "type": "object",
+      "required": ["advisor", "executor", "retention"],
+      "properties": {
+        "advisor": { "$ref": "#/$defs/codexRole" },
+        "executor": { "$ref": "#/$defs/codexRole" },
+        "retention": {
+          "type": "object",
+          "required": ["terminalDays", "keepTerminalJobs"],
+          "properties": {
+            "terminalDays": { "type": "integer", "minimum": 1 },
+            "keepTerminalJobs": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "research": {
       "type": "object",
       "properties": {
@@ -64,5 +81,16 @@
     },
     "diagnostics": { "type": "object" }
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "$defs": {
+    "codexRole": {
+      "type": "object",
+      "required": ["model", "reasoningEffort"],
+      "properties": {
+        "model": { "type": "string", "minLength": 1 },
+        "reasoningEffort": { "enum": ["low", "medium", "high", "xhigh", "max", "ultra"] }
+      },
+      "additionalProperties": false
+    }
+  }
 }

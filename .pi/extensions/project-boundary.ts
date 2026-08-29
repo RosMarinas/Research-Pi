@@ -25,6 +25,7 @@ import {
 	analysisSshCommandPolicy,
 	buildSandboxRuntimeConfig,
 	directToolPath,
+	ensureProjectLocalStateExcluded,
 	isProtectedProjectMutation,
 	likelySandboxDenial,
 	prepareBoundaryRuntime,
@@ -570,6 +571,12 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		try {
 			runtime = await prepareBoundaryRuntime(ctx.cwd);
+			const localExclude = await ensureProjectLocalStateExcluded(runtime.root).catch((error) => ({
+				status: "failed",
+				changed: false,
+				path: null,
+				error: error instanceof Error ? error.message : String(error),
+			}));
 			// sandbox-runtime bakes TMPDIR into its wrapped command from this
 			// harness variable, so set it before initialization and wrapping.
 			process.env.CLAUDE_CODE_TMPDIR = runtime.runtimeTmp;
@@ -579,6 +586,8 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			await ensureProjectSandbox(ctx);
 			initializationError = undefined;
 			await refreshBoundaryStatus(ctx);
+			if (localExclude.changed) ctx.ui.notify("Research Pi local .pi state is now hidden through Git info/exclude; no project file was modified.", "info");
+			else if (localExclude.status === "failed") ctx.ui.notify(`Could not add the local .pi Git exclusion: ${localExclude.error}`, "warning");
 		} catch (error) {
 			runtime = undefined;
 			systemRuntime = undefined;

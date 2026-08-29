@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -24,6 +24,7 @@ import {
 	findReusableCodexJob,
 	listCodexJobs,
 	listCodexMissions,
+	maintainCodexJobRetention,
 	readCodexJob,
 	reconcileCodexJobOutcome,
 	respondToCodexJob,
@@ -1729,6 +1730,74 @@ test("a workspace has one writer lease and cancellation preserves the side-effec
 		assert.ok(["cancelled", "outcome_unknown"].includes(cancelled.status), JSON.stringify(cancelled));
 		if (cancelled.status === "outcome_unknown") assert.equal(cancelled.sideEffect.state, "unknown");
 		else assert.ok(["intent_recorded", "settled"].includes(cancelled.sideEffect.state));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("Codex retention archives only old excess terminal jobs and exact result lookup survives", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-retention-"));
+	const jobRoot = join(root, "codex", "jobs");
+	const workspace = join(root, "workspace");
+	try {
+		mkdirSync(workspace, { recursive: true });
+		const writeFixture = (id, status, finishedAt) => {
+			const jobDir = join(jobRoot, id);
+			mkdirSync(jobDir, { recursive: true });
+			writeFileSync(join(jobDir, "job.json"), `${JSON.stringify({
+				version: 5,
+				id,
+				status,
+				mode: "advisor",
+				cwd: workspace,
+				workspaceRoot: workspace,
+				writerRoot: workspace,
+				createdAt: finishedAt,
+				finishedAt: status === "running" ? null : finishedAt,
+				threadId: `thread-${id.slice(-8)}`,
+				result: { status: "working_synthesis", working_synthesis: `result ${id}` },
+			}, null, 2)}\n`);
+		};
+		const oldIds = [
+			"codex-2026-06-01T00-00-00-000Z-00000001",
+			"codex-2026-06-02T00-00-00-000Z-00000002",
+			"codex-2026-06-03T00-00-00-000Z-00000003",
+			"codex-2026-06-04T00-00-00-000Z-00000004",
+		];
+		oldIds.forEach((id, index) => writeFixture(id, "completed", `2026-06-0${index + 1}T00:00:00.000Z`));
+		const recentId = "codex-2026-08-28T00-00-00-000Z-00000005";
+		const unknownId = "codex-2026-05-01T00-00-00-000Z-00000006";
+		const runningId = "codex-2026-05-01T00-00-00-000Z-00000007";
+		writeFixture(recentId, "completed", "2026-08-28T00:00:00.000Z");
+		writeFixture(unknownId, "outcome_unknown", "2026-05-01T00:00:00.000Z");
+		writeFixture(runningId, "running", "2026-05-01T00:00:00.000Z");
+
+		const retention = await maintainCodexJobRetention({
+			jobRoot,
+			terminalDays: 30,
+			keepTerminalJobs: 2,
+			nowMs: Date.parse("2026-08-29T00:00:00.000Z"),
+			force: true,
+		});
+		assert.deepEqual(retention.archived.sort(), oldIds.slice(0, 3));
+		for (const id of oldIds.slice(0, 3)) assert.equal(existsSync(join(jobRoot, id)), false);
+		for (const id of [oldIds[3], recentId, unknownId, runningId]) assert.equal(existsSync(join(jobRoot, id)), true);
+		const archived = await readCodexJob(oldIds[0], { jobRoot });
+		assert.equal(archived.archived, true);
+		assert.equal(archived.result.working_synthesis, `result ${oldIds[0]}`);
+		assert.equal((readFileSync(retention.archivePath, "utf8").trim().split("\n")).length, 3);
+
+		const repeated = await maintainCodexJobRetention({
+			jobRoot,
+			terminalDays: 30,
+			keepTerminalJobs: 2,
+			nowMs: Date.parse("2026-08-29T00:00:00.000Z"),
+			force: true,
+		});
+		assert.deepEqual(repeated.archived, []);
+		assert.equal((readFileSync(retention.archivePath, "utf8").trim().split("\n")).length, 3);
+		const throttled = await maintainCodexJobRetention({ jobRoot, nowMs: Date.parse("2026-08-29T01:00:00.000Z") });
+		assert.equal(throttled.skipped, "recently-checked");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

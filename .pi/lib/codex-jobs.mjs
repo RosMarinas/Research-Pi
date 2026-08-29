@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { access, mkdir, open, readFile, readdir, realpath, rename, unlink, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdir, open, readFile, readdir, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { capabilityGrantSummary, listCapabilityGrants, resolveCapabilityContext } from "./host-capabilities.mjs";
+import { withOwnerFileLock } from "./owner-file-lock.mjs";
 import { researchPiStateRoot } from "./runtime-paths.mjs";
 import {
 	codexPermissionProfile,
@@ -28,6 +29,8 @@ export const DEFAULT_CODEX_EXECUTOR_MODEL = process.env.RESEARCH_PI_CODEX_EXECUT
 export const DEFAULT_CODEX_EXECUTOR_REASONING_EFFORT = process.env.RESEARCH_PI_CODEX_EXECUTOR_EFFORT?.trim() || "max";
 export const DEFAULT_CODEX_MODEL = DEFAULT_CODEX_EXECUTOR_MODEL;
 export const DEFAULT_CODEX_REASONING_EFFORT = DEFAULT_CODEX_EXECUTOR_REASONING_EFFORT;
+export const DEFAULT_CODEX_RETENTION_DAYS = Number.parseInt(process.env.RESEARCH_PI_CODEX_RETENTION_DAYS ?? "30", 10) || 30;
+export const DEFAULT_CODEX_KEEP_TERMINAL_JOBS = Number.parseInt(process.env.RESEARCH_PI_CODEX_KEEP_TERMINAL_JOBS ?? "200", 10) || 200;
 // App Server dynamic tools are fixed when a thread is created and cannot be
 // added by thread/resume. Bump this whenever the Research Pi dynamic tool set
 // or its required schemas change so pre-existing threads refresh once.
@@ -271,6 +274,98 @@ export async function writeJsonAtomic(path, value, mode = 0o600) {
 
 export async function readJson(path) {
 	return JSON.parse(await readFile(path, "utf8"));
+}
+
+export function codexJobArchivePath(jobRoot = DEFAULT_CODEX_JOB_ROOT) {
+	return join(dirname(resolve(jobRoot)), "archive", "jobs.jsonl");
+}
+
+async function readCodexJobArchive(jobRoot) {
+	const path = codexJobArchivePath(jobRoot);
+	let raw;
+	try {
+		raw = await readFile(path, "utf8");
+	} catch (error) {
+		if (error?.code === "ENOENT") return new Map();
+		throw error;
+	}
+	const jobs = new Map();
+	for (const line of raw.split("\n")) {
+		if (!line.trim()) continue;
+		try {
+			const job = JSON.parse(line);
+			if (JOB_ID_PATTERN.test(job?.id)) jobs.set(job.id, job);
+		} catch {
+			// One malformed historical row must not hide the remaining archive.
+		}
+	}
+	return jobs;
+}
+
+async function readArchivedCodexJob(jobRoot, jobId) {
+	return (await readCodexJobArchive(jobRoot)).get(jobId) ?? null;
+}
+
+export async function maintainCodexJobRetention(options = {}) {
+	const jobRoot = resolve(options.jobRoot ?? DEFAULT_CODEX_JOB_ROOT);
+	const terminalDays = Number.isInteger(options.terminalDays) ? options.terminalDays : DEFAULT_CODEX_RETENTION_DAYS;
+	const keepTerminalJobs = Number.isInteger(options.keepTerminalJobs) ? options.keepTerminalJobs : DEFAULT_CODEX_KEEP_TERMINAL_JOBS;
+	if (terminalDays < 1 || keepTerminalJobs < 1) throw new Error("Codex retention requires positive terminalDays and keepTerminalJobs");
+	const archivePath = codexJobArchivePath(jobRoot);
+	const archiveDir = dirname(archivePath);
+	const stampPath = join(archiveDir, "retention.json");
+	const nowMs = Number.isFinite(options.nowMs) ? options.nowMs : Date.now();
+	await mkdir(archiveDir, { recursive: true, mode: 0o700 });
+
+	return await withOwnerFileLock(`${stampPath}.lock`, async () => {
+		if (!options.force) {
+			const stamp = await readJson(stampPath).catch(() => null);
+			const lastRun = Date.parse(stamp?.lastRunAt ?? "");
+			if (Number.isFinite(lastRun) && nowMs - lastRun < 24 * 60 * 60 * 1000) {
+				return { scanned: 0, archived: [], archivePath, skipped: "recently-checked" };
+			}
+		}
+
+		let entries = [];
+		try {
+			entries = await readdir(jobRoot, { withFileTypes: true });
+		} catch (error) {
+			if (error?.code !== "ENOENT") throw error;
+		}
+		const terminalJobs = [];
+		for (const entry of entries) {
+			if (!entry.isDirectory() || !JOB_ID_PATTERN.test(entry.name)) continue;
+			try {
+				const job = await readCodexJob(entry.name, { jobRoot, reconcile: false });
+				if (["completed", "failed", "cancelled"].includes(job.status)) terminalJobs.push(job);
+			} catch {
+				// Damaged and nonterminal jobs remain untouched for explicit recovery.
+			}
+		}
+		terminalJobs.sort((left, right) => Date.parse(right.finishedAt ?? right.createdAt) - Date.parse(left.finishedAt ?? left.createdAt));
+		const protectedIds = new Set(terminalJobs.slice(0, keepTerminalJobs).map((job) => job.id));
+		const cutoff = nowMs - terminalDays * 24 * 60 * 60 * 1000;
+		const candidates = terminalJobs.filter((job) => {
+			const settledAt = Date.parse(job.finishedAt ?? job.createdAt);
+			return !protectedIds.has(job.id) && Number.isFinite(settledAt) && settledAt < cutoff;
+		});
+		const archivedJobs = await readCodexJobArchive(jobRoot);
+		const additions = candidates
+			.filter((job) => !archivedJobs.has(job.id))
+			.map((job) => ({ ...job, archived: true, archivedAt: new Date(nowMs).toISOString() }));
+		if (additions.length) {
+			await appendFile(archivePath, additions.map((job) => JSON.stringify(job)).join("\n") + "\n", { encoding: "utf8", mode: 0o600 });
+		}
+		for (const job of candidates) await rm(join(jobRoot, job.id), { recursive: true, force: true });
+		await writeJsonAtomic(stampPath, {
+			version: 1,
+			lastRunAt: new Date(nowMs).toISOString(),
+			terminalDays,
+			keepTerminalJobs,
+			archivedCount: candidates.length,
+		});
+		return { scanned: entries.length, archived: candidates.map((job) => job.id), archivePath, skipped: null };
+	}, { timeoutMessage: "Timed out acquiring the Codex retention lock" });
 }
 
 export async function updateJobFile(jobDir, update) {
@@ -883,10 +978,19 @@ export async function readCodexJob(jobId, options = {}) {
 	validateJobId(jobId);
 	const jobRoot = resolve(options.jobRoot ?? DEFAULT_CODEX_JOB_ROOT);
 	const jobDir = join(jobRoot, jobId);
-	let job = await readJson(join(jobDir, "job.json"));
+	let archived = false;
+	let job;
+	try {
+		job = await readJson(join(jobDir, "job.json"));
+	} catch (error) {
+		if (error?.code !== "ENOENT") throw error;
+		job = await readArchivedCodexJob(jobRoot, jobId);
+		if (!job) throw error;
+		archived = true;
+	}
 	await assertCodexJobWorkspace(job, options.expectedCwd);
 	assertCodexJobLeader(job, options);
-	if (options.reconcile !== false && !isTerminalStatus(job.status)) {
+	if (!archived && options.reconcile !== false && !isTerminalStatus(job.status)) {
 		const createdAge = Date.now() - Date.parse(job.createdAt);
 		const identifiedWorkerAlive = job.workerInstanceId
 			? await workerLeaseIsFresh(jobRoot, job.id, job.workerInstanceId)
@@ -919,7 +1023,7 @@ export async function readCodexJob(jobId, options = {}) {
 			}));
 		}
 	}
-	if (job.resultPath) {
+	if (!archived && job.resultPath) {
 		try {
 			job.result = await readJson(job.resultPath);
 		} catch {
@@ -1121,6 +1225,7 @@ export function publicJobView(job) {
 			: git;
 	return {
 		id: job.id,
+		archived: job.archived === true,
 		transport: job.transport ?? "exec-json",
 		autoNotify: job.autoNotify ?? true,
 		leaderSessionId: job.leaderSessionId ?? null,

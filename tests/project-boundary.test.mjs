@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -17,6 +18,7 @@ import {
 	buildSandboxRuntimeConfig,
 	codexPermissionConfigArguments,
 	directToolPath,
+	ensureProjectLocalStateExcluded,
 	fullAccessPermissionProfileDefinition,
 	isAnalysisReadOnlySshCommand,
 	isProtectedProjectMutation,
@@ -150,6 +152,36 @@ test("path resolution accepts project paths and detects traversal plus symlink e
 		assert.match(boundaryWarning(escaped, "read tool"), /真实路径/);
 	} finally {
 		rmSync(parent, { recursive: true, force: true });
+	}
+});
+
+test("project-local Research Pi state is idempotently excluded through shared Git metadata", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-local-exclude-"));
+	try {
+		const main = join(root, "main");
+		const worktree = join(root, "worktree");
+		mkdirSync(main);
+		execFileSync("git", ["init", "-q", main]);
+		writeFileSync(join(main, "README.md"), "fixture\n");
+		execFileSync("git", ["-C", main, "add", "README.md"]);
+		execFileSync("git", ["-C", main, "-c", "user.name=Research Pi Test", "-c", "user.email=test@research-pi.invalid", "commit", "-q", "-m", "fixture"]);
+		execFileSync("git", ["-C", main, "worktree", "add", "-q", "-b", "fixture-worktree", worktree]);
+
+		const first = await ensureProjectLocalStateExcluded(worktree, { environment: { ...process.env } });
+		assert.equal(first.status, "added");
+		assert.equal(first.changed, true);
+		assert.equal(realpathSync(first.path), realpathSync(join(main, ".git", "info", "exclude")));
+		mkdirSync(join(worktree, ".pi", "research"), { recursive: true });
+		writeFileSync(join(worktree, ".pi", "research", "experiments.jsonl"), "{}\n");
+		assert.equal(execFileSync("git", ["-C", worktree, "status", "--short"], { encoding: "utf8" }), "");
+
+		const second = await ensureProjectLocalStateExcluded(worktree, { environment: { ...process.env } });
+		assert.equal(second.status, "already-ignored");
+		assert.equal(second.changed, false);
+		assert.equal((readFileSync(first.path, "utf8").match(/^\/\.pi\/$/gm) ?? []).length, 1);
+		assert.equal((await ensureProjectLocalStateExcluded(join(root, "plain"))).status, "not-git");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
 	}
 });
 

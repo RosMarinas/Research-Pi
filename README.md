@@ -118,7 +118,7 @@ pi --analysis
 | ProjectView | 先链接用户维护的 `RESEARCH.md`，再用 compact 边界冻结 Project Brief，并把最新进展作为 Session 尾部 Delta 注入 |
 | Research Memory | 对历史 Session 和实验记录做本地全文检索，不依赖向量数据库 |
 | Research Compaction | 在模型 settled 后生成带 provenance 的结构化状态，而不只摘要聊天文本 |
-| Experiment Records | 用 `record_experiment` 区分观察、有效性和解释；支持换轨与窄幅状态修订 |
+| Experiment Records | 一条结果写入一个轻量账本，不机械复制 Markdown 或 raw artifact；支持换轨与窄幅状态修订 |
 | Codex Collaboration | 以可续接 mission 调用 advisor/executor，并通过 Runtime mailbox 与 Pi 通信 |
 | Project Boundary | 默认把模型命令限制在当前项目；SSH、外部文件和宿主命令通过显式 capability 授权 |
 | Research Briefing | 在重大结果或阶段交接时恢复工作脉络，并把内部术语翻译成用户可判断的报告 |
@@ -171,6 +171,7 @@ ProjectView 本身是派生视图，不提供会误删项目账本的“全局�
 - 私钥、`.env`、API key、keychain 和云凭据不能进入模型上下文。
 - 确实需要完整宿主权限时可显式使用 `pi --full-access`；它只对本次启动生效，并会在状态栏显示 `🔓 full access`。
 - 配置、Session、Runtime、Codex job、授权账本和 trace 位于用户状态目录，不进入科研仓库。
+- 项目本地 `.pi/` 通过 `.git/info/exclude` 自动隐藏；旧 Codex 终态任务按双门槛压入一个中央归档账本。
 - `pi-traced` 可能记录完整 prompt 与工具内容，只应短时诊断；默认 trace 和 Codex DEBUG SQLite 日志均关闭。
 
 ## 配置与目录
@@ -178,7 +179,7 @@ ProjectView 本身是派生视图，不提供会误删项目账本的“全局�
 ```text
 ~/.config/research-pi/        config.json、schema、credentials.env
 ~/.local/state/research-pi/   sessions、Runtime、memory、Codex、grants、trace
-<research-project>/.pi/       项目实验记录与 checkpoint
+<research-project>/.pi/       本地轻量实验账本（自动从 Git 状态隐藏）
 ```
 
 实际路径以 `pi paths` 为准。Research Pi 的 `config.json` 只管理 Runtime、compact、Codex、搜索、资源与 UI；Leader 的供应商、模型、thinking 和自定义模型由 Pi 原生配置管理：

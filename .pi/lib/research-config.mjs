@@ -88,6 +88,9 @@ export function validateResearchPiConfig(config) {
 	}
 	validateCodexRole("advisor", config.codex?.advisor);
 	validateCodexRole("executor", config.codex?.executor);
+	if (!plainObject(config.codex?.retention)) throw new Error("codex.retention must be an object");
+	positiveInteger(config.codex.retention.terminalDays, "codex.retention.terminalDays");
+	positiveInteger(config.codex.retention.keepTerminalJobs, "codex.retention.keepTerminalJobs");
 	const compact = config.research?.compaction;
 	if (!plainObject(compact)) throw new Error("research.compaction must be an object");
 	positiveInteger(compact.softTokens, "research.compaction.softTokens");
@@ -251,6 +254,8 @@ export function researchPiEnvironment(config) {
 		RESEARCH_PI_CODEX_ADVISOR_EFFORT: config.codex.advisor.reasoningEffort,
 		RESEARCH_PI_CODEX_EXECUTOR_MODEL: config.codex.executor.model,
 		RESEARCH_PI_CODEX_EXECUTOR_EFFORT: config.codex.executor.reasoningEffort,
+		RESEARCH_PI_CODEX_RETENTION_DAYS: String(config.codex.retention.terminalDays),
+		RESEARCH_PI_CODEX_KEEP_TERMINAL_JOBS: String(config.codex.retention.keepTerminalJobs),
 		RESEARCH_PI_COMPACT_SOFT_TOKENS: String(compact.softTokens),
 		RESEARCH_PI_COMPACT_HARD_TOKENS: String(compact.hardTokens),
 		RESEARCH_PI_COMPACT_RECENT_TAIL_TOKENS: compact.recentTailTokens.join(","),
@@ -276,6 +281,7 @@ export function researchPiConfigSummary(config, path) {
 		"Leader model/auth: Pi Core native settings (/login, /model, /scoped-models, /settings)",
 		`Codex advisor: ${config.codex.advisor.model}/${config.codex.advisor.reasoningEffort}`,
 		`Codex executor: ${config.codex.executor.model}/${config.codex.executor.reasoningEffort}`,
+		`Codex retention: ${config.codex.retention.terminalDays} days · keep at least ${config.codex.retention.keepTerminalJobs} terminal jobs`,
 		`Research compact: ${config.research.compaction.softTokens}/${config.research.compaction.hardTokens} tokens · summary target/max ${config.research.compaction.summaryTargetTokens}/${config.research.compaction.summaryMaxTokens}`,
 		`Search: ${config.research.search.enabled} · deepseek/${config.research.search.model} · max ${config.research.search.maxSources} sources`,
 		`UI: theme ${config.pi.settings.theme ?? "research-pi"} · ${config.ui.density} · runtime strip ${config.ui.runtimeStrip}`,

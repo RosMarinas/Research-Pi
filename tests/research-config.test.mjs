@@ -25,6 +25,7 @@ test("Research Pi config owns research runtime settings, not the Leader model ca
 	assert.equal(Object.hasOwn(config, "profiles"), false);
 	assert.equal(Object.hasOwn(config, "providerCompat"), false);
 	assert.equal(config.codex.executor.model, "gpt-5.6-sol");
+	assert.deepEqual(config.codex.retention, { terminalDays: 30, keepTerminalJobs: 200 });
 	assert.equal(config.research.compaction.hardTokens, 384 * 1024);
 	assert.deepEqual(config.research.compaction.recentTailTokens, [24 * 1024, 32 * 1024, 40 * 1024]);
 	assert.equal(config.research.compaction.summaryTargetTokens, 8 * 1024);
@@ -45,6 +46,7 @@ test("partial runtime config merges over defaults and rejects ambiguous or secre
 		/below summaryMaxTokens/,
 	);
 	assert.throws(() => resolveResearchPiConfig({ research: { search: { enabled: "sometimes" } } }), /auto, on, or off/);
+	assert.throws(() => resolveResearchPiConfig({ codex: { retention: { terminalDays: 0 } } }), /positive integer/);
 	assert.throws(() => resolveResearchPiConfig({ pi: { settings: { api_key: "do-not-store-here" } } }), /credential-like/);
 });
 
@@ -132,6 +134,8 @@ test("config exports runtime environment without a second Leader model selection
 	const environment = researchPiEnvironment(defaultResearchPiConfig());
 	assert.equal(Object.hasOwn(environment, "RESEARCH_PI_ACTIVE_PROFILE"), false);
 	assert.equal(environment.RESEARCH_PI_CODEX_ADVISOR_MODEL, "gpt-5.6-sol");
+	assert.equal(environment.RESEARCH_PI_CODEX_RETENTION_DAYS, "30");
+	assert.equal(environment.RESEARCH_PI_CODEX_KEEP_TERMINAL_JOBS, "200");
 	assert.equal(environment.RESEARCH_PI_COMPACT_HARD_TOKENS, String(384 * 1024));
 	assert.equal(environment.RESEARCH_PI_SEARCH_MODEL, "deepseek-v4-flash");
 	assert.equal(environment.RESEARCH_PI_UI_DENSITY, "balanced");
@@ -159,7 +163,7 @@ test("Codex, compact, and search modules consume the configured runtime environm
 		const compact = await import(${JSON.stringify(compact)});
 		const search = await import(${JSON.stringify(search)});
 		const parsed = search.parseDeepSeekWebSearchResponse({content:[{type:"web_search_tool_result",content:[1,2,3].map(i=>({type:"web_search_result",url:"https://example.com/"+i,title:"S"+i}))}]});
-		console.log(JSON.stringify({advisor:codex.defaultCodexModel("advisor"),executor:codex.defaultCodexModel("executor"),effort:codex.defaultCodexReasoningEffort("advisor"),soft:compact.RESEARCH_SOFT_COMPACT_TOKENS,hard:compact.RESEARCH_HARD_COMPACT_TOKENS,tail:compact.RESEARCH_RECENT_TAIL_SCHEDULE,summaryTarget:compact.RESEARCH_SUMMARY_TARGET_TOKENS,summaryMax:compact.RESEARCH_SUMMARY_MAX_TOKENS,sources:parsed.sources.length}));
+		console.log(JSON.stringify({advisor:codex.defaultCodexModel("advisor"),executor:codex.defaultCodexModel("executor"),effort:codex.defaultCodexReasoningEffort("advisor"),retentionDays:codex.DEFAULT_CODEX_RETENTION_DAYS,keepTerminal:codex.DEFAULT_CODEX_KEEP_TERMINAL_JOBS,soft:compact.RESEARCH_SOFT_COMPACT_TOKENS,hard:compact.RESEARCH_HARD_COMPACT_TOKENS,tail:compact.RESEARCH_RECENT_TAIL_SCHEDULE,summaryTarget:compact.RESEARCH_SUMMARY_TARGET_TOKENS,summaryMax:compact.RESEARCH_SUMMARY_MAX_TOKENS,sources:parsed.sources.length}));
 	`;
 	const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
 		encoding: "utf8",
@@ -168,6 +172,8 @@ test("Codex, compact, and search modules consume the configured runtime environm
 			RESEARCH_PI_CODEX_ADVISOR_MODEL: "gpt-advisor-configured",
 			RESEARCH_PI_CODEX_EXECUTOR_MODEL: "gpt-executor-configured",
 			RESEARCH_PI_CODEX_ADVISOR_EFFORT: "high",
+			RESEARCH_PI_CODEX_RETENTION_DAYS: "17",
+			RESEARCH_PI_CODEX_KEEP_TERMINAL_JOBS: "33",
 			RESEARCH_PI_COMPACT_SOFT_TOKENS: "111",
 			RESEARCH_PI_COMPACT_HARD_TOKENS: "222",
 			RESEARCH_PI_COMPACT_RECENT_TAIL_TOKENS: "7,8",
@@ -181,6 +187,8 @@ test("Codex, compact, and search modules consume the configured runtime environm
 		advisor: "gpt-advisor-configured",
 		executor: "gpt-executor-configured",
 		effort: "high",
+		retentionDays: 17,
+		keepTerminal: 33,
 		soft: 111,
 		hard: 222,
 		tail: [7, 8],

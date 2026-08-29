@@ -57,6 +57,8 @@ test("record_experiment mirrors concise evidence into Project Runtime", async ()
 		assert.equal(tool.parameters.required.includes("prediction"), false);
 		assert.equal(tool.parameters.required.includes("hypothesis"), false);
 		assert.equal(tool.parameters.required.includes("validityChecks"), false);
+		assert.equal(tool.parameters.properties.artifacts.maxItems, 12);
+		assert.match(tool.description, /canonical lightweight research memo/);
 		const result = await tool.execute("call-1", {
 			question: "Does the parameterized contract remove lookup leakage?",
 			hypothesis: "Continuous action holdout distinguishes learning from lookup.",
@@ -79,6 +81,7 @@ test("record_experiment mirrors concise evidence into Project Runtime", async ()
 			model: null,
 		});
 		assert.equal(result.details.runtimeMirrored, true);
+		assert.match(result.content[0].text, /no duplicate Markdown or artifact copy is needed/);
 		assert.equal(result.details.predictionStatus, "preregistered");
 		assert.equal(result.details.evidenceMode, "confirmatory");
 		assert.equal(result.details.runGitCommit, "run-producing-head");

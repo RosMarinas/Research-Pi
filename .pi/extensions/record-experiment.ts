@@ -116,10 +116,12 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "record_experiment",
 		label: "Record Experiment",
-		description: "Persist one lightweight research memo when an observation changes a research judgment. Do not use for ordinary probes, routine commands, or plans without results.",
+		description: "Persist one canonical lightweight research memo when an observation changes a research judgment. This ledger entry replaces routine duplicate Markdown; it does not create or copy artifacts.",
 		promptSnippet: "Record a decision-changing experiment result in the project research ledger",
 		promptGuidelines: [
 			"Use record_experiment only after a result materially changes a research judgment; choose evidenceMode honestly: confirmatory for an ex-ante prediction, exploratory for unplanned findings, diagnostic for a mechanism/failure-localization check, and validity_failure when the intended experiment cannot be interpreted.",
+			"Treat this ledger entry as the default complete memo. Do not also create a Markdown report, run directory, activation note, one-pager, or artifact bundle unless the result freezes a protocol, formally settles a batch, or changes a claim/route for human review.",
+			"artifacts are concise references to already-existing canonical evidence. Do not copy generated outputs into the repository or enumerate raw shards, checkpoints, rollouts, panels, or seed rows.",
 			"Never reconstruct a hypothesis, prediction, validity check, registration, or next step to satisfy the tool. Confirmatory evidence needs a real observation-before prediction; preregistered needs registrationRef; valid needs an actual validity check.",
 			"For an older route, provide its exact trackRef. Provide runGitCommit when known; recordedAtGit never substitutes for executed-code identity.",
 		],
@@ -149,7 +151,7 @@ export default function (pi: ExtensionAPI) {
 			nextStep: Type.Optional(Type.String({ description: "Next highest-information action, if one is actually known" })),
 			runId: Type.Optional(Type.String({ description: "External training/evaluation run identifier, if any" })),
 			runGitCommit: Type.Optional(Type.String({ description: "Git commit of the code that actually produced the run; do not substitute the record-time HEAD" })),
-			artifacts: Type.Optional(Type.Array(Type.String(), { description: "Relevant artifact paths or URLs" })),
+			artifacts: Type.Optional(Type.Array(Type.String(), { maxItems: 12, description: "At most 12 concise paths or URLs to already-existing canonical evidence; never enumerate raw files" })),
 			trackRef: Type.Optional(Type.String({ description: "Exact Runtime research-track provenance when this result belongs to a non-current route" })),
 			idempotencyKey: Type.Optional(Type.String({ description: "Stable caller key for safe retries; runId plus question is used when available" })),
 		}),
@@ -274,7 +276,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			return {
-				content: [{ type: "text", text: `Recorded ${id} in ${join(CONFIG_DIR_NAME, "research", "experiments.jsonl")}.${runtimeWarning ? ` Project Runtime mirror warning: ${runtimeWarning}` : ""}` }],
+				content: [{ type: "text", text: `Recorded ${id} in the canonical lightweight ledger ${join(CONFIG_DIR_NAME, "research", "experiments.jsonl")}; no duplicate Markdown or artifact copy is needed.${runtimeWarning ? ` Project Runtime mirror warning: ${runtimeWarning}` : ""}` }],
 				details: { ...record, runtimeMirrored: !runtimeWarning, runtimeWarning, duplicateSkipped: false },
 			};
 		},

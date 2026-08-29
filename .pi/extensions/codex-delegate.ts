@@ -7,6 +7,7 @@ import {
 	isCodexJobOwnerError,
 	listCodexJobs,
 	listCodexMissions,
+	maintainCodexJobRetention,
 	publicJobView,
 	readCodexJob,
 	reconcileCodexJobOutcome,
@@ -1028,6 +1029,9 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		shuttingDown = false;
 		releaseCodexReadFuse();
+		const retention = await maintainCodexJobRetention().catch((error) => ({ error: error instanceof Error ? error.message : String(error) }));
+		if ("error" in retention) ctx.ui.notify(`Codex retention check failed without affecting active jobs: ${retention.error}`, "warning");
+		else if (retention.archived.length) ctx.ui.notify(`Archived ${retention.archived.length} old terminal Codex job(s) into ${retention.archivePath}.`, "info");
 		await reattachBranchJobs(ctx);
 	});
 

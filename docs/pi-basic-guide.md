@@ -179,7 +179,9 @@ Codex executor 缺少 grant 时不再先失败后咨询 Leader。`research_pi_ho
 
 Pi 现在提供这些低摩擦研究工具：
 
-- `record_experiment`：当结果真正改变研究判断时，Pi 追加一条 `.pi/research/experiments.jsonl`，并区分 confirmatory、exploratory、diagnostic 与 validity_failure。只有 confirmatory 要求假设和观察前预测；不存在的 hypothesis、prediction、validityChecks、nextStep 不能事后补写。preregistered prediction 需要 `registrationRef`；未知 `trackRef` 会在写盘前拒绝。重试会去重，`runGitCommit` 与写记录时自动捕获的 `recordedAtGit` 分开保存。
+- `record_experiment`：当结果真正改变研究判断时，Pi 向唯一的 `.pi/research/experiments.jsonl` 追加一条 canonical 备忘录，并区分 confirmatory、exploratory、diagnostic 与 validity_failure。它不会创建 Markdown、Run 目录或复制 artifact；普通 probe 和执行日志不应重复文档化。只有 confirmatory 要求假设和观察前预测；不存在的 hypothesis、prediction、validityChecks、nextStep 不能事后补写。preregistered prediction 需要 `registrationRef`；未知 `trackRef` 会在写盘前拒绝。重试会去重，artifact 最多保留 12 个简洁引用。
+
+Git 项目首次启动时，Research Pi 会通过本地 `.git/info/exclude` 隐藏 `/.pi/`，不修改共享 `.gitignore`，也不产生项目 diff。一个 coherent batch 默认最多保留一份冻结 protocol 和一份简洁 settlement；原始 panel、checkpoint、shard、rollout、批量 ledger 和生成 payload 应由项目 artifact store 管理。
 - `record_research_transition`：当用户明确改变研究问题，或有效证据使旧路线成为 archived/superseded/parallel 时，记录一次 project-level 换轨。普通 next step、代码重构或 Codex completed 不触发；parallel 分支可用精确 `fromTrackRef` 指定从哪条 live route 继续。
 - `amend_project_state`：当当前 ProjectView 只有局部字段需要依据明确用户决策、实验、run 或文档进行纠正时，提交带 Project revision 的 append-only patch。初始状态用 `/compact`，换轨用 `record_research_transition`；数组字段是整组替换，省略字段保持不变。
 - `research_checkpoint`：在大步替换、回滚或废弃路线前，把当前 tracked Git 状态保存到 `refs/pi-research/checkpoints/...`。它不会切分支或清理工作树，也不会捕获 untracked 文件。
@@ -249,6 +251,8 @@ advisor 保持项目只读，但不再默认采取反驳姿态。它可通过 Ru
 同步 advisor 遇到问题时不会继续占住当前 tool call：它以 `input_required` 把控制权交还 Leader，Leader 使用返回的精确 `jobId/requestId` 回复，随后沿用同一个 worker、thread 和 turn 继续。此状态不是失败，不应 cancel 或重新启动 advisor。完全异步咨询仍可显式使用 `background=true`。
 
 Pi 会获得一个 `codex-...` job ID。单个 job 时，底部状态栏持续显示 job 后八位、advisor/executor 模式和明确的 `starting/running/completed/failed/cancelled/outcome_unknown` transport lifecycle；`now:` 表示当前叶子活动，`last:` 表示最近结束的命令或工具。两个以上 Action 或并发叶子活动出现时，footer 只显示不会跳动的聚合计数，Runtime Dock 为每个 Action/活动保留固定多行；超过可见上限时使用 `/watch`。`research_pi_host · completed` 只表示一次工具调用完成，job `completed` 只表示 Codex turn 正常结算；executor 是否完成委派目标由 final result 的 `outcome=succeeded` 且 `goal_satisfied=true` 决定。后台任务未结束时，Leader 不应为了发现完成而反复调用 `status/result`：人类观察进度用 `/watch`，模型等待 Runtime mailbox 的下一条 blocking/terminal 事件；只有显式用户查询、故障恢复或手动管理 `autoNotify=false` 的 job 才需要主动读取同一 job。纯 `status/result/missions` 查询不会把 ProjectView 标成已变更，也不会凭空制造新的 `<research_project_delta>`；真实的 Action 或 mailbox 状态变化仍按原机制刷新。重复启动任务仍然不允许。状态、阻塞问题和完成事件先进入项目 Runtime mailbox，再交给最近 attached 的 Research Leader session。默认 executor 是 project-write + public-network，advisor 是 project-read + public-network；各自的默认 model/effort 位于 `config.json` 的 `codex.executor` 与 `codex.advisor`，也可以在具体委派时覆盖。
+
+Codex 终态任务不会无限保留碎片文件：每天启动时至多检查一次，默认仅将“超过 30 天且不在最近 200 个终态任务中”的 completed/failed/cancelled job 归档到一个中央 JSONL；结构化结果仍能按 job ID 读取。活跃、等待输入和 `outcome_unknown` 任务永不自动归档，Codex thread/context 状态也不受影响。阈值由 `codex.retention` 配置。
 
 `outcome_unknown` 表示 executor 可能已产生文件、Git、远程 run 等副作用，但 worker 没有留下可靠终态。此时不要重跑或猜测：先检查相关外部状态，再让 Pi 调用 `codex_delegate action=reconcile`，提供 `completed|failed|cancelled` 和简短证据说明。同一 workspace 在结案前不会启动另一写入型 Codex；advisor 仍可用于只读排查。
 
