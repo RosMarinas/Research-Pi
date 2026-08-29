@@ -160,6 +160,7 @@ ProjectView 本身是派生视图，不提供会误删项目账本的“全局�
 | `/login`、`/model`、`/scoped-models` | 使用 Pi 原生认证、模型切换和模型范围；Research Pi 不再复制供应商目录 |
 | `/config` | 查看统一配置和切换主题 |
 | `/boundary doctor` | 检查项目、Git、Python、sandbox 与 Codex 环境 |
+| `pi --full-access` | 本次启动显式关闭 Leader/Codex executor 的项目沙箱；Analysis/advisor 仍只读 |
 
 模型可直接调用的研究工具包括 `record_experiment`、`record_research_transition`、`amend_project_state`、`research_checkpoint`、`research_memory_search/read`、`codex_delegate` 和 `host_capability`。
 
@@ -168,6 +169,7 @@ ProjectView 本身是派生视图，不提供会误删项目账本的“全局�
 - 模型 shell 默认可读写当前项目和正常 Git 数据；其他项目、宿主凭据和 Unix socket 不自动开放。
 - SSH target、项目外只读文件和宿主命令需要一次、当前 Session 或当前 Project 范围的明确批准。
 - 私钥、`.env`、API key、keychain 和云凭据不能进入模型上下文。
+- 确实需要完整宿主权限时可显式使用 `pi --full-access`；它只对本次启动生效，并会在状态栏显示 `🔓 full access`。
 - 配置、Session、Runtime、Codex job、授权账本和 trace 位于用户状态目录，不进入科研仓库。
 - `pi-traced` 可能记录完整 prompt 与工具内容，只应短时诊断；默认 trace 和 Codex DEBUG SQLite 日志均关闭。
 

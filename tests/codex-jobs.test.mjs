@@ -35,7 +35,7 @@ import {
 	waitForCodexJob,
 	workerLeaseIsFresh,
 } from "../.pi/lib/codex-jobs.mjs";
-import { CODEX_ADVISOR_PROFILE, CODEX_EXECUTOR_PROFILE } from "../.pi/lib/project-boundary.mjs";
+import { CODEX_ADVISOR_PROFILE, CODEX_EXECUTOR_PROFILE, CODEX_FULL_ACCESS_PROFILE } from "../.pi/lib/project-boundary.mjs";
 import {
 	RESEARCH_LEADER_ACTOR_ID,
 	attachRuntimeActor,
@@ -530,7 +530,7 @@ if (args.includes("sandbox")) {
   process.exit(0);
 }
 const configText = args.join(" ");
-const sandbox = configText.includes("research_pi_executor") ? "${CODEX_EXECUTOR_PROFILE}" : configText.includes("research_pi_advisor") ? "${CODEX_ADVISOR_PROFILE}" : "unknown";
+const sandbox = configText.includes("research_pi_full_access") ? "${CODEX_FULL_ACCESS_PROFILE}" : configText.includes("research_pi_executor") ? "${CODEX_EXECUTOR_PROFILE}" : configText.includes("research_pi_advisor") ? "${CODEX_ADVISOR_PROFILE}" : "unknown";
 let model = "unknown";
 let isResume = false;
 let activeTurn = null;
@@ -548,7 +548,7 @@ process.stderr.write("fake app-server warning\\n");
 
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
 const complete = (prompt, leaderResponse = "") => {
-  if (sandbox === "${CODEX_EXECUTOR_PROFILE}") {
+  if (sandbox === "${CODEX_EXECUTOR_PROFILE}" || sandbox === "${CODEX_FULL_ACCESS_PROFILE}") {
     writeFileSync(join(process.cwd(), "codex-executed.txt"), "executor ran\\n", "utf8");
   }
   const evidence = [model, sandbox, prompt.includes("Research Pi") ? "role-present" : "role-missing", deltaNotificationsOptedOut ? "delta-opt-out" : "delta-not-opted-out", hostToolPresent ? "host-tool-present" : "host-tool-missing", submissionToolPresent ? "submission-tool-present" : "submission-tool-missing", dynamicToolTypesValid ? "dynamic-tool-types-valid" : "dynamic-tool-types-invalid", turnOutputSchemaPresent ? "turn-schema-present" : "turn-schema-absent", consultationField, isResume ? (resumeParamsClean ? "resume-params-clean" : "resume-dynamic-tools-invalid") : "", process.env.SSH_AUTH_SOCK ? "child-ssh-agent-present" : "child-ssh-agent-absent", leaderResponse].filter(Boolean);
@@ -569,7 +569,7 @@ const complete = (prompt, leaderResponse = "") => {
     summary: isResume ? "resumed" : "finished",
     evidence,
     actions_taken: ["fake action"],
-    changed_files: sandbox === "${CODEX_EXECUTOR_PROFILE}" ? ["codex-executed.txt"] : [],
+    changed_files: sandbox === "${CODEX_EXECUTOR_PROFILE}" || sandbox === "${CODEX_FULL_ACCESS_PROFILE}" ? ["codex-executed.txt"] : [],
     checks: [{ command: "fake-check", result: "passed" }],
     external_effects: [],
     uncertainties: [],
@@ -726,6 +726,15 @@ test("delegation prompt makes advisor collaborative while preserving executor au
 	assert.match(executor, /phase=final_answer/);
 	assert.match(executor, /never encode a plan, preamble, checkpoint/);
 	assert.match(executor, /hypothesis H1/);
+
+	const fullAccessExecutor = buildDelegationPrompt({
+		mode: "executor",
+		task: "inspect an external runtime",
+		fullAccess: true,
+	});
+	assert.match(fullAccessExecutor, /explicit full host access/);
+	assert.match(fullAccessExecutor, /not an OS filesystem or command sandbox/);
+	assert.doesNotMatch(fullAccessExecutor, /project is the hard authority boundary/);
 });
 
 test("continuation notice detects stale Git state without copying filenames", () => {
@@ -843,6 +852,20 @@ test("advisor, executor, and explicit resume produce durable structured jobs", a
 		assert.match(executor.result.evidence.join("\n"), /dynamic-tool-types-valid/);
 		assert.match(executor.result.evidence.join("\n"), /turn-schema-absent/);
 		assert.equal(readFileSync(join(workspace, "codex-executed.txt"), "utf8"), "executor ran\n");
+
+		const fullAccessStart = await startCodexJob({
+			cwd: workspace,
+			jobRoot,
+			codexBin,
+			mode: "executor",
+			fullAccess: true,
+			task: "execute with explicit host access",
+		});
+		const fullAccess = await waitForCodexJob(fullAccessStart.id, { jobRoot });
+		assert.equal(fullAccess.status, "completed");
+		assert.equal(fullAccess.fullAccess, true);
+		assert.equal(fullAccess.sandbox, CODEX_FULL_ACCESS_PROFILE);
+		assert.match(fullAccess.result.evidence.join("\n"), new RegExp(CODEX_FULL_ACCESS_PROFILE));
 
 		const resumedStart = await resumeCodexJob(executor.id, {
 			jobRoot,

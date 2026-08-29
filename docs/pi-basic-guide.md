@@ -50,6 +50,15 @@ cd /path/to/research-pi-harness
 ./run-pi.sh --workspace /path/to/research-project
 ```
 
+只有在任务确实需要不受项目边界限制的宿主操作时，才为本次启动显式加上：
+
+```bash
+pi --full-access
+# 源码入口：./run-pi.sh --full-access --workspace /path/to/research-project
+```
+
+此模式不会写入配置；状态栏显示 `🔓 full access`。Leader 与它新派出的 Codex executor 获得宿主读写/网络权限，Analysis Session 与 Codex advisor 仍保持只读。
+
 需要原始官方行为或本地 trace 时：
 
 ```bash
@@ -418,6 +427,7 @@ Transition 会立即影响后续 Session 的 ProjectView，不必等待 `/compac
 - API key 只放在项目 `.env`，不要粘贴进 prompt、日志或实验文档；
 - DeepSeek Web Search 会额外产生模型和搜索相关 token 开销；简单检索也应保持有界；
 - Pi 的模型 shell 受 OS 级 sandbox runtime 约束，Codex executor 使用 project-only permission profile：项目可写、Git commit 可用、公网开放，项目外用户文件和 Unix sockets 默认不可用；Pi shell 的通用系统 temp 写入被关闭，仅保留 Apple Git 所需的窄 `xcrun_db` 系统缓存例外；Codex CLI 0.146 仍自带系统 temp 兼容路径，Harness 已将 `TMPDIR` 指向项目内并禁止主动越界，但这一处目前是纵深防御，不与 Pi shell 等强；
+- `pi --full-access` 是单次启动的显式例外：Leader 和新建 Codex executor 不再受项目 OS 沙箱限制，状态栏会明确显示；Analysis/advisor 不随之放宽；
 - `.git/hooks` 是项目内唯一默认只读的 Git 子路径，防止实验任务植入后续持久执行；`.git/config`、objects、index 和 refs 可写；
 - 项目内任意 `uv`、Python 和 shell 命令由 sandbox 约束效果，而不是由命令字符串白名单约束；需要宿主 SSH/config/agent 的入口通过一次/session/project 三档 host capability 授权；
 - 项目持久 `trust-ssh` 绑定精确 target，`trust-command` 绑定界面显示的 argv 前缀；代码字符串默认绑定完整 argv。它们可被 Pi 与 Codex executor 自动复用，也可用 `/boundary revoke` 撤销；

@@ -775,6 +775,7 @@ async function main() {
 			request.runtimeTmp,
 			request.gitIdentity,
 			systemRuntime,
+			{ fullAccess: request.fullAccess === true },
 		);
 		if (!request.skipSandboxPreflight) {
 			await writeJobUpdate((current) => ({
@@ -790,6 +791,7 @@ async function main() {
 				gitIdentity: request.gitIdentity,
 				runtimePolicy: systemRuntime,
 				environment: process.env,
+				fullAccess: request.fullAccess === true,
 			});
 		}
 		const appServerArgs = [

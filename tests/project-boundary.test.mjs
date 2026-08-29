@@ -11,14 +11,17 @@ import {
 } from "../.pi/lib/host-capabilities.mjs";
 import {
 	CODEX_EXECUTOR_PROFILE,
+	CODEX_FULL_ACCESS_PROFILE,
 	analysisSshCommandPolicy,
 	boundaryWarning,
 	buildSandboxRuntimeConfig,
 	codexPermissionConfigArguments,
 	directToolPath,
+	fullAccessPermissionProfileDefinition,
 	isAnalysisReadOnlySshCommand,
 	isProtectedProjectMutation,
 	permissionProfileDefinition,
+	researchPiFullAccessEnabled,
 	resolveBoundaryPath,
 	resolveExecutablePath,
 	resolveProjectRoot,
@@ -46,6 +49,32 @@ test("project boundary exposes one opaque host-capability tool", () => {
 	assert.match(JSON.stringify(hostTool.parameters), /grantId/);
 	assert.deepEqual(commands, ["boundary"]);
 	assert.equal(typeof getHostCapabilityUiAdapter()?.review, "function");
+});
+
+test("full access bypasses direct-path approval for Leader but keeps the mode explicit in prompt and UI", async () => {
+	const previous = process.env.RESEARCH_PI_FULL_ACCESS;
+	const tools = [];
+	const handlers = {};
+	try {
+		process.env.RESEARCH_PI_FULL_ACCESS = "1";
+		projectBoundaryExtension({
+			registerTool(tool) { tools.push(tool); },
+			registerCommand() {},
+			on(name, handler) { handlers[name] = handler; },
+		});
+		assert.match(tools.find((tool) => tool.name === "bash").label, /full access/);
+		const ctx = {
+			hasUI: true,
+			sessionManager: { getBranch: () => [], getSessionId: () => "full-access-session" },
+			ui: { confirm() { throw new Error("full access must not prompt"); } },
+		};
+		assert.equal(await handlers.tool_call({ toolName: "read", input: { path: "/outside/project.txt" } }, ctx), undefined);
+		const injected = handlers.before_agent_start({ systemPrompt: "base" }, ctx);
+		assert.match(injected.systemPrompt, /explicitly launched Research Pi with full access/);
+	} finally {
+		if (previous === undefined) delete process.env.RESEARCH_PI_FULL_ACCESS;
+		else process.env.RESEARCH_PI_FULL_ACCESS = previous;
+	}
 });
 
 test("project boundary reuses an approved external-read grant", async () => {
@@ -264,6 +293,26 @@ test("Codex executor profile keeps project and Git writable with public network"
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
+});
+
+test("explicit full access selects a root-write Codex executor profile without widening advisor", () => {
+	assert.equal(researchPiFullAccessEnabled({ RESEARCH_PI_FULL_ACCESS: "1" }), true);
+	assert.equal(researchPiFullAccessEnabled({ RESEARCH_PI_FULL_ACCESS: "0" }), false);
+	const profile = fullAccessPermissionProfileDefinition();
+	assert.match(profile, /":root" = "write"/);
+	assert.match(profile, /domains = \{ "\*" = "allow" \}/);
+
+	const executorArgs = codexPermissionConfigArguments("executor", "/project", "/project/.tmp", null, undefined, {
+		fullAccess: true,
+	});
+	assert.ok(executorArgs.some((arg) => arg.includes(`default_permissions="${CODEX_FULL_ACCESS_PROFILE}"`)));
+	assert.ok(executorArgs.some((arg) => arg.includes('filesystem = { ":root" = "write" }')));
+
+	const advisorArgs = codexPermissionConfigArguments("advisor", "/project", undefined, null, undefined, {
+		fullAccess: true,
+	});
+	assert.ok(advisorArgs.some((arg) => arg.includes('default_permissions="research_pi_advisor"')));
+	assert.ok(advisorArgs.some((arg) => arg.includes('":root" = "deny"')));
 });
 
 test("linked worktrees grant their real Git dir and common dir without making hooks writable", () => {

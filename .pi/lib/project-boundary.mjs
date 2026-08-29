@@ -11,6 +11,16 @@ const execFileAsync = promisify(execFile);
 export const PROJECT_BOUNDARY_PROFILE = "research_pi_project";
 export const CODEX_EXECUTOR_PROFILE = "research_pi_executor";
 export const CODEX_ADVISOR_PROFILE = "research_pi_advisor";
+export const CODEX_FULL_ACCESS_PROFILE = "research_pi_full_access";
+
+export function researchPiFullAccessEnabled(environment = process.env) {
+	return environment.RESEARCH_PI_FULL_ACCESS === "1";
+}
+
+export function codexPermissionProfile(mode, options = {}) {
+	if (mode !== "advisor" && options.fullAccess === true) return CODEX_FULL_ACCESS_PROFILE;
+	return mode === "advisor" ? CODEX_ADVISOR_PROFILE : CODEX_EXECUTOR_PROFILE;
+}
 
 const SECRET_ENVIRONMENT_PATTERN = /(?:^|_)(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?|AUTH)(?:_|$)/i;
 const DIRECT_PATH_TOOLS = new Set(["read", "write", "edit", "grep", "find", "ls"]);
@@ -417,9 +427,20 @@ export function permissionProfileDefinition({ access = "write", workspaceRoot, r
 		.join(" ");
 }
 
-export function codexPermissionConfigArguments(mode, workspaceRoot, runtimeTmp, gitIdentity, runtimePolicy) {
+export function fullAccessPermissionProfileDefinition() {
+	return [
+		"{",
+		'description = "Research Pi explicit full host access",',
+		'filesystem = { ":root" = "write" },',
+		'network = { enabled = true, allow_local_binding = true, domains = { "*" = "allow" } }',
+		"}",
+	].join(" ");
+}
+
+export function codexPermissionConfigArguments(mode, workspaceRoot, runtimeTmp, gitIdentity, runtimePolicy, options = {}) {
 	const advisor = mode === "advisor";
-	const profile = advisor ? CODEX_ADVISOR_PROFILE : CODEX_EXECUTOR_PROFILE;
+	const fullAccess = !advisor && options.fullAccess === true;
+	const profile = codexPermissionProfile(mode, { fullAccess });
 	const access = advisor ? "read" : "write";
 	const normalizedRuntime = normalizeSystemRuntimePolicy(runtimePolicy);
 	const shellEnvironment = {
@@ -450,7 +471,7 @@ export function codexPermissionConfigArguments(mode, workspaceRoot, runtimeTmp, 
 		"-c",
 		`default_permissions=${JSON.stringify(profile)}`,
 		"-c",
-		`permissions.${profile}=${permissionProfileDefinition({ access, workspaceRoot, runtimePolicy: normalizedRuntime })}`,
+		`permissions.${profile}=${fullAccess ? fullAccessPermissionProfileDefinition() : permissionProfileDefinition({ access, workspaceRoot, runtimePolicy: normalizedRuntime })}`,
 		"-c",
 		'shell_environment_policy.inherit="core"',
 		"-c",
@@ -466,7 +487,8 @@ export function codexPermissionConfigArguments(mode, workspaceRoot, runtimeTmp, 
 
 export async function runCodexSandboxPreflight(options) {
 	const mode = options.mode === "advisor" ? "advisor" : "executor";
-	const profile = mode === "advisor" ? CODEX_ADVISOR_PROFILE : CODEX_EXECUTOR_PROFILE;
+	const fullAccess = mode !== "advisor" && options.fullAccess === true;
+	const profile = codexPermissionProfile(mode, { fullAccess });
 	const cwd = resolve(options.cwd);
 	const runtimePolicy = normalizeSystemRuntimePolicy(options.runtimePolicy);
 	const permissionArgs = codexPermissionConfigArguments(
@@ -475,12 +497,13 @@ export async function runCodexSandboxPreflight(options) {
 		options.runtimeTmp,
 		options.gitIdentity,
 		runtimePolicy,
+		{ fullAccess },
 	);
 	const commands = ["git --version >/dev/null"];
 	if (existsSync(join(cwd, ".git"))) {
 		commands.push("git status --porcelain=v1 --untracked-files=no >/dev/null");
 	}
-	if (existsSync(join(cwd, ".env"))) {
+	if (!fullAccess && existsSync(join(cwd, ".env"))) {
 		commands.push('if dd if=.env of=/dev/null bs=1 count=1 2>/dev/null; then echo "project .env became readable" >&2; exit 91; fi');
 	}
 	if (mode === "executor" && options.runtimeTmp) {
