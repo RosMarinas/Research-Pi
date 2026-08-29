@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile, readdir, stat } from "node:fs/promises";
+import { lstat, readFile, readdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { RESEARCH_COMPACTION_KIND, RESEARCH_COMPACTION_VERSION } from "./research-compact.mjs";
 import { RESEARCH_LEADER_ACTOR_ID, runtimeResearchTrack, runtimeTrackStatus } from "./research-runtime.mjs";
@@ -7,8 +7,11 @@ import { RESEARCH_LEADER_ACTOR_ID, runtimeResearchTrack, runtimeTrackStatus } fr
 export const PROJECT_VIEW_KIND = "research-project-view";
 export const PROJECT_VIEW_DELTA_KIND = "research-project-view-delta";
 export const PROJECT_VIEW_VERSION = 5;
+export const PROJECT_ANCHOR_FILE = "RESEARCH.md";
 const MAX_SESSION_FILES = 24;
 const MAX_SESSION_BYTES = 64 * 1024 * 1024;
+const MAX_PROJECT_ANCHOR_BYTES = 64 * 1024;
+const MAX_PROJECT_ANCHOR_CHARS = 3_600;
 
 function compact(value, limit = 500) {
 	const text = String(value ?? "").replace(/\s+/g, " ").trim();
@@ -21,6 +24,44 @@ function list(value, limit) {
 
 function fingerprint(value) {
 	return createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 20);
+}
+
+export async function readProjectAnchor(workspaceRoot) {
+	const path = join(resolve(workspaceRoot), PROJECT_ANCHOR_FILE);
+	let info;
+	try {
+		info = await lstat(path);
+	} catch (error) {
+		if (error?.code === "ENOENT") return null;
+		throw error;
+	}
+	if (!info.isFile()) {
+		return {
+			path: PROJECT_ANCHOR_FILE,
+			content: "",
+			warning: "Project Anchor was not loaded because RESEARCH.md is not a regular file.",
+			fingerprint: fingerprint({ path: PROJECT_ANCHOR_FILE, kind: "not-regular" }),
+		};
+	}
+	if (info.size > MAX_PROJECT_ANCHOR_BYTES) {
+		return {
+			path: PROJECT_ANCHOR_FILE,
+			content: "",
+			warning: `Project Anchor was not loaded because it exceeds ${MAX_PROJECT_ANCHOR_BYTES / 1024} KiB; keep it short and move detailed records elsewhere.`,
+			fingerprint: fingerprint({ path: PROJECT_ANCHOR_FILE, size: info.size, kind: "oversized" }),
+		};
+	}
+	const raw = (await readFile(path, "utf8")).trim();
+	const truncated = raw.length > MAX_PROJECT_ANCHOR_CHARS;
+	const content = truncated ? raw.slice(0, MAX_PROJECT_ANCHOR_CHARS).trimEnd() : raw;
+	return {
+		path: PROJECT_ANCHOR_FILE,
+		content,
+		warning: truncated
+			? `Only the first ${MAX_PROJECT_ANCHOR_CHARS} characters are injected; shorten RESEARCH.md for a complete stable anchor.`
+			: null,
+		fingerprint: fingerprint({ path: PROJECT_ANCHOR_FILE, content, truncated }),
+	};
 }
 
 const LIVE_ACTION_STATUSES = new Set(["starting", "running", "input_required", "cancelling", "outcome_unknown"]);
@@ -187,7 +228,7 @@ export async function readRecentExperiments(path, maxRecords = 6) {
 	return records.slice(-maxRecords);
 }
 
-export function buildProjectView({ runtime, snapshot, git = {}, experiments = [] }) {
+export function buildProjectView({ runtime, snapshot, git = {}, experiments = [], anchor = null }) {
 	const currentTrack = runtimeResearchTrack(snapshot);
 	const briefState = snapshot.projectBrief?.state ?? snapshot.projectState?.state ?? null;
 	const actions = snapshot.actions.filter((action) =>
@@ -268,6 +309,7 @@ export function buildProjectView({ runtime, snapshot, git = {}, experiments = []
 		version: PROJECT_VIEW_VERSION,
 		projectKey: runtime.projectKey,
 		workspaceRoot: runtime.workspaceRoot,
+		anchor,
 		briefState,
 		briefRevision: snapshot.projectBrief?.revision ?? stateRevision,
 		git: { branch: git.branch ?? null, commit: git.commit?.slice(0, 12) ?? null, dirty: git.dirty ?? null },
@@ -329,8 +371,17 @@ export function renderProjectBrief(view) {
 		"Stable Project Brief captured at the latest successful research compaction. It orients a new Agent or user; it intentionally excludes the newest work. The Project Delta at the prompt tail is newer and controls current progress.",
 		`Project: ${view.projectKey} · ${view.workspaceRoot}`,
 		`Brief boundary: Project revision ${view.briefRevision || "none"}`,
-		"=== PROJECT OVERVIEW AND FINAL GOAL ===",
 	];
+	if (view.anchor) {
+		lines.push(
+			"=== USER-MAINTAINED PROJECT ANCHOR ===",
+			`Linked file: ${view.anchor.path} · maintained by the user/project, never rewritten by compaction`,
+			"This anchor is authoritative for project intent and guardrails; empirical claims still require experiment evidence.",
+			view.anchor.content || "[No anchor content was loaded.]",
+			view.anchor.warning ? `[Anchor note: ${view.anchor.warning}]` : undefined,
+		);
+	}
+	lines.push("=== PROJECT OVERVIEW AND FINAL GOAL ===");
 	if (state) {
 		lines.push(
 			`Overview: ${compact(brief?.overview, 1_200) || compact(state.researchQuestion, 1_200) || "not established"}`,
@@ -363,7 +414,7 @@ export function renderProjectBrief(view) {
 		"This Brief stays byte-stable until the next successful /compact. Read the Project Delta after the Session history for current work, evidence, and next decisions.",
 		"</research_project_view>",
 	);
-	return truncateSection(lines.filter(Boolean).join("\n"), 5_200, "[Project Brief truncated; use /runtime view for the stored compact-boundary orientation.]\n</research_project_view>");
+	return truncateSection(lines.filter(Boolean).join("\n"), 8_800, "[Project Brief truncated; shorten RESEARCH.md or use /runtime view for the stored orientation.]\n</research_project_view>");
 }
 
 export function renderProjectView(view, options = {}) {
@@ -465,8 +516,20 @@ export function renderProjectViewDelta(view, options = {}) {
 }
 
 export function materializeProjectViewContext(messages, briefText, deltaText, details = {}) {
-	let hasPersistentBrief = false;
-	const filtered = messages.filter((message) => {
+	let latestPersistentBriefIndex = -1;
+	const expectedBriefFingerprint = details.briefFingerprint ?? null;
+	for (const [index, message] of messages.entries()) {
+		if (
+			message.role === "custom"
+			&& message.customType === PROJECT_VIEW_KIND
+			&& message.details?.persistent === true
+			&& message.details?.version === PROJECT_VIEW_VERSION
+			&& message.details?.mode === "brief"
+			&& (!expectedBriefFingerprint || message.details?.fingerprint === expectedBriefFingerprint)
+		) latestPersistentBriefIndex = index;
+	}
+	const hasPersistentBrief = latestPersistentBriefIndex >= 0;
+	const filtered = messages.filter((message, index) => {
 		if (message.role !== "custom") return true;
 		if (message.customType === PROJECT_VIEW_DELTA_KIND) return false;
 		if (message.customType !== PROJECT_VIEW_KIND) return true;
@@ -475,9 +538,7 @@ export function materializeProjectViewContext(messages, briefText, deltaText, de
 			&& message.details?.version === PROJECT_VIEW_VERSION
 			&& message.details?.mode === "brief";
 		if (!isCurrentBrief) return false;
-		if (hasPersistentBrief) return false;
-		hasPersistentBrief = true;
-		return true;
+		return index === latestPersistentBriefIndex;
 	});
 	const result = [...filtered];
 	if (!hasPersistentBrief && briefText) {

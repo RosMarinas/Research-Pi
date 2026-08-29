@@ -115,10 +115,15 @@ An individual `codex_delegate` call can override model or effort. Existing Codex
 
 Research compaction now produces two deliberately different forms of project memory:
 
-1. **Project Brief** is captured only at a successful compact boundary. It contains a short project overview, final goal, overall approach, durable user priorities, and concise closed phases in `goal -> approach -> result` form. It excludes the active run, current claim, newest route, Git state and next experiment. Its rendered bytes remain stable until the next successful compact.
-2. **ProjectView Delta** is rebuilt at every model context boundary and placed after Session history. It contains current route/freshness, latest handoff, newest evidence, live Actions, structured current frontier and candidate next experiment. Older Delta messages are filtered so exactly one self-contained current Delta reaches the model.
+ProjectView adds a user-owned layer before those compact-generated forms:
+
+1. **Project Anchor** is the optional regular file `<project>/RESEARCH.md`. Research Pi links its relative path and injects at most the first 3600 characters. It is never generated or rewritten by compaction. Changes are detected at a model boundary and intentionally replace the previous stable Brief receipt.
+2. **Project Brief** is captured only at a successful compact boundary. It contains a short project overview, final goal, overall approach, durable user priorities, and concise closed phases in `goal -> approach -> result` form. It excludes the active run, current claim, newest route, Git state and next experiment. Its compact-generated portion remains stable until the next successful compact.
+3. **ProjectView Delta** is rebuilt at every model context boundary and placed after Session history. It contains current route/freshness, latest handoff, newest evidence, live Actions, structured current frontier and candidate next experiment. Older Delta messages are filtered so exactly one self-contained current Delta reaches the model.
 
 `amend_project_state`, research transitions, evidence records and completed work update the Delta, not the Brief. The next successful compact may update the Brief and move a genuinely closed phase into its short history. The compaction schema requires the complete `projectBrief`; live state-amendment tooling cannot edit it.
+
+There is deliberately no global ProjectView-clear command. `/runtime new clean` creates a clean Session without deleting Project data; `/runtime context off` pauses injection for an Analysis Session. Removing `RESEARCH.md` removes only the Anchor. Canonical Project State changes remain explicit amendments, transitions, or compaction rather than hidden context deletion.
 
 The configured token values are caps. For a short-context Leader model, Research Pi derives earlier thresholds from the active model window. `pi.settings.compaction` remains the Pi Core fallback policy; it is not the structured research-state schema or ProjectView policy.
 

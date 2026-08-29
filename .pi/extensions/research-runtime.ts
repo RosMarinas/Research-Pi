@@ -18,6 +18,7 @@ import {
 	migrateLatestProjectState,
 	projectViewFingerprint,
 	projectViewRefreshFingerprint,
+	readProjectAnchor,
 	readRecentExperiments,
 	renderProjectBrief,
 	renderProjectView,
@@ -528,7 +529,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		return runtime;
 	};
 
-	const refreshProjectView = async (ctx: ExtensionContext, suppliedSnapshot?: RuntimeSnapshot) => {
+	const refreshProjectView = async (ctx: ExtensionContext, suppliedSnapshot?: RuntimeSnapshot, suppliedAnchor?: Awaited<ReturnType<typeof readProjectAnchor>>) => {
 		const activeRuntime = await getRuntime(ctx);
 		let snapshot = suppliedSnapshot ?? await readRuntimeSnapshot(activeRuntime);
 		if (!snapshot.projectState && !migrationAttemptedProjects.has(activeRuntime.projectKey)) {
@@ -549,11 +550,12 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			}
 			snapshot = await readRuntimeSnapshot(activeRuntime);
 		}
-		const [git, experiments] = await Promise.all([
+		const [git, experiments, anchor] = await Promise.all([
 			getGitSnapshot(ctx.cwd),
 			readRecentExperiments(join(ctx.cwd, ".pi", "research", "experiments.jsonl")),
+			suppliedAnchor === undefined ? readProjectAnchor(ctx.cwd) : Promise.resolve(suppliedAnchor),
 		]);
-		const view = buildProjectView({ runtime: activeRuntime, snapshot, git, experiments });
+		const view = buildProjectView({ runtime: activeRuntime, snapshot, git, experiments, anchor });
 		latestProjectView = view;
 		projectViewText = renderProjectBrief(view);
 		projectViewHash = projectViewFingerprint(view);
@@ -1118,14 +1120,19 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		const activeRuntime = await getRuntime(ctx);
 		const snapshot = await readRuntimeSnapshot(activeRuntime);
 		if (!isAnalysisSession() && !runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID, ctx.sessionManager.getSessionId())) return;
-		if (projectViewDirty || projectViewRefreshFingerprint(snapshot) !== projectViewSnapshotHash) {
-			await refreshProjectView(ctx, snapshot);
+		const anchor = await readProjectAnchor(ctx.cwd);
+		if (
+			projectViewDirty
+			|| projectViewRefreshFingerprint(snapshot) !== projectViewSnapshotHash
+			|| (anchor?.fingerprint ?? null) !== (latestProjectView?.anchor?.fingerprint ?? null)
+		) {
+			await refreshProjectView(ctx, snapshot, anchor);
 		}
 		const view = latestProjectView ?? (await refreshProjectView(ctx, snapshot)).view;
 		// Re-read receipts after compaction/tree changes. A receipt before the
 		// latest compaction is no longer present in provider context.
 		persistedProjectView = latestProjectViewReceipt(ctx.sessionManager.getBranch());
-		if (persistedProjectView) return;
+		if (persistedProjectView?.fingerprint === projectViewHash) return;
 		// Persist exactly one compact-boundary Brief. It carries no live role or
 		// progress text, so its bytes remain an immutable cache prefix until the
 		// next compaction removes it from provider context.
@@ -1252,7 +1259,12 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			};
 		}
 		const snapshotHash = projectViewRefreshFingerprint(snapshot);
-		if (projectViewDirty || snapshotHash !== projectViewSnapshotHash) await refreshProjectView(ctx, snapshot);
+		const anchor = await readProjectAnchor(ctx.cwd);
+		if (
+			projectViewDirty
+			|| snapshotHash !== projectViewSnapshotHash
+			|| (anchor?.fingerprint ?? null) !== (latestProjectView?.anchor?.fingerprint ?? null)
+		) await refreshProjectView(ctx, snapshot, anchor);
 		const runtimeMessagesById = new Map(snapshot.messages.map((message) => [message.id, message]));
 		const messages = event.messages.filter((message) => {
 			if (isAnalysisSession() && message.role === "custom" && message.customType === RUNTIME_MESSAGE_KIND) return false;

@@ -290,9 +290,36 @@ App Server 的动态工具在 thread 创建时固定。Research Pi 为这组工�
 - 已经切换成新的研究问题或正式实验阶段：使用 `/fork` 或 `/new`；
 - 会话很长但仍在解决同一问题：可手动使用 `/compact`。默认在约 272K/384K 总上下文处标记自动压缩，但会等当前 agent run 及其工具调用链完整 settled 后才执行，不会中断正在进行的任务。默认按当前分支第 1/2/3 次 compact 保留约 24K/32K/40K recent tail，结构化摘要目标 8K、生成硬上限 16K，compact 后通常约为 32K/40K/48K；这些数值统一在 `config.json` 的 `research.compaction` 调节。竞争假设、有效性、evidence refs 与下一实验写入结构化 compact，完整 JSONL 历史仍保留。
 - 新会话需要恢复旧证据：使用 memory search/read，不必先恢复整个旧 session。
-- 普通新 Session 自动收到两部分 ProjectView。前半段 Project Brief 来自最近一次成功 compact，只保留项目介绍、最终目标、总体思路、用户优先级和已经结束阶段的“目标—思路—结果”；它不会混入当前运行或最新下一步。后半段 ProjectView Delta 位于 Session 历史之后，包含当前路线、最新 handoff、实验账本、Git 和 Runtime 状态。完成过项目相关工具工作的 Leader turn 会把最终用户汇报保存为本地 handoff，但不会推进科学 Project revision。用 `/runtime view` 可检查两层内容，用 `/runtime recommend` 可查看是否值得 compact 或轮换。确定交接时优先使用 `/runtime rotate`；若目的是主动排除项目记忆影响，则使用 `/runtime new clean`，之后只有显式 `/runtime inherit` 才恢复自动注入。
+- 普通新 Session 自动收到三层 ProjectView。第一层是项目根目录可选的 `RESEARCH.md` Project Anchor；第二层 Project Brief 来自最近一次成功 compact，只保留项目介绍、最终目标、总体思路、用户优先级和已经结束阶段的“目标—思路—结果”；第三层 ProjectView Delta 位于 Session 历史之后，包含当前路线、最新 handoff、实验账本、Git 和 Runtime 状态。完成过项目相关工具工作的 Leader turn 会把最终用户汇报保存为本地 handoff，但不会推进科学 Project revision。用 `/runtime view` 可检查完整视图，用 `/runtime recommend` 可查看是否值得 compact 或轮换。确定交接时优先使用 `/runtime rotate`；若目的是主动排除项目记忆影响，则使用 `/runtime new clean`，之后只有显式 `/runtime inherit` 才恢复自动注入。
 - Project Brief 在两次成功 compact 之间保持字节稳定，窄幅 `amend_project_state`、实验记录、任务完成和路线变化都只更新尾部 Delta。下一次 compact 才能重写 Brief，并把已经结束的阶段压缩进历史。Delta 显示 `current/unconfirmed/stale/transitioning/missing` freshness；新 experiment 或 research transition 晚于最近 compact 时，旧 claim/next experiment 不会冒充当前结论。窄更新用 `amend_project_state`，实质换轨用 `record_research_transition`，真正阶段边界再 compact，不需要每次实验都压缩。
 - Runtime 在 `context` 边界过滤旧 Delta，并把一份完整、自包含的最新 Delta 放在模型 prompt 最末尾。最新 handoff、证据和 Action 排在较重的 frontier 细节之前，因此达到长度上限时优先截断旧细节。固定 Brief 提供缓存友好前缀，尾部 Delta 保证新 Session 不会只看到过时状态；实际命中率仍以 provider 返回的 cache usage 为准。
+- `RESEARCH.md` 是独立于 compact 的用户权威锚点。Research Pi 只自动读取项目根目录中的普通文件，不跟随符号链接；最多注入前 3600 个字符，过长时会提示缩短。适合写项目问题、最终目标、总体路线、non-goals、术语和长期判断原则，不适合写最新实验、临时结论或 TODO。文件变化会在下一模型边界生成新的 Brief receipt，并过滤旧 Anchor 版本；compact 不会修改此文件。
+
+推荐模板：
+
+```md
+# Project North Star
+
+## Problem and final goal
+项目最终希望建立或验证什么？成功的最低标准是什么？
+
+## Overall approach
+总体研究思路和阶段关系，不写当前 run 细节。
+
+## Non-goals and decision principles
+明确不做什么，以及用户最在意的证据边界、风险和收敛标准。
+```
+
+### “清空 ProjectView”是什么意思
+
+ProjectView 是由 Anchor、Project State、实验账本和 Runtime 派生出来的，不是一份应该整体删除的数据库，因此没有全局 `/runtime clear`：
+
+- 想做不受项目记忆影响的独立试验：`/runtime new clean [reason]`；Project 数据保留，之后可 `/runtime inherit`。
+- 只想让 Analysis Session 暂停查看项目上下文：`/runtime context off`，恢复时用 `on`。
+- 想移除顶层锚点：删除 `RESEARCH.md`；下一轮不再注入 Anchor，但 compact 形成的 Brief 仍保留。
+- 想纠正项目状态：局部用 `amend_project_state`，换方向用 `record_research_transition`，阶段重写用 `/compact`。
+
+真正删除 Runtime、实验记录和 Session 历史属于数据清理，不与“清空模型上下文”混为一个命令。
 - 长委派结束、重大实验结果、冲突证据、阶段交接或需要恢复上下文时，Leader 会按需加载 `research-briefing`，说明“做了什么—看到什么—是否有效—意味着什么—下一步为何如此”。如果你已经理解当前阶段并继续追问，它不会机械重复整段背景。
 
 方向实质变化时可以直接告诉 Pi：
