@@ -23,6 +23,13 @@ import {
 
 test("explicit Project State patches preserve omitted fields and replace arrays deliberately", () => {
 	const current = {
+		projectBrief: {
+			overview: "A mechanism-identification project.",
+			finalGoal: "Identify the causal mechanism.",
+			overallApproach: "Use discriminating interventions.",
+			userPriorities: ["Keep evidence boundaries explicit."],
+			previousPhases: [],
+		},
 		researchQuestion: "Which mechanism explains the gain?",
 		currentClaim: "No supported claim yet.",
 		hypotheses: [{ id: "H1", statement: "The gain is causal", status: "active", predictions: [], rationale: "", evidenceRefs: [] }],
@@ -51,11 +58,57 @@ test("explicit Project State patches preserve omitted fields and replace arrays 
 	assert.notEqual(patched, current);
 	assert.equal(current.currentClaim, "No supported claim yet.");
 	assert.throws(
+		() => applyResearchStatePatch(current, { projectBrief: { overview: "A live rewrite must not enter the stable Brief." } }),
+		/Unknown Project State amendment field.*projectBrief/,
+	);
+	assert.throws(
 		() => applyResearchStatePatch(current, {
 			hypotheses: [{ id: "H1", statement: "The gain is causal", status: "supported", evidenceRefs: [] }],
 		}),
 		/without an evidence reference/,
 	);
+});
+
+test("compaction owns the complete stable Project Brief and preserves omitted prior fields", () => {
+	assert.ok(RESEARCH_STATE_TOOL.parameters.required.includes("projectBrief"));
+	assert.deepEqual(RESEARCH_STATE_TOOL.parameters.properties.projectBrief.required, [
+		"overview",
+		"finalGoal",
+		"overallApproach",
+		"userPriorities",
+		"previousPhases",
+	]);
+	const previousBrief = {
+		overview: "A stable project introduction.",
+		finalGoal: "Reach the final registered qualification.",
+		overallApproach: "Advance through discriminating mechanism tests.",
+		userPriorities: ["Do not confuse screens with qualification."],
+		previousPhases: [{ goal: "Qualify the assay", approach: "Use an oracle probe", result: "The assay became interpretable." }],
+	};
+	const normalized = normalizeResearchState({
+		projectBrief: { finalGoal: "Reach the final registered qualification." },
+		researchQuestion: "Which current route should run next?",
+		currentClaim: "The latest run remains unresolved.",
+		hypotheses: [],
+		observations: [],
+		decisions: [],
+		unresolvedConfounders: [],
+		openQuestions: [],
+		nextExperiment: {},
+		criticalContext: [],
+	}, {
+		experiments: [],
+		checkpoints: [],
+		previousState: { projectBrief: previousBrief },
+		validRefs: new Set(),
+		sourceCatalog: [],
+	});
+	assert.deepEqual(normalized.state.projectBrief, previousBrief);
+	const summary = renderResearchSummary(normalized.state, { experiments: [], checkpoints: [] });
+	assert.match(summary, /## Stable Project Brief/);
+	assert.match(summary, /A stable project introduction/);
+	assert.match(summary, /Qualify the assay -> Use an oracle probe -> The assay became interpretable/);
+	assert.doesNotMatch(summary.split("## Research question")[0], /Which current route should run next/);
 });
 
 test("Runtime Project State becomes the next compaction's prior state when it is newer", () => {

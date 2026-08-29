@@ -20,7 +20,7 @@ Research Pi 面向 AI、机器人、通信、优化与仿真等计算实验科�
 
 ## 我最喜欢的设计：双 Session 工作流
 
-Research Pi 可以同时开两扇窗口：一边让 **Pi Leader** 安静推进实验，另一边在 **Pi-analysis** 里随时追问、质疑和展开想法。
+得益于记忆、通信、权限机制的良好设计，Research Pi 可以同时开两个窗口：一边让 **Pi Leader** 推进实验，另一边在 **Pi-analysis** 里随时追问、质疑和展开想法。
 
 ![Research Pi 双 Session 工作台：Pi Leader 推进实验，Pi-analysis 独立讨论，只向主线投递一张短便签](docs/assets/dual-session-workbench.png)
 
@@ -48,7 +48,9 @@ Pi-analysis 看到的是同一个项目的最新工作视图，但它有自己�
 
 ## 快速开始
 
-要求 Node.js `>=22.19`。
+要求 Node.js `>=22.19`。Research Pi 当前使用 Unix 风格的工具链；Windows 推荐通过 **WSL2** 使用，不建议直接在原生 PowerShell 中运行 Agent。
+
+### macOS / Linux
 
 ```sh
 npm install -g 'git+https://github.com/RosMarinas/Research-Pi.git#main'
@@ -56,7 +58,29 @@ pi setup
 pi paths
 ```
 
-根据 `pi paths` 给出的 `credentialsPath` 填写至少一个供应商密钥：
+### Windows（推荐 WSL2）
+
+先在管理员 PowerShell 中安装 Ubuntu：
+
+```powershell
+wsl --install -d Ubuntu
+```
+
+随后打开 Ubuntu，先安装 Linux 版 Node.js `>=22.19`，再像 Linux 一样安装 `main`：
+
+```sh
+sudo apt update
+sudo apt install -y git zsh ripgrep fd-find
+node --version
+npm --version
+npm install -g 'git+https://github.com/RosMarinas/Research-Pi.git#main'
+pi setup
+pi paths
+```
+
+WSL2 本身就是 Linux 环境，因此可以直接使用 `main` 并获得最新功能。请把科研项目放在 `~/research/...` 等 WSL 文件系统中，不要放在 `/mnt/c` 或 `/mnt/d`。`windows-research-pi` 是额外阻断 Windows 挂载盘、`.exe` 和 PowerShell interop 的安全预览分支；需要给 Agent 较高自动执行权限时，可用它测试更严格的宿主隔离。
+
+进入 TUI 后用 Pi 原生 `/login` 登录供应商，再用 `/model` 切换模型；Research Pi 不再维护第二套模型/profile 目录。若供应商使用 API key，或需要 DeepSeek 小型搜索，也可以在 `pi paths` 给出的 `credentialsPath` 中填写：
 
 ```dotenv
 DEEPSEEK_API_KEY=...
@@ -91,7 +115,7 @@ pi --analysis
 | Research Contract | 让 Agent 默认采用探索、证伪、有效性检查和证据驱动收敛 |
 | Project Runtime | 维护 Project State、Actors、Actions、mailbox 与 Leader Session 所有权 |
 | Dual Session | Leader 持续推进主线，Pi-analysis 独立跟进与讨论，并只把最终短综合投递给 Leader |
-| ProjectView | 将 structured state 与最新 evidence delta 追加到模型上下文，避免旧状态冒充当前结论 |
+| ProjectView | 用 compact 边界冻结一份简短 Project Brief，再把最新进展作为 Session 尾部 Delta 注入；新人能快速上手，旧状态也不会冒充当前结论 |
 | Research Memory | 对历史 Session 和实验记录做本地全文检索，不依赖向量数据库 |
 | Research Compaction | 在模型 settled 后生成带 provenance 的结构化状态，而不只摘要聊天文本 |
 | Experiment Records | 用 `record_experiment` 区分观察、有效性和解释；支持换轨与窄幅状态修订 |
@@ -99,7 +123,7 @@ pi --analysis
 | Project Boundary | 默认把模型命令限制在当前项目；SSH、外部文件和宿主命令通过显式 capability 授权 |
 | Research Briefing | 在重大结果或阶段交接时恢复工作脉络，并把内部术语翻译成用户可判断的报告 |
 
-ProjectView 使用 append-only snapshot/delta：研究 revision 或 Git identity 改变时，下一用户轮只在 Session 尾部追加更新；同一轮中新产生的 evidence 由 `context` hook 临时补到下一次模型调用尾部。旧 ProjectView 不会反复删除和搬位，因此更利于 DeepSeek 等 provider 复用共同前缀，同时避免陈旧 compact 污染当前判断。
+ProjectView 分成两层：`/compact` 成功后生成一份固定、简短的 Project Brief，只介绍项目、最终目标、总体思路、用户关心的原则和已结束阶段；在下一次 compact 前，它的字节保持不变。当前路线、最新实验、运行状态和下一步放在每次模型调用最末尾的 ProjectView Delta 中，并替换旧 Delta。这样稳定前缀有利于缓存，新 Session 又不会只看到一份过时介绍。
 
 ## 常用入口
 
@@ -116,7 +140,7 @@ ProjectView 使用 append-only snapshot/delta：研究 revision 或 Git identity
 | `/side <问题>` | 隔离追问；有价值时用 `/side use <id>` 提升到主线 |
 | `/watch` | 观察 Codex 的命令、文件修改和 subagent 活动，不污染 Leader 上下文 |
 | `/actors`、`/inbox` | 查看活跃 Actor 和待处理 Runtime 消息 |
-| `/model` | 切换并持久化 Leader Session 模型 |
+| `/login`、`/model`、`/scoped-models` | 使用 Pi 原生认证、模型切换和模型范围；Research Pi 不再复制供应商目录 |
 | `/config` | 查看统一配置和切换主题 |
 | `/boundary doctor` | 检查项目、Git、Python、sandbox 与 Codex 环境 |
 
@@ -138,13 +162,11 @@ ProjectView 使用 append-only snapshot/delta：研究 revision 或 Git identity
 <research-project>/.pi/       项目实验记录与 checkpoint
 ```
 
-实际路径以 `pi paths` 为准。常用配置命令：
+实际路径以 `pi paths` 为准。Research Pi 的 `config.json` 只管理 Runtime、compact、Codex、搜索、资源与 UI；Leader 的供应商、模型、thinking 和自定义模型由 Pi 原生配置管理：
 
 ```sh
 pi config show
-pi config list
-pi config use opencode-go-flash
-pi --profile deepseek-pro
+# TUI 内：/login、/model、/scoped-models、/settings
 ```
 
 Research Pi 关闭全局 skill/extension 自动发现，只显式加载审查过的 Harness 扩展、内置 `research-briefing` 和配置白名单。

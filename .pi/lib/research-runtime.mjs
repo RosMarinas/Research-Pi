@@ -275,6 +275,7 @@ export async function readRuntimeSnapshot(runtime) {
 	const activations = new Map();
 	const rejectedStates = [];
 	let projectState = null;
+	let projectBrief = null;
 	let revision = 0;
 	const events = await readRuntimeEvents(runtime);
 	for (const event of events) {
@@ -331,6 +332,15 @@ export async function readRuntimeSnapshot(runtime) {
 			}
 			case "project.state.committed":
 				projectState = { ...data, committedAt: event.at, updatedAt: event.at, revision };
+				// ProjectBrief is a compact-boundary snapshot. Later amendments,
+				// evidence, transitions, handoffs, and Actions must not rewrite the
+				// stable cross-Session orientation or churn the prompt prefix.
+				projectBrief = {
+					state: data.state ?? null,
+					source: data.source ?? null,
+					committedAt: event.at,
+					revision,
+				};
 				break;
 			case "project.state.amended":
 				projectState = {
@@ -411,6 +421,7 @@ export async function readRuntimeSnapshot(runtime) {
 		activations: activationList,
 		activeActivations: activationList.filter((activation) => activation.status === "active"),
 		projectState,
+		projectBrief,
 		revision,
 		ledgerEventCount: events.length,
 	};

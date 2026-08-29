@@ -11,6 +11,30 @@ const STRING_ARRAY_SCHEMA = Object.freeze({
 	items: { type: "string", maxLength: 1_000 },
 });
 
+const PROJECT_PHASE_SCHEMA = Object.freeze({
+	type: "object",
+	additionalProperties: false,
+	required: ["goal", "approach", "result"],
+	properties: {
+		goal: { type: "string", maxLength: 800 },
+		approach: { type: "string", maxLength: 1_000 },
+		result: { type: "string", maxLength: 1_000 },
+	},
+});
+
+const PROJECT_BRIEF_SCHEMA = Object.freeze({
+	type: "object",
+	additionalProperties: false,
+	required: ["overview", "finalGoal", "overallApproach", "userPriorities", "previousPhases"],
+	properties: {
+		overview: { type: "string", maxLength: 1_200, description: "A short introduction that lets a new Agent or user understand what the project studies" },
+		finalGoal: { type: "string", maxLength: 1_200, description: "The durable terminal research goal, not the current experiment or milestone" },
+		overallApproach: { type: "string", maxLength: 1_500, description: "The high-level research idea or strategy, excluding current implementation detail" },
+		userPriorities: { ...STRING_ARRAY_SCHEMA, maxItems: 6, description: "Enduring concerns, preferences, and guardrails explicitly important to the user" },
+		previousPhases: { type: "array", maxItems: 6, items: PROJECT_PHASE_SCHEMA, description: "Closed earlier phases only; each phase is one concise goal-approach-result record" },
+	},
+});
+
 export const RESEARCH_STATE_TOOL = Object.freeze({
 	name: RESEARCH_STATE_TOOL_NAME,
 	description: "Submit the final structured research state exactly once after synthesizing the compaction evidence.",
@@ -18,6 +42,7 @@ export const RESEARCH_STATE_TOOL = Object.freeze({
 		type: "object",
 		additionalProperties: false,
 		required: [
+			"projectBrief",
 			"researchQuestion",
 			"currentClaim",
 			"hypotheses",
@@ -29,7 +54,8 @@ export const RESEARCH_STATE_TOOL = Object.freeze({
 			"criticalContext",
 		],
 		properties: {
-			researchQuestion: { type: "string", maxLength: 2_000, description: "Project-level research direction and current scientific frontier; never replace it with the latest coding/debugging task unless the research objective truly changed" },
+			projectBrief: PROJECT_BRIEF_SCHEMA,
+			researchQuestion: { type: "string", maxLength: 2_000, description: "The current scientific frontier or decision question for Project Delta; do not repeat the stable project introduction" },
 			currentClaim: { type: "string", maxLength: 2_000, description: "Current evidence-bounded scientific position, not a software progress statement" },
 			hypotheses: {
 				type: "array",
@@ -91,7 +117,7 @@ export const RESEARCH_STATE_TOOL = Object.freeze({
 					validityChecks: STRING_ARRAY_SCHEMA,
 				},
 			},
-			criticalContext: { ...STRING_ARRAY_SCHEMA, description: "Direction-setting stage, route constraints, non-goals, and continuation principles that a new Session needs to avoid local task inertia" },
+			criticalContext: { ...STRING_ARRAY_SCHEMA, description: "Current-frontier constraints and continuation principles for Project Delta; durable user priorities belong in projectBrief" },
 		},
 	},
 	constrainedSampling: { type: "json_schema", strict: "prefer" },
@@ -116,30 +142,27 @@ export const RESEARCH_RECENT_TAIL_SCHEDULE = Object.freeze(configuredTailSchedul
 export const RESEARCH_SUMMARY_TARGET_TOKENS = configuredPositiveInteger("RESEARCH_PI_COMPACT_SUMMARY_TARGET_TOKENS", 8 * 1024);
 export const RESEARCH_SUMMARY_MAX_TOKENS = configuredPositiveInteger("RESEARCH_PI_COMPACT_SUMMARY_MAX_TOKENS", 16 * 1024);
 
-export const RESEARCH_COMPACTION_SYSTEM_PROMPT = `You maintain working state for computational AI/communications research. Submit the result by calling ${RESEARCH_STATE_TOOL_NAME} exactly once. Do not emit the state as prose. If tool calling is unavailable, return one JSON object only.
+export const RESEARCH_COMPACTION_SYSTEM_PROMPT = `Maintain working state for computational research. Call ${RESEARCH_STATE_TOOL_NAME} exactly once; emit no prose. If tools are unavailable, return one JSON object.
 
-This is not a software-development progress summary. Preserve competing hypotheses, distinguishing predictions, observations versus interpretations, negative-result validity, unresolved confounders, reversibility, and the next highest-information experiment. Exploratory code is disposable unless it affects interpretation or continuation.
-
-The structured state is a concise index, not a replacement transcript. Target at most ${RESEARCH_SUMMARY_TARGET_TOKENS.toLocaleString()} output tokens; follow the supplied tool schema and omit low-value operational detail.
+This is a concise research index, not a transcript or development summary. Target at most ${RESEARCH_SUMMARY_TARGET_TOKENS.toLocaleString()} output tokens. Preserve competing hypotheses, distinguishing predictions, observation versus interpretation, validity, confounders, reversible decisions, and the highest-information next experiment. Omit low-value operations; experimental code matters only when it affects interpretation or continuation.
 
 Rules:
-1. Invalid or inconclusive experiments do not update a hypothesis.
-2. supported requires valid confirmatory evidence with a real observation-before prediction; preregistered also requires registrationRef.
-3. weakened or rejected requires a valid confirmatory or diagnostic experiment. Exploratory findings may motivate hypotheses or decisions but cannot alone create a strong status; validity_failure cannot update one.
-4. Use only supplied provenance. Never invent run IDs, paths, results, predictions, registrations, or evidence modes.
-5. Preserve previous hypothesis IDs and explicit status changes; do not silently omit a changed hypothesis.
-6. Separate observation from interpretation and match the dominant conversation language.
-7. An archived/superseded transition retires the old route; parallel does not. Retired evidence remains history but its claim and next experiment are not current.
-8. Respect experiment track provenance. Evidence from another route cannot establish that the current route's intervention occurred.
-9. runGitCommit identifies executed code; recordedAtGit identifies record-time workspace. Never substitute them.
-10. A clean/Analysis Session summary is candidate synthesis, not Project authority or experimental evidence.
-11. researchQuestion is the project direction and scientific frontier, not the latest coding/debugging task unless the objective truly changed.
-12. criticalContext preserves stage, route guardrails, non-goals, and continuation principles. nextExperiment is a discriminating research intervention, not an inherited coding TODO.`;
+1. Invalid/inconclusive experiments and validity_failure do not update hypotheses.
+2. supported needs valid confirmatory evidence and a real observation-before prediction; preregistered also needs registrationRef. weakened/rejected needs valid confirmatory or diagnostic evidence. Exploratory evidence cannot alone create a strong status.
+3. Use only supplied provenance. Never invent runs, paths, results, predictions, registrations, or evidence modes. Preserve hypothesis IDs and explicit status changes.
+4. Separate observation from interpretation; use the conversation language.
+5. archived/superseded retires the old route; parallel does not. Retired evidence remains history, but its claim/next experiment is not current. Evidence from another track cannot prove the current intervention ran.
+6. runGitCommit identifies executed code; recordedAtGit identifies record-time workspace. Never substitute them.
+7. Clean/Analysis summaries are candidate synthesis, not Project authority or evidence.
+8. projectBrief is the fixed orientation until the next successful compact. Make it short and clear to a new Agent/user: only overview, final goal, overall approach, enduring user priorities, and closed previous phases. Exclude the active/latest phase, current run/claim, next experiment, Git, and live tasks.
+9. Preserve prior projectBrief wording unless evidence changes its durable fields or closes a phase. previousPhases uses concise goal-approach-result records, never a task log.
+10. researchQuestion, currentClaim, hypotheses, observations, open questions, criticalContext, and nextExperiment form the live Project Delta. nextExperiment is a discriminating intervention, not an inherited coding TODO.`;
 
 const MAX_HYPOTHESES = 24;
 const MAX_OBSERVATIONS = 32;
 const MAX_DECISIONS = 24;
 const RESEARCH_STATE_KEYS = new Set([
+	"projectBrief",
 	"researchQuestion",
 	"currentClaim",
 	"hypotheses",
@@ -150,6 +173,7 @@ const RESEARCH_STATE_KEYS = new Set([
 	"nextExperiment",
 	"criticalContext",
 ]);
+const AMENDABLE_RESEARCH_STATE_KEYS = new Set([...RESEARCH_STATE_KEYS].filter((key) => key !== "projectBrief"));
 
 export function selectResearchCompactionPolicy(branchEntries) {
 	const previousResearchCompactions = branchEntries.filter(
@@ -584,6 +608,33 @@ function normalizeNextExperiment(value) {
 	};
 }
 
+function normalizeProjectBrief(value, previous, source = {}) {
+	const candidate = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+	const prior = previous && typeof previous === "object" && !Array.isArray(previous) ? previous : {};
+	const phases = [];
+	for (const phase of Array.isArray(candidate.previousPhases) ? candidate.previousPhases : Array.isArray(prior.previousPhases) ? prior.previousPhases : []) {
+		if (!phase || typeof phase !== "object" || Array.isArray(phase) || phases.length >= 6) continue;
+		const goal = text(phase.goal, 1_200);
+		const approach = text(phase.approach, 1_500);
+		const result = text(phase.result, 1_500);
+		if (!goal && !approach && !result) continue;
+		phases.push({ goal, approach, result });
+	}
+	const fallbackOverview = text(source.researchQuestion, 1_500);
+	const fallbackGoal = fallbackOverview;
+	return {
+		overview: text(candidate.overview, 1_500) || text(prior.overview, 1_500) || fallbackOverview,
+		finalGoal: text(candidate.finalGoal, 1_500) || text(prior.finalGoal, 1_500) || fallbackGoal,
+		overallApproach: text(candidate.overallApproach, 2_000) || text(prior.overallApproach, 2_000),
+		userPriorities: list(
+			Array.isArray(candidate.userPriorities) ? candidate.userPriorities : prior.userPriorities,
+			6,
+			1_000,
+		),
+		previousPhases: phases,
+	};
+}
+
 function requireArray(value, label) {
 	if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
 	return value;
@@ -676,7 +727,7 @@ export function applyResearchStatePatch(current, patch) {
 	}
 	const keys = Object.keys(patch);
 	if (!keys.length) throw new Error("Project State amendment patch must change at least one field");
-	const unknown = keys.filter((key) => !RESEARCH_STATE_KEYS.has(key));
+	const unknown = keys.filter((key) => !AMENDABLE_RESEARCH_STATE_KEYS.has(key));
 	if (unknown.length) throw new Error(`Unknown Project State amendment field(s): ${unknown.join(", ")}`);
 
 	const state = JSON.parse(JSON.stringify(current));
@@ -834,6 +885,7 @@ export function normalizeResearchState(candidate, evidence) {
 
 	return {
 		state: {
+			projectBrief: normalizeProjectBrief(source.projectBrief, evidence.previousState?.projectBrief, source),
 			researchQuestion: text(source.researchQuestion, 3_000),
 			currentClaim: text(source.currentClaim, 3_000),
 			hypotheses,
@@ -897,6 +949,16 @@ function bulletRefs(value) {
 
 export function renderResearchSummary(state, evidence, fileOps = {}) {
 	const lines = ["# Research working state"];
+	lines.push("", "## Stable Project Brief");
+	lines.push(`- Overview: ${state.projectBrief?.overview || "尚未可靠确定。"}`);
+	lines.push(`- Final goal: ${state.projectBrief?.finalGoal || "尚未可靠确定。"}`);
+	lines.push(`- Overall approach: ${state.projectBrief?.overallApproach || "尚未可靠确定。"}`);
+	lines.push("- User priorities:");
+	lines.push(...(state.projectBrief?.userPriorities?.length ? state.projectBrief.userPriorities.map((item) => `  - ${item}`) : ["  - 尚无已记录项。"]))
+	lines.push("- Previous phases:");
+	lines.push(...(state.projectBrief?.previousPhases?.length
+		? state.projectBrief.previousPhases.map((phase) => `  - ${phase.goal} -> ${phase.approach} -> ${phase.result}`)
+		: ["  - 尚无已记录项。"]));
 	lines.push("", "## Research question", state.researchQuestion || "尚未可靠确定。");
 	lines.push("", "## Current claim", state.currentClaim || "尚无足够证据形成当前主张。");
 	lines.push("", "## Competing hypotheses");

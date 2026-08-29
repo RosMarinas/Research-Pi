@@ -11,10 +11,7 @@ import {
 	researchPiConfigSummary,
 	researchPiDeepSeekSearchEnabled,
 	researchPiEnvironment,
-	researchPiProfile,
-	researchPiProfileCredential,
 	RESEARCH_PI_THEME_CHOICES,
-	resolveResearchPiConfig,
 	writeResearchPiAgentConfig,
 	writeResearchPiConfig,
 } from "../.pi/lib/research-config.mjs";
@@ -125,16 +122,7 @@ function takeResearchOptions(argv, config) {
 		workspace = args[index + 1];
 		args.splice(index, 2);
 	}
-	let effectiveConfig = config;
-	const profileIndex = args.indexOf("--profile");
-	if (profileIndex >= 0) {
-		if (!args[profileIndex + 1]) throw new Error("Usage: pi --profile <name> [pi options...]");
-		const profile = args[profileIndex + 1];
-		if (!config.profiles[profile]) throw new Error(`Unknown Research Pi model profile: ${profile}`);
-		effectiveConfig = resolveResearchPiConfig({ ...config, activeProfile: profile });
-		args.splice(profileIndex, 2);
-	}
-	return { workspace: resolve(workspace), args, config: effectiveConfig, sessionMode };
+	return { workspace: resolve(workspace), args, config, sessionMode };
 }
 
 function applyConfigurationEnvironment(config) {
@@ -162,13 +150,6 @@ function configCommand(argv) {
 		process.stdout.write(`${researchPiConfigSummary(config, paths.configPath)}\n\n${JSON.stringify(config, null, 2)}\n`);
 		return;
 	}
-	if (action === "list") {
-		for (const name of Object.keys(config.profiles)) {
-			const profile = researchPiProfile(config, name);
-			process.stdout.write(`${name === config.activeProfile ? "*" : " "} ${name}\t${profile.provider}/${profile.model}\t${profile.thinking}\n`);
-		}
-		return;
-	}
 	if (action === "themes") {
 		const active = config.pi.settings.theme;
 		for (const theme of RESEARCH_PI_THEME_CHOICES) {
@@ -189,15 +170,7 @@ function configCommand(argv) {
 		process.stdout.write(`${researchPiConfigSummary(next, paths.configPath)}\n`);
 		return;
 	}
-	if (action === "use") {
-		const name = argv[1];
-		if (!name || !config.profiles[name]) throw new Error(`Usage: pi config use <${Object.keys(config.profiles).join("|")}>`);
-		const next = writeResearchPiConfig(paths.configPath, { ...config, activeProfile: name });
-		writeResearchPiAgentConfig(paths.agentDir, next, { coreVersion, environment: process.env });
-		process.stdout.write(`${researchPiConfigSummary(next, paths.configPath)}\n`);
-		return;
-	}
-	throw new Error("Usage: pi config [show|path|list|use <profile>|themes|theme <name>]");
+	throw new Error("Usage: pi config [show|path|themes|theme <name>]");
 }
 
 async function readStandardInput() {
@@ -235,12 +208,6 @@ async function spawnCore(argv) {
 	applyConfigurationEnvironment(config);
 	writeResearchPiAgentConfig(paths.agentDir, config, { coreVersion, environment: process.env });
 	const informational = userArgs.some((arg) => ["--version", "--help", "-h"].includes(arg));
-	const credential = researchPiProfileCredential(config);
-	if (!informational && credential.environmentVariable && !process.env[credential.environmentVariable]?.trim()) {
-		throw new Error(
-			`${credential.environmentVariable} is missing for profile ${credential.profile.name}. Run 'pi setup', then edit ${paths.credentialsPath}.`,
-		);
-	}
 	const deepSeekSearchEnabled = informational ? false : researchPiDeepSeekSearchEnabled(config, process.env);
 
 	process.env.PI_CODING_AGENT_DIR = paths.agentDir;
@@ -259,11 +226,7 @@ async function spawnCore(argv) {
 	for (const skill of new Set(skillPaths)) {
 		if (existsSync(join(skill, "SKILL.md"))) args.push("--skill", skill);
 	}
-	const profile = researchPiProfile(config);
 	args.push(
-		"--provider", profile.provider,
-		"--model", profile.model,
-		"--thinking", profile.thinking,
 		"--theme", join(packageRoot, ".pi", "themes"),
 		"--session-dir", paths.sessionDir,
 		"--append-system-prompt", join(packageRoot, ".pi", "APPEND_SYSTEM.md"),

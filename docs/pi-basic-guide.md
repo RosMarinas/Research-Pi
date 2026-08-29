@@ -1,6 +1,6 @@
 # Research Pi 基本使用指南
 
-这份指南面向 Research Pi：Pi 0.84.2、官方 DeepSeek、ZAI GLM Coding Plan 与精选 OpenCode Go profiles。源码 checkout 用于快速开发；稳定版本作为 npm CLI 全局安装。两种形态的日常入口都是 `pi`。
+这份指南面向 Research Pi：Pi 0.84.2 与 Pi 原生支持的供应商/模型。源码 checkout 用于快速开发；稳定版本作为 npm CLI 全局安装。两种形态的日常入口都是 `pi`。
 
 ## 1. 启动
 
@@ -59,19 +59,15 @@ pi-traced
 
 科研 prompt、DeepSeek 配置、研究工具、Codex executor 和 session 由 harness 提供；文件操作、Git checkpoint、Codex 委派和实验账本作用在启动 `pi` 时所在的研究仓库。所有项目的 Research Pi session 集中保存在当前运行形态的状态目录，每个 session header 仍记录其原始工作目录。
 
-稳定包首次安装后运行 `pi setup`，随后在 `~/.config/research-pi/credentials.env` 填入所需 provider 的 key。`DEEPSEEK_API_KEY` 支持官方 DeepSeek Leader 与原生小型搜索，`ZAI_API_KEY` 支持全局 GLM Coding Plan 的 GLM-5.3 与 GLM-5.3-Flash，`OPENCODE_API_KEY` 支持 OpenCode Go profiles。稳定包的普通配置位于 `~/.config/research-pi/config.json`；session、project Runtime、memory、Codex job、grant 和 trace 默认集中在 `~/.local/state/research-pi/`。源码开发入口使用 checkout 的 `.env`、`.pi/config.json` 与 `.pi/` 状态；每个开发 worktree 的配置和运行状态彼此隔离。`pi paths` 可确认当前运行的是哪一种形态。
+稳定包首次安装后运行 `pi setup`。进入 TUI 后用 Pi 原生 `/login` 登录供应商，用 `/model` 切换模型；`/scoped-models` 控制模型轮换范围，`/settings` 调节 thinking 等 Pi 设置。若供应商使用 API key，或需要 DeepSeek 原生小型搜索，也可以在 `~/.config/research-pi/credentials.env` 填入 `DEEPSEEK_API_KEY`、`ZAI_API_KEY` 或 `OPENCODE_API_KEY`。Research Pi 自己的 Runtime/compact/Codex/search/UI 配置位于 `~/.config/research-pi/config.json`；session、Project Runtime、memory、Codex job、grant 和 trace 默认集中在 `~/.local/state/research-pi/`。源码开发入口使用 checkout 的 `.env`、`.pi/config.json` 与 `.pi/` 状态；每个开发 worktree 的配置和运行状态彼此隔离。`pi paths` 可确认当前运行形态和 Pi 原生 agent 目录。
 
-查看或切换配置：
+查看 Research Pi 配置：
 
 ```sh
 pi config show
-pi config list
-pi config use opencode-go-flash
-pi config use zai-glm-5.3-flash
-pi --profile deepseek-pro   # 只覆盖本次启动
 ```
 
-进入 TUI 后输入 `/model` 或按 `Ctrl+L`，从 Research Pi 自动生成的 scoped 目录选择模型。模型、对应默认 thinking 和 `activeProfile` 会一起持久保存；恢复旧 Session 不会覆盖默认值。`/scoped-models` 是 Pi Core 低层入口，Research Pi 已从补全隐藏，日常不需要使用。API key 不在 `config.json` 中，始终单独保存在凭据文件。
+模型不属于上述配置：进入 TUI 后输入 `/model` 或按 `Ctrl+L`，直接使用 Pi 的完整原生模型选择器。新增供应商或订阅模型后，按 Pi 的方式 `/login`，必要时运行 `pi update --models`，无需等待 Research Pi 更新 profile。API key 不进入 `config.json`。
 
 所有字段、示例和覆盖优先级见 [Research Pi Configuration](configuration.md)。
 
@@ -286,7 +282,7 @@ App Server 的动态工具在 thread 创建时固定。Research Pi 为这组工�
 | 新建不带 Project 记忆的 Session | `/runtime new clean [reason]` |
 | 让 clean Session 恢复 Project 继承 | `/runtime inherit [reason]` |
 | 窄幅纠正当前 Project State | 说明修订依据，让 Leader 调用 `amend_project_state` |
-| 查看或持久切换模型 profile | `/model`、`Ctrl+L`；CLI 可用 `pi config use opencode-go-flash` |
+| 登录或切换 Leader 模型 | Pi 原生 `/login`、`/model`、`Ctrl+L`、`/scoped-models`、`/settings` |
 
 科研中推荐这样区分：
 
@@ -294,9 +290,9 @@ App Server 的动态工具在 thread 创建时固定。Research Pi 为这组工�
 - 已经切换成新的研究问题或正式实验阶段：使用 `/fork` 或 `/new`；
 - 会话很长但仍在解决同一问题：可手动使用 `/compact`。默认在约 272K/384K 总上下文处标记自动压缩，但会等当前 agent run 及其工具调用链完整 settled 后才执行，不会中断正在进行的任务。默认按当前分支第 1/2/3 次 compact 保留约 24K/32K/40K recent tail，结构化摘要目标 8K、生成硬上限 16K，compact 后通常约为 32K/40K/48K；这些数值统一在 `config.json` 的 `research.compaction` 调节。竞争假设、有效性、evidence refs 与下一实验写入结构化 compact，完整 JSONL 历史仍保留。
 - 新会话需要恢复旧证据：使用 memory search/read，不必先恢复整个旧 session。
-- 普通新 Session 会自动收到基于最近 structured state、路线 transition、完成任务 handoff、实验账本、Git 和 Runtime 的限长 ProjectView。它按“项目方向 → 路线演进与此前任务简述 → 最近完成任务详述 → 当前研究前沿 → 操作附录”组织；最近的编码、调试或基础设施任务只是上下文，不自动成为新 Session 的目标，也不替代实验事实。完成过项目相关工具工作的 Leader turn 会把最终用户汇报保存为本地 handoff，但不会推进科学 Project revision。用 `/runtime view` 可检查来源，用 `/runtime recommend` 可查看是否值得 compact 或轮换。确定交接时优先使用 `/runtime rotate`：它先检查 Project State、未知副作用与 Action 恢复身份，再创建空白 transcript 的 project-aware Session；原生 `/new` 不做这份 readiness/audit。若目的是主动排除项目记忆影响而非接手，则使用 `/runtime new clean`，之后只有显式 `/runtime inherit` 才恢复自动注入。
-- ProjectView 显示 `current/unconfirmed/stale/transitioning/missing` freshness，并按“structured baseline → live delta”表达。新 experiment 或 research transition 晚于最近 compact 时，旧 claim/next experiment 只作为实验前基线；delta 在下一次模型调用前直接加入 intervention、observation、validity 与 conclusion。窄更新用 `amend_project_state`，实质换轨用 `record_research_transition`，真正的阶段检查点再 compact，不需要每次实验都压缩。
-- 用户轮开始时，Runtime 通过 `before_agent_start` 把变化后的 ProjectView snapshot/短 delta 作为隐藏 Session 消息追加在历史尾部；同一轮工具刚产生新 evidence 时，`context` 只临时补一个尾部 delta，下一用户轮再持久化。旧 ProjectView 不被删除或搬位，因此完整旧请求更容易成为下一请求的共同前缀。普通只读工具与 Session activation 不创建新视图；实际命中率以 provider 返回的 cache usage 为准。
+- 普通新 Session 自动收到两部分 ProjectView。前半段 Project Brief 来自最近一次成功 compact，只保留项目介绍、最终目标、总体思路、用户优先级和已经结束阶段的“目标—思路—结果”；它不会混入当前运行或最新下一步。后半段 ProjectView Delta 位于 Session 历史之后，包含当前路线、最新 handoff、实验账本、Git 和 Runtime 状态。完成过项目相关工具工作的 Leader turn 会把最终用户汇报保存为本地 handoff，但不会推进科学 Project revision。用 `/runtime view` 可检查两层内容，用 `/runtime recommend` 可查看是否值得 compact 或轮换。确定交接时优先使用 `/runtime rotate`；若目的是主动排除项目记忆影响，则使用 `/runtime new clean`，之后只有显式 `/runtime inherit` 才恢复自动注入。
+- Project Brief 在两次成功 compact 之间保持字节稳定，窄幅 `amend_project_state`、实验记录、任务完成和路线变化都只更新尾部 Delta。下一次 compact 才能重写 Brief，并把已经结束的阶段压缩进历史。Delta 显示 `current/unconfirmed/stale/transitioning/missing` freshness；新 experiment 或 research transition 晚于最近 compact 时，旧 claim/next experiment 不会冒充当前结论。窄更新用 `amend_project_state`，实质换轨用 `record_research_transition`，真正阶段边界再 compact，不需要每次实验都压缩。
+- Runtime 在 `context` 边界过滤旧 Delta，并把一份完整、自包含的最新 Delta 放在模型 prompt 最末尾。最新 handoff、证据和 Action 排在较重的 frontier 细节之前，因此达到长度上限时优先截断旧细节。固定 Brief 提供缓存友好前缀，尾部 Delta 保证新 Session 不会只看到过时状态；实际命中率仍以 provider 返回的 cache usage 为准。
 - 长委派结束、重大实验结果、冲突证据、阶段交接或需要恢复上下文时，Leader 会按需加载 `research-briefing`，说明“做了什么—看到什么—是否有效—意味着什么—下一步为何如此”。如果你已经理解当前阶段并继续追问，它不会机械重复整段背景。
 
 方向实质变化时可以直接告诉 Pi：

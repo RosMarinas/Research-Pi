@@ -3,27 +3,10 @@
   "$id": "https://github.com/RosMarinas/Research-Pi/research-pi-config.schema.json",
   "title": "Research Pi Configuration",
   "type": "object",
-  "required": ["version", "activeProfile", "profiles"],
+  "required": ["version"],
   "properties": {
     "$schema": { "type": "string" },
-    "version": { "const": 1 },
-    "activeProfile": { "type": "string", "minLength": 1 },
-    "profiles": {
-      "type": "object",
-      "minProperties": 1,
-      "additionalProperties": {
-        "type": "object",
-        "required": ["provider", "model", "thinking"],
-        "properties": {
-          "label": { "type": "string" },
-          "description": { "type": "string" },
-          "provider": { "type": "string", "minLength": 1 },
-          "model": { "type": "string", "minLength": 1 },
-          "thinking": { "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"] }
-        },
-        "additionalProperties": false
-      }
-    },
+    "version": { "const": 2 },
     "pi": {
       "type": "object",
       "properties": {
@@ -71,17 +54,15 @@
     "resources": { "type": "object" },
     "ui": {
       "type": "object",
-      "required": ["density", "runtimeStrip", "showProfileStatus", "configPanelRows"],
+      "required": ["density", "runtimeStrip", "configPanelRows"],
       "properties": {
         "density": { "enum": ["compact", "balanced"] },
         "runtimeStrip": { "enum": ["auto", "always", "off"] },
-        "showProfileStatus": { "type": "boolean" },
         "configPanelRows": { "type": "integer", "minimum": 3, "maximum": 20 }
       },
       "additionalProperties": false
     },
-    "diagnostics": { "type": "object" },
-    "providerCompat": { "type": "object" }
+    "diagnostics": { "type": "object" }
   },
   "additionalProperties": false
 }
