@@ -463,6 +463,8 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	let projectViewDirty = true;
 	let persistedProjectView: ProjectViewReceipt | undefined;
 	let latestProjectView: Awaited<ReturnType<typeof buildProjectView>> | undefined;
+	let activeUserDeltaText: string | undefined;
+	let activeUserDeltaRevision: number | undefined;
 	let latestCodexJobs: any[] = [];
 	let runtimeDockTui: { requestRender?: () => void } | undefined;
 	const runtimeDockClock = createRuntimeDockClock(() => runtimeDockTui?.requestRender?.());
@@ -479,6 +481,10 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		policy: SessionInheritancePolicy,
 		context: ProjectContextMode = policy === "clean" ? "none" : "project",
 	) => {
+		if (sessionInheritancePolicy !== policy || projectContextMode !== context) {
+			activeUserDeltaText = undefined;
+			activeUserDeltaRevision = undefined;
+		}
 		sessionInheritancePolicy = policy;
 		projectContextMode = context;
 	};
@@ -562,6 +568,14 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		projectViewSnapshotHash = projectViewRefreshFingerprint(snapshot);
 		projectViewDirty = false;
 		return { snapshot, view };
+	};
+
+	const captureUserProjectDelta = (view: Awaited<ReturnType<typeof buildProjectView>>) => {
+		activeUserDeltaText = sessionRoleContext(
+			isAnalysisSession() ? "analysis" : "leader",
+			renderProjectViewDelta(view, { includeDirectedMessages: !isAnalysisSession() }),
+		);
+		activeUserDeltaRevision = view.projectRevision;
 	};
 
 	const runtimeModelFromSnapshot = async (ctx: ExtensionContext, activeRuntime: RuntimeContext, snapshot: RuntimeSnapshot) => {
@@ -702,6 +716,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		if (!idle && options.deferWhenBusy) {
 			return { status: "queued" as const, detail: "The Leader is still running; delivery remains in the Runtime mailbox" };
 		}
+		const triggerTurn = message.type !== "notify" && (options.triggerTurn ?? true);
 		pi.sendMessage(
 			{
 				customType: RUNTIME_MESSAGE_KIND,
@@ -719,12 +734,14 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 				},
 			},
 			idle
-				? { triggerTurn: options.triggerTurn ?? true }
+				? { triggerTurn }
 				: { triggerTurn: false, deliverAs: "followUp" },
 		);
 		return {
 			status: "delivered" as const,
-			detail: idle ? "started a leader turn" : "queued for the next safe leader turn",
+			detail: idle
+				? triggerTurn ? "started a leader turn" : "attached to the next genuine user turn without waking the Leader"
+				: "queued for the next safe leader turn",
 			attachmentEpoch: attachment.epoch ?? null,
 		};
 	};
@@ -1069,6 +1086,8 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			await settleRuntimeActorActivation(runtime, activeActivationId, { reason: "session shutdown" });
 			activeActivationId = undefined;
 		}
+		activeUserDeltaText = undefined;
+		activeUserDeltaRevision = undefined;
 		await detachRuntimeActor(runtime, RESEARCH_LEADER_ACTOR_ID, localSessionId, localAttachmentEpoch);
 		if (ctx.hasUI) {
 			ctx.ui.setStatus("research_runtime", undefined);
@@ -1097,13 +1116,17 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			const activeRuntime = await getRuntime(ctx, { claim: sessionInheritancePolicy === "project" });
 			attachmentLossNotified = false;
 			if (isAnalysisSession()) {
-				if (isProjectAwareSession()) await refreshProjectView(ctx);
+				if (isProjectAwareSession()) {
+					const { view } = await refreshProjectView(ctx);
+					captureUserProjectDelta(view);
+				}
 			} else if (sessionInheritancePolicy === "project") {
 				startRuntimeMailboxWatch(activeRuntime, ctx);
-				const { snapshot } = await refreshProjectView(ctx);
+				let { snapshot, view } = await refreshProjectView(ctx);
 				if (await deliverOpenLeaderMessages(activeRuntime, snapshot, ctx, { triggerTurn: false })) {
-					await refreshProjectView(ctx);
+					({ snapshot, view } = await refreshProjectView(ctx));
 				}
+				captureUserProjectDelta(view);
 			}
 		} catch (error) {
 			if (!(error instanceof RuntimeLeaderBusyError)) throw error;
@@ -1129,13 +1152,8 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			await refreshProjectView(ctx, snapshot, anchor);
 		}
 		const view = latestProjectView ?? (await refreshProjectView(ctx, snapshot)).view;
-		// Re-read receipts after compaction/tree changes. A receipt before the
-		// latest compaction is no longer present in provider context.
 		persistedProjectView = latestProjectViewReceipt(ctx.sessionManager.getBranch());
 		if (persistedProjectView?.fingerprint === projectViewHash) return;
-		// Persist exactly one compact-boundary Brief. It carries no live role or
-		// progress text, so its bytes remain an immutable cache prefix until the
-		// next compaction removes it from provider context.
 		persistedProjectView = projectViewReceipt(view);
 		return {
 			message: {
@@ -1218,10 +1236,9 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	pi.on("tool_execution_end", (event) => {
 		const input = toolExecutionInputs.get(event.toolCallId) ?? {};
 		toolExecutionInputs.delete(event.toolCallId);
-		// Refresh only after tools that can change project evidence, Git, files,
-		// or Runtime delegation state. The next context hook performs one
-		// deterministic rebuild; pure Codex status/result reads preserve the
-		// exact prompt suffix and cannot manufacture another ProjectView delta.
+		// Mark semantic changes for the next genuine user request. The current
+		// request keeps its captured Delta; its tool result is the newer evidence.
+		// Pure Codex status/result reads cannot manufacture another Delta.
 		if (isAnalysisSession() && event.toolName === "bash") return;
 		if (projectViewToolMutates(event.toolName, input)) {
 			projectViewDirty = true;
@@ -1258,13 +1275,6 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 				),
 			};
 		}
-		const snapshotHash = projectViewRefreshFingerprint(snapshot);
-		const anchor = await readProjectAnchor(ctx.cwd);
-		if (
-			projectViewDirty
-			|| snapshotHash !== projectViewSnapshotHash
-			|| (anchor?.fingerprint ?? null) !== (latestProjectView?.anchor?.fingerprint ?? null)
-		) await refreshProjectView(ctx, snapshot, anchor);
 		const runtimeMessagesById = new Map(snapshot.messages.map((message) => [message.id, message]));
 		const messages = event.messages.filter((message) => {
 			if (isAnalysisSession() && message.role === "custom" && message.customType === RUNTIME_MESSAGE_KIND) return false;
@@ -1284,15 +1294,10 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			});
 			return true;
 		});
-		const view = latestProjectView ?? (await refreshProjectView(ctx, snapshot)).view;
-		const deltaText = sessionRoleContext(
-			isAnalysisSession() ? "analysis" : "leader",
-			renderProjectViewDelta(view, { includeDirectedMessages: !isAnalysisSession() }),
-		);
 		return {
-			messages: materializeProjectViewContext(messages, projectViewText, deltaText, {
+			messages: materializeProjectViewContext(messages, projectViewText, activeUserDeltaText, {
 				briefFingerprint: projectViewHash,
-				projectRevision: view.projectRevision,
+				projectRevision: activeUserDeltaRevision,
 			}),
 		};
 	});
@@ -1336,6 +1341,10 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_settled", async (_event, ctx) => {
+		// A Project Delta belongs only to the genuine user request that captured it.
+		// Runtime wakes and later user requests must never inherit this suffix.
+		activeUserDeltaText = undefined;
+		activeUserDeltaRevision = undefined;
 		let activeRuntime: RuntimeContext | undefined;
 		let runtimeChanged = false;
 		if (materializedMessages.size) {

@@ -97,7 +97,8 @@ test("Pi registers one Codex delegation tool instead of a family of noisy tools"
 	assert.match(registered.promptGuidelines.join("\n"), /stable mission label/);
 	assert.match(registered.promptGuidelines.join("\n"), /structured host bridge/);
 	assert.match(registered.promptGuidelines.join("\n"), /semantic outcome/);
-	assert.match(registered.promptGuidelines.join("\n"), /repeated status\/result reads are suppressed/);
+	assert.match(registered.promptGuidelines.join("\n"), /genuine user request may inspect one or more relevant jobs directly/);
+	assert.match(registered.promptGuidelines.join("\n"), /must not turn that exception into a wait loop/);
 	assert.equal(command.name, "codex");
 	assert.match(command.definition.description, /mission threads/);
 });
@@ -259,8 +260,7 @@ test("background Codex reads stay fused until a real external event", () => {
 		toolCallId: "repeated-read",
 		input: { action: "result", jobId },
 	});
-	assert.equal(repeated.block, true);
-	assert.equal(repeated.terminate, true);
+	assert.equal(repeated, undefined, "a genuine user run may inspect the same job as needed");
 
 	emit("tool_result", {
 		type: "tool_result",
@@ -277,6 +277,13 @@ test("background Codex reads stay fused until a real external event", () => {
 		toolCallId: "retry-after-error",
 		input: { action: "result", jobId },
 	}), undefined);
+	emit("agent_settled", { type: "agent_settled" });
+	assert.equal(emit("tool_call", {
+		type: "tool_call",
+		toolName: "codex_delegate",
+		toolCallId: "automatic-read-after-user-run",
+		input: { action: "status", jobId },
+	})?.block, true, "the user exception ends when that run settles");
 
 	const manualJobId = "codex-2026-08-26T07-00-00-000Z-manual01";
 	emit("input", { type: "input", source: "interactive", text: "manually inspect" });
@@ -317,7 +324,7 @@ test("background Codex reads stay fused until a real external event", () => {
 		toolName: "codex_delegate",
 		toolCallId: "poll-after-response",
 		input: { action: "result", jobId: manualJobId },
-	})?.block, true, "a resumed advisor is monitored even when its original start was synchronous");
+	}), undefined, "respond does not consume the genuine user's inspection authority");
 });
 
 test("Codex mailbox delivery defers until the Leader can receive a still-open event", () => {
@@ -351,7 +358,8 @@ test("a nonterminal Codex result tells the Leader to yield to Runtime delivery",
 		progress: "web search",
 	});
 	assert.match(text, /Runtime mailbox will deliver/);
-	assert.match(text, /Do not call status\/result again in this Leader run/);
+	assert.match(text, /Do not poll autonomously/);
+	assert.match(text, /genuine user request may inspect progress directly/);
 	assert.doesNotMatch(text, /Use action=result later/);
 });
 

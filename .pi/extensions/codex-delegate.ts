@@ -199,7 +199,7 @@ export function formatCodexJob(job: ReturnType<typeof publicJobView>): string {
 	return [
 		`Codex job ${job.id} is ${job.status}; ${jobActivityText(job)}.`,
 		"The Runtime mailbox will deliver its next blocking or terminal event automatically.",
-		"Do not call status/result again in this Leader run; end the run and wait for that event.",
+		"Do not poll autonomously. A genuine user request may inspect progress directly; otherwise end the run and wait for the Runtime event.",
 	].join(" ");
 }
 
@@ -521,11 +521,12 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 	const deliveredEvents = new Set<string>();
 	const deliveringEvents = new Set<string>();
 	const codexReadsUntilExternalEvent = new Set<string>();
-	const codexReadToolCalls = new Map<string, string>();
+	const codexReadToolCalls = new Map<string, { jobId: string; userAuthorized: boolean }>();
 	const capabilityApprovalRequests = new Map<string, Promise<boolean>>();
 	let capabilityApprovalQueue: Promise<unknown> = Promise.resolve();
 	let latestTerminal: CodexJobView | undefined;
 	let shuttingDown = false;
+	let genuineUserRunActive = false;
 	let lastFooterText: string | undefined;
 	let lastDockProjection: string | undefined;
 
@@ -536,8 +537,8 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			return;
 		}
 		codexReadsUntilExternalEvent.delete(jobId);
-		for (const [toolCallId, pendingJobId] of codexReadToolCalls) {
-			if (pendingJobId === jobId) codexReadToolCalls.delete(toolCallId);
+		for (const [toolCallId, pending] of codexReadToolCalls) {
+			if (pending.jobId === jobId) codexReadToolCalls.delete(toolCallId);
 		}
 	};
 
@@ -1036,7 +1037,9 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("input", (event) => {
-		if (event.source !== "extension") releaseCodexReadFuse();
+		if (event.source === "extension") return;
+		genuineUserRunActive = true;
+		releaseCodexReadFuse();
 	});
 
 	pi.on("tool_call", (event) => {
@@ -1045,19 +1048,22 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		if (action !== "status" && action !== "result") return;
 		const jobId = String(event.input?.jobId ?? "");
 		if (!jobId) return;
-		if (codexReadsUntilExternalEvent.has(jobId) || [...codexReadToolCalls.values()].includes(jobId)) {
+		const userAuthorized = genuineUserRunActive;
+		if (!userAuthorized && (
+			codexReadsUntilExternalEvent.has(jobId)
+			|| [...codexReadToolCalls.values()].some((pending) => pending.jobId === jobId)
+		)) {
 			return {
 				block: true,
-				reason: `Repeated Codex polling suppressed for ${jobId}. Its Runtime mailbox notification is already armed; end this Leader run and wait for the next blocking or terminal event.`,
+				reason: `Automatic Codex polling suppressed for ${jobId}. Its Runtime mailbox notification is already armed. A genuine user request may inspect it immediately; otherwise wait for the next blocking or terminal event.`,
 				terminate: true,
 			};
 		}
-		codexReadToolCalls.set(event.toolCallId, jobId);
+		codexReadToolCalls.set(event.toolCallId, { jobId, userAuthorized });
 	});
 
 	pi.on("tool_result", (event) => {
 		if (event.toolName !== "codex_delegate") return;
-		const pendingJobId = codexReadToolCalls.get(event.toolCallId);
 		codexReadToolCalls.delete(event.toolCallId);
 		if (event.isError) return;
 		const details = event.details as CodexJobView | undefined;
@@ -1069,6 +1075,10 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		) {
 			codexReadsUntilExternalEvent.add(details.id);
 		}
+	});
+
+	pi.on("agent_settled", () => {
+		genuineUserRunActive = false;
 	});
 
 	pi.on("session_tree", (_event, ctx) => {
@@ -1112,7 +1122,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			"Let executor finish in-project work without command-by-command approval. External access must use the structured host bridge; never manufacture a grant, transmit a secret, or start a replacement delegation to bypass a request.",
 			"Interpret completed as transport state. Judge semantic outcome, goal_satisfied, evidence, validity, and remaining work; reconcile outcome_unknown only after inspecting external state.",
 			"Answer input_required on the exact jobId/requestId with respond when Pi can decide; ask the user only for a user-owned choice or direct credential setup.",
-			"After a background job or resumed advisor returns a nonterminal state, end the current Leader run. Runtime delivers the next blocking or terminal event; repeated status/result reads are suppressed until a real external event arrives.",
+			"After a background job or resumed advisor returns a nonterminal state, end an autonomous Leader run. Runtime delivers the next blocking or terminal event. A genuine user request may inspect one or more relevant jobs directly, but must not turn that exception into a wait loop.",
 		],
 		parameters: ParamsSchema,
 		executionMode: "sequential",

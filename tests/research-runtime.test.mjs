@@ -65,6 +65,14 @@ async function waitUntil(predicate, { timeoutMs = 3_000, intervalMs = 20 } = {})
 	throw new Error(`Condition was not met within ${timeoutMs}ms`);
 }
 
+function messageText(message) {
+	if (!message) return "";
+	if (typeof message.content === "string") return message.content;
+	return Array.isArray(message.content)
+		? message.content.filter((part) => part?.type === "text").map((part) => part.text).join("\n")
+		: "";
+}
+
 test("Codex Runtime result cards preserve Markdown structure when expanded", () => {
 	const content = [
 		"[Research Runtime result msg-1 from codex:mission-demo:advisor]",
@@ -677,6 +685,15 @@ test("Runtime mailbox delivery is single-owner and rechecks message state before
 		assert.equal(concurrent.filter((status) => status === "delivered").length, 1);
 		assert.equal(sent.length, 1);
 		assert.equal(sent[0].options.triggerTurn, true);
+		const runtimeOnlyContext = await handlers.get("context")({
+			type: "context",
+			messages: [sent[0].message],
+		}, ctx);
+		assert.equal(
+			runtimeOnlyContext.messages.some((item) => messageText(item).includes("<research_project_delta>")),
+			false,
+			"an internal ask/result wake must not synthesize a user-request Delta",
+		);
 		assert.equal((await readRuntimeSnapshot(runtime)).messages.find((item) => item.id === message.id)?.status, "delivered");
 		assert.equal(await adapter.deliver(ctx, { messageId: message.id }), "handled");
 		assert.equal(sent.length, 1);
@@ -708,6 +725,7 @@ test("Runtime mailbox delivery is single-owner and rechecks message state before
 		idle = true;
 		assert.equal(await adapter.deliver(ctx, { messageId: deferred.id }), "delivered");
 		assert.equal(sent.length, 2);
+		assert.equal(sent[1].options.triggerTurn, false, "notify is visible later but cannot start a Leader turn");
 	} finally {
 		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
 		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;
@@ -761,7 +779,7 @@ test("ordinary Leader claim starts the mailbox watcher immediately", async () =>
 	}
 });
 
-test("Analysis handoff wakes only the attached Leader and retries after a busy turn settles", async () => {
+test("Analysis notify reaches only the attached Leader without starting an autonomous turn", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-analysis-wake-"));
 	const previousRoot = process.env.RESEARCH_PI_RUNTIME_DIR;
 	process.env.RESEARCH_PI_RUNTIME_DIR = join(root, "runtime");
@@ -854,7 +872,7 @@ test("Analysis handoff wakes only the attached Leader and retries after a busy t
 		await waitUntil(() => leaderSent.length === 1);
 		assert.equal(analysisSent.length, 0, "Analysis Session must never materialize the Leader mailbox locally");
 		assert.equal(leaderSent[0].message.details.messageId, first.details.messageId);
-		assert.equal(leaderSent[0].options.triggerTurn, true);
+		assert.equal(leaderSent[0].options.triggerTurn, false);
 		let runtime = await resolveResearchRuntime(workspace);
 		let snapshot = await readRuntimeSnapshot(runtime);
 		assert.equal(snapshot.messages.find((message) => message.id === first.details.messageId)?.status, "delivered");
@@ -877,7 +895,7 @@ test("Analysis handoff wakes only the attached Leader and retries after a busy t
 		await leaderHandlers.get("agent_settled")({ type: "agent_settled" }, leaderCtx);
 		await waitUntil(() => leaderSent.length === 2);
 		assert.equal(leaderSent[1].message.details.messageId, second.details.messageId);
-		assert.equal(leaderSent[1].options.triggerTurn, true);
+		assert.equal(leaderSent[1].options.triggerTurn, false);
 		await new Promise((resolve) => setTimeout(resolve, RUNTIME_TEST_WATCH_SETTLE_MS));
 		assert.equal(leaderSent.length, 2, "ledger delivery receipts must not wake the Leader again");
 
@@ -1202,8 +1220,9 @@ test("/runtime new clean starts without transcript, ProjectView, mailbox, or Pro
 		assert.equal(sent.length, 1);
 		assert.equal(sent[0].message.details.messageId, mailbox.id);
 		assert.equal(sent[0].options.triggerTurn, false);
+		await handlers.get("input")({ type: "input", source: "user", text: "continue" }, cleanContext);
 		const inherited = await handlers.get("context")({ type: "context", messages: [{ role: "user", content: "continue" }] }, cleanContext);
-		assert.match(String(inherited.messages.find((message) => message.customType === "research-project-view")?.content), /Project question must stay outside clean context/);
+		assert.match(messageText(inherited.messages.at(-1)), /Project question must stay outside clean context/);
 	} finally {
 		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
 		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;
@@ -1290,14 +1309,19 @@ test("Analysis Session observes Project state without stealing the Leader, then 
 		assert.ok(snapshot.actors.some((actor) => actor.kind === "analysis" && actor.metadata?.sessionId === "session-analysis"));
 		assert.equal(sent.length, 0, "Analysis Session must not drain the Leader mailbox");
 
+		await handlers.get("input")({ type: "input", source: "user", text: "Discuss H1 versus H2" }, ctx);
 		const injected = await handlers.get("before_agent_start")({ type: "before_agent_start" }, ctx);
-		assert.match(injected.message.content, /Which mechanism explains the result/);
+		assert.doesNotMatch(injected.message.content, /Which mechanism explains the result/, "the current question belongs to Delta, not the stable Brief");
 		assert.doesNotMatch(injected.message.content, /Session role:/, "the stable Brief must not encode a Session role");
 		const analysisContext = await handlers.get("context")({
 			type: "context",
-			messages: [{ role: "custom", customType: injected.message.customType, content: injected.message.content, details: injected.message.details }],
+			messages: [
+				{ role: "custom", customType: injected.message.customType, content: injected.message.content, details: injected.message.details },
+				{ role: "user", content: "Discuss H1 versus H2" },
+			],
 		}, ctx);
-		assert.match(String(analysisContext.messages.at(-1)?.content), /Session role: Analysis Session/);
+		assert.match(messageText(analysisContext.messages.at(-1)), /Which mechanism explains the result/);
+		assert.match(messageText(analysisContext.messages.at(-1)), /Session role: Analysis Session/);
 		await handlers.get("agent_start")({ type: "agent_start" }, ctx);
 		assert.equal(aborts, 0, "Analysis Session can reason without owning the Leader attachment");
 		assert.equal(handlers.get("tool_call")({ toolName: "read", input: {} }), undefined);
@@ -1314,27 +1338,28 @@ test("Analysis Session observes Project state without stealing the Leader, then 
 			],
 		}, ctx);
 		assert.equal(filtered.messages.some((message) => message.customType === RUNTIME_MESSAGE_KIND), false);
-			assert.ok(filtered.messages.some((message) => message.content === "Discuss H1 versus H2"));
+		assert.ok(filtered.messages.some((message) => messageText(message).includes("Discuss H1 versus H2")));
 
-			await commands.get("runtime").handler("context off", ctx);
-			assert.equal(runtimeSessionInheritancePolicy(branch), "analysis");
-			assert.equal(runtimeSessionProjectContext(branch, "analysis"), "none");
-			assert.equal(await handlers.get("before_agent_start")({ type: "before_agent_start" }, ctx), undefined);
-			assert.equal(handlers.get("tool_call")({ toolName: "bash", input: { command: "git status --short" } }), undefined);
-			const contextOff = await handlers.get("context")({
-				type: "context",
-				messages: [
-					{ role: "custom", customType: "research-project-view", content: "old ProjectView" },
-					{ role: "user", content: "analysis without project context" },
-				],
-			}, ctx);
-			assert.deepEqual(contextOff.messages, [{ role: "user", content: "analysis without project context" }]);
-			await commands.get("runtime").handler("context on", ctx);
-			assert.equal(runtimeSessionProjectContext(branch, "analysis"), "project");
-			const contextOn = await handlers.get("context")({ type: "context", messages: [{ role: "user", content: "resume analysis" }] }, ctx);
-			assert.match(String(contextOn.messages.at(-1)?.content), /Session role: Analysis Session/);
+		await commands.get("runtime").handler("context off", ctx);
+		assert.equal(runtimeSessionInheritancePolicy(branch), "analysis");
+		assert.equal(runtimeSessionProjectContext(branch, "analysis"), "none");
+		assert.equal(await handlers.get("before_agent_start")({ type: "before_agent_start" }, ctx), undefined);
+		assert.equal(handlers.get("tool_call")({ toolName: "bash", input: { command: "git status --short" } }), undefined);
+		const contextOff = await handlers.get("context")({
+			type: "context",
+			messages: [
+				{ role: "custom", customType: "research-project-view", content: "old ProjectView" },
+				{ role: "user", content: "analysis without project context" },
+			],
+		}, ctx);
+		assert.deepEqual(contextOff.messages, [{ role: "user", content: "analysis without project context" }]);
+		await commands.get("runtime").handler("context on", ctx);
+		assert.equal(runtimeSessionProjectContext(branch, "analysis"), "project");
+		await handlers.get("input")({ type: "input", source: "user", text: "resume analysis" }, ctx);
+		const contextOn = await handlers.get("context")({ type: "context", messages: [{ role: "user", content: "resume analysis" }] }, ctx);
+		assert.match(messageText(contextOn.messages.at(-1)), /Session role: Analysis Session/);
 
-			const revisionBeforeCompact = snapshot.revision;
+		const revisionBeforeCompact = snapshot.revision;
 		await handlers.get("session_compact")({ type: "session_compact", compactionEntry: { type: "compaction", id: "analysis-compact" } }, ctx);
 		assert.equal((await readRuntimeSnapshot(runtime)).revision, revisionBeforeCompact, "Analysis compaction must not write Project State");
 
@@ -1361,9 +1386,10 @@ test("Analysis Session observes Project state without stealing the Leader, then 
 		assert.deepEqual(new Set(sent.map((item) => item.message.details.messageId)), new Set([existingMessage.id, analysisMessage.id]));
 		assert.equal(handlers.get("tool_call")({ toolName: "bash", input: { command: "echo execute" } }), undefined);
 		assert.ok(notices.some((message) => /now the Leader Session/.test(message)));
+		await handlers.get("input")({ type: "input", source: "user", text: "execute" }, ctx);
 		const leaderContext = await handlers.get("context")({ type: "context", messages: [{ role: "user", content: "execute" }] }, ctx);
-		assert.match(String(leaderContext.messages.at(-1)?.content), /Session role: Leader Session/);
-		assert.match(String(leaderContext.messages.at(-1)?.content), /supersedes any earlier Analysis Session role block/);
+		assert.match(messageText(leaderContext.messages.at(-1)), /Session role: Leader Session/);
+		assert.match(messageText(leaderContext.messages.at(-1)), /supersedes any earlier Analysis Session role block/);
 	} finally {
 		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
 		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;
@@ -1525,7 +1551,7 @@ test("an active Leader Session blocks silent takeover but explicit takeover adva
 	}
 });
 
-test("a cross-session research transition refreshes ProjectView at the next model boundary", async () => {
+test("a cross-session transition reaches the next genuine user Delta and stays frozen through the run", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-boundary-refresh-"));
 	const previousRoot = process.env.RESEARCH_PI_RUNTIME_DIR;
 	process.env.RESEARCH_PI_RUNTIME_DIR = join(root, "runtime");
@@ -1569,9 +1595,11 @@ test("a cross-session research transition refreshes ProjectView at the next mode
 			oldDisposition: "superseded",
 			authorityRefs: ["user-decision:safe-boundary"],
 		});
+		await handlers.get("input")({ type: "input", source: "user", text: "continue" }, ctx);
 		const result = await handlers.get("context")({ type: "context", messages: [{ role: "user", content: "continue" }] }, ctx);
-		const projectDelta = result.messages.find((message) => message.customType === "research-project-view-delta");
-		assert.match(String(projectDelta?.content), /Current research track: .*route B/);
+		assert.match(messageText(result.messages.at(-1)), /Current research track: .*route B/);
+		const frozenDelta = result.messages.at(-1).content.at(-1).text;
+		assert.equal(result.messages.some((message) => message.customType === "research-project-view-delta"), false);
 
 		await upsertRuntimeAction(runtime, {
 			id: "cross-session-action",
@@ -1579,9 +1607,20 @@ test("a cross-session research transition refreshes ProjectView at the next mode
 			status: "running",
 			label: "route B diagnostic",
 		});
+		const sameRun = await handlers.get("context")({
+			type: "context",
+			messages: [
+				{ role: "user", content: "continue" },
+				{ role: "assistant", content: [{ type: "toolCall", id: "probe-1", name: "read", arguments: {} }] },
+				{ role: "toolResult", toolCallId: "probe-1", toolName: "read", content: [{ type: "text", text: "done" }] },
+			],
+		}, ctx);
+		assert.equal(messageText(sameRun.messages.at(-1)).endsWith(frozenDelta), true);
+		assert.doesNotMatch(messageText(sameRun.messages.at(-1)), /cross-session-action \[running\]/, "Runtime changes do not rewrite Delta mid-run");
+		await handlers.get("agent_settled")({ type: "agent_settled" }, ctx);
+		await handlers.get("input")({ type: "input", source: "user", text: "continue again" }, ctx);
 		const activityResult = await handlers.get("context")({ type: "context", messages: [{ role: "user", content: "continue again" }] }, ctx);
-		const refreshedDelta = activityResult.messages.find((message) => message.customType === "research-project-view-delta");
-		assert.match(String(refreshedDelta?.content), /cross-session-action \[running\]/);
+		assert.match(messageText(activityResult.messages.at(-1)), /cross-session-action \[running\]/);
 	} finally {
 		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
 		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;
@@ -1645,24 +1684,40 @@ test("ProjectView persists one fixed Brief while replacing one live tail Delta",
 			conclusion: "The encoder is the current failure locus.",
 			nextStep: "Test staged encoder training.",
 		});
+		await handlers.get("input")({ type: "input", source: "user", text: "continue" }, ctx);
 		assert.equal(await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "continue" }, ctx), undefined);
 
 		const context = await handlers.get("context")({
 			type: "context",
-			messages: branch.map((entry) => ({
-				role: "custom",
-				customType: entry.customType,
-				content: entry.content,
-				details: entry.details,
-			})),
+			messages: [
+				...branch.map((entry) => ({
+					role: "custom",
+					customType: entry.customType,
+					content: entry.content,
+					details: entry.details,
+				})),
+				{ role: "user", content: "continue" },
+			],
 		}, ctx);
 		const briefs = context.messages.filter((message) => message.customType === "research-project-view");
 		const deltas = context.messages.filter((message) => message.customType === "research-project-view-delta");
 		assert.equal(briefs.length, 1);
 		assert.equal(briefs[0].content, stableBrief);
-		assert.equal(deltas.length, 1);
-		assert.equal(context.messages.at(-1), deltas[0]);
-		assert.match(String(deltas[0].content), /observation: The margin increased from 0.02 to 0.31/);
+		assert.equal(context.messages[0], briefs[0], "the stable Brief is always the logical prefix");
+		assert.equal(deltas.length, 0);
+		assert.match(messageText(context.messages.at(-1)), /observation: The margin increased from 0.02 to 0.31/);
+		const frozenDelta = context.messages.at(-1).content.at(-1).text;
+		const continuation = await handlers.get("context")({
+			type: "context",
+			messages: [
+				...branch.map((entry) => ({ role: "custom", customType: entry.customType, content: entry.content, details: entry.details })),
+				{ role: "user", content: "continue" },
+				{ role: "assistant", content: [{ type: "toolCall", id: "probe", name: "read", arguments: {} }] },
+				{ role: "toolResult", toolCallId: "probe", toolName: "read", content: [{ type: "text", text: "ok" }] },
+			],
+		}, ctx);
+		assert.equal(continuation.messages.at(-1).role, "toolResult");
+		assert.equal(continuation.messages.at(-1).content.at(-1).text, frozenDelta);
 
 		writeFileSync(join(workspace, "RESEARCH.md"), "# Project Anchor\n\nGoal: preserve the corrected scientific objective.\n");
 		const replacement = await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "anchor changed" }, ctx);
@@ -1735,14 +1790,19 @@ test("a completed Leader work turn becomes a durable cross-Session handoff witho
 		assert.match(snapshot.handoffs[0].task, /Repair the local experiment launcher/);
 		assert.match(snapshot.handoffs[0].summary, /research direction is unchanged/);
 
+		await handlers.get("agent_settled")({ type: "agent_settled" }, ctx);
+		await handlers.get("input")({ type: "input", source: "user", text: "new session continues" }, ctx);
 		assert.equal(await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "new session continues" }, ctx), undefined);
 		const update = await handlers.get("context")({
 			type: "context",
-			messages: branch.map((entry) => ({ role: "custom", customType: entry.customType, content: entry.content, details: entry.details })),
+			messages: [
+				...branch.map((entry) => ({ role: "custom", customType: entry.customType, content: entry.content, details: entry.details })),
+				{ role: "user", content: "new session continues" },
+			],
 		}, ctx);
-		const delta = update.messages.find((message) => message.customType === "research-project-view-delta");
-		assert.match(String(delta?.content), /Latest completed work handoff/);
-		assert.match(String(delta?.content), /context, not an automatic next task/);
+		assert.equal(update.messages.some((message) => message.customType === "research-project-view-delta"), false);
+		assert.match(messageText(update.messages.at(-1)), /Latest completed work handoff/);
+		assert.match(messageText(update.messages.at(-1)), /context, not an automatic next task/);
 	} finally {
 		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;
 		else process.env.RESEARCH_PI_RUNTIME_DIR = previousRoot;

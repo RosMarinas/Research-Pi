@@ -6,7 +6,7 @@ import { RESEARCH_LEADER_ACTOR_ID, runtimeResearchTrack, runtimeTrackStatus } fr
 
 export const PROJECT_VIEW_KIND = "research-project-view";
 export const PROJECT_VIEW_DELTA_KIND = "research-project-view-delta";
-export const PROJECT_VIEW_VERSION = 5;
+export const PROJECT_VIEW_VERSION = 6;
 export const PROJECT_ANCHOR_FILE = "RESEARCH.md";
 const MAX_SESSION_FILES = 24;
 const MAX_SESSION_BYTES = 64 * 1024 * 1024;
@@ -384,8 +384,8 @@ export function renderProjectBrief(view) {
 	lines.push("=== PROJECT OVERVIEW AND FINAL GOAL ===");
 	if (state) {
 		lines.push(
-			`Overview: ${compact(brief?.overview, 1_200) || compact(state.researchQuestion, 1_200) || "not established"}`,
-			`Final goal: ${compact(brief?.finalGoal, 1_200) || compact(state.researchQuestion, 1_200) || "not established"}`,
+			`Overview: ${compact(brief?.overview, 1_200) || "not established"}`,
+			`Final goal: ${compact(brief?.finalGoal, 1_200) || "not established"}`,
 		);
 		lines.push(
 			"=== OVERALL DIRECTION AND APPROACH ===",
@@ -427,7 +427,7 @@ export function renderProjectViewDelta(view, options = {}) {
 	const evidence = [...view.pendingEvidence].reverse().slice(0, 2);
 	const header = [
 		"<research_project_delta>",
-		"Current Project Delta rebuilt at the model boundary. It is the only model-visible live ProjectView suffix and supersedes older progress, plans, and route interpretations.",
+		"Request-scoped Project Delta captured with the latest genuine user input. It is the only model-visible live ProjectView suffix, remains frozen across this request's tool continuations, and supersedes older progress, plans, and route interpretations.",
 		`Stable Brief boundary: Project revision ${view.briefRevision || "none"}`,
 		`Project revision: ${view.projectRevision} · structured state revision: ${view.stateRevision || "none"} · memory freshness: ${view.freshness}`,
 		`Git: branch=${view.git.branch ?? "unknown"} commit=${view.git.commit ?? "unknown"} dirty=${view.git.dirty ?? "unknown"}`,
@@ -501,7 +501,7 @@ export function renderProjectViewDelta(view, options = {}) {
 		includeDirectedMessages
 			? "Runtime mailbox bodies use the separate single-delivery channel; inspect /inbox only when routing needs attention."
 			: "Directed Runtime message contents belong only to the addressed Leader Session.",
-		"The current user request selects the immediate task. This Delta is current context, not an instruction to continue the previous task.",
+		"The current user request selects the immediate task. This suffix is context only: do not acknowledge it as a separate message or continue work merely because it is present.",
 		"</research_project_delta>",
 	];
 	const fixed = [...header, ...progress].filter(Boolean).join("\n");
@@ -516,9 +516,9 @@ export function renderProjectViewDelta(view, options = {}) {
 }
 
 export function materializeProjectViewContext(messages, briefText, deltaText, details = {}) {
-	let latestPersistentBriefIndex = -1;
+	let latestPersistentBrief;
 	const expectedBriefFingerprint = details.briefFingerprint ?? null;
-	for (const [index, message] of messages.entries()) {
+	for (const message of messages) {
 		if (
 			message.role === "custom"
 			&& message.customType === PROJECT_VIEW_KIND
@@ -526,40 +526,60 @@ export function materializeProjectViewContext(messages, briefText, deltaText, de
 			&& message.details?.version === PROJECT_VIEW_VERSION
 			&& message.details?.mode === "brief"
 			&& (!expectedBriefFingerprint || message.details?.fingerprint === expectedBriefFingerprint)
-		) latestPersistentBriefIndex = index;
+		) latestPersistentBrief = message;
 	}
-	const hasPersistentBrief = latestPersistentBriefIndex >= 0;
-	const filtered = messages.filter((message, index) => {
+	const filtered = messages.filter((message) => {
 		if (message.role !== "custom") return true;
 		if (message.customType === PROJECT_VIEW_DELTA_KIND) return false;
 		if (message.customType !== PROJECT_VIEW_KIND) return true;
-		if (message.details?.transient === true) return false;
-		const isCurrentBrief = message.details?.persistent === true
-			&& message.details?.version === PROJECT_VIEW_VERSION
-			&& message.details?.mode === "brief";
-		if (!isCurrentBrief) return false;
-		return index === latestPersistentBriefIndex;
+		return false;
 	});
 	const result = [...filtered];
-	if (!hasPersistentBrief && briefText) {
-		result.push({
-			role: "custom",
-			customType: PROJECT_VIEW_KIND,
-			content: briefText,
-			display: false,
-			details: { version: PROJECT_VIEW_VERSION, mode: "brief", transient: true, ...details },
-			timestamp: 0,
-		});
-	}
+	const materializedBrief = latestPersistentBrief ?? (briefText ? {
+		role: "custom",
+		customType: PROJECT_VIEW_KIND,
+		content: briefText,
+		display: false,
+		details: { version: PROJECT_VIEW_VERSION, mode: "brief", transient: true, ...details },
+		timestamp: 0,
+	} : undefined);
+	// The Brief has one fixed logical position even though Pi persists its hidden
+	// receipt after the prompt that first requested it. This keeps it a stable
+	// prefix and prevents a context block from appearing newer than the user.
+	if (materializedBrief) result.unshift(materializedBrief);
 	if (deltaText) {
-		result.push({
-			role: "custom",
-			customType: PROJECT_VIEW_DELTA_KIND,
-			content: deltaText,
-			display: false,
-			details: { version: PROJECT_VIEW_VERSION, mode: "delta", transient: true, ...details },
-			timestamp: 0,
-		});
+		// Delta is request-scoped metadata, not a new conversation message. Attach
+		// exactly one frozen suffix to the current inbound message. On the first
+		// provider call that is the real user request; on tool continuations it is
+		// the latest ToolResult. This preserves the moving cache-tail design while
+		// keeping the actual tool result as the conversational continuation.
+		let targetIndex = -1;
+		for (let index = result.length - 1; index >= 0; index -= 1) {
+			if (result[index]?.role === "user" || result[index]?.role === "toolResult") {
+				targetIndex = index;
+				break;
+			}
+		}
+		if (targetIndex >= 0) {
+			const target = result[targetIndex];
+			const content = typeof target.content === "string"
+				? [{ type: "text", text: target.content }]
+				: Array.isArray(target.content)
+					? [...target.content]
+					: [];
+			content.push({ type: "text", text: deltaText });
+			result[targetIndex] = {
+				...target,
+				content,
+				details: {
+					...(target.details ?? {}),
+					researchProjectDelta: {
+						version: PROJECT_VIEW_VERSION,
+						projectRevision: details.projectRevision ?? null,
+					},
+				},
+			};
+		}
 	}
 	return result;
 }

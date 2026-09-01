@@ -180,7 +180,7 @@ Host capability 不走上述自由文本咨询路径。Codex 调用 `research_pi
 
 这里没有把 A 的完整 transcript 注入 B。最近一次结构化 research compact 会提交带 Project revision 的 state；B 在模型调用前得到确定性的限长 ProjectView，优先合并 active transition、freshness、state provenance、project evidence 索引、Git 摘要、未结 Action 和 mailbox ID。它不包含完整旧 transcript，重要证据仍须通过引用或 memory read 精确读取。
 
-方向切换不等待 compact。`record_research_transition` 立即使旧 state 变为 stale，并说明旧路线是 archived、superseded 还是 parallel；下一次 compact 才综合形成新 state。superseded/archived 时不会机械搬运旧假设，旧证据仍可检索；parallel 路线的存活状态会跨后续主路线切换保留，并可用精确 `fromTrackRef` 从任一 live route 继续。Evidence、Action、message、Project State 与 Codex job 都携带 track provenance；延迟返回的实验可显式保留旧 `trackRef`。ProjectView 根据 compacted state 自己的 track 判断它是否 retired，而不是只看最后一次 transition。Project revision 使用 compare-and-append：压缩或换轨基于旧 revision 时不会覆盖当前状态。ProjectView 另外观察 ledger semantic event count，所以跨 Session 新增 Action/mailbox 会在下一模型边界刷新，即使它不改变科研 revision。
+方向切换不等待 compact。`record_research_transition` 立即使旧 state 变为 stale，并说明旧路线是 archived、superseded 还是 parallel；下一次 compact 才综合形成新 state。superseded/archived 时不会机械搬运旧假设，旧证据仍可检索；parallel 路线的存活状态会跨后续主路线切换保留，并可用精确 `fromTrackRef` 从任一 live route 继续。Evidence、Action、message、Project State 与 Codex job 都携带 track provenance；延迟返回的实验可显式保留旧 `trackRef`。ProjectView 根据 compacted state 自己的 track 判断它是否 retired，而不是只看最后一次 transition。Project revision 使用 compare-and-append：压缩或换轨基于旧 revision 时不会覆盖当前状态。ProjectView 观察 ledger semantic event count，但只在下一条真正的用户输入到来时捕获一份新的请求级 Delta；跨 Session 新增 Action/mailbox 不会单独唤醒 Leader 或改写正在运行请求的 Delta。
 
 ### 4.5 Clean Session 与 Project State 修订
 
@@ -251,7 +251,7 @@ node --test tests/research-runtime.test.mjs tests/runtime-board.test.mjs
 - rotation request/completion 可从 Project ledger 重建；
 - clean Session request/receipt 可重建；启动、context、compact 与 Codex 自动复用都保持隔离，显式 inherit 后才投递 mailbox/ProjectView；
 - delivered 但尚未 consumed 的 Leader 消息可在新 Session 重投，旧 epoch 的 settled run 不能抢先 consume。
-- 另一 Session 的 transition、Action 或 mailbox 在下一模型边界刷新 ProjectView。
+- 另一 Session 的 transition、Action 或 mailbox 在下一条真正的用户输入中刷新请求级 ProjectView Delta，不会单独触发 Leader。
 - Runtime Board 不重新激活 superseded claim，只展示为 prior claim；active Actor 优先、settled mailbox 被过滤，四个分页都适配 24 行终端的 92% overlay；没有按 `r` 时不会轮询。
 - 从旧 Session 打开 Board 不会抢占当前 attached Research Leader，即使 cwd 经过 macOS `/var` 等规范路径别名。
 

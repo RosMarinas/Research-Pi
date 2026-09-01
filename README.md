@@ -123,7 +123,7 @@ pi --analysis
 | Project Boundary | 默认把模型命令限制在当前项目；SSH、外部文件和宿主命令通过显式 capability 授权 |
 | Research Briefing | 在重大结果或阶段交接时恢复工作脉络，并把内部术语翻译成用户可判断的报告 |
 
-ProjectView 分成三层：项目根目录可选的 `RESEARCH.md` 是用户维护的 Project Anchor，不由模型或 compact 改写；`/compact` 生成简短的 Project Brief，概括总体方向和已结束阶段；当前路线、最新实验、运行状态和下一步则进入 Session 尾部的 ProjectView Delta。于是“项目为什么存在”不会随摘要漂移，而“项目现在做到哪了”也不会被固定文档拖旧。
+ProjectView 分成三层：项目根目录可选的 `RESEARCH.md` 是用户维护的 Project Anchor，不由模型或 compact 改写；`/compact` 生成简短的 Project Brief，概括总体方向和已结束阶段；当前路线、最新实验、运行状态和下一步则进入请求级 ProjectView Delta。Delta 只在你真正发来下一条消息时捕获，随这一轮请求临时发送，不写进 Session、不会自己叫醒 Leader；工具继续执行时也沿用同一份快照。于是“项目为什么存在”不会随摘要漂移，“项目现在做到哪了”不会被固定文档拖旧，内部状态更新也不会凭空制造一轮对话。
 
 建议每个长期科研项目维护一份短 `RESEARCH.md`，只写不容易频繁变化的内容：项目要解决什么、最终成功是什么、总体路线、明确不做什么，以及用户最在意的判断原则。不要把实验流水账、当前 run 或每日 TODO 放进去。Research Pi 会自动链接并注入前 3600 个字符；文件修改后，下一轮会替换旧 Anchor 视图，无需 compact。
 
