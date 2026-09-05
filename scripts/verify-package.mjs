@@ -26,6 +26,9 @@ assert.ok(!files.some((path) => path.startsWith(".pi/agent/")), "Generated Pi ag
 for (const required of [
 	"README.md",
 	"README_en.md",
+	".pi/extensions/cache-audit.ts",
+	".pi/lib/cache-audit.mjs",
+	"docs/cache-diagnostics.md",
 	"bin/pi.mjs",
 	".pi/APPEND_SYSTEM.md",
 	".pi/config.defaults.json",

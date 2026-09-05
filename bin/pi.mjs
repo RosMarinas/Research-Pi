@@ -254,6 +254,7 @@ async function spawnCore(argv) {
 		"deepseek-v4-pro-anchor.ts",
 		"codex-watch.ts",
 		"codex-delegate.ts",
+		"cache-audit.ts",
 	];
 	if (deepSeekSearchEnabled) extensions.splice(extensions.indexOf("deepseek-v4-pro-anchor.ts"), 0, "deepseek-web-search.ts");
 	for (const name of extensions) args.push("--extension", join(packageRoot, ".pi", "extensions", name));
