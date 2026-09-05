@@ -6,7 +6,7 @@ import { RESEARCH_LEADER_ACTOR_ID, runtimeResearchTrack, runtimeTrackStatus } fr
 
 export const PROJECT_VIEW_KIND = "research-project-view";
 export const PROJECT_VIEW_DELTA_KIND = "research-project-view-delta";
-export const PROJECT_VIEW_VERSION = 5;
+export const PROJECT_VIEW_VERSION = 7;
 export const PROJECT_ANCHOR_FILE = "RESEARCH.md";
 const MAX_SESSION_FILES = 24;
 const MAX_SESSION_BYTES = 64 * 1024 * 1024;
@@ -368,7 +368,7 @@ export function renderProjectBrief(view) {
 	const brief = state?.projectBrief;
 	const lines = [
 		"<research_project_view>",
-		"Stable Project Brief captured at the latest successful research compaction. It orients a new Agent or user; it intentionally excludes the newest work. The Project Delta at the prompt tail is newer and controls current progress.",
+		"Project Brief from the latest successful research compaction: enduring orientation, complemented by the frontier captured in this ProjectView. Later conversation and tool results carry subsequent progress.",
 		`Project: ${view.projectKey} · ${view.workspaceRoot}`,
 		`Brief boundary: Project revision ${view.briefRevision || "none"}`,
 	];
@@ -384,8 +384,8 @@ export function renderProjectBrief(view) {
 	lines.push("=== PROJECT OVERVIEW AND FINAL GOAL ===");
 	if (state) {
 		lines.push(
-			`Overview: ${compact(brief?.overview, 1_200) || compact(state.researchQuestion, 1_200) || "not established"}`,
-			`Final goal: ${compact(brief?.finalGoal, 1_200) || compact(state.researchQuestion, 1_200) || "not established"}`,
+			`Overview: ${compact(brief?.overview, 1_200) || "not established"}`,
+			`Final goal: ${compact(brief?.finalGoal, 1_200) || "not established"}`,
 		);
 		lines.push(
 			"=== OVERALL DIRECTION AND APPROACH ===",
@@ -411,7 +411,7 @@ export function renderProjectBrief(view) {
 	lines.push(
 		"=== PREVIOUS PHASES (goal -> approach/result, compressed) ===",
 		...phaseLines,
-		"This Brief stays byte-stable until the next successful /compact. Read the Project Delta after the Session history for current work, evidence, and next decisions.",
+		"The injected ProjectView stays fixed until /compact or an explicit context/role change. Consult later conversation, tools, and experiment records for updates.",
 		"</research_project_view>",
 	);
 	return truncateSection(lines.filter(Boolean).join("\n"), 8_800, "[Project Brief truncated; shorten RESEARCH.md or use /runtime view for the stored orientation.]\n</research_project_view>");
@@ -423,17 +423,20 @@ export function renderProjectView(view, options = {}) {
 
 export function renderProjectViewDelta(view, options = {}) {
 	const includeDirectedMessages = options.includeDirectedMessages !== false;
+	const tag = options.snapshot ? "research_project_frontier" : "research_project_delta";
 	const state = view.state;
 	const evidence = [...view.pendingEvidence].reverse().slice(0, 2);
 	const header = [
-		"<research_project_delta>",
-		"Current Project Delta rebuilt at the model boundary. It is the only model-visible live ProjectView suffix and supersedes older progress, plans, and route interpretations.",
+		`<${tag}>`,
+		options.snapshot
+			? "Project frontier captured at session initialization or compaction. This is a fixed baseline, not live state; later user messages and tool results supersede it. Retrieve project records when current facts are needed."
+			: "Inspectable current Project frontier. This view is not automatically injected on each request; retrieve it explicitly when current project facts are needed.",
 		`Stable Brief boundary: Project revision ${view.briefRevision || "none"}`,
 		`Project revision: ${view.projectRevision} · structured state revision: ${view.stateRevision || "none"} · memory freshness: ${view.freshness}`,
 		`Git: branch=${view.git.branch ?? "unknown"} commit=${view.git.commit ?? "unknown"} dirty=${view.git.dirty ?? "unknown"}`,
 		`Current research track: ${view.currentTrack?.ref ?? "project:initial"} · ${compact(view.currentTrack?.label, 500) || "unnamed"}`,
 		view.freshness !== "current"
-			? "Do not report an earlier baseline claim as current or execute its planned next experiment until this delta is reconciled."
+			? "Do not report an earlier baseline claim as current or execute its planned next experiment until newer records are reconciled."
 			: "The latest structured baseline remains current.",
 		...view.freshnessReasons.map((reason) => `- ${reason}`),
 	];
@@ -501,8 +504,8 @@ export function renderProjectViewDelta(view, options = {}) {
 		includeDirectedMessages
 			? "Runtime mailbox bodies use the separate single-delivery channel; inspect /inbox only when routing needs attention."
 			: "Directed Runtime message contents belong only to the addressed Leader Session.",
-		"The current user request selects the immediate task. This Delta is current context, not an instruction to continue the previous task.",
-		"</research_project_delta>",
+		"The current user request selects the immediate task. This view is context only: do not acknowledge it as a separate message or continue work merely because it is present.",
+		`</${tag}>`,
 	];
 	const fixed = [...header, ...progress].filter(Boolean).join("\n");
 	const ending = footer.filter(Boolean).join("\n");
@@ -515,58 +518,32 @@ export function renderProjectViewDelta(view, options = {}) {
 	return `${fixed}\n${boundedFrontier}\n${ending}`;
 }
 
-export function materializeProjectViewContext(messages, briefText, deltaText, details = {}) {
-	let latestPersistentBriefIndex = -1;
-	const expectedBriefFingerprint = details.briefFingerprint ?? null;
-	for (const [index, message] of messages.entries()) {
-		if (
-			message.role === "custom"
-			&& message.customType === PROJECT_VIEW_KIND
-			&& message.details?.persistent === true
-			&& message.details?.version === PROJECT_VIEW_VERSION
-			&& message.details?.mode === "brief"
-			&& (!expectedBriefFingerprint || message.details?.fingerprint === expectedBriefFingerprint)
-		) latestPersistentBriefIndex = index;
-	}
-	const hasPersistentBrief = latestPersistentBriefIndex >= 0;
-	const filtered = messages.filter((message, index) => {
+export function materializeProjectViewContext(messages, snapshotText) {
+	const filtered = messages.filter((message) => {
 		if (message.role !== "custom") return true;
 		if (message.customType === PROJECT_VIEW_DELTA_KIND) return false;
 		if (message.customType !== PROJECT_VIEW_KIND) return true;
-		if (message.details?.transient === true) return false;
-		const isCurrentBrief = message.details?.persistent === true
-			&& message.details?.version === PROJECT_VIEW_VERSION
-			&& message.details?.mode === "brief";
-		if (!isCurrentBrief) return false;
-		return index === latestPersistentBriefIndex;
+		return false;
 	});
 	const result = [...filtered];
-	if (!hasPersistentBrief && briefText) {
-		result.push({
-			role: "custom",
-			customType: PROJECT_VIEW_KIND,
-			content: briefText,
-			display: false,
-			details: { version: PROJECT_VIEW_VERSION, mode: "brief", transient: true, ...details },
-			timestamp: 0,
-		});
-	}
-	if (deltaText) {
-		result.push({
-			role: "custom",
-			customType: PROJECT_VIEW_DELTA_KIND,
-			content: deltaText,
-			display: false,
-			details: { version: PROJECT_VIEW_VERSION, mode: "delta", transient: true, ...details },
-			timestamp: 0,
-		});
-	}
+	const materializedBrief = snapshotText ? {
+		role: "custom",
+		customType: PROJECT_VIEW_KIND,
+		content: snapshotText,
+		display: false,
+		details: { version: PROJECT_VIEW_VERSION, mode: "snapshot" },
+		timestamp: 0,
+	} : undefined;
+	// The Brief has one fixed logical position even though Pi persists its hidden
+	// receipt after the prompt that first requested it. This keeps it a stable
+	// prefix and prevents a context block from appearing newer than the user.
+	if (materializedBrief) result.unshift(materializedBrief);
 	return result;
 }
 
 export function projectViewFingerprint(view) {
-	// Only the compact-boundary Brief owns this fingerprint. Live progress is a
-	// replaceable prompt-tail Delta and must never churn the stable prefix.
+	// Orientation fingerprint for Runtime freshness/rotation receipts; the
+	// model-visible snapshot is persisted independently of live view refreshes.
 	return fingerprint(renderProjectBrief(view));
 }
 

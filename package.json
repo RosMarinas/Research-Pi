@@ -30,6 +30,7 @@
     "docs/security-model.md",
     ".env.example",
     "README.md",
+    "README_en.md",
     "SECURITY.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md"

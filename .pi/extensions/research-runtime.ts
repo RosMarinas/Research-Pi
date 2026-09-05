@@ -20,9 +20,7 @@ import {
 	projectViewRefreshFingerprint,
 	readProjectAnchor,
 	readRecentExperiments,
-	renderProjectBrief,
 	renderProjectView,
-	renderProjectViewDelta,
 } from "../lib/project-view.mjs";
 import { RESEARCH_HARD_COMPACT_TOKENS, RESEARCH_SOFT_COMPACT_TOKENS } from "../lib/research-compact.mjs";
 import {
@@ -86,7 +84,8 @@ type ProjectContextMode = "project" | "none";
 type ProjectViewReceipt = {
 	version: number;
 	persistent: true;
-	mode: "brief";
+	mode: "snapshot";
+	content: string;
 	briefRevision: number;
 	fingerprint: string;
 };
@@ -421,22 +420,25 @@ function inboxLines(snapshot: Awaited<ReturnType<typeof readRuntimeSnapshot>>, i
 
 function latestProjectViewReceipt(entries: any[]): ProjectViewReceipt | undefined {
 	let afterCompaction = 0;
-	for (const [index, entry] of entries.entries()) if (entry?.type === "compaction") afterCompaction = index + 1;
+	for (const [index, entry] of entries.entries()) {
+		if (entry?.type === "compaction" || (entry?.type === "custom" && entry.customType === RUNTIME_SESSION_POLICY_ENTRY_KIND)) afterCompaction = index + 1;
+	}
 	for (let index = entries.length - 1; index >= afterCompaction; index -= 1) {
 		const entry = entries[index];
-		if (entry?.type !== "custom_message" || entry.customType !== PROJECT_VIEW_KIND) continue;
-		const details = entry.details;
-		if (details?.persistent !== true || details.version !== PROJECT_VIEW_VERSION || details.mode !== "brief") continue;
-		return details as ProjectViewReceipt;
+		if (!["custom_message", "custom"].includes(entry?.type) || entry.customType !== PROJECT_VIEW_KIND) continue;
+		const details = entry.type === "custom" ? entry.data : entry.details;
+		if (details?.persistent !== true || details.version !== PROJECT_VIEW_VERSION || details.mode !== "snapshot") continue;
+		return { ...details, content: entry.type === "custom" ? details.content : entry.content } as ProjectViewReceipt;
 	}
 	return undefined;
 }
 
-function projectViewReceipt(view: Awaited<ReturnType<typeof buildProjectView>>): ProjectViewReceipt {
+function projectViewReceipt(view: Awaited<ReturnType<typeof buildProjectView>>, role: "analysis" | "leader"): ProjectViewReceipt {
 	return {
 		version: view.version,
 		persistent: true,
-		mode: "brief",
+		mode: "snapshot",
+		content: sessionRoleContext(role, renderProjectView(view, { snapshot: true, includeDirectedMessages: role !== "analysis" })),
 		briefRevision: view.briefRevision ?? 0,
 		fingerprint: projectViewFingerprint(view),
 	};
@@ -457,7 +459,6 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		type: string | null;
 	}>();
 	const migrationAttemptedProjects = new Set<string>();
-	let projectViewText = "";
 	let projectViewHash = "";
 	let projectViewSnapshotHash = "";
 	let projectViewDirty = true;
@@ -479,6 +480,9 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		policy: SessionInheritancePolicy,
 		context: ProjectContextMode = policy === "clean" ? "none" : "project",
 	) => {
+		if (sessionInheritancePolicy !== policy || projectContextMode !== context) {
+			persistedProjectView = undefined;
+		}
 		sessionInheritancePolicy = policy;
 		projectContextMode = context;
 	};
@@ -557,11 +561,18 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		]);
 		const view = buildProjectView({ runtime: activeRuntime, snapshot, git, experiments, anchor });
 		latestProjectView = view;
-		projectViewText = renderProjectBrief(view);
 		projectViewHash = projectViewFingerprint(view);
 		projectViewSnapshotHash = projectViewRefreshFingerprint(snapshot);
 		projectViewDirty = false;
 		return { snapshot, view };
+	};
+
+	const ensureProjectSnapshot = async (ctx: ExtensionContext) => {
+		if (!persistedProjectView) {
+			persistedProjectView = latestProjectViewReceipt(ctx.sessionManager.getBranch())
+				?? projectViewReceipt((await refreshProjectView(ctx)).view, isAnalysisSession() ? "analysis" : "leader");
+		}
+		return persistedProjectView;
 	};
 
 	const runtimeModelFromSnapshot = async (ctx: ExtensionContext, activeRuntime: RuntimeContext, snapshot: RuntimeSnapshot) => {
@@ -671,7 +682,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 				overlayOptions: { anchor: "center", width: "94%", maxHeight: "92%", margin: 1 },
 			},
 		);
-		if (result === "view") ctx.ui.notify(latestProjectView ? renderProjectView(latestProjectView, { includeDirectedMessages: !isAnalysisSession() }) : projectViewText, "info");
+		if (result === "view") ctx.ui.notify(latestProjectView ? renderProjectView(latestProjectView, { includeDirectedMessages: !isAnalysisSession() }) : "", "info");
 		else if (result && typeof result === "object" && result.action === "watch") {
 			const watch = getCodexWatchAdapter();
 			if (watch) await watch.open(ctx, result.selector);
@@ -702,6 +713,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		if (!idle && options.deferWhenBusy) {
 			return { status: "queued" as const, detail: "The Leader is still running; delivery remains in the Runtime mailbox" };
 		}
+		const triggerTurn = message.type !== "notify" && (options.triggerTurn ?? true);
 		pi.sendMessage(
 			{
 				customType: RUNTIME_MESSAGE_KIND,
@@ -719,12 +731,14 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 				},
 			},
 			idle
-				? { triggerTurn: options.triggerTurn ?? true }
+				? { triggerTurn }
 				: { triggerTurn: false, deliverAs: "followUp" },
 		);
 		return {
 			status: "delivered" as const,
-			detail: idle ? "started a leader turn" : "queued for the next safe leader turn",
+			detail: idle
+				? triggerTurn ? "started a leader turn" : "attached to the next genuine user turn without waking the Leader"
+				: "queued for the next safe leader turn",
 			attachmentEpoch: attachment.epoch ?? null,
 		};
 	};
@@ -1002,7 +1016,6 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 				snapshot = refreshed.snapshot;
 				view = refreshed.view;
 			} else {
-				projectViewText = "";
 				projectViewHash = "";
 				projectViewSnapshotHash = projectViewRefreshFingerprint(snapshot);
 				projectViewDirty = false;
@@ -1034,7 +1047,6 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			snapshot = refreshed.snapshot;
 			view = refreshed.view;
 		} else {
-			projectViewText = "";
 			projectViewHash = "";
 			projectViewSnapshotHash = projectViewRefreshFingerprint(snapshot);
 			projectViewDirty = false;
@@ -1097,7 +1109,9 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			const activeRuntime = await getRuntime(ctx, { claim: sessionInheritancePolicy === "project" });
 			attachmentLossNotified = false;
 			if (isAnalysisSession()) {
-				if (isProjectAwareSession()) await refreshProjectView(ctx);
+				if (isProjectAwareSession()) {
+					await refreshProjectView(ctx);
+				}
 			} else if (sessionInheritancePolicy === "project") {
 				startRuntimeMailboxWatch(activeRuntime, ctx);
 				const { snapshot } = await refreshProjectView(ctx);
@@ -1115,6 +1129,10 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		}
 	});
 
+	pi.on("session_tree", (_event, ctx) => {
+		persistedProjectView = isProjectAwareSession() ? latestProjectViewReceipt(ctx.sessionManager.getBranch()) : undefined;
+	});
+
 	pi.on("before_agent_start", async (_event, ctx) => {
 		if (!isProjectAwareSession()) return;
 		const activeRuntime = await getRuntime(ctx);
@@ -1128,21 +1146,18 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		) {
 			await refreshProjectView(ctx, snapshot, anchor);
 		}
-		const view = latestProjectView ?? (await refreshProjectView(ctx, snapshot)).view;
-		// Re-read receipts after compaction/tree changes. A receipt before the
-		// latest compaction is no longer present in provider context.
-		persistedProjectView = latestProjectViewReceipt(ctx.sessionManager.getBranch());
-		if (persistedProjectView?.fingerprint === projectViewHash) return;
-		// Persist exactly one compact-boundary Brief. It carries no live role or
-		// progress text, so its bytes remain an immutable cache prefix until the
-		// next compaction removes it from provider context.
-		persistedProjectView = projectViewReceipt(view);
+		const storedSnapshot = latestProjectViewReceipt(ctx.sessionManager.getBranch());
+		if (storedSnapshot) {
+			persistedProjectView = storedSnapshot;
+			return;
+		}
+		const { content, ...details } = await ensureProjectSnapshot(ctx);
 		return {
 			message: {
 				customType: PROJECT_VIEW_KIND,
-				content: projectViewText,
+				content,
 				display: false,
-				details: persistedProjectView,
+				details,
 			},
 		};
 	});
@@ -1218,10 +1233,8 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	pi.on("tool_execution_end", (event) => {
 		const input = toolExecutionInputs.get(event.toolCallId) ?? {};
 		toolExecutionInputs.delete(event.toolCallId);
-		// Refresh only after tools that can change project evidence, Git, files,
-		// or Runtime delegation state. The next context hook performs one
-		// deterministic rebuild; pure Codex status/result reads preserve the
-		// exact prompt suffix and cannot manufacture another ProjectView delta.
+		// Refresh the inspectable live view; model-visible progress travels through
+		// ordinary tool results without rewriting the fixed project snapshot.
 		if (isAnalysisSession() && event.toolName === "bash") return;
 		if (projectViewToolMutates(event.toolName, input)) {
 			projectViewDirty = true;
@@ -1258,24 +1271,18 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 				),
 			};
 		}
-		const snapshotHash = projectViewRefreshFingerprint(snapshot);
-		const anchor = await readProjectAnchor(ctx.cwd);
-		if (
-			projectViewDirty
-			|| snapshotHash !== projectViewSnapshotHash
-			|| (anchor?.fingerprint ?? null) !== (latestProjectView?.anchor?.fingerprint ?? null)
-		) await refreshProjectView(ctx, snapshot, anchor);
 		const runtimeMessagesById = new Map(snapshot.messages.map((message) => [message.id, message]));
 		const messages = event.messages.filter((message) => {
 			if (isAnalysisSession() && message.role === "custom" && message.customType === RUNTIME_MESSAGE_KIND) return false;
 			if (message.role !== "custom" || message.customType !== RUNTIME_MESSAGE_KIND) return true;
 			const messageId = String(message.details?.messageId ?? "");
 			if (!messageId) return true;
-			if (consumedMessageIds.has(messageId)) return false;
+			// Consumption prevents redelivery, not retention of already delivered history.
+			if (consumedMessageIds.has(messageId)) return true;
 			const runtimeMessage = runtimeMessagesById.get(messageId);
 			if (runtimeMessage?.status === "consumed" || runtimeMessage?.status === "superseded") {
 				consumedMessageIds.add(messageId);
-				return false;
+				return true;
 			}
 			materializedMessages.set(messageId, {
 				attachmentEpoch: String(message.details?.attachmentEpoch ?? "") || null,
@@ -1284,25 +1291,24 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			});
 			return true;
 		});
-		const view = latestProjectView ?? (await refreshProjectView(ctx, snapshot)).view;
-		const deltaText = sessionRoleContext(
-			isAnalysisSession() ? "analysis" : "leader",
-			renderProjectViewDelta(view, { includeDirectedMessages: !isAnalysisSession() }),
-		);
 		return {
-			messages: materializeProjectViewContext(messages, projectViewText, deltaText, {
-				briefFingerprint: projectViewHash,
-				projectRevision: view.projectRevision,
-			}),
+			messages: materializeProjectViewContext(messages, (await ensureProjectSnapshot(ctx)).content),
 		};
 	});
 
 	pi.on("session_compact", async (event, ctx) => {
+		// A completed local compact is an intentional prefix boundary, even when
+		// Analysis compaction cannot write the shared scientific Project State.
+		persistedProjectView = undefined;
 		if (sessionInheritancePolicy === "clean") {
 			if (ctx.hasUI) ctx.ui.notify("Clean Session compaction remains session-local and did not replace Project State.", "info");
 			return;
 		}
 		if (sessionInheritancePolicy === "analysis") {
+			if (isProjectAwareSession()) {
+				persistedProjectView = projectViewReceipt((await refreshProjectView(ctx)).view, "analysis");
+				pi.appendEntry(PROJECT_VIEW_KIND, persistedProjectView);
+			}
 			if (ctx.hasUI) ctx.ui.notify("Analysis Session compaction remains local and did not replace Project State.", "info");
 			return;
 		}
@@ -1331,7 +1337,9 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		if (result?.status === "stale_attachment" && ctx.hasUI) {
 			ctx.ui.notify("Research compact remained Session-local because Leader ownership changed during Project State commit.", "warning");
 		}
-		await refreshProjectView(ctx);
+		const { view } = await refreshProjectView(ctx);
+		persistedProjectView = projectViewReceipt(view, "leader");
+		pi.appendEntry(PROJECT_VIEW_KIND, persistedProjectView);
 		await refreshStatus(ctx);
 	});
 
@@ -1458,7 +1466,6 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 					if (projectContextMode === "project") {
 						await refreshProjectView(ctx);
 					} else {
-						projectViewText = "";
 						projectViewHash = "";
 						latestProjectView = undefined;
 					}

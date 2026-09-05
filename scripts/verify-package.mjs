@@ -24,6 +24,8 @@ assert.deepEqual(forbidden, [], `Sensitive runtime files would enter the npm pac
 assert.ok(!files.includes(".pi/config.json"), "The user-local Research Pi config would enter the npm package");
 assert.ok(!files.some((path) => path.startsWith(".pi/agent/")), "Generated Pi agent state would enter the npm package");
 for (const required of [
+	"README.md",
+	"README_en.md",
 	"bin/pi.mjs",
 	".pi/APPEND_SYSTEM.md",
 	".pi/config.defaults.json",
