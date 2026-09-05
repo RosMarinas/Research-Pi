@@ -1,5 +1,20 @@
 # Intermittent prompt-cache misses
 
+## 2026-09-06 follow-up: Runtime wake resets the system identity
+
+The opt-in wire audit captured **two different cases** in the subsequent occurrence:
+
+- Several requests preserved all old messages, tools, settings, and route, with a matching Go session header, yet reported zero cached tokens. One started only 36 ms after the preceding response ended.
+- Later requests changed `message[0]` immediately after a Runtime mailbox wake's first tool result, then changed it again when a user submitted a new turn. Both transitions reported zero cached tokens. No compaction or model switch was involved.
+
+The pinned Core provides a reproducible client-side explanation for the second case. A normal user turn runs `before_agent_start`, where Research Pi replaces the native coding identity. Core clears that override when the run settles. A `sendCustomMessage(..., { triggerTurn: true })` wake skips `before_agent_start`: its first request inherits the previous prompt, but the next-turn refresh after a tool result falls back to the native base prompt. A subsequent user turn restores the research identity. The audit did not store prompt text; this mechanism was independently reproduced with Core's real custom-message, run-finally, and tool-continuation paths using synthetic responses, without network calls.
+
+Research Pi now applies its fixed identity transform at the provider-request boundary as well. It is idempotent and edits only the known native identity in instruction fields; it does not freeze or restore a saved whole system prompt. New resources, tool definitions, explicit custom roles, conversation history, and cache-control metadata remain intact. On main, the full-access explanation receives the same treatment using the current authorization policy; Windows does not gain full-access support. The regression failed before the fix and passes afterward, with byte-identical system prompts across user → mailbox wake → tool continuation → user.
+
+The TUI's “after 7m idle” label is also misleading in this occurrence. Core 0.84.2 computes it from two assistant message timestamps, which mark request starts: about seven minutes were spent generating the previous response, followed by only 39 ms before the next request. This is not seven minutes of user inactivity, and is not evidence of an idle cache-expiration threshold. Audit v2 records request start, response end, duration, and the actual gap after the preceding response separately; the native TUI label itself is unchanged.
+
+This closes the reproduced client-side identity reset. The unchanged-prefix zero-cache responses remain a separate observation and cannot be explained by that reset alone. No keepalive, forced compaction, model output cap, header change, or hidden retry was added.
+
 ## 2026-09-06 investigation
 
 The fixed ProjectView snapshot change removes a demonstrated client-side prefix mutation. It does not establish that every subsequent cache warning has the same cause.
@@ -52,6 +67,7 @@ While enabled, each completed Leader response adds a `research-cache-audit` cust
 - Request size, message count, and the first changed message index; whether observed system, tool schemas, or request settings changed.
 - Whether the Go session header exists and matches the current Session, without storing its value or authorization headers.
 - HTTP status and Pi's reported input/output/cache token counts.
+- Request start, response end, generation/request duration, and idle time since the preceding completed response (v2). The first request after enabling/reloading has no idle comparison.
 
 Only fingerprints are kept in memory for comparison; prompt bodies, tool results, credential values, and per-message hashes are not persisted. The observer runs after bundled payload transformations. A later user-supplied extension could still rewrite the request. It supports message-array payloads, including Chat Completions, Anthropic, and Responses; unsupported shapes have no comparison.
 

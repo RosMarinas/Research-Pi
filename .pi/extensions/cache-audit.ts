@@ -9,7 +9,8 @@ export default function cacheAuditExtension(pi: ExtensionAPI) {
 	let pending: any;
 	let latest: any;
 	let headers: ReturnType<typeof inspectCacheHeaders> | undefined;
-	const reset = () => { previous = undefined; pending = undefined; latest = undefined; headers = undefined; sequence = 0; };
+	let previousResponseEndedAt: number | undefined;
+	const reset = () => { previous = undefined; pending = undefined; latest = undefined; headers = undefined; previousResponseEndedAt = undefined; sequence = 0; };
 	pi.on("session_start", () => { reset(); enabled = pi.getFlag("cache-audit") === true; });
 	pi.registerCommand("cache-audit", {
 		description: "Enable/disable redacted request-prefix diagnostics, or show the last result",
@@ -29,9 +30,12 @@ export default function cacheAuditExtension(pi: ExtensionAPI) {
 	});
 	pi.on("before_provider_request", (event, ctx) => {
 		if (!enabled) return;
+		const requestStartedAt = Date.now();
 		const current = fingerprintProviderPayload(event.payload, ctx.model);
 		pending = current ? {
-			version: 1, sequence: ++sequence,
+			version: 2, sequence: ++sequence,
+			requestStartedAt,
+			idleMs: previousResponseEndedAt === undefined ? undefined : requestStartedAt - previousResponseEndedAt,
 			provider: ctx.model?.provider, model: ctx.model?.id,
 			requestBytes: current.bytes, messages: current.messages.length,
 			prefix: compareProviderPrefixes(previous, current), headers,
@@ -45,7 +49,9 @@ export default function cacheAuditExtension(pi: ExtensionAPI) {
 	pi.on("message_end", (event) => {
 		if (!enabled || !pending || event.message.role !== "assistant") return;
 		const { input, output, cacheRead, cacheWrite } = event.message.usage;
-		latest = { ...pending, usage: { input, output, cacheRead, cacheWrite }, stopReason: event.message.stopReason };
+		const responseEndedAt = Date.now();
+		latest = { ...pending, responseEndedAt, durationMs: responseEndedAt - pending.requestStartedAt, usage: { input, output, cacheRead, cacheWrite }, stopReason: event.message.stopReason };
+		previousResponseEndedAt = responseEndedAt;
 		pi.appendEntry("research-cache-audit", latest);
 		pending = undefined;
 	});

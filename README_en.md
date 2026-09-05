@@ -1,4 +1,4 @@
-> **2026-09-06 · Important cache fix (`672a06c`)**: Removed the moving Delta that changed previously sent prompt prefixes, switched to fixed snapshots at initialization/compaction, and retained consumed messages in conversation history to prevent prefix cache misses from causing long-context re-billing.
+> **2026-09-06 · Important prefix-cache fixes**: Replaced the moving Delta with fixed snapshots at initialization/compaction and retained communication history. Also fixed system-prompt reversion during tool continuations after Runtime message wakes, preventing repeated changes to long-context prefixes.
 
 # Research Pi
 

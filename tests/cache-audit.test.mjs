@@ -26,7 +26,9 @@ test("Pi SDK already supplies Go session headers without generic affinity enable
 	assert.equal(inspectCacheHeaders({ "X-OpenCode-Session": "wrong-session", Authorization: "secret-key" }, "session-a").opencodeSessionMatches, false);
 });
 
-test("audit is opt-in, does not mutate requests, and never persists message or credential bodies", async () => {
+test("audit is opt-in, does not mutate requests, and never persists message or credential bodies", async (t) => {
+	let now = 1000;
+	t.mock.method(Date, "now", () => now);
 	const handlers = new Map(), commands = new Map(), entries = [];
 	cacheAuditExtension({
 		on: (name, handler) => handlers.set(name, handler),
@@ -46,12 +48,17 @@ test("audit is opt-in, does not mutate requests, and never persists message or c
 	const original = JSON.stringify(event);
 	assert.equal(handlers.get("before_provider_request")(event, ctx), undefined);
 	handlers.get("after_provider_response")({ status: 200 });
+	now += 7 * 60 * 1000;
 	handlers.get("message_end")(result);
 	assert.equal(JSON.stringify(event), original);
 	assert.equal(entries[0].data.httpStatus, 200);
 	assert.equal(entries[0].data.headers.opencodeSessionMatches, true);
+	assert.equal(entries[0].data.idleMs, undefined);
+	assert.equal(entries[0].data.durationMs, 7 * 60 * 1000);
+	now += 39;
 	handlers.get("before_provider_request")(event, ctx);
 	handlers.get("message_end")({ message: { ...result.message, usage: { ...result.message.usage, cacheRead: 0 } } });
 	assert.equal(entries[1].data.prefix.appendOnly, true, "a backend-reported miss does not imply a changed prefix");
+	assert.equal(entries[1].data.idleMs, 39, "previous generation time is not idle time");
 	assert.doesNotMatch(JSON.stringify(entries), /private research text|secret-key|session-a/);
 });
