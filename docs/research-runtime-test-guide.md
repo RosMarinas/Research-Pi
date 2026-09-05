@@ -246,12 +246,12 @@ node --test tests/research-runtime.test.mjs tests/runtime-board.test.mjs
 - Codex ask/result 的幂等投影；
 - default steer 不 abort；
 - `--preempt` 才 abort；
-- consumed transient message 不再进入后续 context。
+- consumed 消息不再重复投递，但已进入 Session 的消息在后续 context 中保持原样。
 - rotation readiness 会阻止缺失/陈旧 Project State、`outcome_unknown` 和无外部身份的 active Action；
 - rotation request/completion 可从 Project ledger 重建；
 - clean Session request/receipt 可重建；启动、context、compact 与 Codex 自动复用都保持隔离，显式 inherit 后才投递 mailbox/ProjectView；
 - delivered 但尚未 consumed 的 Leader 消息可在新 Session 重投，旧 epoch 的 settled run 不能抢先 consume。
-- 另一 Session 的 transition、Action 或 mailbox 在下一条真正的用户输入中刷新请求级 ProjectView Delta，不会单独触发 Leader。
+- 另一 Session 的 transition、Action 和界面刷新不重写已注入的 ProjectView 快照；新 Session 或 compact 才重新捕获，日常按需检索记录。定向 mailbox 仍按原投递/唤醒规则工作，消费后保留已投递历史、不重复投递。
 - Runtime Board 不重新激活 superseded claim，只展示为 prior claim；active Actor 优先、settled mailbox 被过滤，四个分页都适配 24 行终端的 92% overlay；没有按 `r` 时不会轮询。
 - 从旧 Session 打开 Board 不会抢占当前 attached Research Leader，即使 cwd 经过 macOS `/var` 等规范路径别名。
 

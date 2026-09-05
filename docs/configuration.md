@@ -126,11 +126,11 @@ Research compaction now produces two deliberately different forms of project mem
 
 ProjectView adds a user-owned layer before those compact-generated forms:
 
-1. **Project Anchor** is the optional regular file `<project>/RESEARCH.md`. Research Pi links its relative path and injects at most the first 3600 characters. It is never generated or rewritten by compaction. A genuine user request detects an edited Anchor and intentionally replaces the previous stable Brief receipt.
+1. **Project Anchor** is the optional regular file `<project>/RESEARCH.md`. Research Pi links its relative path and captures at most the first 3600 characters. It is never generated or rewritten by compaction. Edits appear in the next snapshot, not by rewriting the current Session prefix; explicitly read the file or communicate urgent changes in conversation.
 2. **Project Brief** is captured only at a successful compact boundary. It contains a short project overview, final goal, overall approach, durable user priorities, and concise closed phases in `goal -> approach -> result` form. It excludes the active run, current claim, newest route, Git state and next experiment. Its compact-generated portion remains stable until the next successful compact.
-3. **ProjectView Delta** is captured once when genuine user input starts a request. It contains current route/freshness, latest handoff, newest evidence, live Actions, structured current frontier and candidate next experiment. The Delta is not written into Session history and is not a standalone user message: one frozen copy is attached to the moving end of that request's provider context, including tool continuations. Internal Runtime changes do not rewrite it or wake the Leader. The next genuine user request captures a fresh replacement.
+3. **Project frontier** contains current route/freshness, latest handoff, newest evidence, Actions, structured current frontier and candidate next experiment. Together with Anchor and Brief it forms one persisted snapshot at project-context initialization and after successful local compaction. Explicit role/context changes establish a new snapshot. Ordinary user turns, tool continuations, UI refreshes, and Session resume retain the exact snapshot; there is no automatic request-tail Delta. Later progress travels through ordinary conversation, tool results, and directed messages. Consuming a delivered mailbox message prevents redelivery, not retention in conversation history.
 
-`amend_project_state`, research transitions, evidence records and completed work update the Delta, not the Brief. The next successful compact may update the Brief and move a genuinely closed phase into its short history. The compaction schema requires the complete `projectBrief`; live state-amendment tooling cannot edit it.
+`amend_project_state`, research transitions, evidence records and completed work update the stored records and inspectable live view, not the injected snapshot. Retrieve current records when needed. The next successful compact may update the Brief and move a genuinely closed phase into its short history. The compaction schema requires the complete `projectBrief`; live state-amendment tooling cannot edit it. Analysis compaction refreshes its local snapshot without writing shared Project State. Prefix stability is client-side behavior, not a guarantee of provider cache retention or routing.
 
 There is deliberately no global ProjectView-clear command. `/runtime new clean` creates a clean Session without deleting Project data; `/runtime context off` pauses injection for an Analysis Session. Removing `RESEARCH.md` removes only the Anchor. Canonical Project State changes remain explicit amendments, transitions, or compaction rather than hidden context deletion.
 
@@ -212,6 +212,6 @@ In the TUI:
 2. select any available model with `/model`;
 3. optionally adjust `/scoped-models` and `/settings`;
 4. ask for one short response, exit, relaunch, and confirm Pi retained the native selection;
-5. run `/runtime view` and confirm it shows a stable Project Brief followed by the current inspectable ProjectView Delta; the model receives that Delta only with a genuine user request.
+5. run `/runtime view` to inspect the current ProjectView; the model's automatic snapshot stays fixed until compaction or an explicit context/role change.
 
 This is sufficient for an ordinary route check. Long-context continuation, compact quality and cache behavior are best judged during real project use.

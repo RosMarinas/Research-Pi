@@ -18,6 +18,41 @@ Research Pi 面向 AI、机器人、通信、优化与仿真等计算实验科�
 4. **让不同模型做擅长的事**：Pi 把握研究主线，Codex 负责长程执行，Pi-analysis 陪用户理解、质疑和讨论。它们交换的是短消息，不是彼此整段复制上下文。
 5. **先找到对的方向，再把代码写漂亮**：探索阶段允许大胆替换、快速试错和整体回滚；方向值得保留后，再补工程质量与复现能力。
 
+## 设计特点
+
+🧠 **换对话，不丢研究主线。** Harness 把项目目标、关键决定、最新进展和交接记录保存在对话之外。新 Session 按角色载入项目快照；compact 后接续记忆，不必每次从头解释。日常交流沿用当前历史，不反复塞入动态摘要。
+
+🔎 **实验做过，就能找回来。** 实验账本记录问题、干预、观察和有效性判断，失败实验也有位置。默认检索当前项目，也支持跨项目搜索全局已索引的实验记录，让过去的证据成为下一次判断的起点。
+
+📬 **各自思考，短消息协作。** Leader 推进主线，Codex 执行任务，Analysis 独立讨论。通信经过持久 mailbox：进度更新不打断思考，需要决策或任务结束时再交给当前 Leader；换 Session 后，待处理消息仍能接续。
+
+下面的通信流程简化自 thesis 中的通信图：
+
+```mermaid
+sequenceDiagram
+    actor U as 用户
+    participant L as Pi Leader
+    participant R as Project Runtime
+    participant C as Codex 执行器
+    participant A as Pi-analysis
+    U->>L: 研究问题与决策
+    L->>R: 委派任务
+    R->>C: 任务与项目上下文
+    C-->>R: 进度记录（不唤醒 Leader）
+    opt 需要输入
+        C->>R: ASK 写入 mailbox
+        R->>L: 投递给当前 Leader
+        L->>R: 回答 / 调整方向
+        R->>C: 继续原任务
+    end
+    C->>R: 结构化结果
+    R->>L: 投递结果并记录回执
+    A->>R: 讨论后的短便签（建议，不是证据）
+    R->>L: 合适时机投递，轮换后跟随新 Leader
+    L->>U: 证据、边界与下一步
+    Note over L,A: 对话各自保留，不复制整段历史
+```
+
 ## 我最喜欢的设计：双 Session 工作流
 
 得益于记忆、通信、权限机制的良好设计，Research Pi 可以同时开两个窗口：一边让 **Pi Leader** 推进实验，另一边在 **Pi-analysis** 里随时追问、质疑和展开想法。
@@ -115,7 +150,7 @@ pi --analysis
 | Research Contract | 让 Agent 默认采用探索、证伪、有效性检查和证据驱动收敛 |
 | Project Runtime | 维护 Project State、Actors、Actions、mailbox 与 Leader Session 所有权 |
 | Dual Session | Leader 持续推进主线，Pi-analysis 独立跟进与讨论，并只把最终短综合投递给 Leader |
-| ProjectView | 先链接用户维护的 `RESEARCH.md`，再用 compact 边界冻结 Project Brief，并把最新进展作为 Session 尾部 Delta 注入 |
+| ProjectView | 初始化与 compact 时载入固定项目快照：`RESEARCH.md`、Project Brief 与当前研究进展；日常轮次只追加对话和工具结果 |
 | Research Memory | 对历史 Session 和实验记录做本地全文检索，不依赖向量数据库 |
 | Research Compaction | 在模型 settled 后生成带 provenance 的结构化状态，而不只摘要聊天文本 |
 | Experiment Records | 一条结果写入一个轻量账本，不机械复制 Markdown 或 raw artifact；支持换轨与窄幅状态修订 |
@@ -123,9 +158,9 @@ pi --analysis
 | Project Boundary | 默认把模型命令限制在当前项目；SSH、外部文件和宿主命令通过显式 capability 授权 |
 | Research Briefing | 在重大结果或阶段交接时恢复工作脉络，并把内部术语翻译成用户可判断的报告 |
 
-ProjectView 分成三层：项目根目录可选的 `RESEARCH.md` 是用户维护的 Project Anchor，不由模型或 compact 改写；`/compact` 生成简短的 Project Brief，概括总体方向和已结束阶段；当前路线、最新实验、运行状态和下一步则进入请求级 ProjectView Delta。Delta 只在你真正发来下一条消息时捕获，随这一轮请求临时发送，不写进 Session、不会自己叫醒 Leader；工具继续执行时也沿用同一份快照。于是“项目为什么存在”不会随摘要漂移，“项目现在做到哪了”不会被固定文档拖旧，内部状态更新也不会凭空制造一轮对话。
+ProjectView 在项目上下文初始化和成功 compact 后捕获一次：用户维护的 `RESEARCH.md` 保留项目意图，Project Brief 概括总体方向与已结束阶段，当前研究进展补齐交接位置。快照在普通轮次间保持不变，不再自动追加或移动 Delta；新进展通过用户消息、工具结果和一次投递的通信进入历史，已消费的消息也保留在历史中。实时视图和实验账本仍可按需查看；角色或上下文显式切换时会重新建立快照。这样保持已发送前缀稳定，但实际缓存命中仍取决于 provider。
 
-建议每个长期科研项目维护一份短 `RESEARCH.md`，只写不容易频繁变化的内容：项目要解决什么、最终成功是什么、总体路线、明确不做什么，以及用户最在意的判断原则。不要把实验流水账、当前 run 或每日 TODO 放进去。Research Pi 会自动链接并注入前 3600 个字符；文件修改后，下一轮会替换旧 Anchor 视图，无需 compact。
+建议每个长期科研项目维护一份短 `RESEARCH.md`，只写不容易频繁变化的内容：项目要解决什么、最终成功是什么、总体路线、明确不做什么，以及用户最在意的判断原则。不要把实验流水账、当前 run 或每日 TODO 放进去。Research Pi 在建立快照时链接并载入前 3600 个字符；文件修改不会自动重写当前 Session 的前缀，急需生效的变化请在对话中说明或让 Agent 读取文件，下次 compact 或新 Session 再统一更新快照。
 
 ```md
 # Project North Star

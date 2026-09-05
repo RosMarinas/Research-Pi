@@ -440,7 +440,7 @@ test("research transitions use Project revision compare-and-append", async () =>
 	}
 });
 
-test("ProjectView materializes one stable Brief and one request-scoped Delta suffix", () => {
+test("ProjectView materializes a fixed snapshot without modifying user or tool history", () => {
 	const view = buildProjectView({
 		runtime: { projectKey: "project-fixture", workspaceRoot: "/workspace" },
 			snapshot: {
@@ -470,36 +470,41 @@ test("ProjectView materializes one stable Brief and one request-scoped Delta suf
 	assert.doesNotMatch(brief, /outcome_unknown|metric moved|branch=main/);
 	assert.match(delta, /outcome_unknown/);
 	assert.match(delta, /observation: metric moved/);
-	const messages = materializeProjectViewContext([
+	const snapshot = renderProjectView(view, { snapshot: true });
+	assert.match(snapshot, /<research_project_frontier>/);
+	assert.doesNotMatch(snapshot, /<research_project_delta>/);
+	const user = { role: "user", content: "new question" };
+	const history = [
 		{ role: "assistant", content: "old" },
 		{ role: "custom", content: "obsolete", customType: PROJECT_VIEW_DELTA_KIND, details: { transient: true } },
-		{ role: "user", content: "new question" },
-	], brief, delta, { fingerprint: "fixture" });
+		user,
+	];
+	const messages = materializeProjectViewContext(history, snapshot);
 	assert.equal(messages.filter((message) => message.customType === PROJECT_VIEW_KIND).length, 1);
 	assert.equal(messages.filter((message) => message.customType === PROJECT_VIEW_DELTA_KIND).length, 0);
 	assert.equal(messages[0].customType, PROJECT_VIEW_KIND);
 	assert.equal(messages.at(-1).role, "user");
-	assert.equal(messages.at(-1).content.at(-1).text, delta);
-	assert.equal(messages.at(-1).details.researchProjectDelta.version, PROJECT_VIEW_VERSION);
+	assert.equal(messages.at(-1), user);
 	assert.equal(messages.find((message) => message.customType === PROJECT_VIEW_KIND).details.version, PROJECT_VIEW_VERSION);
 	const continuation = materializeProjectViewContext([
-		{ role: "user", content: [{ type: "text", text: "new question" }] },
+		...history,
 		{ role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "probe", arguments: {} }] },
 		{ role: "toolResult", toolCallId: "call-1", toolName: "probe", content: [{ type: "text", text: "probe result" }] },
-	], brief, delta, { fingerprint: "fixture" });
+	], snapshot);
 	assert.equal(continuation.at(-1).role, "toolResult");
-	assert.equal(continuation.at(-1).content.at(-1).text, delta);
+	assert.equal(continuation.at(-1).content.at(-1).text, "probe result");
+	assert.deepEqual(continuation.slice(0, messages.length), messages, "the prior request is an exact prefix after tool continuation");
 	assert.equal(continuation.filter((message) => message.customType === PROJECT_VIEW_DELTA_KIND).length, 0);
 	const refreshed = materializeProjectViewContext([{
 		role: "custom",
 		customType: PROJECT_VIEW_KIND,
 		content: "stale anchor brief",
 		details: { persistent: true, version: PROJECT_VIEW_VERSION, mode: "brief", fingerprint: "old" },
-	}], "current anchor brief", delta, { briefFingerprint: "new" });
+	}], snapshot);
 	const refreshedBriefs = refreshed.filter((message) => message.customType === PROJECT_VIEW_KIND);
 	assert.equal(refreshedBriefs.length, 1);
-	assert.equal(refreshedBriefs[0].content, "current anchor brief");
-	assert.equal(refreshedBriefs[0].details.transient, true);
+	assert.equal(refreshedBriefs[0].content, snapshot);
+	assert.equal(refreshedBriefs[0].details.mode, "snapshot");
 });
 
 test("RESEARCH.md is a user-maintained Project Anchor independent of compaction state", async () => {
