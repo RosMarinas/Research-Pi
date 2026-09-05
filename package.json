@@ -25,6 +25,7 @@
     ".pi/vendor/",
     "docs/pi-basic-guide.md",
     "docs/configuration.md",
+    "docs/cache-diagnostics.md",
     "docs/research-runtime-test-guide.md",
     "docs/windows-wsl-guide.md",
     "docs/security-model.md",

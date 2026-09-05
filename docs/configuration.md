@@ -127,6 +127,10 @@ There is deliberately no global ProjectView-clear command. `/runtime new clean` 
 
 The configured token values are caps. For a short-context Leader model, Research Pi derives earlier thresholds from the active model window. `pi.settings.compaction` remains the Pi Core fallback policy; it is not the structured research-state schema or ProjectView policy.
 
+## Prompt-cache diagnostics
+
+For intermittent cache warnings, enable `/cache-audit on` or launch with `pi --cache-audit`. This opt-in observer records redacted request-prefix comparisons and reported usage in local Session metadata; it does not rewrite the request. See [cache diagnostics](cache-diagnostics.md) for interpretation and synthetic probes.
+
 ## Bounded search
 
 ```json
