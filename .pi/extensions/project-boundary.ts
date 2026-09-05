@@ -37,11 +37,17 @@ import {
 } from "../lib/project-boundary.mjs";
 import { runtimeSessionInheritancePolicy } from "../lib/research-runtime.mjs";
 import { resolveSystemRuntimePolicy } from "../lib/security-policy.mjs";
+import { mapProviderSystemPrompt } from "../lib/provider-system-prompt.mjs";
 
 type BoundaryRuntime = Awaited<ReturnType<typeof prepareBoundaryRuntime>>;
 type CapabilityContext = Awaited<ReturnType<typeof resolveCapabilityContext>>;
 type SystemRuntimePolicy = Awaited<ReturnType<typeof resolveSystemRuntimePolicy>>;
 const INITIAL_SESSION_POLICY = process.env.RESEARCH_PI_INITIAL_SESSION_MODE === "analysis" ? "analysis" : "project";
+const FULL_ACCESS_PROMPT_SUFFIX = "\n\n<research_pi_full_access>\nThe user explicitly launched Research Pi with full access. The project remains the task scope, but it is not an OS filesystem or command sandbox for this Leader Session. You may use host files, commands, network, Unix sockets, credentials, and external paths when they are genuinely required by the user's task, without requesting a Research Pi boundary grant. Do not broaden the task, expose secrets, or skip exact-target checks for destructive operations. Analysis Sessions and Codex advisor Actors remain read-only.\n</research_pi_full_access>";
+
+function appendFullAccessPrompt(prompt: string): string {
+	return prompt.includes(FULL_ACCESS_PROMPT_SUFFIX) ? prompt : prompt + FULL_ACCESS_PROMPT_SUFFIX;
+}
 
 function currentSessionPolicy(ctx: any) {
 	return runtimeSessionInheritancePolicy(ctx.sessionManager.getBranch(), null, null, INITIAL_SESSION_POLICY);
@@ -600,8 +606,15 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 	pi.on("before_agent_start", (event, ctx) => {
 		if (!leaderHasFullAccess(ctx)) return undefined;
 		return {
-			systemPrompt: `${event.systemPrompt}\n\n<research_pi_full_access>\nThe user explicitly launched Research Pi with full access. The project remains the task scope, but it is not an OS filesystem or command sandbox for this Leader Session. You may use host files, commands, network, Unix sockets, credentials, and external paths when they are genuinely required by the user's task, without requesting a Research Pi boundary grant. Do not broaden the task, expose secrets, or skip exact-target checks for destructive operations. Analysis Sessions and Codex advisor Actors remain read-only.\n</research_pi_full_access>`,
+			systemPrompt: appendFullAccessPrompt(event.systemPrompt),
 		};
+	});
+	pi.on("before_provider_request", (event, ctx) => {
+		// Custom-message wakes bypass before_agent_start. Keep this explanatory
+		// suffix stable too, using the current policy rather than a saved grant.
+		return leaderHasFullAccess(ctx)
+			? mapProviderSystemPrompt(event.payload, appendFullAccessPrompt, { lastTextOnly: true })
+			: mapProviderSystemPrompt(event.payload, (prompt: string) => prompt.replace(FULL_ACCESS_PROMPT_SUFFIX, ""));
 	});
 
 	pi.on("session_shutdown", async () => {

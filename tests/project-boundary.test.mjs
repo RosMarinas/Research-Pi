@@ -73,6 +73,18 @@ test("full access bypasses direct-path approval for Leader but keeps the mode ex
 		assert.equal(await handlers.tool_call({ toolName: "read", input: { path: "/outside/project.txt" } }, ctx), undefined);
 		const injected = handlers.before_agent_start({ systemPrompt: "base" }, ctx);
 		assert.match(injected.systemPrompt, /explicitly launched Research Pi with full access/);
+		const wire = { messages: [{ role: "system", content: "base" }, { role: "user", content: "task" }] };
+		const normalized = handlers.before_provider_request({ payload: wire }, ctx);
+		assert.equal(normalized.messages[0].content, injected.systemPrompt, "mailbox continuation must retain the same permission explanation");
+		assert.deepEqual(handlers.before_provider_request({ payload: normalized }, ctx), normalized, "never append the explanation twice");
+		const anthropic = { system: [{ type: "text", text: "Provider-owned identity" }, { type: "text", text: "base", cache_control: { type: "ephemeral" } }] };
+		const blocks = handlers.before_provider_request({ payload: anthropic }, ctx).system;
+		assert.deepEqual(blocks[0], anthropic.system[0], "do not change the provider-owned prelude");
+		assert.equal(blocks[1].text, injected.systemPrompt);
+		assert.deepEqual(blocks[1].cache_control, anthropic.system[1].cache_control);
+		const analysisCtx = { ...ctx, sessionManager: { ...ctx.sessionManager, getBranch: () => [{ type: "custom", customType: "research-runtime-session-policy", data: { policy: "analysis" } }] } };
+		assert.equal(handlers.before_agent_start({ systemPrompt: "base" }, analysisCtx), undefined);
+		assert.deepEqual(handlers.before_provider_request({ payload: normalized }, analysisCtx), wire, "an explicit role change must not replay a stale full-access explanation");
 	} finally {
 		if (previous === undefined) delete process.env.RESEARCH_PI_FULL_ACCESS;
 		else process.env.RESEARCH_PI_FULL_ACCESS = previous;
