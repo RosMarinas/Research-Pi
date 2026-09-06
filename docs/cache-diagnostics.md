@@ -1,5 +1,71 @@
 # Intermittent prompt-cache misses
 
+## 2026-09-06 systematic investigation after the identity fix
+
+### Question and competing explanations
+
+The remaining question is why a tool continuation can report zero cached tokens even after the demonstrated client-side prefix mutations were removed. A passing prefix regression alone is not an answer. Inspect the complete path:
+
+| Layer | Discriminating observation | Current evidence |
+|---|---|---|
+| Session / ProjectView / mailbox | Old content changes before provider conversion | Fixed-snapshot and immutable-mailbox regressions pass; current v2 requests are append-only |
+| System identity / tool schemas / settings | Early instruction or schema changes | Current v2 records show no changes, including after tool results |
+| SDK serialization / final headers / retries | Actual HTTP differs from the payload hook or Go session attribution changes | New opt-in transport observer closes this previously unmeasured boundary |
+| Gateway / upstream cache | Stable final HTTP prefix but explicit zero cache in raw usage | Plausible; needs correlation with the newly observed real response |
+| SSE usage / Pi parser | Raw cache count is positive but Pi reports zero, or a later usage update overwrites it | One parser blind spot reproduced offline; not yet attributed to the real Session |
+| TUI warning / cost estimate | Warning treats unknown counters as zero or generation time as idle | Request-start-based idle heuristic is misleading; estimated re-billing is not an account invoice |
+
+### Current Session evidence
+
+After diagnostics were enabled again, v2 captured eleven completed requests from 04:47:25 to 04:52:46 UTC. Every comparable request retained the complete preceding message array, route, system fields, tools, and settings; Go session headers were present and matched. The sequence included both zero-cache responses and recoveries. For example:
+
+| v2 sequence | Gap after previous response | Cached tokens | Old request prefix |
+|---|---:|---:|---|
+| 2 | 59 ms | 0 | unchanged |
+| 6 | 394 ms | 189,696 | unchanged |
+| 7 | 78,420 ms | 196,992 | unchanged |
+| 8 | 31 ms | 0 | unchanged |
+| 9 | 39 ms | 196,992 | unchanged |
+| 10 | 129 ms | 201,856 | unchanged |
+| 11 | 201 ms | 204,288 | unchanged |
+
+This supports an intermittent failure/reporting problem, not a deterministic rule that every tool result invalidates the prefix. These are payload-hook and normalized-usage observations, not yet final-HTTP/raw-SSE evidence. The active launcher and native module path belong to this checkout; the v2 records confirm that the updated observer was loaded.
+
+### Bounded synthetic transport controls
+
+Eight successful requests used only synthetic data: 40 scripted tool-call/result pairs, a single synthetic tool schema, and about 188k input tokens. They passed through the pinned Pi Chat Completions adapter and native Go attribution headers. Each arm repeated the identical final HTTP body twice after its cold request, then appended another synthetic call/result pair. Both used the same session header within their arm. Raw SSE usage was compared directly with Pi's parsed counters.
+
+| Requested output budget | Cold cache | Identical repeat 1 | Identical repeat 2 | Appended tool pair |
+|---|---:|---:|---:|---:|
+| 128 | 0 | 188,160 | 188,160 | 188,160 |
+| 131,072 | 0 | 188,160 | 188,160 | 188,160 |
+
+Input was 188,166 tokens, growing to 188,545. Each output was only 11 tokens. Raw cache counts and Pi's parsed counts agreed in all eight requests. This weakens explanations based solely on input length, tool history, HTTP serialization, or the output reservation. It does **not** test long generation, realistic multi-tool schemas, all sessions/backends, or the complete autonomous Runtime lifecycle. The static catalog lacks the active `glm-5.3-flash` alias, so the probe explicitly uses GLM-family adapter metadata while sending that exact observed alias; it does not silently switch served models or claim a catalog-based price estimate.
+
+An offline SSE replay exposed a separate, concrete compatibility gap: `{prompt_tokens:100, cached_tokens:90}` produces `cacheRead:0` in the pinned adapter, which reads nested `prompt_tokens_details.cached_tokens` or `prompt_cache_hit_tokens` instead. The successful live controls returned the nested form. Do not apply a parser workaround to the real incident until its raw response establishes which form it uses.
+
+### The next decisive measurement, not another context patch
+
+With `/cache-audit on`, `research-cache-transport` entries now record the final outgoing prefix comparison, its agreement with the payload hook, actual Go header presence/match, output reservation, HTTP attempt number, and **all numerical raw SSE usage updates**. No raw body, credential, URL, or response text is persisted. The observer returns the original fetch response unchanged and consumes a clone for diagnostics. It observes Go Chat Completions only, and only while the Session has a pending audited request. Off/reload restores the fetch function; an explicit on/off preference now survives reload within that Session.
+
+Interpret matching sequence numbers together:
+
+1. Final HTTP differs from the hook: locate the downstream transport transform before changing memory.
+2. Raw cache is positive but parsed cache is zero: fix and replay-test the usage parser/reporting path.
+3. Raw cache field is absent: classify it as unknown, not evidence of an actual total miss.
+4. Final prefix is stable and raw cache explicitly zero: investigate provider cache residency/routing; client prefix rewrites cannot repair a cache it does not control.
+
+Until that measurement discriminates the remaining causes, do not add keepalives, force compaction, reduce output budgets, switch providers, or accumulate more context patches. Long-generation and multi-tool controls are the next synthetic interventions only if the real wire observation leaves them relevant.
+
+Run the synthetic control from a checkout (billed, at most four requests per invocation):
+
+```sh
+node scripts/diagnose-cache-transport.mjs --live
+node scripts/diagnose-cache-transport.mjs --live --native-output-budget
+```
+
+The native-budget arm cancels if streamed output exceeds 8192 characters; cancellation is not a guaranteed server billing cap. No live experiment uploads research transcripts or executes returned tool calls.
+
 ## 2026-09-06 follow-up: Runtime wake resets the system identity
 
 The opt-in wire audit captured **two different cases** in the subsequent occurrence:
@@ -60,7 +126,7 @@ Alternatively, start with `pi --cache-audit`. Continue normal work, then inspect
 /cache-audit status
 ```
 
-Disable it with `/cache-audit off`. It is off by default and does not edit prompts, cache keys, headers, model settings, or delivery behavior.
+Disable it with `/cache-audit off`. It is off by default; an explicit on/off choice is stored as a non-model-visible Session entry and survives reload. It does not edit prompts, cache keys, headers, model settings, or delivery behavior.
 
 While enabled, each completed Leader response adds a `research-cache-audit` custom entry to the local Session JSONL. The entry is not model-visible context. It records:
 
@@ -70,6 +136,8 @@ While enabled, each completed Leader response adds a `research-cache-audit` cust
 - Request start, response end, generation/request duration, and idle time since the preceding completed response (v2). The first request after enabling/reloading has no idle comparison.
 
 Only fingerprints are kept in memory for comparison; prompt bodies, tool results, credential values, and per-message hashes are not persisted. The observer runs after bundled payload transformations. A later user-supplied extension could still rewrite the request. It supports message-array payloads, including Chat Completions, Anthropic, and Responses; unsupported shapes have no comparison.
+
+For Go Chat Completions, the separate transport observer also compares the final HTTP body and extracts only numerical usage fields from raw SSE, covering downstream transformations that the payload hook cannot see. Missing transport entries mean that boundary was not observed, not that it matched.
 
 Interpret consecutive records together. An unchanged observed prefix plus a reported zero-cache response narrows the problem toward transport/backend behavior; an early changed message or changed tools/system identifies a client-side investigation target. Model changes, compaction, tree navigation, and explicit role changes can intentionally change the prefix. A setting change is recorded separately and is not automatically evidence of cache invalidation.
 
