@@ -192,3 +192,14 @@ Use `pi-raw` for comparison against the pinned, unmodified Pi Core. Tests exerci
 ## License
 
 Original code and documentation are [MIT licensed](LICENSE). Third-party components retain their own licenses; see [Third-Party Notices](THIRD_PARTY_NOTICES.md).
+
+
+## Mobile browser access
+
+Start a new session with:
+
+    pi --workspace /path/to/project --web-tailscale
+
+Open the private pairing link printed in the terminal from a phone on the existing Tailscale account. Chat, Actors, and Project Runtime have mobile views; the shared terminal preserves native dialogs, custom TUI components, commands, and session navigation. Browser disconnects do not stop the agent. Use --web for localhost only.
+
+The gateway requires authentication and exact same-origin requests. Tailscale access uses the currently signed-in identity without replacing existing Serve endpoints. An already running Pi process needs a planned restart into Web mode. See [mobile access and security](docs/mobile-web.md).

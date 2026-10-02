@@ -21,6 +21,7 @@ import {
 	readCodexAnalysisContext,
 } from "../.pi/lib/research-analysis-bridge.mjs";
 import { resolveResearchPiPaths } from "../.pi/lib/runtime-paths.mjs";
+import { parseWebOptions } from "../.pi/lib/web-launcher.mjs";
 import { researchPiExtensions } from "../.pi/lib/research-extensions.mjs";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -211,7 +212,9 @@ async function analysisCommand(argv) {
 
 async function spawnCore(argv) {
 	const baseConfig = prepareConfig();
-	const { workspace, args: userArgs, config, sessionMode, fullAccess } = takeResearchOptions(argv, baseConfig);
+	const web = parseWebOptions(argv);
+	const { workspace, args: userArgs, config, sessionMode, fullAccess } = takeResearchOptions(web.args, baseConfig);
+	if (web.enabled && userArgs.some((arg) => ["--mode", "--print", "-p"].includes(arg))) throw new Error("--web requires interactive TUI mode");
 	writeResearchPiAgentConfig(paths.agentDir, config, { coreVersion });
 	if (!existsSync(workspace)) throw new Error(`Research workspace does not exist: ${workspace}`);
 	loadConfigurationEnvironment();
@@ -245,11 +248,18 @@ async function spawnCore(argv) {
 		"--append-system-prompt", join(packageRoot, ".pi", "APPEND_SYSTEM.md"),
 	);
 	for (const extension of researchPiExtensions(packageRoot, {
+		web: web.enabled,
 		search: deepSeekSearchEnabled,
 		anchor: process.env.RESEARCH_PI_DEEPSEEK_ANCHOR === "1" || userArgs.some((arg) => arg === "--v4-pro-anchor" || arg.startsWith("--v4-pro-anchor=")),
 		trace: process.env.RESEARCH_PI_TRACE === "1",
 	})) args.push("--extension", extension);
 	args.push(...userArgs);
+
+	if (web.enabled && !informational) {
+		const { launchResearchWeb } = await import("../.pi/lib/web-launcher.mjs");
+		process.exitCode = await launchResearchWeb({ executable: process.execPath, args: [coreCli, ...args], cwd: workspace, env: process.env, packageRoot, options: web });
+		return;
+	}
 
 	await new Promise((resolveRun, rejectRun) => {
 		const child = spawn(process.execPath, [coreCli, ...args], {

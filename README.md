@@ -104,6 +104,16 @@ Leader 判断上下文是否相关：同一 `mission` 默认继续，同一 Acto
 
 Codex 保留持久任务、同工作区并发、写入范围协调及恢复机制。Pi／Antigravity runner 使用独立长驻进程承接后续消息，**目前只在所属 Pi 进程存活期间可继续操作，退出时会关闭，重启后不自动恢复**。统一入口不代表三个 backend 的恢复和授权能力完全相同。
 
+## 手机网页访问
+
+计划启动新会话时使用：
+
+    pi --workspace /path/to/project --web-tailscale
+
+手机连接当前 Tailscale 网络，打开终端提供的私有配对链接。对话、Agents、Project Runtime 使用手机界面；完整终端视图保留 /config、/watch、/login、会话树和自定义 TUI。电脑与手机共用同一个 Pi 进程，关闭网页不会停止任务。
+
+仅本机试用可用 --web。服务只监听 localhost，要求令牌与同源请求；Tailscale 模式限定当前用户身份，保留已有 Serve 配置。正在运行且未启用 Web 的 Pi 需要等下一次计划启动再使用。[使用方式、功能范围与安全说明](docs/mobile-web.md)。
+
 ## 项目记忆，而非无限增长的聊天
 
 - **ProjectView**：初始化与 compact 时建立固定项目快照。日常进展通过对话、工具结果和消息追加，不反复改写已发送的前缀。

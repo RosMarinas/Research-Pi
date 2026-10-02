@@ -25,3 +25,8 @@ node_modules
 /Codex科研场景反馈与改进.md
 /docs/research/
 /docs/testing/
+
+# Local browser acceptance artifacts and pairing pointers
+/output/playwright/
+/.playwright/
+/.playwright-cli/

@@ -656,6 +656,10 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	};
 
 	registerRuntimeUiAdapter({
+		snapshot: async (ctx: ExtensionContext) => {
+			const activeRuntime = await getRuntime(ctx);
+			return await runtimeModelFromSnapshot(ctx, activeRuntime, await readRuntimeSnapshot(activeRuntime));
+		},
 		refresh: async (ctx: ExtensionContext, options: { backend?: string; jobs?: any[]; codexJobs?: any[] } = {}) => refreshDock(ctx, options),
 		deliver: async (ctx: ExtensionContext, options: { messageId: string }) => {
 			const activeRuntime = await getRuntime(ctx);

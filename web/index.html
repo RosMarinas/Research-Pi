@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f5f4ef">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Research Pi">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="stylesheet" href="/vendor/xterm.css">
+<link rel="stylesheet" href="/style.css">
+<title>Research Pi</title>
+</head>
+<body>
+<section id="pair" class="pair-screen" hidden>
+  <div class="pair-card">
+    <img src="/icon.svg" width="54" height="54" alt="">
+    <p class="eyebrow">YOUR RESEARCH, WITH YOU</p>
+    <h1>连接 Research Pi</h1>
+    <p>使用电脑终端给出的访问链接或令牌。手机会连接同一个 Pi 会话。</p>
+    <form id="pair-form"><label for="token">访问令牌</label><input id="token" type="password" autocomplete="off" required><button type="submit" class="primary">连接</button></form>
+    <p id="pair-error" role="alert"></p>
+    <small>凭据留在电脑 · 连接由 Tailscale 保护</small>
+  </div>
+</section>
+<div id="app" hidden>
+  <header class="topbar">
+    <img src="/icon.svg" width="34" height="34" alt="">
+    <div class="identity"><strong>Research Pi</strong><span id="workspace">正在连接</span></div>
+    <span id="connection" class="connection"><i></i><span>连接中</span></span>
+    <button id="settings-button" class="icon-button" aria-label="模型与设置">⚙</button>
+  </header>
+  <nav id="tabs" class="tabs" aria-label="工作区">
+    <button data-tab="chat" class="active">对话</button><button data-tab="agents">Agents</button><button data-tab="project">项目</button><button data-tab="terminal">终端</button>
+  </nav>
+  <div id="pending-banner" class="pending-banner" hidden><span>Pi 正在等待操作</span><button id="pending-open">查看</button></div>
+  <main>
+    <section id="chat-view" class="view">
+      <div class="conversation-meta"><span id="model-label">—</span><span id="run-state">等待连接</span></div>
+      <div id="messages" class="messages" aria-live="polite"><div class="empty"><h2>把研究继续下去。</h2><p>同一个项目，同一个 Pi。</p></div></div>
+      <div id="activity" class="activity" hidden></div>
+      <form id="composer" class="composer">
+        <div id="attachments" class="attachments"></div>
+        <textarea id="message" rows="2" placeholder="继续讨论，或输入 / 命令" aria-label="消息"></textarea>
+        <div class="composer-actions">
+          <label class="attach-button" title="添加图片">＋<input id="image-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden></label>
+          <select id="send-mode" aria-label="忙时如何发送"><option value="followUp">下一步处理</option><option value="steer">调整当前方向</option></select>
+          <button type="button" id="abort" class="quiet" hidden>停止当前轮</button>
+          <button type="submit" id="send" class="primary">发送 ↑</button>
+        </div>
+        <small id="composer-status">内容由电脑上的 Pi 处理</small>
+      </form>
+    </section>
+    <section id="agents-view" class="view" hidden>
+      <div class="section-title"><h2>协作成员</h2><button id="refresh-agents" class="quiet">刷新</button></div>
+      <div id="actors" class="actor-grid"></div>
+      <section id="actor-detail" hidden>
+        <div class="section-title"><h3 id="actor-title"></h3><button id="close-actor" class="quiet">收起</button></div>
+        <div id="actor-messages" class="messages actor-messages"></div>
+        <form id="actor-form" class="composer">
+          <textarea id="actor-input" rows="2" placeholder="直接向这个 Agent 发消息" aria-label="Agent 消息" required></textarea>
+          <div class="composer-actions"><select id="actor-kind" aria-label="消息类型"><option value="notify">消息</option><option value="ask">提问</option><option value="reply">回答</option><option value="steer">调整方向</option></select><button class="primary" type="submit">发送</button></div>
+          <small id="actor-receipt">通过现有 Runtime 投递</small>
+        </form>
+      </section>
+    </section>
+    <section id="project-view" class="view" hidden><div class="section-title"><h2>Project Runtime</h2><button id="runtime-terminal" class="quiet">完整面板 ↗</button></div><div id="project-content"></div></section>
+    <section id="terminal-view" class="view terminal-view" hidden>
+      <div class="terminal-actions"><select id="terminal-command" aria-label="终端快捷命令"><option value="">快捷命令…</option><option>/runtime</option><option>/watch</option><option>/config</option><option>/models</option><option>/model</option><option>/login</option><option>/tree</option><option>/resume</option><option>/settings</option><option>/help</option></select><button id="fit-terminal" class="quiet">适配屏幕</button></div>
+      <div id="terminal" aria-label="Pi 终端"></div>
+      <div class="keybar" aria-label="终端按键"><button data-key="esc">Esc</button><button data-key="tab">Tab</button><button data-key="up">↑</button><button data-key="down">↓</button><button data-key="left">←</button><button data-key="right">→</button><button data-key="ctrl">Ctrl</button><button data-key="ctrlc">Ctrl C</button><button data-key="pageup">PgUp</button><button data-key="pagedown">PgDn</button><button data-key="altenter">Alt ↵</button><button data-key="enter">↵</button></div>
+      <form id="terminal-input-form" class="terminal-input"><input id="terminal-input" placeholder="输入中文或命令…" aria-label="终端文字"><button type="submit">输入 ↵</button></form>
+      <small class="terminal-note">与电脑共享终端，包括确认框、菜单和快捷键。断开网页不会停止 Pi。</small>
+    </section>
+  </main>
+</div>
+<dialog id="approval"><form id="approval-form"><p class="eyebrow">PI 正在等待你</p><h2 id="approval-title"></h2><p id="approval-message"></p><div id="approval-fields"></div><div class="dialog-actions"><button id="approval-cancel" type="button" class="quiet">取消</button><button id="approval-submit" type="submit" class="primary">确认</button></div></form></dialog>
+<dialog id="settings"><div class="section-title"><h2>模型与设置</h2><button id="settings-close" class="quiet">关闭</button></div><label for="model-select">Leader 模型</label><select id="model-select"></select><label for="thinking-select">思考强度</label><select id="thinking-select"><option>off</option><option>minimal</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option><option>ultra</option></select><button id="save-model" class="primary">应用</button><hr><button id="full-config" class="quiet">在终端打开完整配置 ↗</button><button id="logout" class="quiet">断开此浏览器</button></dialog>
+<div id="toast" role="status" hidden></div>
+<script src="/vendor/xterm.js"></script><script src="/vendor/fit.js"></script><script src="/vendor/purify.js"></script><script type="module" src="/app.js"></script>
+</body></html>

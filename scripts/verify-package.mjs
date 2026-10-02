@@ -25,6 +25,16 @@ assert.ok(!files.includes(".pi/config.json"), "The user-local Research Pi config
 assert.ok(!files.some((path) => path.startsWith(".pi/agent/")), "Generated Pi agent state would enter the npm package");
 for (const required of [
 	"README.md",
+	"web/index.html",
+	"web/app.js",
+	"web/style.css",
+	"docs/mobile-web.md",
+	".pi/extensions/research-web.ts",
+	".pi/lib/web-server.mjs",
+	".pi/lib/web-launcher.mjs",
+	".pi/lib/web-dialogs.mjs",
+	".pi/lib/web-tailscale.mjs",
+	"scripts/prepare-web.mjs",
 	"README_en.md",
 	".pi/extensions/cache-audit.ts",
 	".pi/lib/cache-audit.mjs",
