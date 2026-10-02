@@ -29,7 +29,7 @@ test("packaged launcher creates external config/state and runs the pinned core",
 		assert.equal(statSync(credentials).mode & 0o777, 0o600);
 		const configPath = join(config, "config.json");
 		const persistedConfig = JSON.parse(readFileSync(configPath, "utf8"));
-		assert.equal(persistedConfig.version, 2);
+		assert.equal(persistedConfig.version, 3);
 		assert.equal(Object.hasOwn(persistedConfig, "activeProfile"), false);
 		assert.equal(Object.hasOwn(persistedConfig, "profiles"), false);
 		assert.equal(statSync(configPath).mode & 0o777, 0o600);
@@ -53,10 +53,10 @@ test("packaged launcher creates external config/state and runs the pinned core",
 
 		const version = spawnSync(process.execPath, [launcher, "--version"], { encoding: "utf8", env: environment });
 		assert.equal(version.status, 0, version.stderr);
-		assert.match(version.stdout, /0\.84\.2/);
+		assert.equal(version.stdout.trim(), "1.0.0");
 		const fullAccessVersion = spawnSync(process.execPath, [launcher, "--full-access", "--version"], { encoding: "utf8", env: environment });
 		assert.equal(fullAccessVersion.status, 0, fullAccessVersion.stderr);
-		assert.match(fullAccessVersion.stdout, /0\.84\.2/);
+		assert.equal(fullAccessVersion.stdout.trim(), "1.0.0");
 		assert.equal(existsSync(join(state, "agent", "models.json")), false);
 	} finally {
 		rmSync(temp, { recursive: true, force: true });

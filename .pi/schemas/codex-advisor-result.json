@@ -21,7 +21,8 @@
     },
     "shared_understanding": {
       "type": "string",
-      "maxLength": 12000
+      "maxLength": 1200,
+      "description": "Only the shared understanding needed for the next decision; omit established background."
     },
     "points_of_agreement": {
       "type": "array",
@@ -50,11 +51,12 @@
     },
     "working_synthesis": {
       "type": "string",
-      "maxLength": 12000
+      "maxLength": 1600,
+      "description": "Concise synthesis with material uncertainty; refer to evidence instead of duplicating it."
     },
     "suggested_next_exchange": {
       "type": "string",
-      "maxLength": 8000
+      "maxLength": 600
     }
   }
 }

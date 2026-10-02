@@ -11,10 +11,13 @@ import {
 } from "../lib/codex-jobs.mjs";
 import {
 	RESEARCH_LEADER_ACTOR_ID,
+	readRuntimeSnapshot,
+	resolveRuntimeActor,
 	resolveResearchRuntime,
+	runtimeActorBackend,
 	runtimeActorTarget,
 } from "../lib/research-runtime.mjs";
-import { registerCodexWatchAdapter } from "../lib/research-runtime-adapters.mjs";
+import { getSubagentWatchAdapter, registerSubagentWatchAdapter } from "../lib/research-runtime-adapters.mjs";
 
 const ACTIVE_STATUSES = new Set(["starting", "running", "input_required", "cancelling"]);
 const VIEW_MODES = ["overview", "activity", "agents"] as const;
@@ -36,7 +39,7 @@ function shortId(value: unknown, length = 8): string {
 
 function actorTarget(job: CodexJobView): string {
 	if (!job.actorId) return `job:${shortId(job.id)}`;
-	return runtimeActorTarget({ id: job.actorId, kind: "codex" });
+	return runtimeActorTarget({ id: job.actorId, kind: "subagent", backend: "codex" });
 }
 
 function elapsed(job: CodexJobView, currentTime = Date.now()): string {
@@ -349,8 +352,8 @@ class CodexWatchOverlay {
 		const title = `◈ CODEX WATCH ${this.selected + 1}/${this.jobs.length}`;
 		const mission = compact(job.mission ?? "unlabelled", 90);
 		const header = [
-			` ${th.fg(stateColor as any, `${semanticIncomplete ? "!" : statusIcon(job.status)} ${job.status}${outcome ? `/${outcome}` : ""}`)} · ${th.fg("accent", mission)} · ${job.mode} · ${elapsed(job)}`,
-			` ${th.fg("dim", `@${actorTarget(job)} · job ${shortId(job.id)} · ${job.model}/${job.reasoningEffort}`)}`,
+			` ${th.fg(stateColor as any, `${semanticIncomplete ? "!" : statusIcon(job.status)} ${job.status}${outcome ? `/${outcome}` : ""}`)} · ${th.fg("accent", mission)} · ${job.role ?? job.mode} · ${elapsed(job)}`,
+			` ${th.fg("dim", `@${actorTarget(job)} · codex · job ${shortId(job.id)} · ${job.model}/${job.thinking ?? job.reasoningEffort}`)}`,
 			` ${selectedMode}`,
 			"",
 		];
@@ -394,9 +397,30 @@ export async function openCodexWatch(ctx: ExtensionCommandContext, selector = ""
 }
 
 export default function codexWatchExtension(pi: ExtensionAPI) {
-	registerCodexWatchAdapter({ open: openCodexWatch });
+	registerSubagentWatchAdapter("codex", { open: openCodexWatch });
 	pi.registerCommand("watch", {
-		description: "Watch objective Codex execution; switch Actions with arrows and views with Tab",
-		handler: async (args, ctx) => openCodexWatch(ctx, args),
+		description: "Watch a Runtime subagent Actor, including backend, model, thinking and objective activity",
+		handler: async (args, ctx) => {
+			const selector = args.trim();
+			try {
+				const runtime = await resolveResearchRuntime(ctx.cwd);
+				const snapshot = await readRuntimeSnapshot(runtime);
+				let actor;
+				if (selector) actor = resolveRuntimeActor(snapshot, selector);
+				else {
+					const activeActorIds = new Set(snapshot.actions.filter((action) => ACTIVE_STATUSES.has(action.status)).map((action) => action.actorId));
+					actor = snapshot.actors.find((candidate) => runtimeActorBackend(candidate) && activeActorIds.has(candidate.id))
+						?? [...snapshot.actors].reverse().find((candidate) => runtimeActorBackend(candidate));
+				}
+				const backend = runtimeActorBackend(actor);
+				const adapter = backend ? getSubagentWatchAdapter(backend) : undefined;
+				if (!adapter) throw new Error(backend ? `${backend} Watch adapter is not loaded` : "No subagent Actor is available to watch");
+				await adapter.open(ctx, selector || `@${runtimeActorTarget(actor)}`);
+			} catch (error) {
+				// Preserve direct Codex job-id inspection for existing Runtime history.
+				if (selector && /^(?:codex-|[a-f0-9]{8})$/i.test(selector.replace(/^@/, ""))) await openCodexWatch(ctx, selector);
+				else ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			}
+		},
 	});
 }

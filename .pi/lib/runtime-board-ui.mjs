@@ -81,10 +81,10 @@ export class RuntimeBoardOverlay {
 
 	watchTarget() {
 		const selected = RUNTIME_BOARD_SECTIONS[this.sectionIndex] === "actors" ? this.model.actors[this.actorIndex] : null;
-		const actor = selected?.kind === "codex"
+		const actor = selected?.backend
 			? selected
-			: this.model.actors.find((candidate) => candidate.kind === "codex" && ["starting", "running", "waiting for input", "cancelling"].includes(candidate.state))
-				?? this.model.actors.find((candidate) => candidate.kind === "codex");
+			: this.model.actors.find((candidate) => candidate.backend && ["starting", "running", "waiting for input", "cancelling"].includes(candidate.state))
+				?? this.model.actors.find((candidate) => candidate.backend);
 		return actor?.target ?? "";
 	}
 
@@ -188,6 +188,7 @@ export class RuntimeBoardOverlay {
 			const color = stateColor(actor.action?.status || actor.state);
 			const cursor = index === this.actorIndex ? th.fg("accent", "›") : " ";
 			rows.push(`${cursor} ${th.fg(color, `${stateIcon(actor.action?.status || actor.state)} ${actor.target}`)} · ${actor.label} · ${actor.state}`);
+			if (actor.backend) rows.push(`   ${th.fg("dim", `${actor.backend} · ${actor.role ?? "general"} · ${actor.model ?? "inherit"} · thinking ${actor.thinking ?? "inherit"}`)}`);
 			if (actor.action) rows.push(`   ${th.fg("dim", `${shortId(actor.action.id, 12)} · ${actor.action.label}${actor.action.externalId ? ` · external ${shortId(actor.action.externalId, 12)}` : ""}`)}`);
 		}
 		if (!this.model.actors.length) rows.push(` ${th.fg("dim", "No Actor is registered.")}`);

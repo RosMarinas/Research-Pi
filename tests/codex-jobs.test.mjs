@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -12,6 +12,7 @@ import codexDelegateExtension, {
 	formatCodexJobsStatus,
 	formatCodexStatus,
 	planCodexJobRecovery,
+	resolveSubagentRunnerDefaults,
 } from "../.pi/extensions/codex-delegate.ts";
 import {
 	DEFAULT_CODEX_ADVISOR_SCHEMA_PATH,
@@ -21,10 +22,13 @@ import {
 	buildDelegationPrompt,
 	buildCodexContinuationNotice,
 	cancelCodexJob,
+	codexWriteScopesOverlap,
 	findReusableCodexJob,
 	listCodexJobs,
 	listCodexMissions,
 	maintainCodexJobRetention,
+	normalizeCodexWriteScope,
+	publicJobView,
 	readCodexJob,
 	reconcileCodexJobOutcome,
 	respondToCodexJob,
@@ -37,6 +41,8 @@ import {
 	workerLeaseIsFresh,
 } from "../.pi/lib/codex-jobs.mjs";
 import { CODEX_ADVISOR_PROFILE, CODEX_EXECUTOR_PROFILE, CODEX_FULL_ACCESS_PROFILE } from "../.pi/lib/project-boundary.mjs";
+import { readCodexPeerMessages } from "../.pi/lib/codex-collaboration.mjs";
+import { settleCodexExternalRun } from "../.pi/lib/codex-resources.mjs";
 import {
 	RESEARCH_LEADER_ACTOR_ID,
 	attachRuntimeActor,
@@ -75,32 +81,33 @@ test("terminal Codex jobs supersede unresolved request records without changing 
 	}
 });
 
-test("Pi registers one Codex delegation tool instead of a family of noisy tools", () => {
-	let registered;
-	let command;
-	codexDelegateExtension({
-		registerTool(tool) {
-			registered = tool;
-		},
-		registerCommand(name, definition) {
-			command = { name, definition };
-		},
-		on() {},
-	});
-	assert.equal(registered.name, "codex_delegate");
-	assert.equal(registered.executionMode, "sequential");
-	assert.doesNotMatch(registered.description, /gpt-5\.6-sol\/max/, "configured defaults must not churn the tool prompt");
-	assert.match(registered.description, /collaborative advisor consultation/);
-	assert.doesNotMatch(registered.description, /second opinion|independent proposal or critique/i);
-	assert.match(registered.promptGuidelines.join("\n"), /executor for an end-to-end objective with observable success criteria/);
-	assert.match(registered.promptGuidelines.join("\n"), /advisor for read-only clarification and competing explanations/);
-	assert.match(registered.promptGuidelines.join("\n"), /stable mission label/);
-	assert.match(registered.promptGuidelines.join("\n"), /structured host bridge/);
-	assert.match(registered.promptGuidelines.join("\n"), /semantic outcome/);
-	assert.match(registered.promptGuidelines.join("\n"), /genuine user request may inspect one or more relevant jobs directly/);
-	assert.match(registered.promptGuidelines.join("\n"), /must not turn that exception into a wait loop/);
-	assert.equal(command.name, "codex");
-	assert.match(command.definition.description, /mission threads/);
+test("an Action-level backend override receives defaults from that backend", () => {
+	const keys = [
+		"RESEARCH_PI_SUBAGENT_GENERAL_BACKEND", "RESEARCH_PI_SUBAGENT_GENERAL_MODEL", "RESEARCH_PI_SUBAGENT_GENERAL_THINKING",
+		"RESEARCH_PI_SUBAGENT_EXECUTOR_BACKEND", "RESEARCH_PI_SUBAGENT_EXECUTOR_MODEL", "RESEARCH_PI_SUBAGENT_EXECUTOR_THINKING",
+	];
+	const previous = keys.map((key) => process.env[key]);
+	try {
+		Object.assign(process.env, {
+			RESEARCH_PI_SUBAGENT_GENERAL_BACKEND: "pi",
+			RESEARCH_PI_SUBAGENT_GENERAL_MODEL: "inherit",
+			RESEARCH_PI_SUBAGENT_GENERAL_THINKING: "inherit",
+			RESEARCH_PI_SUBAGENT_EXECUTOR_BACKEND: "codex",
+			RESEARCH_PI_SUBAGENT_EXECUTOR_MODEL: "gpt-6-astra",
+			RESEARCH_PI_SUBAGENT_EXECUTOR_THINKING: "high",
+		});
+		assert.deepEqual(resolveSubagentRunnerDefaults("general", "codex"), {
+			backend: "codex", model: "gpt-6-astra", thinking: "high", speed: "inherit",
+		});
+		assert.deepEqual(resolveSubagentRunnerDefaults("executor", "pi"), {
+			backend: "pi", model: "inherit", thinking: "inherit", speed: "inherit",
+		});
+	} finally {
+		keys.forEach((key, index) => {
+			if (previous[index] === undefined) delete process.env[key];
+			else process.env[key] = previous[index];
+		});
+	}
 });
 
 test("Codex branch recovery keeps Project jobs global and legacy jobs branch-scoped", () => {
@@ -216,7 +223,7 @@ test("background Codex reads stay fused until a real external event", () => {
 
 	emit("tool_result", {
 		type: "tool_result",
-		toolName: "codex_delegate",
+		toolName: "subagent",
 		toolCallId: "start-call",
 		input: { action: "start" },
 		content: [],
@@ -225,7 +232,7 @@ test("background Codex reads stay fused until a real external event", () => {
 	});
 	const afterStart = emit("tool_call", {
 		type: "tool_call",
-		toolName: "codex_delegate",
+		toolName: "subagent",
 		toolCallId: "first-poll",
 		input: { action: "result", jobId },
 	});
@@ -234,7 +241,7 @@ test("background Codex reads stay fused until a real external event", () => {
 	assert.match(afterStart.reason, /polling suppressed/);
 	assert.equal(emit("tool_call", {
 		type: "tool_call",
-		toolName: "codex_delegate",
+		toolName: "subagent",
 		toolCallId: "normal-control",
 		input: { action: "steer", jobId, message: "new evidence" },
 	}), undefined, "the read fuse must not affect normal Codex control actions");
@@ -243,20 +250,20 @@ test("background Codex reads stay fused until a real external event", () => {
 	emit("agent_start", { type: "agent_start" });
 	assert.equal(emit("tool_call", {
 		type: "tool_call",
-		toolName: "codex_delegate",
+		toolName: "subagent",
 		toolCallId: "poll-after-auto-restart",
 		input: { action: "result", jobId },
 	})?.block, true);
 	emit("input", { type: "input", source: "interactive", text: "check the job" });
 	assert.equal(emit("tool_call", {
 		type: "tool_call",
-		toolName: "codex_delegate",
+		toolName: "subagent",
 		toolCallId: "allowed-read",
 		input: { action: "status", jobId },
 	}), undefined);
 	const repeated = emit("tool_call", {
 		type: "tool_call",
-		toolName: "codex_delegate",
+		toolName: "subagent",
 		toolCallId: "repeated-read",
 		input: { action: "result", jobId },
 	});
@@ -264,7 +271,7 @@ test("background Codex reads stay fused until a real external event", () => {
 
 	emit("tool_result", {
 		type: "tool_result",
-		toolName: "codex_delegate",
+		toolName: "subagent",
 		toolCallId: "allowed-read",
 		input: { action: "status", jobId },
 		content: [],
@@ -273,14 +280,14 @@ test("background Codex reads stay fused until a real external event", () => {
 	});
 	assert.equal(emit("tool_call", {
 		type: "tool_call",
-		toolName: "codex_delegate",
+		toolName: "subagent",
 		toolCallId: "retry-after-error",
 		input: { action: "result", jobId },
 	}), undefined);
 	emit("agent_settled", { type: "agent_settled" });
 	assert.equal(emit("tool_call", {
 		type: "tool_call",
-		toolName: "codex_delegate",
+		toolName: "subagent",
 		toolCallId: "automatic-read-after-user-run",
 		input: { action: "status", jobId },
 	})?.block, true, "the user exception ends when that run settles");
@@ -289,13 +296,13 @@ test("background Codex reads stay fused until a real external event", () => {
 	emit("input", { type: "input", source: "interactive", text: "manually inspect" });
 	assert.equal(emit("tool_call", {
 		type: "tool_call",
-		toolName: "codex_delegate",
+		toolName: "subagent",
 		toolCallId: "manual-read",
 		input: { action: "status", jobId: manualJobId },
 	}), undefined);
 	emit("tool_result", {
 		type: "tool_result",
-		toolName: "codex_delegate",
+		toolName: "subagent",
 		toolCallId: "manual-read",
 		input: { action: "status", jobId: manualJobId },
 		content: [],
@@ -304,7 +311,7 @@ test("background Codex reads stay fused until a real external event", () => {
 	});
 	assert.equal(emit("tool_call", {
 		type: "tool_call",
-		toolName: "codex_delegate",
+		toolName: "subagent",
 		toolCallId: "manual-read-again",
 		input: { action: "result", jobId: manualJobId },
 	}), undefined, "manual non-notifying jobs must remain readable");
@@ -312,7 +319,7 @@ test("background Codex reads stay fused until a real external event", () => {
 	emit("input", { type: "input", source: "interactive", text: "answer the advisor" });
 	emit("tool_result", {
 		type: "tool_result",
-		toolName: "codex_delegate",
+		toolName: "subagent",
 		toolCallId: "advisor-response",
 		input: { action: "respond", jobId: manualJobId },
 		content: [],
@@ -321,7 +328,7 @@ test("background Codex reads stay fused until a real external event", () => {
 	});
 	assert.equal(emit("tool_call", {
 		type: "tool_call",
-		toolName: "codex_delegate",
+		toolName: "subagent",
 		toolCallId: "poll-after-response",
 		input: { action: "result", jobId: manualJobId },
 	}), undefined, "respond does not consume the genuine user's inspection authority");
@@ -370,7 +377,7 @@ test("Codex delegation exposes bounded running and terminal footer states", () =
 		status: "running",
 		progress: "item.completed: command execution",
 	});
-	assert.equal(running, "⚙ Codex executor 12345678 · running · phase: item.completed: command execution");
+	assert.equal(running, "⚙ Codex executor 12345678 · inherit/inherit · running · phase: item.completed: command execution");
 
 	const runningAfterTool = formatCodexStatus({
 		id: "codex-2026-08-11-9e62a4b5",
@@ -379,7 +386,7 @@ test("Codex delegation exposes bounded running and terminal footer states", () =
 		progress: "Codex turn running",
 		lastActivity: { summary: "research_pi_host · completed" },
 	});
-	assert.equal(runningAfterTool, "⚙ Codex executor 9e62a4b5 · running · last: research_pi_host · completed");
+	assert.equal(runningAfterTool, "⚙ Codex executor 9e62a4b5 · inherit/inherit · running · last: research_pi_host · completed");
 
 	const completed = formatCodexStatus({
 		id: "codex-2026-08-11-abcdef12",
@@ -387,7 +394,7 @@ test("Codex delegation exposes bounded running and terminal footer states", () =
 		status: "completed",
 		progress: "completed",
 	});
-	assert.equal(completed, "✓ Codex advisor abcdef12 · completed · phase: completed");
+	assert.equal(completed, "✓ Codex advisor abcdef12 · inherit/inherit · completed · phase: completed");
 
 	const partial = formatCodexStatus({
 		id: "codex-2026-08-11-abcddcba",
@@ -396,7 +403,7 @@ test("Codex delegation exposes bounded running and terminal footer states", () =
 		progress: "completed",
 		result: { outcome: "partial", goal_satisfied: false },
 	});
-	assert.equal(partial, "! Codex executor abcddcba · completed/partial · phase: completed");
+	assert.equal(partial, "! Codex executor abcddcba · inherit/inherit · completed/partial · phase: completed");
 
 	const parallel = formatCodexStatus({
 		id: "codex-2026-08-11-feedbeef",
@@ -409,7 +416,7 @@ test("Codex delegation exposes bounded running and terminal footer states", () =
 			{ id: "two", summary: "second child" },
 		],
 	});
-	assert.equal(parallel, "⚙ Codex executor feedbeef · running · 3 parallel activities · /watch");
+	assert.equal(parallel, "⚙ Codex executor feedbeef · inherit/inherit · running · 3 parallel activities · /watch");
 
 	const aggregate = formatCodexJobsStatus([
 		{ id: "codex-b", mode: "executor", status: "running", createdAt: "2026-08-11T00:00:02Z" },
@@ -524,6 +531,48 @@ test("a stale Pi Session cannot start new Codex work after Leader ownership move
 	}
 });
 
+test("worker applies native model, speed and subagent defaults; continuation retains the captured settings", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-worker-model-settings-"));
+	const keys = ["RESEARCH_PI_CODEX_EXECUTOR_MODEL", "RESEARCH_PI_CODEX_EXECUTOR_EFFORT", "RESEARCH_PI_CODEX_EXECUTOR_SERVICE_TIER", "RESEARCH_PI_CODEX_SUBAGENT_MODEL", "RESEARCH_PI_CODEX_SUBAGENT_EFFORT"];
+	const previous = keys.map((key) => process.env[key]);
+	try {
+		const workspace = join(root, "workspace"), jobRoot = join(root, "jobs");
+		mkdirSync(workspace);
+		const codexBin = makeFakeCodex(root);
+		Object.assign(process.env, {
+			RESEARCH_PI_CODEX_EXECUTOR_MODEL: "gpt-6-astra", RESEARCH_PI_CODEX_EXECUTOR_EFFORT: "high",
+			RESEARCH_PI_CODEX_EXECUTOR_SERVICE_TIER: "fast", RESEARCH_PI_CODEX_SUBAGENT_MODEL: "gpt-6-luna", RESEARCH_PI_CODEX_SUBAGENT_EFFORT: "high",
+		});
+		const first = await waitForCodexJob((await startCodexJob({ cwd: workspace, jobRoot, codexBin, role: "general", task: "MODEL_SETTINGS_PROBE" })).id, { jobRoot });
+		assert.equal(first.status, "completed");
+		assert.equal(first.mode, "executor");
+		assert.equal(first.role, "general");
+		assert.equal(publicJobView(first).role, "general");
+		assert.equal(first.serviceTier, "fast");
+		assert.deepEqual(first.subagent, { model: "gpt-6-luna", reasoningEffort: "high" });
+		const probe = () => JSON.parse(readFileSync(join(workspace, "model-settings-probe.json"), "utf8"));
+		assert.deepEqual(probe().turn, { model: "gpt-6-astra", effort: "high", serviceTier: "priority" });
+		assert.equal(probe().thread.serviceTier, "priority");
+		assert.ok(probe().args.includes('agents.default_subagent_model="gpt-6-luna"'));
+		assert.ok(probe().args.includes('agents.default_subagent_reasoning_effort="high"'));
+		assert.ok(probe().args.includes("features.fast_mode=true"));
+		Object.assign(process.env, { RESEARCH_PI_CODEX_EXECUTOR_MODEL: "gpt-5.5", RESEARCH_PI_CODEX_EXECUTOR_EFFORT: "low", RESEARCH_PI_CODEX_EXECUTOR_SERVICE_TIER: "standard", RESEARCH_PI_CODEX_SUBAGENT_MODEL: "inherit", RESEARCH_PI_CODEX_SUBAGENT_EFFORT: "inherit" });
+		const resumed = await waitForCodexJob((await resumeCodexJob(first.id, { jobRoot, codexBin, followUp: "MODEL_SETTINGS_PROBE continuation" })).id, { jobRoot });
+		assert.equal(resumed.status, "completed");
+		assert.equal(resumed.role, "general");
+		assert.equal(resumed.serviceTier, "fast");
+		assert.deepEqual(resumed.subagent, first.subagent);
+		assert.deepEqual(probe().turn, { model: "gpt-6-astra", effort: "high", serviceTier: "priority" });
+		const fresh = await waitForCodexJob((await startCodexJob({ cwd: workspace, jobRoot, codexBin, task: "MODEL_SETTINGS_PROBE fresh" })).id, { jobRoot });
+		assert.equal(fresh.status, "completed");
+		assert.deepEqual(probe().turn, { model: "gpt-5.5", effort: "low", serviceTier: "default" });
+		assert.ok(!probe().args.some((arg) => arg.startsWith("agents.default_subagent_")));
+	} finally {
+		keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index]; });
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 function makeFakeCodex(root, delayMs = 0) {
 	const path = join(root, `fake-codex-${delayMs}.mjs`);
 	writeFileSync(
@@ -541,6 +590,7 @@ if (args.includes("sandbox")) {
 const configText = args.join(" ");
 const sandbox = configText.includes("research_pi_full_access") ? "${CODEX_FULL_ACCESS_PROFILE}" : configText.includes("research_pi_executor") ? "${CODEX_EXECUTOR_PROFILE}" : configText.includes("research_pi_advisor") ? "${CODEX_ADVISOR_PROFILE}" : "unknown";
 let model = "unknown";
+let threadSettings = {};
 let isResume = false;
 let activeTurn = null;
 let completionTimer;
@@ -553,6 +603,9 @@ let consultationField = "missing-consultation-field";
 let isAdvisorSchema = false;
 let resumeParamsClean = true;
 let pendingFinalPrompt = "";
+let currentPrompt = "";
+let peerReceipt = "";
+let peerReply = "";
 process.stderr.write("fake app-server warning\\n");
 
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
@@ -610,6 +663,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     send({ id: message.id, result: { userAgent: "fake", platformFamily: "unix", platformOs: "test", codexHome: process.cwd() } });
   } else if (message.method === "thread/start") {
     model = message.params.model;
+    threadSettings = { model, serviceTier: message.params.serviceTier };
     hostToolPresent = message.params.dynamicTools?.some((tool) => tool.name === "research_pi_host") ?? false;
     const consultation = message.params.dynamicTools?.find((tool) => tool.name === "consult_research_pi");
     const submission = message.params.dynamicTools?.find((tool) => tool.name === "submit_research_pi_result");
@@ -621,6 +675,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     send({ method: "thread/started", params: { thread: { id: "thread-fake-123", turns: [] } } });
   } else if (message.method === "thread/resume") {
     model = message.params.model;
+    threadSettings = { model, serviceTier: message.params.serviceTier };
     resumeParamsClean = !Object.prototype.hasOwnProperty.call(message.params, "dynamicTools")
       && !Object.prototype.hasOwnProperty.call(message.params, "serviceName");
     // App Server persists dynamic tools on a compatible thread; thread/resume
@@ -635,6 +690,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     activeTurn = "turn-fake-456";
     turnOutputSchemaPresent = Boolean(message.params.outputSchema);
     const prompt = message.params.input[0].text;
+    if (prompt.includes("MODEL_SETTINGS_PROBE")) writeFileSync(join(process.cwd(), "model-settings-probe.json"), JSON.stringify({ args, thread: threadSettings, turn: { model: message.params.model, effort: message.params.effort, serviceTier: message.params.serviceTier } }));
+    currentPrompt = prompt;
     if (isResume) {
       isAdvisorSchema = prompt.includes("read-only research advisor");
       consultationField = isAdvisorSchema ? "why-it-matters" : "why-blocking";
@@ -667,7 +724,11 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       send({ method: "item/completed", params: { threadId: "thread-fake-123", turnId: activeTurn, item: { id: "command-observed", type: "commandExecution", status: "completed", command: "python3 probe.py", commandActions: [], cwd: process.cwd(), durationMs: 12, exitCode: 0, aggregatedOutput: "probe-ok" } } });
       send({ method: "item/completed", params: { threadId: "thread-fake-123", turnId: activeTurn, item: { id: "collab-observed", type: "collabAgentToolCall", tool: "spawnAgent", status: "completed", senderThreadId: "thread-fake-123", receiverThreadIds: ["thread-child-1"], agentsStates: { "thread-child-1": { status: "running", message: "checking probe" } }, model: "gpt-5.6-luna", reasoningEffort: "high", prompt: "Check the probe result" } } });
     }
-    if (prompt.includes("ask the leader live")) {
+    if (prompt.includes("PEER_SENDER")) {
+      send({ id: "peer-list", method: "item/tool/call", params: { threadId: "thread-fake-123", turnId: activeTurn, tool: "research_pi_collaborate", arguments: { action: "peers" } } });
+    } else if (prompt.includes("REGISTER_EXTERNAL_RUN")) {
+      send({ id: "run-register", method: "item/tool/call", params: { threadId: "thread-fake-123", turnId: activeTurn, tool: "research_pi_run", arguments: { action: "register", externalId: "scheduler-42", target: "host-a", evidenceRefs: ["run.log"] } } });
+    } else if (prompt.includes("ask the leader live")) {
       send({ id: "server-question-1", method: "item/tool/call", params: { threadId: "thread-fake-123", turnId: activeTurn, callId: "call-1", tool: "consult_research_pi", arguments: { audience: "leader", question: "Choose H1 or H2", why_blocking: "The experiment differs", options: ["H1", "H2"] } } });
     } else if (prompt.includes("HOST_READ_PATH=")) {
       const path = prompt.match(/HOST_READ_PATH=([^\\n<]+)/)?.[1]?.trim();
@@ -679,6 +740,15 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     } else {
       completionTimer = setTimeout(() => complete(prompt), ${delayMs});
     }
+  } else if (message.id === "peer-list") {
+    const peers = JSON.parse(message.result?.contentItems?.[0]?.text ?? "[]");
+    const peer = peers.find((item) => item.mission === "receiver");
+    send({ id: "peer-send", method: "item/tool/call", params: { threadId: "thread-fake-123", turnId: activeTurn, tool: "research_pi_collaborate", arguments: { action: "send", targetJobId: peer?.jobId, message: "Interface: input array; output score." } } });
+  } else if (message.id === "peer-send") {
+    peerReceipt = message.result?.contentItems?.[0]?.text ?? message.error?.message ?? "missing receipt";
+    if (peerReply) complete(currentPrompt, peerReceipt + peerReply);
+  } else if (message.id === "peer-reply" || message.id === "run-register") {
+    complete(currentPrompt, message.result?.contentItems?.[0]?.text ?? message.error?.message ?? "missing response");
   } else if (message.id === "server-question-1") {
     const answer = message.result?.contentItems?.[0]?.text ?? "missing answer";
     complete("Research Pi", answer);
@@ -696,6 +766,17 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     send({ method: "turn/completed", params: { threadId: "thread-fake-123", turn: { id: activeTurn, status: "completed", items: [], error: null } } });
   } else if (message.method === "turn/steer") {
     send({ id: message.id, result: { turnId: activeTurn } });
+    const text = message.params.input[0].text;
+    if (text.startsWith("[Research Pi peer message")) {
+      clearTimeout(completionTimer);
+      const peer = JSON.parse(text.split("\\n").at(-1));
+      if (currentPrompt.includes("PEER_RECEIVER")) {
+        send({ id: "peer-reply", method: "item/tool/call", params: { threadId: "thread-fake-123", turnId: activeTurn, tool: "research_pi_collaborate", arguments: { action: "send", targetJobId: peer.fromJobId, message: "Tests will cover empty input and score range." } } });
+      } else {
+        peerReply = peer.message;
+        if (peerReceipt) complete(currentPrompt, peerReceipt + peerReply);
+      }
+    }
   } else if (message.method === "turn/interrupt") {
     clearTimeout(completionTimer);
     send({ id: message.id, result: {} });
@@ -733,7 +814,7 @@ test("delegation prompt makes advisor collaborative while preserving executor au
 	assert.match(executor, /record the run id/);
 	assert.match(executor, /phase=commentary/);
 	assert.match(executor, /phase=final_answer/);
-	assert.match(executor, /never encode a plan, preamble, checkpoint/);
+	assert.match(executor, /No plan or checkpoint is a result/);
 	assert.match(executor, /hypothesis H1/);
 
 	const fullAccessExecutor = buildDelegationPrompt({
@@ -856,6 +937,7 @@ test("advisor, executor, and explicit resume produce durable structured jobs", a
 		assert.equal(executor.result.status, undefined);
 		assert.deepEqual(executor.result.remaining_work, []);
 		assert.equal(executor.resultSource, "submit_research_pi_result");
+		await assert.rejects(resumeCodexJob(executor.id, { jobRoot, codexBin, mode: "advisor", followUp: "change roles" }), /must keep its mode/);
 		assert.match(executor.result.evidence.join("\n"), /why-blocking/);
 		assert.match(executor.result.evidence.join("\n"), /submission-tool-present/);
 		assert.match(executor.result.evidence.join("\n"), /dynamic-tool-types-valid/);
@@ -1721,7 +1803,7 @@ test("a missing Codex host grant becomes structured input and resumes the same t
 	}
 });
 
-test("a workspace has one writer lease and cancellation preserves the side-effect boundary", async () => {
+test("omitted writeScope remains exclusive and cancellation preserves the side-effect boundary", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-lock-"));
 	try {
 		const workspace = join(root, "workspace");
@@ -1739,6 +1821,162 @@ test("a workspace has one writer lease and cancellation preserves the side-effec
 		if (cancelled.status === "outcome_unknown") assert.equal(cancelled.sideEffect.state, "unknown");
 		else assert.ok(["intent_recorded", "settled"].includes(cancelled.sideEffect.state));
 	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("write scopes canonicalize new paths and reject escapes, aliases, and overlapping directories", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-scopes-"));
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(join(workspace, "src"), { recursive: true });
+		assert.deepEqual(await normalizeCodexWriteScope(workspace, ["src/../src/model.ts", "src/model.ts"]), ["src/model.ts"]);
+		assert.equal(codexWriteScopesOverlap(["src"], ["src/model.ts"]), true);
+		assert.equal(codexWriteScopesOverlap(["src"], ["src-other"]), false);
+		assert.equal(codexWriteScopesOverlap(["src"], undefined), true);
+		for (const scope of [[], ["../outside"], [root], ["src/**"], [".git/index"]]) {
+			await assert.rejects(normalizeCodexWriteScope(workspace, scope), /writeScope|Git metadata/);
+		}
+		if (process.platform !== "win32") {
+			symlinkSync(join(workspace, "src"), join(workspace, "alias"));
+			symlinkSync(root, join(workspace, "outside"));
+			assert.deepEqual(await normalizeCodexWriteScope(workspace, ["alias/new/file.ts"]), ["src/new/file.ts"]);
+			await assert.rejects(normalizeCodexWriteScope(workspace, ["outside/new/file.ts"]), /inside the workspace/);
+		}
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("disjoint executors run concurrently, enforce capacity, settle independently, and preserve scope on resume", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-multi-"));
+	const jobs = [];
+	const jobRoot = join(root, "codex", "jobs");
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace, { recursive: true });
+		const codexBin = makeFakeCodex(root, 1500);
+		const common = { cwd: workspace, jobRoot, codexBin, mode: "executor", maxExecutors: 2, background: true };
+		const starts = await Promise.allSettled(["src/model", "tests/model"].map((scope) => startCodexJob({
+			...common, task: `Implement ${scope}`, mission: scope, writeScope: [scope],
+		})));
+		for (const result of starts) if (result.status === "fulfilled") jobs.push(result.value);
+		assert.ok(starts.every((result) => result.status === "fulfilled"), JSON.stringify(starts));
+		assert.equal(jobs.length, 2);
+		assert.notEqual(jobs[0].id, jobs[1].id);
+		await assert.rejects(startCodexJob({ ...common, mission: "src/model", task: "duplicate mission", writeScope: ["other"] }), /already has active job/);
+		await assert.rejects(startCodexJob({ ...common, task: "overlap", writeScope: ["src/model/layer.ts"] }), /already writing an overlapping scope/);
+		await assert.rejects(startCodexJob({ ...common, task: "third", writeScope: ["docs"] }), /limit reached \(2\)/);
+		const firstRequest = JSON.parse(readFileSync(join(jobRoot, jobs[0].id, "request.json"), "utf8"));
+		assert.match(firstRequest.prompt, /Write only these workspace-relative paths: \["src\/model"\]/);
+		assert.match(firstRequest.prompt, /not alone/);
+		assert.match(firstRequest.prompt, /Do not stage\/commit\/reset/);
+		const completed = await Promise.all(jobs.map((job) => waitForCodexJob(job.id, { jobRoot, pollMs: 20 })));
+		assert.ok(completed.every((job) => job.status === "completed"), JSON.stringify(completed));
+		assert.deepEqual(publicJobView(completed[0]).writeScope, ["src/model"]);
+		const resumed = await resumeCodexJob(jobs[0].id, { jobRoot, codexBin, followUp: "Check the same component" });
+		jobs.push(resumed);
+		assert.deepEqual(resumed.writeScope, ["src/model"]);
+		assert.match(JSON.parse(readFileSync(join(jobRoot, resumed.id, "request.json"), "utf8")).prompt, /write_ownership/);
+		assert.equal((await waitForCodexJob(resumed.id, { jobRoot, pollMs: 20 })).status, "completed");
+	} finally {
+		await Promise.allSettled(jobs.map((job) => cancelCodexJob(job.id, { jobRoot })));
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("simultaneous overlapping admissions produce exactly one executor", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-admission-"));
+	const jobRoot = join(root, "codex", "jobs");
+	let jobs = [];
+	try {
+		const workspace = join(root, "workspace");
+		mkdirSync(workspace, { recursive: true });
+		const codexBin = makeFakeCodex(root, 1500);
+		const results = await Promise.allSettled(["src", "src/model.ts"].map((scope) => startCodexJob({
+			cwd: workspace, jobRoot, codexBin, mode: "executor", task: scope, writeScope: [scope],
+		})));
+		jobs = results.filter((result) => result.status === "fulfilled").map((result) => result.value);
+		assert.equal(jobs.length, 1);
+		assert.match(results.find((result) => result.status === "rejected").reason.message, /already writing/);
+	} finally {
+		await Promise.allSettled(jobs.map((job) => cancelCodexJob(job.id, { jobRoot })));
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("an unknown scoped outcome blocks only overlapping work, while legacy unknown jobs block the workspace", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-scoped-unknown-"));
+	const jobRoot = join(root, "codex", "jobs");
+	let started;
+	try {
+		const workspace = realpathSync(root);
+		const unknownId = "codex-2026-10-02T00-00-00-000Z-deadbeef";
+		const unknownPath = join(jobRoot, unknownId, "job.json");
+		mkdirSync(join(jobRoot, unknownId), { recursive: true });
+		const unknown = { id: unknownId, mode: "executor", status: "outcome_unknown", cwd: workspace, writerRoot: workspace, writeScope: ["src"] };
+		writeFileSync(unknownPath, JSON.stringify(unknown));
+		const common = { cwd: workspace, jobRoot, codexBin: makeFakeCodex(root, 100), mode: "executor", task: "independent task" };
+		await assert.rejects(startCodexJob({ ...common, writeScope: ["src/model.ts"] }), /outcome is unknown/);
+		started = await startCodexJob({ ...common, writeScope: ["docs"] });
+		assert.equal((await waitForCodexJob(started.id, { jobRoot, pollMs: 20 })).status, "completed");
+		delete unknown.writeScope;
+		writeFileSync(unknownPath, JSON.stringify(unknown));
+		await assert.rejects(startCodexJob({ ...common, writeScope: ["other"] }), /outcome is unknown/);
+	} finally {
+		if (started) await cancelCodexJob(started.id, { jobRoot });
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("independent executor processes discover peers and exchange messages through active turns", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-peer-roundtrip-"));
+	const jobs = [];
+	const jobRoot = join(root, "jobs");
+	try {
+		const workspace = join(root, "workspace"); mkdirSync(workspace);
+		const common = { cwd: workspace, jobRoot, mode: "executor", codexBin: makeFakeCodex(root, 6000), skipSandboxPreflight: true, leaderActorId: "research-leader" };
+		const receiver = await startCodexJob({ ...common, mission: "receiver", task: "PEER_RECEIVER", writeScope: ["tests"] }); jobs.push(receiver.id);
+		const sender = await startCodexJob({ ...common, mission: "sender", task: "PEER_SENDER", writeScope: ["src"] }); jobs.push(sender.id);
+		const [sent, received] = await Promise.all(jobs.map((job) => waitForCodexJob(job, { jobRoot, pollMs: 30, signal: AbortSignal.timeout(12000) })));
+		assert.equal(sent.status, "completed", JSON.stringify(sent));
+		assert.equal(received.status, "completed", JSON.stringify(received));
+		assert.ok(received.result.evidence.some((item) => item.includes("Tests will cover empty input")), JSON.stringify(received.result));
+		const a = await readCodexPeerMessages(sender.id, { jobRoot });
+		const b = await readCodexPeerMessages(receiver.id, { jobRoot });
+		assert.equal(a.outgoing[0].status, "applied");
+		assert.equal(b.outgoing[0].status, "applied");
+		assert.equal(b.incoming[0].fromJobId, sender.id);
+		assert.equal(a.incoming[0].fromJobId, receiver.id);
+		assert.equal(readdirSync(workspace).filter((name) => name.endsWith(".md")).length, 0);
+	} finally {
+		for (const job of jobs) await cancelCodexJob(job, { jobRoot }).catch(() => undefined);
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("worker run registration survives handoff and prevents conflicting resource reuse", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-live-run-"));
+	const jobs = [];
+	const jobRoot = join(root, "jobs");
+	try {
+		const workspace = join(root, "workspace"); mkdirSync(workspace);
+		writeFileSync(join(workspace, "run.log"), "scheduler accepted 42\n");
+		const common = { cwd: workspace, jobRoot, mode: "executor", codexBin: makeFakeCodex(root), skipSandboxPreflight: true };
+		const first = await startCodexJob({ ...common, task: "REGISTER_EXTERNAL_RUN", writeScope: ["runs"], resourceClaims: ["gpu:host-a:0"] }); jobs.push(first.id);
+		const done = await waitForCodexJob(first.id, { jobRoot, pollMs: 30, signal: AbortSignal.timeout(6000) });
+		assert.equal(done.status, "completed");
+		assert.equal(done.externalRuns[0].status, "running");
+		assert.match(formatCodexJob(publicJobView(done)), /independent of worker completion/);
+		await assert.rejects(startCodexJob({ ...common, task: "competing run", writeScope: ["other"], resourceClaims: ["gpu:host-a:0"] }), /Resource conflict/);
+		const newerId = "codex-2026-10-02T00-00-00-000Z-abcdef12";
+		mkdirSync(join(jobRoot, newerId));
+		writeFileSync(join(jobRoot, newerId, "job.json"), JSON.stringify({ ...done, id: newerId, resultPath: null, externalRuns: [], finishedAt: new Date(Date.now() + 1000).toISOString() }));
+		const retention = await maintainCodexJobRetention({ jobRoot, terminalDays: 1, keepTerminalJobs: 1, force: true, nowMs: Date.now() + 10 * 86400000 });
+		assert.ok(!retention.archived.includes(first.id));
+		await settleCodexExternalRun(jobRoot, first.id, done.externalRuns[0].id, { status: "completed", note: "Observed scheduler exit=0 and final log" });
+		const next = await startCodexJob({ ...common, task: "next run", writeScope: ["other"], resourceClaims: ["gpu:host-a:0"] }); jobs.push(next.id);
+		assert.equal((await waitForCodexJob(next.id, { jobRoot, pollMs: 30, signal: AbortSignal.timeout(6000) })).status, "completed");
+	} finally {
+		for (const job of jobs) await cancelCodexJob(job, { jobRoot }).catch(() => undefined);
 		rmSync(root, { recursive: true, force: true });
 	}
 });

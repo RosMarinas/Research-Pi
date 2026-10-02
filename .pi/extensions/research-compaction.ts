@@ -1,10 +1,9 @@
 import { randomUUID } from "node:crypto";
-import type { ExtensionAPI, SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
+	buildSessionProjection,
 	convertToLlm,
-	findCutPoint,
 	serializeConversation,
-	sessionEntryToContextMessages,
 } from "@earendil-works/pi-coding-agent";
 import {
 	buildResearchCompactionDetails,
@@ -33,58 +32,6 @@ function fileLists(fileOps: { read: Set<string>; written: Set<string>; edited: S
 	};
 }
 
-function prepareWithDynamicTail(event: SessionBeforeCompactEvent, keepRecentTokens: number) {
-	const { branchEntries, preparation } = event;
-	let previousCompactionIndex = -1;
-	for (let index = branchEntries.length - 1; index >= 0; index -= 1) {
-		if (branchEntries[index].type === "compaction") {
-			previousCompactionIndex = index;
-			break;
-		}
-	}
-
-	let boundaryStart = 0;
-	if (previousCompactionIndex >= 0) {
-		const previousCompaction = branchEntries[previousCompactionIndex];
-		if (previousCompaction.type === "compaction") {
-			const firstKeptIndex = branchEntries.findIndex((entry) => entry.id === previousCompaction.firstKeptEntryId);
-			boundaryStart = firstKeptIndex >= 0 ? firstKeptIndex : previousCompactionIndex + 1;
-		}
-	}
-
-	const cutPoint = findCutPoint(branchEntries, boundaryStart, branchEntries.length, keepRecentTokens);
-	const firstKeptEntry = branchEntries[cutPoint.firstKeptEntryIndex];
-	if (!firstKeptEntry?.id) return preparation;
-
-	const historyEnd = cutPoint.isSplitTurn ? cutPoint.turnStartIndex : cutPoint.firstKeptEntryIndex;
-	const messagesToSummarize = [];
-	for (let index = boundaryStart; index < historyEnd; index += 1) {
-		const entry = branchEntries[index];
-		if (entry.type === "compaction") continue;
-		const message = sessionEntryToContextMessages(entry)[0];
-		if (message) messagesToSummarize.push(message);
-	}
-
-	const turnPrefixMessages = [];
-	if (cutPoint.isSplitTurn) {
-		for (let index = cutPoint.turnStartIndex; index < cutPoint.firstKeptEntryIndex; index += 1) {
-			const entry = branchEntries[index];
-			if (entry.type === "compaction") continue;
-			const message = sessionEntryToContextMessages(entry)[0];
-			if (message) turnPrefixMessages.push(message);
-		}
-	}
-
-	if (!messagesToSummarize.length && !turnPrefixMessages.length) return preparation;
-	return {
-		...preparation,
-		firstKeptEntryId: firstKeptEntry.id,
-		messagesToSummarize,
-		turnPrefixMessages,
-		isSplitTurn: cutPoint.isSplitTurn,
-		settings: { ...preparation.settings, keepRecentTokens },
-	};
-}
 
 export function researchCompactionThresholds(model?: { contextWindow?: number } | null) {
 	const contextWindow = Number(model?.contextWindow);
@@ -94,7 +41,9 @@ export function researchCompactionThresholds(model?: { contextWindow?: number } 
 	const reserved = Math.max(32 * 1024, Math.floor(contextWindow * 0.1));
 	const modelSafeHard = Math.max(64 * 1024, contextWindow - reserved);
 	const hardTokens = Math.min(RESEARCH_HARD_COMPACT_TOKENS, modelSafeHard);
-	const softTokens = Math.min(RESEARCH_SOFT_COMPACT_TOKENS, Math.floor(hardTokens * 0.75));
+	// Scale the configured ratio only for smaller models. A fixed 75% cap would
+	// silently turn the requested 360k/384k thresholds into 288k/384k.
+	const softTokens = Math.min(RESEARCH_SOFT_COMPACT_TOKENS, Math.floor(hardTokens * RESEARCH_SOFT_COMPACT_TOKENS / RESEARCH_HARD_COMPACT_TOKENS));
 	return { softTokens, hardTokens };
 }
 
@@ -115,9 +64,10 @@ export default function (pi: ExtensionAPI) {
 	pi.on("turn_end", (_event, ctx) => {
 		const usage = ctx.getContextUsage();
 		const thresholds = researchCompactionThresholds(ctx.model);
-		if (!usage || usage.tokens < thresholds.softTokens || compactionRunning || scheduledCompaction) return;
+		if (!usage || usage.tokens === null || usage.tokens < thresholds.softTokens || compactionRunning) return;
 
 		const trigger = usage.tokens >= thresholds.hardTokens ? "hard" : "soft";
+		if (scheduledCompaction && (scheduledCompaction.trigger === "hard" || trigger === "soft")) return;
 		scheduledCompaction = { trigger, tokens: usage.tokens };
 		if (ctx.hasUI) {
 			ctx.ui.notify(
@@ -154,10 +104,16 @@ export default function (pi: ExtensionAPI) {
 		const runtimeSnapshot = await readRuntimeSnapshot(await resolveResearchRuntime(ctx.cwd));
 		const inheritancePolicy = runtimeSessionInheritancePolicy(branchEntries, runtimeSnapshot, ctx.sessionManager.getSessionId());
 		const projectRevision = runtimeSnapshot.revision;
-		const policy = selectResearchCompactionPolicy(branchEntries);
-		const preparation = prepareWithDynamicTail(event, policy.keepRecentTokens);
+		// Pi 1.0 prepares the canonical projection, including context edits,
+		// prior compaction boundaries, and nested tool file operations. Re-slicing
+		// raw entries here would reintroduce omitted/replaced messages.
+		const preparation = event.preparation;
+		const policy = selectResearchCompactionPolicy(branchEntries, preparation.settings.keepRecentTokens);
 		const sessionId = ctx.sessionManager.getSessionId();
-		const sessionEvidence = collectResearchEvidence(branchEntries, sessionId, preparation.firstKeptEntryId, { inheritancePolicy });
+		const sessionEvidence = collectResearchEvidence(branchEntries, sessionId, preparation.firstKeptEntryId, {
+			inheritancePolicy,
+			projectedEntries: buildSessionProjection(branchEntries).entries,
+		});
 		const evidence = inheritancePolicy === "clean"
 			? sessionEvidence
 			: mergeProjectRuntimeEvidence(sessionEvidence, runtimeSnapshot);

@@ -15,6 +15,7 @@ node_modules
 .pi/research/*.jsonl
 .pi/memory/
 .pi/codex/
+.pi/subagents/
 .pi/runtime/
 .pi/capabilities/
 .pi/agent/*

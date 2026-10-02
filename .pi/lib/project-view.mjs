@@ -234,6 +234,9 @@ export function buildProjectView({ runtime, snapshot, git = {}, experiments = []
 	const actions = snapshot.actions.filter((action) =>
 		LIVE_ACTION_STATUSES.has(action.status),
 	).slice(-8).map((action) => ({ ...action, routeStatus: runtimeTrackStatus(snapshot, action.trackRef) }));
+	const externalRuns = snapshot.actions.flatMap((action) => (action.metadata?.externalRuns ?? [])
+		.filter((run) => !["completed", "failed", "cancelled"].includes(run.status))
+		.map((run) => ({ ...run, jobId: action.externalId, routeStatus: runtimeTrackStatus(snapshot, action.trackRef) })));
 	const handoffs = [...(snapshot.handoffs ?? [])]
 		.sort((left, right) => Date.parse(left.recordedAt ?? "") - Date.parse(right.recordedAt ?? ""))
 		.slice(-6)
@@ -327,6 +330,7 @@ export function buildProjectView({ runtime, snapshot, git = {}, experiments = []
 		latestCompletedTask: completedTasks.at(-1) ?? null,
 		pendingEvidenceCount,
 		pendingEvidence: evidenceAfterState.slice(-4),
+		externalRuns,
 		transitionSupersedesState: Boolean(
 			snapshot.projectState
 			&& stateRouteStatus === "retired",
@@ -423,6 +427,7 @@ export function renderProjectView(view, options = {}) {
 
 export function renderProjectViewDelta(view, options = {}) {
 	const includeDirectedMessages = options.includeDirectedMessages !== false;
+	const lean = options.snapshot === true;
 	const tag = options.snapshot ? "research_project_frontier" : "research_project_delta";
 	const state = view.state;
 	const evidence = [...view.pendingEvidence].reverse().slice(0, 2);
@@ -465,8 +470,8 @@ export function renderProjectViewDelta(view, options = {}) {
 		const handoff = view.latestCompletedTask;
 		progress.push(
 			"Latest completed work handoff (context, not an automatic next task):",
-			`Task: ${compact(handoff.task, 700) || handoff.id}`,
-			`Reported result: ${compact(handoff.summary, 1_400)}`,
+			`Task: ${compact(handoff.task, lean ? 300 : 700) || handoff.id}`,
+			`Reported result: ${compact(handoff.summary, lean ? 500 : 1_400)}`,
 			`Route: ${handoff.routeStatus} · source=${handoff.id}`,
 		);
 	} else {
@@ -480,18 +485,23 @@ export function renderProjectViewDelta(view, options = {}) {
 	}
 	progress.push(
 		"Live Runtime actions:",
-		...bullets(view.actions.slice(-4), (item) => `${item.id} [${item.status}] [route=${item.routeStatus}] ${compact(item.label, 240)} external=${item.externalId ?? "none"}`, "none"),
+		...bullets(view.actions.slice(lean ? -2 : -4), (item) => `${item.id} [${item.status}] [route=${item.routeStatus}] ${compact(item.label, lean ? 120 : 240)} external=${item.externalId ?? "none"}`, "none"),
+	);
+	if (view.externalRuns?.length) progress.push(
+		"Unsettled external runs (worker completion does not imply experiment completion):",
+		...view.externalRuns.slice(-4).map((run) => `- ${run.id} [${run.status}] [route=${run.routeStatus}] ${run.target} external=${run.externalId} job=${run.jobId}`),
+		view.externalRuns.length > 4 ? `${view.externalRuns.length} total; inspect job externalRuns for the rest.` : "",
 	);
 
 	const frontier = ["=== CURRENT RESEARCH FRONTIER ==="];
 	if (state && !view.transitionSupersedesState) {
 		frontier.push(
-			`Current question: ${compact(state.researchQuestion, 900) || "not established"}`,
-			`Evidence-bounded position: ${compact(state.currentClaim, 900) || "no supported claim recorded"}`,
+			`Current question: ${compact(state.researchQuestion, lean ? 400 : 900) || "not established"}`,
+			`Evidence-bounded position: ${compact(state.currentClaim, lean ? 500 : 900) || "no supported claim recorded"}`,
 			"Competing hypotheses:",
-			...bullets(list(state.hypotheses, 4), (item) => `${item.id} [${item.status}] ${compact(item.statement, 460)}${item.evidenceRefs?.length ? ` | refs=${item.evidenceRefs.join(",")}` : ""}`, "none recorded"),
+			...bullets(list(state.hypotheses, 4), (item) => `${item.id} [${item.status}] ${compact(item.statement, lean ? 240 : 460)}${item.evidenceRefs?.length ? ` | refs=${item.evidenceRefs.join(",")}` : ""}`, "none recorded"),
 			"Open questions and confounders:",
-			...bullets([...list(state.unresolvedConfounders, 2), ...list(state.openQuestions, 3)], (item) => compact(item, 460), "none recorded"),
+			...bullets([...list(state.unresolvedConfounders, 2), ...list(state.openQuestions, 3)], (item) => compact(item, lean ? 240 : 460), "none recorded"),
 			`Candidate next experiment: ${compact(state.nextExperiment?.question, 560) || "not determined"}`,
 			state.nextExperiment?.intervention ? `  intervention: ${compact(state.nextExperiment.intervention, 680)}` : undefined,
 		);
@@ -501,6 +511,7 @@ export function renderProjectViewDelta(view, options = {}) {
 		frontier.push("No structured current frontier is available yet.");
 	}
 	const footer = [
+		lean ? "This is a compact index, not complete evidence. Retrieve exact records and validity judgments before consequential decisions; /runtime view shows more detail." : undefined,
 		includeDirectedMessages
 			? "Runtime mailbox bodies use the separate single-delivery channel; inspect /inbox only when routing needs attention."
 			: "Directed Runtime message contents belong only to the addressed Leader Session.",

@@ -1,22 +1,36 @@
-let codexAdapter;
-let codexWatchAdapter;
+const subagentAdapters = new Map();
+const subagentWatchAdapters = new Map();
 let runtimeUiAdapter;
 let hostCapabilityUiAdapter;
 
-export function registerCodexRuntimeAdapter(adapter) {
-	codexAdapter = adapter;
+function normalizeBackend(backend) {
+	const value = String(backend ?? "").trim().toLowerCase();
+	if (!value) throw new Error("A subagent backend name is required");
+	return value;
 }
 
-export function getCodexRuntimeAdapter() {
-	return codexAdapter;
+export function registerSubagentRuntimeAdapter(backend, adapter) {
+	subagentAdapters.set(normalizeBackend(backend), adapter);
 }
 
-export function registerCodexWatchAdapter(adapter) {
-	codexWatchAdapter = adapter;
+export function getSubagentRuntimeAdapter(backend) {
+	return subagentAdapters.get(normalizeBackend(backend));
 }
 
-export function getCodexWatchAdapter() {
-	return codexWatchAdapter;
+export function listSubagentRuntimeAdapters() {
+	return [...subagentAdapters.entries()].map(([backend, adapter]) => ({ backend, adapter }));
+}
+
+export function registerSubagentWatchAdapter(backend, adapter) {
+	subagentWatchAdapters.set(normalizeBackend(backend), adapter);
+}
+
+export function getSubagentWatchAdapter(backend) {
+	return subagentWatchAdapters.get(normalizeBackend(backend));
+}
+
+export function listSubagentWatchAdapters() {
+	return [...subagentWatchAdapters.entries()].map(([backend, adapter]) => ({ backend, adapter }));
 }
 
 export function registerRuntimeUiAdapter(adapter) {

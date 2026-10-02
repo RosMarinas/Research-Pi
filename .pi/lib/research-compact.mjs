@@ -128,17 +128,8 @@ function configuredPositiveInteger(name, fallback) {
 	return Number.isInteger(value) && value > 0 ? value : fallback;
 }
 
-function configuredTailSchedule() {
-	const values = String(process.env.RESEARCH_PI_COMPACT_RECENT_TAIL_TOKENS ?? "")
-		.split(",")
-		.map((value) => Number(value.trim()))
-		.filter((value) => Number.isInteger(value) && value > 0);
-	return values.length ? values : [24 * 1024, 32 * 1024, 40 * 1024];
-}
-
-export const RESEARCH_SOFT_COMPACT_TOKENS = configuredPositiveInteger("RESEARCH_PI_COMPACT_SOFT_TOKENS", 272 * 1024);
+export const RESEARCH_SOFT_COMPACT_TOKENS = configuredPositiveInteger("RESEARCH_PI_COMPACT_SOFT_TOKENS", 360 * 1024);
 export const RESEARCH_HARD_COMPACT_TOKENS = configuredPositiveInteger("RESEARCH_PI_COMPACT_HARD_TOKENS", 384 * 1024);
-export const RESEARCH_RECENT_TAIL_SCHEDULE = Object.freeze(configuredTailSchedule());
 export const RESEARCH_SUMMARY_TARGET_TOKENS = configuredPositiveInteger("RESEARCH_PI_COMPACT_SUMMARY_TARGET_TOKENS", 8 * 1024);
 export const RESEARCH_SUMMARY_MAX_TOKENS = configuredPositiveInteger("RESEARCH_PI_COMPACT_SUMMARY_MAX_TOKENS", 16 * 1024);
 
@@ -175,7 +166,7 @@ const RESEARCH_STATE_KEYS = new Set([
 ]);
 const AMENDABLE_RESEARCH_STATE_KEYS = new Set([...RESEARCH_STATE_KEYS].filter((key) => key !== "projectBrief"));
 
-export function selectResearchCompactionPolicy(branchEntries) {
+export function selectResearchCompactionPolicy(branchEntries, keepRecentTokens) {
 	const previousResearchCompactions = branchEntries.filter(
 		(entry) =>
 			entry?.type === "compaction" &&
@@ -183,13 +174,12 @@ export function selectResearchCompactionPolicy(branchEntries) {
 			entry.details?.version === RESEARCH_COMPACTION_VERSION,
 	).length;
 	const ordinal = previousResearchCompactions + 1;
-	const scheduleIndex = Math.min(ordinal - 1, RESEARCH_RECENT_TAIL_SCHEDULE.length - 1);
 	return {
 		version: RESEARCH_COMPACTION_POLICY_VERSION,
 		ordinal,
 		softTriggerTokens: RESEARCH_SOFT_COMPACT_TOKENS,
 		hardTriggerTokens: RESEARCH_HARD_COMPACT_TOKENS,
-		keepRecentTokens: RESEARCH_RECENT_TAIL_SCHEDULE[scheduleIndex],
+		keepRecentTokens,
 	};
 }
 
@@ -333,10 +323,19 @@ export function collectResearchEvidence(branchEntries, sessionId, firstKeptEntry
 
 	const cutIndex = branchEntries.findIndex((entry) => entry.id === firstKeptEntryId);
 	const discardedEntries = cutIndex >= 0 ? branchEntries.slice(0, cutIndex) : branchEntries;
-	const catalogCandidates = discardedEntries
+	const discardedIds = new Set(discardedEntries.map((entry) => entry.id));
+	// Records above remain authoritative raw artifacts. Conversational snippets
+	// must use the same edited projection as the summary input.
+	const catalogEntries = options.projectedEntries
+		? options.projectedEntries.flatMap(({ sourceEntry, messages }) => sourceEntry.type === "message" && discardedIds.has(sourceEntry.id)
+			? messages.map((message) => ({ ...sourceEntry, message })) : [])
+		: discardedEntries;
+	const contextEdits = new Map(branchEntries.filter((entry) => entry.type === "context_edit").map((entry) => [entry.targetId, entry.id]));
+	const catalogCandidates = catalogEntries
 		.filter((entry) => entry.type === "message" && ["user", "assistant"].includes(entry.message?.role))
 		.map((entry) => ({
 			ref: refFor(sessionId, entry.id),
+			...(contextEdits.has(entry.id) ? { contextEditRef: refFor(sessionId, contextEdits.get(entry.id)) } : {}),
 			role: entry.message.role,
 			timestamp: entry.timestamp,
 			text: text(messageText(entry), 600),

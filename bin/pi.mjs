@@ -21,6 +21,7 @@ import {
 	readCodexAnalysisContext,
 } from "../.pi/lib/research-analysis-bridge.mjs";
 import { resolveResearchPiPaths } from "../.pi/lib/runtime-paths.mjs";
+import { researchPiExtensions } from "../.pi/lib/research-extensions.mjs";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const paths = resolveResearchPiPaths({ harnessRoot: packageRoot });
@@ -98,6 +99,9 @@ function setup() {
 	}
 	process.stdout.write(`State directory: ${paths.stateRoot}\n`);
 	process.stdout.write(`Config file: ${paths.configPath}\n`);
+	process.stdout.write("GPT subscription: start pi, then /login openai (Sign in with ChatGPT), or /login openai-codex for the existing Codex provider; select the model with /model.\n");
+	process.stdout.write("Codex subagents use the Codex CLI's separate login: codex login. No provider API key is required for either subscription path.\n");
+	process.stdout.write("Antigravity subagents use the local agy session; launch agy interactively once for first-time sign-in. Pi subagents reuse Pi's native provider authentication.\n");
 }
 
 function loadConfigurationEnvironment() {
@@ -215,16 +219,18 @@ async function spawnCore(argv) {
 	writeResearchPiAgentConfig(paths.agentDir, config, { coreVersion, environment: process.env });
 	const informational = userArgs.some((arg) => ["--version", "--help", "-h"].includes(arg));
 	const deepSeekSearchEnabled = informational ? false : researchPiDeepSeekSearchEnabled(config, process.env);
+	const coreCli = join(packageRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
+	if (!existsSync(coreCli)) throw new Error(`Pinned Pi core is missing: ${coreCli}`);
 
 	process.env.PI_CODING_AGENT_DIR = paths.agentDir;
 	process.env.RESEARCH_PI_CONFIG_DIR = paths.configRoot;
 	process.env.RESEARCH_PI_STATE_DIR = paths.stateRoot;
+	process.env.RESEARCH_PI_HARNESS_ROOT = packageRoot;
+	process.env.RESEARCH_PI_CORE_CLI = coreCli;
 	if (sessionMode === "analysis") process.env.RESEARCH_PI_INITIAL_SESSION_MODE = "analysis";
 	if (fullAccess) process.env.RESEARCH_PI_FULL_ACCESS = "1";
 	if (process.env.RESEARCH_PI_TRACE === "1") process.env.PI_TRACE_DIR = paths.traceDir;
 
-	const coreCli = join(packageRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
-	if (!existsSync(coreCli)) throw new Error(`Pinned Pi core is missing: ${coreCli}`);
 	const args = ["--no-skills", "--no-extensions", "--no-themes"];
 	const skillPaths = [
 		join(packageRoot, ".pi", "skills", "research-briefing"),
@@ -238,29 +244,11 @@ async function spawnCore(argv) {
 		"--session-dir", paths.sessionDir,
 		"--append-system-prompt", join(packageRoot, ".pi", "APPEND_SYSTEM.md"),
 	);
-	const extensions = [
-		"project-boundary.ts",
-		"tool-activity.ts",
-		"research-config.ts",
-		"research-mode.ts",
-		"record-experiment.ts",
-		"research-transition.ts",
-		"amend-project-state.ts",
-		"research-checkpoint.ts",
-		"research-memory.ts",
-		"research-compaction.ts",
-		"research-runtime.ts",
-		"research-side.ts",
-		"deepseek-v4-pro-anchor.ts",
-		"codex-watch.ts",
-		"codex-delegate.ts",
-		"cache-audit.ts",
-	];
-	if (deepSeekSearchEnabled) extensions.splice(extensions.indexOf("deepseek-v4-pro-anchor.ts"), 0, "deepseek-web-search.ts");
-	for (const name of extensions) args.push("--extension", join(packageRoot, ".pi", "extensions", name));
-	if (process.env.RESEARCH_PI_TRACE === "1") {
-		args.push("--extension", join(packageRoot, ".pi", "vendor", "pi-trace-extension-0.1.14", "trace", "index.ts"));
-	}
+	for (const extension of researchPiExtensions(packageRoot, {
+		search: deepSeekSearchEnabled,
+		anchor: process.env.RESEARCH_PI_DEEPSEEK_ANCHOR === "1" || userArgs.some((arg) => arg === "--v4-pro-anchor" || arg.startsWith("--v4-pro-anchor=")),
+		trace: process.env.RESEARCH_PI_TRACE === "1",
+	})) args.push("--extension", extension);
 	args.push(...userArgs);
 
 	await new Promise((resolveRun, rejectRun) => {

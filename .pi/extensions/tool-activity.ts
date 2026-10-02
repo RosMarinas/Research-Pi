@@ -51,7 +51,7 @@ export function summarizeToolCall(toolName: string, rawArgs: unknown): string {
 			return bounded(args.label);
 		case "record_experiment":
 			return bounded(args.runId ?? args.validityJudgment ?? "research memo");
-		case "codex_delegate":
+		case "subagent":
 			return bounded([args.action, args.mode, args.jobId ? String(args.jobId).slice(-8) : ""].filter(Boolean).join(" · "));
 		default:
 			return "";

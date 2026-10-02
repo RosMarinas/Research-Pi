@@ -9,7 +9,7 @@ test("raw usage preserves missing vs explicit-zero cache fields and strips arbit
 	assert.equal(numericCacheUsage(undefined), undefined);
 });
 
-test("observer sees the pinned Pi adapter's real fetch path and detects unsupported flat cached_tokens", async () => {
+test("Pi 1.0 adapter and wire audit agree on flat cached_tokens", async () => {
 	const original = globalThis.fetch;
 	const reports = [];
 	globalThis.fetch = async () => new Response('data: {"choices":[{"index":0,"delta":{"content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":1,"cached_tokens":90}}\n\ndata: [DONE]\n\n', { headers: { "content-type": "text/event-stream" } });
@@ -22,7 +22,7 @@ test("observer sees the pinned Pi adapter's real fetch path and detects unsuppor
 		assert.equal(result.stopReason, "stop");
 		assert.equal(reports[0].requestObserved, true);
 		assert.equal(reports[0].usageUpdates[0].usage.cached_tokens, 90);
-		assert.equal(result.usage.cacheRead, 0, "known pinned-adapter blind spot, not yet attributed to the real Session");
+		assert.equal(result.usage.cacheRead, 90, "Pi 1.0 natively handles the previously unsupported flat field");
 	} finally { observer.restore(); globalThis.fetch = original; }
 });
 

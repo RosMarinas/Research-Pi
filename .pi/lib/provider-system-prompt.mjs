@@ -1,4 +1,4 @@
-// Pi Core 0.84.2 serializes its system prompt differently across adapters.
+// Map instruction text in Pi transcripts and provider-specific payloads.
 // Touch only instruction fields, never user/assistant/tool history. Keep block
 // boundaries and cache metadata intact. lastTextOnly is for appending a suffix.
 export function mapProviderSystemPrompt(payload, transform, { lastTextOnly = false } = {}) {

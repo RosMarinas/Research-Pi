@@ -1,8 +1,8 @@
-# Research Runtime：Codex 职责、状态与真实项目测试指南
+# Research Runtime：subagent 状态与恢复测试指南
 
-状态：Milestone 2 已实测；下一阶段的多 Session 所有权、路线 provenance 与 ledger 恢复已实现，等待真实项目验证
-更新：2026-08-20
-适用版本：包含 `research-runtime.ts` 的 Research Pi 开发版
+更新：2026-10-02，适用于 Pi Core 1.0.0 与统一 subagent 层。
+
+所有 backend 共用 `subagent`、`/actors`、`/subagents`、`/watch` 和 Runtime 消息入口，界面展示 backend、role、model、thinking。下面的持久任务、跨 Session 恢复、写入范围与副作用协议主要描述 Codex backend；Pi／Antigravity runner 目前只在所属 Pi 进程内保持 live Session，退出后不自动恢复。离线测试验证协议与状态机，文末的真实项目测试需要另行执行，不能从离线通过推断已经实测。
 
 ## 1. 先把几个对象分开
 
@@ -11,8 +11,8 @@ Codex 不属于某个 Pi 对话。它在 Project 中承担一个有界、可续�
 | 对象 | 含义 | 生命周期 |
 |---|---|---|
 | Project | 长期科研边界与 Runtime 状态所有者 | 跨 Session、跨模型长期存在 |
-| Leader Actor | 项目中稳定的研究领导身份，当前由 Pi/DeepSeek 承载 | 身份稳定，可更换 Leader Session |
-| Leader Session | 当前拥有执行、Project State 写入、Codex 调度和 Leader mailbox 的 Pi Session | 同一 Project 同时只有一个 |
+| Leader Actor | 项目中稳定的研究领导身份，由 Pi 当前选择的模型承载 | 身份稳定，可更换 Leader Session |
+| Leader Session | 当前拥有执行、Project State 写入、subagent 调度和 Leader mailbox 的 Pi Session | 同一 Project 同时只有一个 |
 | Analysis Session | 继承 ProjectView 的只读讨论入口；可查本地/远端证据，但不执行 | 可与 Leader Session 并存 |
 | Codex Actor | 一个稳定的 Codex 子职责，当前由 `mission + mode` 定义 | 跨 Pi Session 存在，可反复激活 |
 | Action/job | Codex Actor 接受的一次具体委派或续接 | 有明确开始与终态 |
@@ -94,7 +94,7 @@ queued -> delivered -> consumed
 
 - `queued`：已耐久写入 Project mailbox，Provider 尚未接受；
 - `delivered`：已交给目标 Adapter 或 attached Leader Session；
-- `consumed`：已进入一次 Leader 模型运行并完全 settled；之后从模型上下文过滤；
+- `consumed`：已进入一次 Leader 模型运行并完全 settled；不再重复投递，但保留在既有对话历史中；
 - `superseded`：请求已被更新请求替代，或所属 Codex job 已进入终态；终态 ASK 会在投递前自动结算，避免跨 Session 反复出现。
 
 投递采用 at-least-once 的恢复思路：如果进程在模型看到消息后、`agent_settled` 前崩溃，消息可能在恢复时再出现一次；不会为了追求 exactly-once 而增加高频事务写入。
@@ -103,7 +103,7 @@ queued -> delivered -> consumed
 
 ### 3.4 副作用恢复边界
 
-executor 的 job 先记录 `intent_recorded`，在 App Server `turn/start` 前把 `started` 耐久落盘。若 worker 在 started 后消失或被强杀，恢复只能知道“副作用可能发生”，因此标为 `outcome_unknown`。Runtime 会阻止同一精确 workspace 的新 executor，避免重复提交、重复远程运行或在未知状态上继续写；advisor 不写项目，仍可用于检查。只有在检查 Git、文件、远程 run/job 等实际状态后，才可用 `codex_delegate action=reconcile` 提交 terminal outcome 与证据 note。Harness 不自动猜测。
+executor 的 job 先记录 `intent_recorded`，在 App Server `turn/start` 前把 `started` 耐久落盘。若 worker 在 started 后消失或被强杀，恢复只能知道“副作用可能发生”，因此标为 `outcome_unknown`。Runtime 会阻止同一精确 workspace 的新 executor，避免重复提交、重复远程运行或在未知状态上继续写；advisor 不写项目，仍可用于检查。只有在检查 Git、文件、远程 run/job 等实际状态后，才可用 `subagent action=reconcile` 提交 terminal outcome 与证据 note。Harness 不自动猜测。
 
 ## 4. 通信如何发生
 
@@ -133,7 +133,7 @@ sequenceDiagram
 2. job 进入 `input_required`；
 3. Runtime 创建 `ask` message，目标是 `research-leader`；
 4. 当前 attached Pi Session 收到一次消息；
-5. Leader 可用原 `codex_delegate respond`，用户可用 `/message reply @codex:<Actor短码> ...`；
+5. Leader 可用原 `subagent respond`，用户可用 `/message reply @codex:<Actor短码> ...`；
 6. Adapter 把 reply 映射到原 request ID；同一 Codex turn 继续执行。
 
 回复不是启动另一只 Codex，也不需要把完整问题复制进新 Session。
@@ -211,7 +211,7 @@ exact workspaceKey/root               文件与副作用边界，不可跨 workt
 /message notify @codex:<Actor短码> <新信息>
 /steer @codex:<Actor短码> <纠偏>
 /steer --preempt @codex:<Actor短码> <紧急纠偏>
-/codex missions
+/subagents missions
 /watch [job后缀|mission|@codex:<Actor短码>]
 /runtime
 /runtime health
@@ -324,7 +324,7 @@ node --test tests/codex-jobs.test.mjs
 
 ```text
 /actors
-/codex missions
+/subagents missions
 ```
 
 预期出现稳定的 `@codex:<Actor短码>`，状态为 active 或 waiting。该短码由 Actor ID 派生，后续新建 Action/job 时不变化；底部 Codex 状态栏显示的仍是当前 job 后八位，不要混淆两者。

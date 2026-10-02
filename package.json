@@ -26,6 +26,7 @@
     "docs/pi-basic-guide.md",
     "docs/configuration.md",
     "docs/cache-diagnostics.md",
+    "docs/pi-1-migration.md",
     "docs/research-runtime-test-guide.md",
     "docs/security-model.md",
     ".env.example",
@@ -38,7 +39,7 @@
   "scripts": {
     "pi": "./run-pi.sh",
     "pi:trace": "./run-pi-traced.sh",
-    "check": "sh -n run-pi.sh run-pi-traced.sh install-user.sh && node --check bin/pi.mjs && node --check bin/pi-traced.mjs && node --check bin/pi-raw.mjs && node --check .pi/extensions/project-boundary.ts && node --check .pi/extensions/tool-activity.ts && node --check .pi/extensions/research-config.ts && node --check .pi/extensions/research-mode.ts && node --check .pi/extensions/record-experiment.ts && node --check .pi/extensions/research-transition.ts && node --check .pi/extensions/amend-project-state.ts && node --check .pi/extensions/research-compaction.ts && node --check .pi/extensions/research-runtime.ts && node --check .pi/extensions/research-side.ts && node --check .pi/extensions/deepseek-web-search.ts && node --check .pi/extensions/deepseek-v4-pro-anchor.ts && node --check .pi/extensions/codex-watch.ts && node --check .pi/extensions/codex-delegate.ts && node --check .pi/lib/project-boundary.mjs && node --check .pi/lib/security-policy.mjs && node --check .pi/lib/runtime-paths.mjs && node --check .pi/lib/research-config.mjs && node --check .pi/lib/research-analysis-bridge.mjs && node --check .pi/lib/boundary-doctor.mjs && node --check .pi/lib/host-capabilities.mjs && node --check .pi/lib/research-runtime.mjs && node --check .pi/lib/research-runtime-adapters.mjs && node --check .pi/lib/owner-file-lock.mjs && node --check .pi/lib/runtime-mailbox-watch.mjs && node --check .pi/lib/project-view.mjs && node --check .pi/lib/runtime-board.mjs && node --check .pi/lib/runtime-board-ui.mjs && node --check .pi/lib/runtime-dock-ui.mjs && node --check .pi/lib/research-side.mjs && node --check .pi/lib/deepseek-web-search.mjs && node --check .pi/lib/research-memory.mjs && node --check .pi/lib/research-compact.mjs && node --check .pi/lib/codex-activity.mjs && node --check .pi/lib/codex-sqlite-logs.mjs && node --check .pi/lib/codex-jobs.mjs && node --check .pi/lib/codex-job-worker.mjs",
+    "check": "sh -n run-pi.sh run-pi-traced.sh install-user.sh && node --check bin/pi.mjs && node --check bin/pi-traced.mjs && node --check bin/pi-raw.mjs && node --check .pi/extensions/project-boundary.ts && node --check .pi/extensions/tool-activity.ts && node --check .pi/extensions/research-config.ts && node --check .pi/extensions/research-mode.ts && node --check .pi/extensions/record-experiment.ts && node --check .pi/extensions/research-transition.ts && node --check .pi/extensions/amend-project-state.ts && node --check .pi/extensions/research-compaction.ts && node --check .pi/extensions/research-runtime.ts && node --check .pi/extensions/research-side.ts && node --check .pi/extensions/subagent-runners.ts && node --check .pi/extensions/deepseek-web-search.ts && node --check .pi/extensions/deepseek-v4-pro-anchor.ts && node --check .pi/extensions/codex-watch.ts && node --check .pi/extensions/codex-delegate.ts && node --check .pi/lib/project-boundary.mjs && node --check .pi/lib/security-policy.mjs && node --check .pi/lib/runtime-paths.mjs && node --check .pi/lib/research-config.mjs && node --check .pi/lib/research-analysis-bridge.mjs && node --check .pi/lib/boundary-doctor.mjs && node --check .pi/lib/host-capabilities.mjs && node --check .pi/lib/research-runtime.mjs && node --check .pi/lib/research-runtime-adapters.mjs && node --check .pi/lib/subagent-sessions.mjs && node --check .pi/lib/owner-file-lock.mjs && node --check .pi/lib/runtime-mailbox-watch.mjs && node --check .pi/lib/project-view.mjs && node --check .pi/lib/runtime-board.mjs && node --check .pi/lib/runtime-board-ui.mjs && node --check .pi/lib/runtime-dock-ui.mjs && node --check .pi/lib/research-side.mjs && node --check .pi/lib/deepseek-web-search.mjs && node --check .pi/lib/research-memory.mjs && node --check .pi/lib/research-compact.mjs && node --check .pi/lib/codex-activity.mjs && node --check .pi/lib/codex-sqlite-logs.mjs && node --check .pi/lib/codex-jobs.mjs && node --check .pi/lib/codex-job-worker.mjs",
     "test": "node --test tests/*.test.mjs",
     "test:package": "node scripts/verify-package.mjs",
     "prepack": "npm run check && npm test && npm run test:package"
@@ -49,8 +50,9 @@
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "0.0.71",
     "@anthropic-ai/sdk": "0.91.1",
-    "@earendil-works/pi-coding-agent": "0.84.2",
-    "@earendil-works/pi-tui": "0.84.2",
+    "@earendil-works/pi-ai": "1.0.0",
+    "@earendil-works/pi-coding-agent": "1.0.0",
+    "@earendil-works/pi-tui": "1.0.0",
     "typebox": "1.3.7"
   }
 }

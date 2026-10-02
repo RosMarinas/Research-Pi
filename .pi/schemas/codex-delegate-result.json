@@ -29,12 +29,13 @@
     },
     "completion_basis": {
       "type": "string",
-      "maxLength": 4000,
+      "maxLength": 600,
       "description": "Why this is a legitimate final handoff rather than an intermediate progress update."
     },
     "summary": {
       "type": "string",
-      "maxLength": 12000
+      "maxLength": 1600,
+      "description": "A short result and its limits, not a report. Reference existing evidence; do not repeat task background."
     },
     "evidence": {
       "type": "array",
@@ -43,8 +44,8 @@
     },
     "actions_taken": {
       "type": "array",
-      "maxItems": 64,
-      "items": { "type": "string", "maxLength": 2000 }
+      "maxItems": 12,
+      "items": { "type": "string", "maxLength": 600 }
     },
     "changed_files": {
       "type": "array",
@@ -92,7 +93,7 @@
     },
     "recommended_next_step": {
       "type": "string",
-      "maxLength": 8000,
+      "maxLength": 600,
       "description": "The next decision or task after this delegation ends; do not use it for work that should still be completed in the current turn."
     }
   }

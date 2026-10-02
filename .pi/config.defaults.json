@@ -1,10 +1,12 @@
 {
   "$schema": "./schemas/research-pi-config.schema.json",
-  "version": 2,
+  "version": 3,
   "pi": {
+    "modelServiceTiers": {},
     "settings": {
       "theme": "research-pi",
       "tuiMode": "regular",
+      "defaultTools": ["+codemode"],
       "retry": {
         "enabled": true,
         "maxRetries": 2,
@@ -20,14 +22,35 @@
       }
     }
   },
-  "codex": {
+  "subagents": {
     "advisor": {
+      "backend": "codex",
       "model": "gpt-5.6-sol",
-      "reasoningEffort": "max"
+      "thinking": "max",
+      "speed": "inherit"
     },
     "executor": {
+      "backend": "codex",
       "model": "gpt-5.6-sol",
-      "reasoningEffort": "max"
+      "thinking": "max",
+      "speed": "inherit"
+    },
+    "environment": {
+      "backend": "antigravity",
+      "model": "gemini-3.1-pro-high",
+      "thinking": "high"
+    },
+    "general": {
+      "backend": "pi",
+      "model": "inherit",
+      "thinking": "inherit"
+    }
+  },
+  "codex": {
+    "maxExecutors": 4,
+    "internalSubagent": {
+      "model": "inherit",
+      "thinking": "inherit"
     },
     "retention": {
       "terminalDays": 30,
@@ -36,14 +59,13 @@
   },
   "research": {
     "compaction": {
-      "softTokens": 278528,
+      "softTokens": 368640,
       "hardTokens": 393216,
-      "recentTailTokens": [24576, 32768, 40960],
       "summaryTargetTokens": 8192,
       "summaryMaxTokens": 16384
     },
     "search": {
-      "enabled": "auto",
+      "enabled": "off",
       "model": "deepseek-v4-flash",
       "thinkingBudgetTokens": 1024,
       "maxSources": 12,

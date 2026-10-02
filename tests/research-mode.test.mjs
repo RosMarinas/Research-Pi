@@ -1,17 +1,19 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import researchMode, { applyResearchIdentity } from "../.pi/extensions/research-mode.ts";
 import { mapProviderSystemPrompt } from "../.pi/lib/provider-system-prompt.mjs";
-import { Agent } from "../node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-agent-core/dist/agent.js";
-import { AgentSession } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js";
-import { createFauxCore, fauxAssistantMessage, fauxToolCall } from "../node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/providers/faux.js";
+import { fauxProvider, fauxAssistantMessage, fauxToolCall } from "../node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/providers/faux.js";
+import { getCurrentSystemPrompt } from "../node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.js";
 import { buildSystemPrompt } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/system-prompt.js";
 
-test("research identity stays byte-stable through a mailbox wake and its tool continuation", async () => {
-	const handlers = new Map();
-	researchMode({ on: (event, handler) => handlers.set(event, handler) });
-	const base = buildSystemPrompt({ cwd: "/synthetic-project", selectedTools: ["probe"], toolSnippets: { probe: "Return synthetic data" }, appendSystemPrompt: "Keep this guardrail unchanged." });
-	const faux = createFauxCore({});
+test("Pi 1.0 research identity stays stable through a real Session mailbox wake and tool continuation", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-identity-"));
+	const agentDir = join(root, "agent");
+	const faux = fauxProvider();
 	faux.setResponses([
 		fauxAssistantMessage("user turn done"),
 		fauxAssistantMessage(fauxToolCall("probe", {}, { id: "probe-1" }), { stopReason: "toolUse" }),
@@ -19,43 +21,61 @@ test("research identity stays byte-stable through a mailbox wake and its tool co
 		fauxAssistantMessage("next user turn done"),
 	]);
 	const sent = [];
-	const agent = new Agent({
-		initialState: { model: faux.getModel(), systemPrompt: base, tools: [{ name: "probe", label: "Probe", description: "Synthetic only", parameters: { type: "object", properties: {} }, execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }) }] },
-		streamFn: async (model, context, options) => {
-			const payload = { messages: [{ role: "system", content: context.systemPrompt }] };
-			const result = await handlers.get("before_provider_request")?.({ payload });
-			sent.push((result ?? payload).messages[0].content);
-			return faux.streamSimple(model, context, options);
-		},
+	const errors = [];
+	const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
+	const loader = new DefaultResourceLoader({
+		cwd: root, agentDir, settingsManager,
+		noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+		appendSystemPrompt: ["Keep this guardrail unchanged."],
+		extensionFactories: [researchMode, (pi) => pi.registerProvider(faux.provider)],
 	});
-	// Use Core's real run/finally and next-turn refresh paths, without creating
-	// a filesystem-backed Session, loading user resources, or making API calls.
-	const session = Object.create(AgentSession.prototype);
-	Object.assign(session, {
-		agent, _baseSystemPrompt: base,
-		_handlePostAgentRun: async () => false,
-		_flushPendingBashMessages() {}, async _emitAgentSettled() { this._isAgentRunActive = false; },
-	});
-	session._installAgentNextTurnRefresh();
-	const userTurn = async (text) => {
-		const result = handlers.get("before_agent_start")({ systemPrompt: base });
-		session._systemPromptOverride = result?.systemPrompt;
-		agent.state.systemPrompt = result?.systemPrompt ?? base;
-		await session._runAgentPrompt({ role: "user", content: text, timestamp: 0 });
-	};
-	await userTurn("start");
-	assert.equal(session._systemPromptOverride, undefined, "Core clears the override when a user run settles");
-	await session.sendCustomMessage({ customType: "research-runtime-message", content: "synthetic result", display: false }, { triggerTurn: true });
-	await userTurn("continue");
-	assert.equal(sent.length, 4, JSON.stringify(agent.state.messages.map((m) => ({ role: m.role, stop: m.stopReason, error: m.errorMessage }))));
-	assert.match(sent[0], /^You are a computational research agent/);
-	assert.ok(sent.every((prompt) => prompt === sent[0]), "mailbox tool continuation must not revert to the native coding identity");
-	assert.match(sent[2], /Keep this guardrail unchanged/);
+	let session;
+	try {
+		await loader.reload();
+		assert.deepEqual(loader.getExtensions().errors, []);
+		({ session } = await createAgentSession({
+			cwd: root, agentDir, model: faux.getModel(), resourceLoader: loader, settingsManager,
+			sessionManager: SessionManager.inMemory(root), tools: ["probe"],
+			customTools: [{ name: "probe", label: "Probe", description: "Synthetic only", parameters: { type: "object", properties: {} }, execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }) }],
+		}));
+		await session.bindExtensions({ onError: (error) => errors.push(error) });
+		const stream = session.agent.streamFunction;
+		session.agent.streamFunction = (model, context, options) => {
+			sent.push(getCurrentSystemPrompt(context.messages));
+			return stream(model, context, options);
+		};
+		await session.prompt("start");
+		await session.sendCustomMessage({ customType: "research-runtime-message", content: "synthetic result", display: false }, { triggerTurn: true });
+		await session.agent.waitForIdle();
+		await session.prompt("continue");
+		assert.deepEqual(errors, []);
+		assert.equal(sent.length, 4);
+		assert.match(sent[0], /^You are a computational research agent/);
+		assert.ok(sent.every((prompt) => prompt === sent[0]), "mailbox tool continuation must not revert to the native coding identity");
+		assert.match(sent[2], /Keep this guardrail unchanged/);
+	} finally {
+		session?.dispose();
+		rmSync(root, { recursive: true, force: true });
+	}
 });
 
 const native = buildSystemPrompt({ cwd: "/synthetic-project", selectedTools: [], appendSystemPrompt: "Keep current guardrails." });
 const research = applyResearchIdentity(native);
 const cacheControl = { type: "ephemeral" };
+test("research identity preserves structured sections and full-access prompt overrides", () => {
+	const handlers = new Map();
+	researchMode({ on: (event, handler) => handlers.set(event, handler) });
+	const options = { forceSystemPrompt: native + "\nFull-access authority explanation" };
+	handlers.get("before_agent_start")({ systemPromptOptions: options });
+	assert.equal(options.forceSystemPrompt, research + "\nFull-access authority explanation");
+	const input = [{ role: "system", content: "", sections: { preamble: native, evidence: "Keep evidence", retired: null }, toolsAdded: [{ name: "probe" }], timestamp: 0 }];
+	const output = handlers.get("context_with_system")({ messages: input }).messages;
+	assert.equal(output[0].sections.preamble, research);
+	assert.equal(output[0].sections.evidence, "Keep evidence");
+	assert.equal(output[0].sections.retired, null);
+	assert.deepEqual(output[0].toolsAdded, input[0].toolsAdded);
+	assert.equal(input[0].sections.preamble, native);
+});
 for (const [name, makePayload] of Object.entries({
 	"Chat Completions": (text) => ({ messages: [{ role: "system", content: text }] }),
 	"developer message": (text) => ({ messages: [{ role: "developer", content: [{ type: "text", text }] }] }),

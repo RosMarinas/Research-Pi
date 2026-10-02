@@ -89,7 +89,11 @@ function jobActivityLabel(job) {
 function jobLine(job, th) {
 	const jobElapsed = elapsed(job.startedAt ?? job.createdAt);
 	const jobDetail = jobActivityLabel(job);
-	return `${th.fg(job.status === "input_required" ? "warning" : "accent", job.status === "input_required" ? "?" : "●")} ${job.mode ?? "codex"} ${shortId(job.id)} · ${jobStateLabel(job.status)}${jobElapsed ? ` ${jobElapsed}` : ""}${jobDetail ? ` · ${jobDetail}` : ""}`;
+	const backend = job.backend ?? "codex";
+	const role = job.role ?? job.mode ?? "general";
+	const model = job.model ?? "inherit";
+	const thinking = job.thinking ?? job.reasoningEffort ?? "inherit";
+	return `${th.fg(job.status === "input_required" ? "warning" : "accent", job.status === "input_required" ? "?" : "●")} ${backend}/${role} ${shortId(job.id)} · ${jobStateLabel(job.status)} · ${model}/${thinking}${jobElapsed ? ` · ${jobElapsed}` : ""}${jobDetail ? ` · ${jobDetail}` : ""}`;
 }
 
 function activityLines(jobs, th, limit = 4) {
@@ -168,7 +172,7 @@ export class RuntimeDockComponent {
 		const visibleJobs = jobs.slice(0, visibleJobLimit);
 		const jobLines = visibleJobs.map((job) => jobLine(job, th));
 		if (jobs.length > visibleJobs.length) {
-			jobLines.push(th.fg("dim", `… +${jobs.length - visibleJobs.length} more Codex actions · /watch`));
+			jobLines.push(th.fg("dim", `… +${jobs.length - visibleJobs.length} more subagent actions · /watch`));
 		}
 
 		if (usable < 64 || this.density === "compact") {

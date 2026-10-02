@@ -13,14 +13,20 @@ export function applyResearchIdentity(systemPrompt: string): string {
 }
 
 export default function (pi: ExtensionAPI) {
+	// An earlier extension (e.g. full-access boundary messaging) may force a
+	// complete prompt, which Core applies after context hooks. Normalize it too.
 	pi.on("before_agent_start", (event) => {
-		const systemPrompt = applyResearchIdentity(event.systemPrompt);
-		if (systemPrompt === event.systemPrompt) return undefined;
-		return { systemPrompt };
+		const forced = event.systemPromptOptions.forceSystemPrompt;
+		if (typeof forced === "string") event.systemPromptOptions.forceSystemPrompt = applyResearchIdentity(forced);
 	});
-	// Core clears the before_agent_start override when a run settles. A Runtime
-	// custom-message wake bypasses that hook, and its tool continuation refreshes
-	// from the native base prompt. Normalize the fixed identity at the wire edge
-	// too; do not replay a saved whole prompt over new instructions or tools.
-	pi.on("before_provider_request", (event) => mapProviderSystemPrompt(event.payload, applyResearchIdentity));
+	// Pi 1.0 exposes the full transcript before provider serialization. This
+	// also covers mailbox wakes and preserves mid-conversation prompt sections
+	// and tool changes, without patching each provider's HTTP payload.
+	pi.on("context_with_system", (event) => ({
+		messages: mapProviderSystemPrompt({ messages: event.messages }, applyResearchIdentity).messages.map((message: any) => {
+			if (message.role !== "system" || !message.sections) return message;
+			return { ...message, sections: Object.fromEntries(Object.entries(message.sections).map(([name, value]) =>
+				[name, typeof value === "string" ? applyResearchIdentity(value) : value])) };
+		}),
+	}));
 }

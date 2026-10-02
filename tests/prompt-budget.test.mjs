@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { buildDelegationPrompt } from "../.pi/lib/codex-jobs.mjs";
+import { buildDelegationPrompt, CODEX_OUTPUT_POLICY } from "../.pi/lib/codex-jobs.mjs";
 import {
 	buildResearchCompactionPrompt,
 	RESEARCH_COMPACTION_SYSTEM_PROMPT,
@@ -24,6 +24,8 @@ test("stable Research Pi prompt surfaces stay within explicit budgets", () => {
 		assert.ok(continuation.length <= 1_400, `${mode} continuation grew to ${continuation.length} chars`);
 		assert.ok(continuation.length < fresh.length / 2, `${mode} continuation no longer isolates the task delta`);
 		assert.ok(continuation.indexOf("<mission>") < continuation.indexOf("<task>"));
+		assert.ok(fresh.includes(CODEX_OUTPUT_POLICY));
+		assert.ok(continuation.includes(CODEX_OUTPUT_POLICY), "resumes inherit the same zero-new-documents default");
 	}
 
 	const dynamicCompaction = buildResearchCompactionPrompt({

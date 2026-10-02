@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { prepareCompaction } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/compaction/compaction.js";
 import researchCompactionExtension, { researchCompactionThresholds } from "../.pi/extensions/research-compaction.ts";
 import {
 	applyResearchStatePatch,
 	buildResearchCompactionDetails,
-	buildResearchCompactionPrompt,
-	RESEARCH_COMPACTION_SYSTEM_PROMPT,
 	collectResearchEvidence,
 	mergeProjectRuntimeEvidence,
 	normalizeResearchState,
@@ -15,11 +18,37 @@ import {
 	RESEARCH_HARD_COMPACT_TOKENS,
 	RESEARCH_SOFT_COMPACT_TOKENS,
 	RESEARCH_STATE_TOOL,
-	RESEARCH_SUMMARY_MAX_TOKENS,
-	RESEARCH_SUMMARY_TARGET_TOKENS,
 	renderResearchSummary,
-	selectResearchCompactionPolicy,
 } from "../.pi/lib/research-compact.mjs";
+
+test("research compaction follows Pi's retained boundary and edited context without resurrecting raw history", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-compact-projection-"));
+	try {
+		const session = SessionManager.inMemory(root);
+		const omitted = session.appendMessage({ role: "user", content: "OMITTED_RAW_HISTORY", timestamp: 0 });
+		const replaced = session.appendMessage({ role: "user", content: "REPLACED_RAW_HISTORY", timestamp: 1 });
+		session.appendContextEdit(omitted, null);
+		session.appendContextEdit(replaced, { content: "VISIBLE_REPLACEMENT" });
+		session.appendMessage({ role: "user", content: "Recent context. ".repeat(100), timestamp: 2 });
+		const branchEntries = session.getBranch();
+		const preparation = prepareCompaction(branchEntries, { enabled: true, reserveTokens: 100, keepRecentTokens: 32 });
+		assert.ok(preparation);
+		const handlers = new Map();
+		researchCompactionExtension({ on: (name, handler) => handlers.set(name, handler), registerCommand() {} });
+		let captured;
+		const notices = [];
+		await handlers.get("session_before_compact")({ branchEntries, preparation, reason: "manual", signal: new AbortController().signal }, {
+			cwd: root, hasUI: false, sessionManager: session,
+			model: { api: "openai-codex-responses", maxTokens: 16384 },
+			ui: { notify: (text) => notices.push(text) },
+			modelRegistry: { complete: async (_model, context) => { captured = JSON.stringify(context); throw new Error("Synthetic request captured; no model invoked"); } },
+		});
+		assert.equal(typeof captured, "string");
+		assert.match(captured, /VISIBLE_REPLACEMENT/);
+		assert.doesNotMatch(captured, /OMITTED_RAW_HISTORY|REPLACED_RAW_HISTORY/);
+		assert.ok(notices.some((text) => text.includes("keeping ~32 recent tokens")));
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test("explicit Project State patches preserve omitted fields and replace arrays deliberately", () => {
 	const current = {
@@ -231,8 +260,36 @@ test("short-context Leader models compact before their model window", () => {
 	});
 	const hy3 = researchCompactionThresholds({ contextWindow: 256_000 });
 	assert.equal(hy3.hardTokens, 256_000 - 32 * 1024);
-	assert.equal(hy3.softTokens, Math.floor(hy3.hardTokens * 0.75));
+	assert.equal(hy3.softTokens, Math.floor(hy3.hardTokens * RESEARCH_SOFT_COMPACT_TOKENS / RESEARCH_HARD_COMPACT_TOKENS));
 	assert.ok(hy3.softTokens < hy3.hardTokens);
+});
+
+test("large-context GPT uses 360k/384k without a hidden 75 percent soft cap", () => {
+	const handlers = new Map();
+	let tokens = 360 * 1024 - 1;
+	let compactOptions;
+	const notices = [];
+	researchCompactionExtension({ on(name, handler) { handlers.set(name, handler); }, registerCommand() {} });
+	const ctx = {
+		model: { contextWindow: 1_050_000 }, hasUI: true,
+		getContextUsage: () => ({ tokens }),
+		ui: { notify: (message, level) => notices.push({ message, level }) },
+		compact: (options) => { compactOptions = options; },
+	};
+	assert.deepEqual(researchCompactionThresholds(ctx.model), { softTokens: 368640, hardTokens: 393216 });
+	handlers.get("turn_end")({}, ctx);
+	handlers.get("agent_settled")({}, ctx);
+	assert.equal(compactOptions, undefined, "must not compact below 360k");
+	assert.equal(notices.length, 0);
+	tokens = 360 * 1024;
+	handlers.get("turn_end")({}, ctx);
+	assert.equal(notices[0].level, "info");
+	assert.equal(compactOptions, undefined, "do not interrupt the current run");
+	tokens = 384 * 1024;
+	handlers.get("turn_end")({}, ctx);
+	assert.equal(notices[1].level, "warning");
+	handlers.get("agent_settled")({}, ctx);
+	assert.match(compactOptions.customInstructions, /hard compaction at 393216/);
 });
 
 function experimentEntry(id, parentId, validityJudgment) {
@@ -508,33 +565,4 @@ test("repairs only conservative model JSON syntax failures", () => {
 		"removed 2 trailing comma(s)",
 	]);
 	assert.throws(() => parseResearchState('{"hypotheses":["H1"'), /unterminated JSON object/);
-});
-
-test("research compaction uses bounded staged recent tails", () => {
-	const compact = (id) => ({
-		type: "compaction",
-		id,
-		details: { kind: "research-pi-compaction", version: 1 },
-	});
-	assert.deepEqual(selectResearchCompactionPolicy([]), {
-		version: 1,
-		ordinal: 1,
-		softTriggerTokens: RESEARCH_SOFT_COMPACT_TOKENS,
-		hardTriggerTokens: RESEARCH_HARD_COMPACT_TOKENS,
-		keepRecentTokens: 24 * 1024,
-	});
-	assert.equal(selectResearchCompactionPolicy([compact("c1")]).keepRecentTokens, 32 * 1024);
-	assert.equal(selectResearchCompactionPolicy([compact("c1"), compact("c2")]).keepRecentTokens, 40 * 1024);
-	assert.equal(selectResearchCompactionPolicy([compact("c1"), compact("c2"), compact("c3")]).keepRecentTokens, 40 * 1024);
-	assert.equal(RESEARCH_SOFT_COMPACT_TOKENS, 272 * 1024);
-	assert.equal(RESEARCH_HARD_COMPACT_TOKENS, 384 * 1024);
-	assert.equal(RESEARCH_SUMMARY_TARGET_TOKENS, 8 * 1024);
-	assert.equal(RESEARCH_SUMMARY_MAX_TOKENS, 16 * 1024);
-	assert.match(RESEARCH_COMPACTION_SYSTEM_PROMPT, /Target at most 8,192 output tokens/);
-	assert.match(buildResearchCompactionPrompt({
-		conversationText: "recent work",
-		experiments: [],
-		checkpoints: [],
-		sourceCatalog: [],
-	}), /Conversation being compacted/);
 });

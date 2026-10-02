@@ -3,24 +3,12 @@ import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import codexWatchExtension from "../.pi/extensions/codex-watch.ts";
 import {
 	CodexActivityCursor,
 	compactCodexAuditEvent,
 	projectCodexActivityUpdate,
 	projectCodexAgents,
 } from "../.pi/lib/codex-activity.mjs";
-
-test("Codex Watch registers one on-demand TUI command", () => {
-	let registered;
-	codexWatchExtension({
-		registerCommand(name, definition) {
-			registered = { name, definition };
-		},
-	});
-	assert.equal(registered.name, "watch");
-	assert.match(registered.definition.description, /objective Codex execution/);
-});
 
 test("objective Codex activity keeps bounded command evidence and protects sensitive output", () => {
 	const command = compactCodexAuditEvent({

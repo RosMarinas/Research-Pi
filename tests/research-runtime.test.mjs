@@ -89,7 +89,7 @@ test("Codex Runtime result cards preserve Markdown structure when expanded", () 
 		"Uncertainties:",
 		"- limitation C",
 		"Recommended next step: run probe D",
-		"Use codex_delegate action=result with jobId=codex-demo if the full structured result is needed.",
+		"Use subagent action=result with jobId=codex-demo if the full structured result is needed.",
 	].join("\n");
 	assert.equal(codexRuntimeMessagePreview(content), "总判断暂不冻结。 1. 第一条论证。 2. 第二条论证。");
 	const markdown = codexRuntimeMessageMarkdown(content);
@@ -98,7 +98,7 @@ test("Codex Runtime result cards preserve Markdown structure when expanded", () 
 	assert.match(markdown, /^## Evidence/m);
 	assert.match(markdown, /^## Uncertainties/m);
 	assert.match(markdown, /^## Recommended next step/m);
-	assert.match(markdown, /^> Use codex_delegate/m);
+	assert.match(markdown, /^> Use subagent/m);
 });
 
 test("Runtime status reports live activation instead of historical Actor count", () => {
@@ -127,10 +127,30 @@ test("Runtime status reports live activation instead of historical Actor count",
 	assert.deepEqual(runtimeActorSummary(snapshot), { active: 1, waiting: 0, registered: 18 });
 	assert.equal(formatRuntimeStatus(snapshot.projectKey, snapshot), "Runtime 42beebda · 1 active");
 	assert.doesNotMatch(formatRuntimeStatus(snapshot.projectKey, snapshot), /18 actors/);
-	assert.match(actorLines(snapshot), /mission-0 · codex · active \(running\)/);
+	assert.match(actorLines(snapshot), /mission-0 · codex · general · inherit · thinking inherit · active \(running\)/);
 	assert.doesNotMatch(actorLines(snapshot), /mission-1/);
 	assert.match(actorLines(snapshot, false), /18 registered/);
-	assert.match(actorLines(snapshot, false), /mission-1 · codex · suspended \(completed\)/);
+	assert.match(actorLines(snapshot, false), /mission-1 · codex · general · inherit · thinking inherit · suspended \(completed\)/);
+});
+
+test("Runtime Actor UI exposes subagent backend, role, model, and thinking", () => {
+	const snapshot = {
+		projectKey: "project-runner-ui",
+		actors: [{
+			id: "antigravity:mission-sdk:environment",
+			kind: "subagent",
+			label: "antigravity · sdk-setup",
+			backend: "antigravity",
+			role: "environment",
+			model: "gemini-3.1-pro-high",
+			thinking: "high",
+			metadata: { backendSessionId: "conversation-1" },
+		}],
+		attachments: [],
+		messages: [],
+		actions: [{ id: "action-sdk", actorId: "antigravity:mission-sdk:environment", status: "running" }],
+	};
+	assert.match(actorLines(snapshot), /antigravity · environment · gemini-3\.1-pro-high · thinking high · active \(running\)/);
 });
 
 test("Analysis Session exposes read-only shell inspection but blocks work and Project mutation", () => {
@@ -138,23 +158,23 @@ test("Analysis Session exposes read-only shell inspection but blocks work and Pr
 	for (const tool of ["bash", "read", "grep", "find", "ls", "research_memory_search", "research_memory_read", "web_search", "host_capability", "analysis_send_to_leader"]) {
 		assert.equal(analysisSessionToolBlockReason("analysis", tool), null, tool);
 	}
-	assert.equal(analysisSessionToolBlockReason("analysis", "codex_delegate", { action: "result" }), null);
+	assert.equal(analysisSessionToolBlockReason("analysis", "subagent", { action: "result" }), null);
 	assert.match(analysisSessionToolBlockReason("analysis", "edit"), /cannot use edit/);
 	assert.match(analysisSessionToolBlockReason("analysis", "record_experiment"), /cannot use record_experiment/);
-	assert.match(analysisSessionToolBlockReason("analysis", "codex_delegate", { action: "start", mode: "advisor" }), /cannot use codex_delegate/);
+	assert.match(analysisSessionToolBlockReason("analysis", "subagent", { action: "start", mode: "advisor" }), /cannot use subagent/);
 	assert.equal(analysisSessionToolBlockReason("project", "bash"), null);
 });
 
 test("pure Codex reads do not dirty ProjectView while delegation changes still do", () => {
 	for (const action of ["status", "result", "missions"]) {
-		assert.equal(projectViewToolMutates("codex_delegate", { action }), false, action);
+		assert.equal(projectViewToolMutates("subagent", { action }), false, action);
 	}
 	for (const action of ["start", "resume", "respond", "steer", "cancel", "reconcile"]) {
-		assert.equal(projectViewToolMutates("codex_delegate", { action }), true, action);
+		assert.equal(projectViewToolMutates("subagent", { action }), true, action);
 	}
 	assert.equal(projectViewToolMutates("edit"), true);
 	assert.equal(projectViewToolMutates("read"), false);
-	assert.equal(projectViewToolMutates("codex_delegate", { action: "future-mutating-action" }), true);
+	assert.equal(projectViewToolMutates("subagent", { action: "future-mutating-action" }), true);
 });
 
 test("lifecycle health is observe-only and prioritizes ambiguous side effects", () => {

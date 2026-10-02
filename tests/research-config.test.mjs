@@ -20,14 +20,20 @@ import {
 
 test("Research Pi config owns research runtime settings, not the Leader model catalog", () => {
 	const config = defaultResearchPiConfig();
-	assert.equal(config.version, 2);
+	assert.equal(config.version, 3);
 	assert.equal(Object.hasOwn(config, "activeProfile"), false);
 	assert.equal(Object.hasOwn(config, "profiles"), false);
 	assert.equal(Object.hasOwn(config, "providerCompat"), false);
-	assert.equal(config.codex.executor.model, "gpt-5.6-sol");
+	assert.deepEqual(config.subagents.advisor, { backend: "codex", model: "gpt-5.6-sol", thinking: "max", speed: "inherit" });
+	assert.deepEqual(config.subagents.executor, { backend: "codex", model: "gpt-5.6-sol", thinking: "max", speed: "inherit" });
+	assert.deepEqual(config.subagents.environment, { backend: "antigravity", model: "gemini-3.1-pro-high", thinking: "high" });
+	assert.deepEqual(config.subagents.general, { backend: "pi", model: "inherit", thinking: "inherit" });
+	assert.equal(config.codex.maxExecutors, 4);
+	assert.deepEqual(config.pi.settings.defaultTools, ["+codemode"]);
+	assert.equal(config.research.search.enabled, "off");
 	assert.deepEqual(config.codex.retention, { terminalDays: 30, keepTerminalJobs: 200 });
 	assert.equal(config.research.compaction.hardTokens, 384 * 1024);
-	assert.deepEqual(config.research.compaction.recentTailTokens, [24 * 1024, 32 * 1024, 40 * 1024]);
+	assert.equal(config.research.compaction.softTokens, 360 * 1024);
 	assert.equal(config.research.compaction.summaryTargetTokens, 8 * 1024);
 	assert.equal(config.research.compaction.summaryMaxTokens, 16 * 1024);
 	assert.equal(config.research.search.model, "deepseek-v4-flash");
@@ -36,9 +42,9 @@ test("Research Pi config owns research runtime settings, not the Leader model ca
 });
 
 test("partial runtime config merges over defaults and rejects ambiguous or secret fields", () => {
-	const config = resolveResearchPiConfig({ codex: { executor: { model: "gpt-5.6-luna" } } });
-	assert.equal(config.codex.executor.model, "gpt-5.6-luna");
-	assert.equal(config.codex.executor.reasoningEffort, "max");
+	const config = resolveResearchPiConfig({ subagents: { executor: { model: "gpt-5.6-luna" } } });
+	assert.equal(config.subagents.executor.model, "gpt-5.6-luna");
+	assert.equal(config.subagents.executor.thinking, "max");
 	assert.throws(() => resolveResearchPiConfig({ typoSetting: true }), /Unknown Research Pi config key/);
 	assert.throws(() => resolveResearchPiConfig({ research: { compaction: { softTokens: 500_000 } } }), /below hardTokens/);
 	assert.throws(
@@ -47,6 +53,8 @@ test("partial runtime config merges over defaults and rejects ambiguous or secre
 	);
 	assert.throws(() => resolveResearchPiConfig({ research: { search: { enabled: "sometimes" } } }), /auto, on, or off/);
 	assert.throws(() => resolveResearchPiConfig({ codex: { retention: { terminalDays: 0 } } }), /positive integer/);
+	assert.throws(() => resolveResearchPiConfig({ codex: { maxExecutors: 0 } }), /positive integer/);
+	assert.throws(() => resolveResearchPiConfig({ codex: { maxExecutors: 1.5 } }), /positive integer/);
 	assert.throws(() => resolveResearchPiConfig({ pi: { settings: { api_key: "do-not-store-here" } } }), /credential-like/);
 });
 
@@ -65,7 +73,7 @@ test("v1 profile config migrates once into Pi native defaults and removes the cu
 		}, null, 2)}\n`);
 		const config = ensureResearchPiConfig(configPath);
 		const persisted = JSON.parse(readFileSync(configPath, "utf8"));
-		assert.equal(persisted.version, 2);
+		assert.equal(persisted.version, 3);
 		assert.equal(Object.hasOwn(persisted, "activeProfile"), false);
 		assert.equal(Object.hasOwn(persisted, "profiles"), false);
 		assert.equal(Object.hasOwn(persisted, "providerCompat"), false);
@@ -82,6 +90,35 @@ test("v1 profile config migrates once into Pi native defaults and removes the cu
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
+});
+
+test("v2 Codex role settings migrate into unified v3 subagent runners", () => {
+	const defaults = defaultResearchPiConfig();
+	const legacy = {
+		...defaults,
+		version: 2,
+		research: { ...defaults.research, compaction: { ...defaults.research.compaction, recentTailTokens: [24576, 32768, 40960] } },
+		codex: {
+			maxExecutors: 3,
+			advisor: { model: "gpt-advisor", reasoningEffort: "high", serviceTier: "standard" },
+			executor: { model: "gpt-executor", reasoningEffort: "xhigh", serviceTier: "fast" },
+			subagent: { model: "gpt-child", reasoningEffort: "medium" },
+			retention: defaults.codex.retention,
+		},
+	};
+	delete legacy.subagents;
+	const migrated = resolveResearchPiConfig(legacy);
+	assert.equal(migrated.version, 3);
+	assert.deepEqual(migrated.subagents.advisor, { backend: "codex", model: "gpt-advisor", thinking: "high", speed: "standard" });
+	assert.deepEqual(migrated.subagents.executor, { backend: "codex", model: "gpt-executor", thinking: "xhigh", speed: "fast" });
+	assert.deepEqual(migrated.subagents.environment, { backend: "antigravity", model: "gemini-3.1-pro-high", thinking: "high" });
+	assert.deepEqual(migrated.subagents.general, { backend: "pi", model: "inherit", thinking: "inherit" });
+	assert.deepEqual(migrated.codex.internalSubagent, { model: "gpt-child", thinking: "medium" });
+	assert.equal(Object.hasOwn(migrated.codex, "advisor"), false);
+	assert.equal(Object.hasOwn(migrated.codex, "executor"), false);
+	assert.equal(Object.hasOwn(migrated.codex, "subagent"), false);
+	assert.equal(Object.hasOwn(migrated.research.compaction, "recentTailTokens"), false);
+	assert.equal(migrated.pi.settings.compaction.keepRecentTokens, defaults.pi.settings.compaction.keepRecentTokens);
 });
 
 test("normal launches preserve Pi native model scope and custom models", () => {
@@ -114,12 +151,12 @@ test("normal launches preserve Pi native model scope and custom models", () => {
 	}
 });
 
-test("config persistence creates a private v2 file and schema", () => {
+test("config persistence creates a private v3 file and schema", () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-config-"));
 	try {
 		const configPath = join(root, "config.json");
 		const config = ensureResearchPiConfig(configPath);
-		assert.equal(config.version, 2);
+		assert.equal(config.version, 3);
 		assert.equal(statSync(configPath).mode & 0o777, 0o600);
 		assert.ok(statSync(join(root, "schemas", "research-pi-config.schema.json")).isFile());
 		const changed = writeResearchPiConfig(configPath, { ...config, ui: { ...config.ui, density: "compact" } });
@@ -134,15 +171,27 @@ test("config exports runtime environment without a second Leader model selection
 	const environment = researchPiEnvironment(defaultResearchPiConfig());
 	assert.equal(Object.hasOwn(environment, "RESEARCH_PI_ACTIVE_PROFILE"), false);
 	assert.equal(environment.RESEARCH_PI_CODEX_ADVISOR_MODEL, "gpt-5.6-sol");
+	assert.equal(environment.RESEARCH_PI_SUBAGENT_ENVIRONMENT_BACKEND, "antigravity");
+	assert.equal(environment.RESEARCH_PI_SUBAGENT_GENERAL_MODEL, "inherit");
 	assert.equal(environment.RESEARCH_PI_CODEX_RETENTION_DAYS, "30");
 	assert.equal(environment.RESEARCH_PI_CODEX_KEEP_TERMINAL_JOBS, "200");
+	assert.equal(environment.RESEARCH_PI_CODEX_MAX_EXECUTORS, "4");
 	assert.equal(environment.RESEARCH_PI_COMPACT_HARD_TOKENS, String(384 * 1024));
 	assert.equal(environment.RESEARCH_PI_SEARCH_MODEL, "deepseek-v4-flash");
 	assert.equal(environment.RESEARCH_PI_UI_DENSITY, "balanced");
+	const alternate = researchPiEnvironment(resolveResearchPiConfig({
+		subagents: {
+			advisor: { backend: "pi", model: "opencode-go/deepseek-v4-flash", thinking: "high" },
+			executor: { backend: "antigravity", model: "gemini-3.1-pro-high", thinking: "high" },
+		},
+	}));
+	assert.equal(alternate.RESEARCH_PI_SUBAGENT_ADVISOR_MODEL, "opencode-go/deepseek-v4-flash");
+	assert.equal(alternate.RESEARCH_PI_CODEX_ADVISOR_MODEL, "gpt-5.6-sol");
+	assert.equal(alternate.RESEARCH_PI_CODEX_EXECUTOR_MODEL, "gpt-5.6-sol");
 });
 
 test("legacy credential file support and native search are independent of Leader selection", () => {
-	const config = defaultResearchPiConfig();
+	const config = resolveResearchPiConfig({ research: { search: { enabled: "auto" } } });
 	assert.deepEqual(researchPiCredentialEnvironmentNames(config).sort(), ["DEEPSEEK_API_KEY", "OPENCODE_API_KEY", "ZAI_API_KEY"]);
 	assert.equal(researchPiDeepSeekSearchEnabled(config, { OPENCODE_API_KEY: "go-key" }), false);
 	assert.equal(researchPiDeepSeekSearchEnabled(config, { DEEPSEEK_API_KEY: "ds-key" }), true);
@@ -163,7 +212,7 @@ test("Codex, compact, and search modules consume the configured runtime environm
 		const compact = await import(${JSON.stringify(compact)});
 		const search = await import(${JSON.stringify(search)});
 		const parsed = search.parseDeepSeekWebSearchResponse({content:[{type:"web_search_tool_result",content:[1,2,3].map(i=>({type:"web_search_result",url:"https://example.com/"+i,title:"S"+i}))}]});
-		console.log(JSON.stringify({advisor:codex.defaultCodexModel("advisor"),executor:codex.defaultCodexModel("executor"),effort:codex.defaultCodexReasoningEffort("advisor"),retentionDays:codex.DEFAULT_CODEX_RETENTION_DAYS,keepTerminal:codex.DEFAULT_CODEX_KEEP_TERMINAL_JOBS,soft:compact.RESEARCH_SOFT_COMPACT_TOKENS,hard:compact.RESEARCH_HARD_COMPACT_TOKENS,tail:compact.RESEARCH_RECENT_TAIL_SCHEDULE,summaryTarget:compact.RESEARCH_SUMMARY_TARGET_TOKENS,summaryMax:compact.RESEARCH_SUMMARY_MAX_TOKENS,sources:parsed.sources.length}));
+		console.log(JSON.stringify({advisor:codex.defaultCodexModel("advisor"),executor:codex.defaultCodexModel("executor"),effort:codex.defaultCodexReasoningEffort("advisor"),retentionDays:codex.DEFAULT_CODEX_RETENTION_DAYS,keepTerminal:codex.DEFAULT_CODEX_KEEP_TERMINAL_JOBS,soft:compact.RESEARCH_SOFT_COMPACT_TOKENS,hard:compact.RESEARCH_HARD_COMPACT_TOKENS,summaryTarget:compact.RESEARCH_SUMMARY_TARGET_TOKENS,summaryMax:compact.RESEARCH_SUMMARY_MAX_TOKENS,sources:parsed.sources.length}));
 	`;
 	const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
 		encoding: "utf8",
@@ -176,7 +225,6 @@ test("Codex, compact, and search modules consume the configured runtime environm
 			RESEARCH_PI_CODEX_KEEP_TERMINAL_JOBS: "33",
 			RESEARCH_PI_COMPACT_SOFT_TOKENS: "111",
 			RESEARCH_PI_COMPACT_HARD_TOKENS: "222",
-			RESEARCH_PI_COMPACT_RECENT_TAIL_TOKENS: "7,8",
 			RESEARCH_PI_COMPACT_SUMMARY_TARGET_TOKENS: "9",
 			RESEARCH_PI_COMPACT_SUMMARY_MAX_TOKENS: "18",
 			RESEARCH_PI_SEARCH_MAX_SOURCES: "2",
@@ -191,7 +239,6 @@ test("Codex, compact, and search modules consume the configured runtime environm
 		keepTerminal: 33,
 		soft: 111,
 		hard: 222,
-		tail: [7, 8],
 		summaryTarget: 9,
 		summaryMax: 18,
 		sources: 2,

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { codexModelConfigArgs, codexServiceTierParams } from "./model-settings.mjs";
 import { createHash } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import { appendFile, mkdir, readdir, unlink } from "node:fs/promises";
@@ -8,6 +9,7 @@ import { compactCodexAuditEvent, describeCodexNotification, projectCodexActivity
 import { configureCodexSqliteLogs } from "./codex-sqlite-logs.mjs";
 import {
 	getGitSnapshot,
+	readCodexJob,
 	readJson,
 	releaseWriterLock,
 	sanitizeCodexEnvironment,
@@ -17,6 +19,8 @@ import {
 } from "./codex-jobs.mjs";
 import { codexPermissionConfigArguments, resolveExecutablePath, runCodexSandboxPreflight } from "./project-boundary.mjs";
 import { resolveSystemRuntimePolicy } from "./security-policy.mjs";
+import { CODEX_COLLABORATION_TOOL, collaborateWithCodexPeers, formatPeerMessage } from "./codex-collaboration.mjs";
+import { CODEX_RUN_TOOL, listCodexExternalRuns, registerCodexExternalRun, releaseCodexResources, settleCodexExternalRun } from "./codex-resources.mjs";
 
 function now() {
 	return new Date().toISOString();
@@ -381,6 +385,30 @@ async function main() {
 		const params = message.params ?? {};
 		const id = requestId(request.jobId, message.id, method);
 		try {
+			if (method === "item/tool/call" && params.tool === "research_pi_run") {
+				if (request.mode !== "executor" || submittedResult) throw new Error("External-run tools require an active executor before final handoff");
+				const args = params.arguments ?? {};
+				const ownerJobId = args.ownerJobId ?? request.jobId;
+				if (ownerJobId !== request.jobId) {
+					const owner = await readCodexJob(ownerJobId, { jobRoot: dirname(jobDir), expectedCwd: request.cwd });
+					if (args.action === "register" || owner.actorId !== request.actorId || owner.leaderActorId !== request.leaderActorId || owner.researchTrackRef !== request.researchTrackRef) {
+						throw new Error("Only this Actor's earlier same-track runs may be inspected or settled after resume");
+					}
+				}
+				let result;
+				if (args.action === "list") result = await listCodexExternalRuns(dirname(jobDir), ownerJobId);
+				else if (args.action === "register") result = await registerCodexExternalRun(dirname(jobDir), request.jobId, args);
+				else if (args.action === "settle") result = await settleCodexExternalRun(dirname(jobDir), ownerJobId, args.runId, args);
+				else throw new Error("Unknown external-run action");
+				send({ id: message.id, result: { success: true, contentItems: [{ type: "inputText", text: JSON.stringify(result) }] } });
+				return;
+			}
+			if (method === "item/tool/call" && params.tool === "research_pi_collaborate") {
+				if (submittedResult) throw new Error("A final handoff was already submitted");
+				const result = await collaborateWithCodexPeers(request.jobId, params.arguments ?? {}, { jobRoot: dirname(jobDir) });
+				send({ id: message.id, result: { success: true, contentItems: [{ type: "inputText", text: JSON.stringify(result) }] } });
+				return;
+			}
 			if (method === "item/tool/call" && params.tool === "submit_research_pi_result") {
 				const candidate = request.mode === "advisor"
 					? params.arguments
@@ -671,12 +699,13 @@ async function main() {
 					if (!pending) throw new Error(`No pending Codex request ${command.requestId}`);
 					pendingHumanResponses.delete(command.requestId);
 					pending.resolve({ response: commandResponse ?? "", answers: commandAnswers ?? null });
-				} else if (command.type === "steer") {
+				} else if (command.type === "steer" || command.type === "peer_message") {
 					if (!threadId || !activeTurnId) throw new Error("Codex job has no active turn to steer");
+					if (submittedResult && command.type === "peer_message") throw new Error("Peer handoff already submitted; message was not delivered");
 					await rpcRequest("turn/steer", {
 						threadId,
 						expectedTurnId: activeTurnId,
-						input: [{ type: "text", text: command.message }],
+						input: [{ type: "text", text: command.type === "peer_message" ? formatPeerMessage(command) : command.message }],
 					});
 				} else if (command.type === "cancel") {
 					requestCancellation();
@@ -796,6 +825,7 @@ async function main() {
 		}
 		const appServerArgs = [
 			...permissionArgs,
+			...codexModelConfigArgs(request),
 			"app-server",
 			"--stdio",
 		];
@@ -874,6 +904,7 @@ async function main() {
 
 		const consultationWhyField = request.mode === "advisor" ? "why_it_matters" : "why_blocking";
 		const dynamicTools = [
+			...(request.mode === "executor" ? [CODEX_COLLABORATION_TOOL, CODEX_RUN_TOOL] : []),
 			{
 				type: "function",
 				name: "submit_research_pi_result",
@@ -928,6 +959,7 @@ async function main() {
 		const threadParams = {
 			cwd: request.cwd,
 			model: request.model,
+			...codexServiceTierParams(request.serviceTier),
 			approvalPolicy: "never",
 			permissions: request.sandbox,
 		};
@@ -957,6 +989,7 @@ async function main() {
 				cwd: request.cwd,
 				model: request.model,
 				effort: request.reasoningEffort,
+				...codexServiceTierParams(request.serviceTier),
 				approvalPolicy: "never",
 				permissions: request.sandbox,
 			},
@@ -1076,6 +1109,7 @@ async function main() {
 			await appendFile(join(jobDir, "stderr-tail.log"), stderrTail, { mode: 0o600 }).catch(() => undefined);
 		}
 		await releaseWriterLock(request.lockPath, request.jobId).catch(() => undefined);
+		await releaseCodexResources(dirname(jobDir), request.jobId).catch(() => undefined);
 		await unlink(join(jobDir, "worker-lease.json")).catch(() => undefined);
 	}
 }

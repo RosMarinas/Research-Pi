@@ -68,7 +68,7 @@ test("Runtime Dock clock redraws once per second only while a live Codex job exi
 
 test("Runtime Dock is responsive and renders objective Codex progress", () => {
 	const active = model({ counts: { active: 1 }, project: { freshness: "missing" } });
-	const jobs = [{ id: "codex-demo-12345678", status: "running", mode: "advisor", progress: "reading preregistration", startedAt: new Date().toISOString() }];
+	const jobs = [{ id: "codex-demo-12345678", backend: "codex", status: "running", role: "advisor", model: "gpt-6-astra", thinking: "max", progress: "reading preregistration", startedAt: new Date().toISOString() }];
 	const dock = new RuntimeDockComponent(active, jobs, theme(), { density: "balanced" });
 	for (const width of [12, 48, 80, 140]) {
 		const lines = dock.render(width);
@@ -77,6 +77,7 @@ test("Runtime Dock is responsive and renders objective Codex progress", () => {
 			assert.match(lines.join("\n"), /EmbeddingWorld/);
 			assert.match(lines.join("\n"), /advisor/);
 			assert.match(lines.join("\n"), /RUNNING/);
+			if (width >= 80) assert.match(lines.join("\n"), /gpt-6-astra\/max/);
 		}
 	}
 });
@@ -98,9 +99,9 @@ test("Runtime Dock never presents a completed leaf tool as a completed executor"
 		startedAt: new Date(Date.now() - 90 * 60_000).toISOString(),
 	}];
 	const lines = new RuntimeDockComponent(active, jobs, theme(), { density: "balanced" }).render(160).join("\n");
-	assert.match(lines, /executor 9e62a4b5 · RUNNING/);
+	assert.match(lines, /codex\/executor 9e62a4b5 · RUNNING · inherit\/inherit/);
 	assert.match(lines, /last: research_pi_host · completed/);
-	assert.doesNotMatch(lines, /executor 9e62a4b5 · COMPLETED/);
+	assert.doesNotMatch(lines, /codex\/executor 9e62a4b5 · COMPLETED/);
 });
 
 test("Runtime Dock gives concurrent Codex work stable multi-line rows", () => {

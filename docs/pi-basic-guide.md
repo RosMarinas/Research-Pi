@@ -1,6 +1,6 @@
 # Research Pi 基本使用指南
 
-这份指南面向 Research Pi：Pi 0.84.2 与 Pi 原生支持的供应商/模型。源码 checkout 用于快速开发；稳定版本作为 npm CLI 全局安装。两种形态的日常入口都是 `pi`。
+这份指南面向基于 Pi Core 1.0.0 的 Research Pi。Leader 与 Pi runner 使用 Pi 原生支持的供应商/模型；Codex、Antigravity 与 Pi runner 通过统一 subagent 层协作。源码 checkout 用于开发，安装版本作为 npm CLI 使用，两种形态的日常入口都是 `pi`。
 
 ## 1. 启动
 
@@ -11,7 +11,7 @@ pi
 
 Research Pi 有两个直观的项目角色：
 
-- **Leader Session**：默认入口 `pi`。可以修改项目、运行实验、调度 Codex、更新 Project State，并独占 durable Leader mailbox。
+- **Leader Session**：默认入口 `pi`。可以修改项目、运行实验、调度 subagent、更新 Project State，并独占 durable Leader mailbox。
 - **Analysis Session**：入口 `pi --analysis`。读取同一 ProjectView 并讨论问题，但不抢占 Leader、不接收 Codex ASK/result，也不能修改代码、启动实验或更新 Project State。可以在 OS 强制的项目只读沙箱中运行本地 shell；只有项目内 Runtime 临时目录可写。
 
 Analysis Session 可以使用项目内只读工具和本地只读 shell，也可以通过 `host_capability` 读取已批准的外部文件或执行 SSH 检查。`cat/head/tail/grep/rg/find/ls/stat`、只读 Git、调度器和 `nvidia-smi` 查询等保守语法可在受信 SSH target 上直接执行；其他远端命令会向用户展示完整命令并申请一次性或当前 Session 的精确授权，不会把该授权泛化成整个 SSH target 的信任。凭据路径始终禁止进入模型上下文。
@@ -25,7 +25,7 @@ Analysis Session 可以使用项目内只读工具和本地只读 shell，也可
 
 前者只把“候选分析”放进 Leader mailbox，不会自动成为科研事实；当前 attached Leader 空闲时会由 Runtime 自动唤醒处理，正在运行时则等该轮 settled 后安全投递，不需要用户再发一条消息来刷新 inbox。后者显式接管 Leader 角色并恢复执行工具。需要同时保留原 Leader 并行工作时，应从另一个终端运行 `pi --analysis`；同一 TUI 内的 `/runtime analysis` 适合把当前 Session 原地降为只读讨论。
 
-也可以把第二个终端留给原生 Codex Session，不把它纳入 `codex_delegate` job。先在同一个科研项目目录启动 `codex`，给它一次明确约定：
+也可以把第二个终端留给原生 Codex Session，不把它纳入 `subagent` job。先在同一个科研项目目录启动 `codex`，给它一次明确约定：
 
 ```text
 先运行 pi analysis context 读取 Research Pi 的当前 ProjectView；只和我讨论，不接管 Leader。只有我明确说“投递”时，才把判断、最强依据和建议下一步压缩后交给 Research Pi。
@@ -76,7 +76,7 @@ pi-traced
 pi config show
 ```
 
-模型不属于上述配置：进入 TUI 后输入 `/model` 或按 `Ctrl+L`，直接使用 Pi 的完整原生模型选择器。新增供应商或订阅模型后，按 Pi 的方式 `/login`，必要时运行 `pi update --models`，无需等待 Research Pi 更新 profile。API key 不进入 `config.json`。
+Leader 的模型选择保存在 Pi 原生设置中：进入 TUI 后输入 `/model` 或按 `Ctrl+L`，使用 Pi 的完整原生模型选择器。`/models` 统一展示 Leader 与各 subagent 的 backend、model、thinking；runner 的默认值保存在 Research Pi `config.json`，不影响已运行的任务。新增 Pi 供应商或订阅模型后，按 Pi 的方式 `/login`，必要时运行 `pi update --models`，无需等待 Research Pi 更新 profile。API key 不进入 `config.json`。
 
 所有字段、示例和覆盖优先级见 [Research Pi Configuration](configuration.md)。
 
@@ -189,7 +189,7 @@ Git 项目首次启动时，Research Pi 会通过本地 `.git/info/exclude` 隐�
 - `research_memory_read`：根据搜索结果中的 session/entry ID 读取精确原文和小范围上下文。
 - `/side <问题>`：用当前上下文做一次隔离追问并持久保存；默认不进入主上下文。
 - `web_search`：通过 DeepSeek 原生搜索做简单、直接、带来源的网页查找。
-- `codex_delegate`：把工具密集或长程执行交给独立 Codex 上下文，或请求一个只读第二意见。进度使用自然语言 `phase=commentary`，结构化结果由一次性的 `submit_research_pi_result` 提交，最后只保留简短 `phase=final_answer` acknowledgement；executor 用 `outcome=succeeded|partial|blocked|failed` 与 `goal_satisfied` 表达委派结果，不把 turn 的 `completed` 当作任务成功。Pi 仍负责研究规划与证据判断。
+- `subagent`：把工具密集或长程执行交给独立 Codex 上下文，或请求一个只读第二意见。进度使用自然语言 `phase=commentary`，结构化结果由一次性的 `submit_research_pi_result` 提交，最后只保留简短 `phase=final_answer` acknowledgement；executor 用 `outcome=succeeded|partial|blocked|failed` 与 `goal_satisfied` 表达委派结果，不把 turn 的 `completed` 当作任务成功。Pi 仍负责研究规划与证据判断。
 - `/watch`：按需打开 Codex 客观执行面板；左右切换 Action，Tab 或上下切换 overview/activity/agents，`q`/`Esc` 关闭。观察内容不进入模型上下文。
 - `/actors`（等同 `/actors active`）、`/inbox`：查看当前 active/waiting 的 project Runtime Actors 与 durable mailbox；`/actors all` 查看历史注册和 suspended Actors。
 - `/message`、`/steer`：面向 Actor 通信；steer 默认等待下一安全模型边界，只有 `--preempt` 才主动中断。
@@ -232,7 +232,7 @@ Git 项目首次启动时，Research Pi 会通过本地 `.git/info/exclude` 隐�
 
 side 问答会以卡片保存在 session 中。`Ctrl+O` 在展开/收起之间切换；如果终端状态异常，也可用 `/side collapse` 强制恢复紧凑视图。`/side show <id>` 打开可滚动 overlay，使用方向键/PgUp/PgDn 浏览并以 `q` 或 Esc 返回；`/side use <id>` 才把它提升到主上下文。之后也能通过 Research Memory 找回，但它仍属于 assistant synthesis，不是实验事实。
 
-需要当天信息、一个官方页面或一份有界小调研时，可以让 Pi 调用 `web_search`。它复用 Research Pi 配置中的 DeepSeek key。用户明确指定，或任务确实需要大量搜索、交叉核验和中间材料整理时，再交给 Codex 隔离过程。
+需要当天信息或官方资料时，可以让 Codex advisor 直接使用其默认开启的原生 web search 检索并交叉核验，也可以使用显式配置的 MCP 搜索。`research.search` 只控制额外的 DeepSeek `web_search` 工具，默认关闭且完全可选；需要这条独立通道时再设置 `research.search.enabled=auto` 或 `on`。
 
 需要 Codex 实际完成一项较长任务时，可以直接对 Pi 说：
 
@@ -248,21 +248,23 @@ side 问答会以卡片保存在 session 中。`Ctrl+O` 在展开/收起之间�
 
 advisor 保持项目只读，但不再默认采取反驳姿态。它可通过 Runtime mailbox 向 Pi 提出会显著改善讨论的问题；Pi 用 `respond` 回答后，同一 Codex turn 继续。后续使用同一 mission 会恢复原 Codex thread，使咨询内容不随 Pi Session 轮换丢失。
 
+Pi 1.0 版本默认允许同工作区最多 4 个 executor。给每个独立子任务分配不同 mission 和不重叠的 `writeScope`，例如实现负责 `["src/model"]`、测试负责 `["tests/model"]`；Leader 先派发所有独立任务，收到各自结果后整合。省略范围代表独占整个工作区，仍会阻止其他 writer。范围是调度约定，不能隔离 GPU、共享运行目录或 Git index；这些资源须由 Leader 协调。见 [迁移说明与调用示例](pi-1-migration.md)。
+
 同步 advisor 遇到问题时不会继续占住当前 tool call：它以 `input_required` 把控制权交还 Leader，Leader 使用返回的精确 `jobId/requestId` 回复，随后沿用同一个 worker、thread 和 turn 继续。此状态不是失败，不应 cancel 或重新启动 advisor。完全异步咨询仍可显式使用 `background=true`。
 
-Pi 会获得一个 `codex-...` job ID。单个 job 时，底部状态栏持续显示 job 后八位、advisor/executor 模式和明确的 `starting/running/completed/failed/cancelled/outcome_unknown` transport lifecycle；`now:` 表示当前叶子活动，`last:` 表示最近结束的命令或工具。两个以上 Action 或并发叶子活动出现时，footer 只显示不会跳动的聚合计数，Runtime Dock 为每个 Action/活动保留固定多行；超过可见上限时使用 `/watch`。`research_pi_host · completed` 只表示一次工具调用完成，job `completed` 只表示 Codex turn 正常结算；executor 是否完成委派目标由 final result 的 `outcome=succeeded` 且 `goal_satisfied=true` 决定。后台任务未结束时，Leader 不应为了发现完成而反复调用 `status/result`：人类观察进度用 `/watch`，模型等待 Runtime mailbox 的下一条 blocking/terminal 事件；只有显式用户查询、故障恢复或手动管理 `autoNotify=false` 的 job 才需要主动读取同一 job。纯 `status/result/missions` 查询不会把 ProjectView 标成已变更，也不会凭空制造新的 `<research_project_delta>`；真实的 Action 或 mailbox 状态变化仍按原机制刷新。重复启动任务仍然不允许。状态、阻塞问题和完成事件先进入项目 Runtime mailbox，再交给最近 attached 的 Research Leader session。默认 executor 是 project-write + public-network，advisor 是 project-read + public-network；各自的默认 model/effort 位于 `config.json` 的 `codex.executor` 与 `codex.advisor`，也可以在具体委派时覆盖。
+Pi 会获得带 backend 前缀的 job ID，例如 `codex-...`、`antigravity-...` 或 `pi-...`。单个 job 时，底部状态栏和 Runtime Dock 显示 backend/role、所选 model/thinking，以及明确的 `starting/running/completed/failed/cancelled/outcome_unknown` transport lifecycle；`now:` 表示当前叶子活动，`last:` 表示最近结束的命令或工具。两个以上 Action 或并发叶子活动出现时，footer 只显示不会跳动的聚合计数，Runtime Dock 为每个 Action/活动保留固定多行；超过可见上限时使用 `/watch`。`research_pi_host · completed` 只表示一次工具调用完成，job `completed` 只表示对应 backend 的 turn 正常结算；Codex executor 是否完成委派目标仍由 final result 的 `outcome=succeeded` 且 `goal_satisfied=true` 决定。后台任务未结束时，Leader 不应为了发现完成而反复调用 `status/result`：人类观察进度用 `/watch`，模型等待 Runtime mailbox 的下一条 blocking/terminal 事件；只有显式用户查询、故障恢复或手动管理 `autoNotify=false` 的 job 才需要主动读取同一 job。纯 `status/result/missions` 查询不会把 ProjectView 标成已变更，也不会凭空制造新的 `<research_project_delta>`；真实的 Action 或 mailbox 状态变化仍按原机制刷新。重复启动任务仍然不允许。状态、阻塞问题和完成事件先进入项目 Runtime mailbox，再交给最近 attached 的 Research Leader session。默认 advisor/executor 使用 Codex，environment 使用 Antigravity，general 使用 Pi；各自的 backend/model/thinking 位于 `config.json` 的 `subagents.<role>`，也可以在具体委派时覆盖。
 
 Codex 终态任务不会无限保留碎片文件：每天启动时至多检查一次，默认仅将“超过 30 天且不在最近 200 个终态任务中”的 completed/failed/cancelled job 归档到一个中央 JSONL；结构化结果仍能按 job ID 读取。活跃、等待输入和 `outcome_unknown` 任务永不自动归档，Codex thread/context 状态也不受影响。阈值由 `codex.retention` 配置。
 
-`outcome_unknown` 表示 executor 可能已产生文件、Git、远程 run 等副作用，但 worker 没有留下可靠终态。此时不要重跑或猜测：先检查相关外部状态，再让 Pi 调用 `codex_delegate action=reconcile`，提供 `completed|failed|cancelled` 和简短证据说明。同一 workspace 在结案前不会启动另一写入型 Codex；advisor 仍可用于只读排查。
+`outcome_unknown` 表示 executor 可能已产生文件、Git、远程 run 等副作用，但 worker 没有留下可靠终态。此时不要重跑或猜测：先检查相关外部状态，再让 Pi 调用 `subagent action=reconcile`，提供 `completed|failed|cancelled` 和简短证据说明。同一 workspace 在结案前不会启动另一写入型 Codex；advisor 仍可用于只读排查。
 
 Codex 中间更新使用自然语言 `phase=commentary`，不再受终态 schema 约束；结束时调用 `submit_research_pi_result` 写入严格结构化结果，再发简短 `phase=final_answer` acknowledgement。结果卡默认折叠为状态、摘要预览和结构化计数；展开后额外显示 delegation outcome、completion basis 与 remaining work。用户可随时运行 `/watch` 查看最近的 active Action，也可用 `/watch <job后缀>`、`/watch <mission>` 或 `/watch @codex:<Actor短码>` 定位。内部 subagent 只是本次 Action 的临时子节点，不会污染 Project Actor 列表。
 
-Pi 在连续处理同一研究子任务时应使用稳定、简短的 `mission` 标签。带 mission 的新派遣默认 `reuse=auto`：运行中的同 mission/mode/track job 会直接重新挂接，已完成的会通过 App Server `thread/resume` 续接历史；同一精确 workspace、mode、mission 和 research track 可跨 Pi session 复用。同一个 advisor mission 用于持续澄清同一问题；换轨后默认开启新 thread，只有用户或 Leader 显式恢复旧 job 才跨 track 续接，并会收到 route-change 警告。续接时 Runtime 也会比较 Git snapshot，工作区变化则要求 Codex 重新检查当前文件。使用 `/codex missions` 查看按 track 分组的任务链，使用 `/actors` 找当前活跃 Actor，或用 `/actors all` 找 suspended Actor 的稳定 `@codex:<Actor短码>`；若要切换研究路线或主动清除旧假设，使用新的 mission。
+Pi 在连续处理同一研究子任务时应使用稳定、简短的 `mission` 标签。Codex backend 的带 mission 新派遣默认 `reuse=auto`：运行中的同 mission/role/track job 会直接重新挂接，已完成的会通过 App Server `thread/resume` 续接历史；同一精确 workspace、role、mission 和 research track 可跨 Pi session 复用。同一个 advisor mission 用于持续澄清同一问题；换轨后默认开启新 thread，只有用户或 Leader 显式恢复旧 job 才跨 track 续接，并会收到 route-change 警告。续接时 Runtime 也会比较 Git snapshot，工作区变化则要求 Codex 重新检查当前文件。使用 `/subagents missions` 查看 Codex 的持久任务链，使用 `/actors` 找当前活跃 Actor，或用 `/actors all` 找 suspended Actor 的稳定 `@backend:<Actor短码>`；若要切换研究路线或主动清除旧假设，使用新的 mission。Pi 与 Antigravity runner 的连续对话保留在各自的 live Session 中，不写额外 handoff 文件。
 
 App Server 的动态工具在 thread 创建时固定。Research Pi 为这组工具记录协议版本；升级结构化结果、Leader 咨询或宿主能力工具后，旧 thread 会在下一次续接时自动刷新一次。mission 与 Actor 身份保留，但旧对话不强行迁移；新 thread 从当前任务、上一轮简短 handoff 和权威工作区重建状态，之后继续正常复用。
 
-用户发现某个 Actor 跑偏时可以直接输入：
+用户发现某个 Actor 跑偏时可以直接输入；同一入口也适用于 `@antigravity:...` 和 `@pi:...`：
 
 ```text
 /steer @codex:12ab34cd 先停止继续补丁；回到 H1/H2 的可区分预测，检查当前实验是否真的介入了目标变量。
@@ -357,7 +359,7 @@ Transition 会立即影响后续 Session 的 ProjectView，不必等待 `/compac
 
 ## 5. 常用界面操作
 
-输入 `/` 会打开 slash command 补全；Pi 0.84.2 没有单独的 `/help` 命令。Research Pi 隐藏了不再需要的低层 `/scoped-models` 补全项。
+输入 `/` 会打开 slash command 补全。原生 `/login`、`/model`、`/scoped-models` 和 `/settings` 保持可用；统一模型分工用 `/models`，任务观察与控制用 `/subagents`、`/watch`、`/message` 和 `/steer`。
 
 | 按键 | 作用 |
 |---|---|

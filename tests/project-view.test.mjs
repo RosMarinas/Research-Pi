@@ -440,6 +440,27 @@ test("research transitions use Project revision compare-and-append", async () =>
 	}
 });
 
+test("compact snapshots shorten handoffs while preserving invalid evidence and still-running external experiments", () => {
+	const state = compaction().details.researchState;
+	const view = buildProjectView({
+		runtime: { projectKey: "project-fixture", workspaceRoot: "/workspace" },
+		snapshot: {
+			projectState: { state, source: { trackRef: "project:initial" }, revision: 1 },
+			actors: [], transitions: [], messages: [], revision: 2,
+			handoffs: [{ id: "handoff-1", task: "launch", summary: "large work history ".repeat(100), trackRef: "project:initial" }],
+			actions: [{ id: "a1", status: "completed", externalId: "job-1", metadata: { externalRuns: [{ id: "run-1", status: "running", target: "host-a", externalId: "scheduler-42" }] } }],
+			evidence: [{ id: "exp-1", revision: 2, observation: "control failed", validityJudgment: "invalid", conclusion: "does not test H1" }],
+		},
+	});
+	const lean = renderProjectViewDelta(view, { snapshot: true });
+	const detailed = renderProjectViewDelta(view);
+	assert.ok(lean.length < detailed.length);
+	assert.match(lean, /exp-1 \[invalid\]/);
+	assert.match(lean, /run-1 \[running\]/);
+	assert.match(lean, /worker completion does not imply experiment completion/);
+	assert.match(lean, /compact index, not complete evidence/);
+});
+
 test("ProjectView materializes a fixed snapshot without modifying user or tool history", () => {
 	const view = buildProjectView({
 		runtime: { projectKey: "project-fixture", workspaceRoot: "/workspace" },

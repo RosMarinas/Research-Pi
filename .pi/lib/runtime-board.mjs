@@ -1,5 +1,5 @@
 import { basename } from "node:path";
-import { RESEARCH_LEADER_ACTOR_ID, runtimeActorTarget } from "./research-runtime.mjs";
+import { RESEARCH_LEADER_ACTOR_ID, runtimeActorBackend, runtimeActorTarget } from "./research-runtime.mjs";
 
 const ACTIVE_ACTION_STATUSES = new Set(["starting", "running", "cancelling"]);
 const OPEN_MESSAGE_STATUSES = new Set(["queued", "delivered"]);
@@ -26,8 +26,8 @@ function actorState(actor, action, attachment) {
 	if (action?.status === "input_required") return "waiting for input";
 	if (ACTIVE_ACTION_STATUSES.has(action?.status)) return action.status;
 	if (action?.status === "outcome_unknown") return "outcome unknown";
-	if (actor.kind === "codex") {
-		return actor.metadata?.threadId
+	if (runtimeActorBackend(actor)) {
+		return actor.metadata?.backendSessionId || actor.metadata?.threadId
 			? `suspended · ${action?.status ?? "resumable"}`
 			: action?.status ?? "registered";
 	}
@@ -37,7 +37,7 @@ function actorState(actor, action, attachment) {
 function actorPriority(actor, state) {
 	if (["starting", "running", "cancelling", "waiting for input", "outcome unknown"].includes(state)) return 0;
 	if (actor.id === RESEARCH_LEADER_ACTOR_ID) return 1;
-	if (actor.kind === "codex") return 2;
+	if (runtimeActorBackend(actor)) return 2;
 	if (actor.kind === "user") return 4;
 	return 3;
 }
@@ -58,6 +58,10 @@ export function buildRuntimeBoardModel({ runtime, snapshot, view, health, sessio
 			label: inline(actor.id === RESEARCH_LEADER_ACTOR_ID ? "Leader Session" : actor.label || actor.id, 100),
 			kind: actor.kind,
 			provider: actor.provider ?? null,
+			backend: runtimeActorBackend(actor),
+			role: actor.role ?? actor.metadata?.role ?? actor.metadata?.mode ?? null,
+			model: actor.model ?? actor.metadata?.model ?? null,
+			thinking: actor.thinking ?? actor.metadata?.thinking ?? null,
 			state,
 			action: action ? {
 				id: action.id,

@@ -24,8 +24,8 @@ import {
 } from "../lib/project-view.mjs";
 import { RESEARCH_HARD_COMPACT_TOKENS, RESEARCH_SOFT_COMPACT_TOKENS } from "../lib/research-compact.mjs";
 import {
-	getCodexRuntimeAdapter,
-	getCodexWatchAdapter,
+	getSubagentRuntimeAdapter,
+	getSubagentWatchAdapter,
 	registerRuntimeUiAdapter,
 } from "../lib/research-runtime-adapters.mjs";
 import { buildRuntimeBoardModel } from "../lib/runtime-board.mjs";
@@ -62,6 +62,7 @@ import {
 	requestRuntimeSessionRotation,
 	requestRuntimeSessionInheritance,
 	resolveRuntimeActor,
+	runtimeActorBackend,
 	runtimeActorAttachment,
 	runtimeActorTarget,
 	runtimeMessageText,
@@ -121,7 +122,7 @@ const ANALYSIS_SAFE_TOOLS = new Set([
 	"host_capability",
 	"analysis_send_to_leader",
 ]);
-const ANALYSIS_CODEX_READ_ACTIONS = new Set(["status", "result", "missions"]);
+const ANALYSIS_SUBAGENT_READ_ACTIONS = new Set(["status", "result", "missions", "messages"]);
 const PROJECT_VIEW_MUTATING_TOOLS = new Set([
 	"bash",
 	"edit",
@@ -131,14 +132,14 @@ const PROJECT_VIEW_MUTATING_TOOLS = new Set([
 	"amend_project_state",
 	"research_checkpoint",
 ]);
-const PROJECT_VIEW_READ_ONLY_CODEX_ACTIONS = new Set(["status", "result", "missions"]);
+const PROJECT_VIEW_READ_ONLY_SUBAGENT_ACTIONS = new Set(["status", "result", "missions", "messages"]);
 
 export function projectViewToolMutates(
 	toolName: string,
 	input: Record<string, unknown> = {},
 ): boolean {
-	if (toolName === "codex_delegate") {
-		return !PROJECT_VIEW_READ_ONLY_CODEX_ACTIONS.has(String(input.action ?? ""));
+	if (toolName === "subagent") {
+		return !PROJECT_VIEW_READ_ONLY_SUBAGENT_ACTIONS.has(String(input.action ?? ""));
 	}
 	return PROJECT_VIEW_MUTATING_TOOLS.has(toolName);
 }
@@ -150,7 +151,7 @@ export function analysisSessionToolBlockReason(
 ): string | null {
 	if (policy !== "analysis") return null;
 	if (ANALYSIS_SAFE_TOOLS.has(toolName)) return null;
-	if (toolName === "codex_delegate" && ANALYSIS_CODEX_READ_ACTIONS.has(String(input.action ?? ""))) return null;
+	if (toolName === "subagent" && ANALYSIS_SUBAGENT_READ_ACTIONS.has(String(input.action ?? ""))) return null;
 	return `Analysis Session cannot use ${toolName}: it may inspect local/remote evidence, including OS-sandboxed read-only project shell commands, but cannot modify code, run experiments, steer workers, or update Project State. Use analysis_send_to_leader, or /runtime promote <reason> to become the Leader Session.`;
 }
 
@@ -192,7 +193,7 @@ export async function reconcileStaleCodexMailbox(
 function sessionRoleContext(role: "analysis" | "leader", content: string): string {
 	const rolePrompt = role === "analysis"
 		? "You are the current read-only Analysis Session. Discuss, explain, compare hypotheses, and inspect local or approved remote evidence. You may run project-local shell commands under an OS-enforced read-only filesystem profile, but must not start experiments or external side effects. Do not modify code, steer workers, consume the Leader mailbox, or update Project State. Treat new interpretations as proposals, not evidence. Use analysis_send_to_leader for a useful synthesis; project execution requires explicit user promotion."
-		: "You are the currently attached Leader Session. This role block supersedes any earlier Analysis Session role block in this conversation. Execution tools, Project State writes, Codex coordination, and the durable Leader mailbox are active within their normal authority boundaries.";
+		: "You are the currently attached Leader Session. This role block supersedes any earlier Analysis Session role block in this conversation. Execution tools, Project State writes, subagent coordination, and the durable Leader mailbox are active within their normal authority boundaries.";
 	return [`# Session role: ${role === "analysis" ? "Analysis" : "Leader"} Session`, rolePrompt, content]
 		.filter(Boolean)
 		.join("\n\n");
@@ -219,7 +220,7 @@ function latestAssistantText(messages: any[]): string {
 function handoffKind(toolNames: Set<string>): string {
 	if (toolNames.has("record_research_transition")) return "research-route-change";
 	if (toolNames.has("record_experiment")) return "research-evidence";
-	if (toolNames.has("codex_delegate")) return "delegated-project-work";
+	if (toolNames.has("subagent")) return "delegated-project-work";
 	return "leader-project-task";
 }
 
@@ -231,7 +232,7 @@ function runtimeDisplayBody(content: string): string {
 
 export function codexRuntimeMessagePreview(content: string, limit = 360): string {
 	const body = runtimeDisplayBody(content);
-	const summary = body.match(/(?:^|\n)Summary:\s*([\s\S]*?)(?=\n(?:Evidence|Actions taken|Changed files|Checks|External effects|Uncertainties|Recommended next step|Error):|\nUse codex_delegate|$)/)?.[1] ?? body;
+	const summary = body.match(/(?:^|\n)Summary:\s*([\s\S]*?)(?=\n(?:Evidence|Actions taken|Changed files|Checks|External effects|Uncertainties|Recommended next step|Error):|\nUse subagent|$)/)?.[1] ?? body;
 	return compact(summary, limit);
 }
 
@@ -244,7 +245,7 @@ export function codexRuntimeMessageMarkdown(content: string): string {
 		.replace(/^(Evidence|Actions taken|Changed files|Checks|External effects|Uncertainties):\s*$/gm, "## $1")
 		.replace(/^Recommended next step:\s*/m, "## Recommended next step\n\n")
 		.replace(/^Error:\s*/m, "## Error\n\n")
-		.replace(/^(Use codex_delegate[^\n]*)$/gm, "> $1")
+		.replace(/^(Use subagent[^\n]*)$/gm, "> $1")
 		.trim();
 }
 
@@ -397,12 +398,16 @@ export function actorLines(snapshot: RuntimeSnapshot, activeOnly = true): string
 			if (actor.kind === "user") state = "present";
 			else if (latestAction?.status === "input_required") state = "waiting for input";
 			else if (ACTIVE_ACTION_STATUSES.has(latestAction?.status)) state = `active (${latestAction.status})`;
-			else if (actor.kind === "codex") {
-				state = actor.metadata?.threadId
+			else if (runtimeActorBackend(actor)) {
+				state = actor.metadata?.backendSessionId || actor.metadata?.threadId
 					? `suspended (${latestAction?.status ?? "resumable"})`
 					: latestAction?.status ?? "registered";
 			} else state = attachment ? `attached ${String(attachment.sessionId).slice(-8)}` : "detached";
-			return `- ${target} · ${actor.id === RESEARCH_LEADER_ACTOR_ID ? "Leader Session" : actor.label} · ${actor.kind} · ${state}`;
+			const backend = runtimeActorBackend(actor);
+			const runner = backend
+				? `${backend} · ${actor.role ?? actor.metadata?.role ?? actor.metadata?.mode ?? "general"} · ${actor.model ?? actor.metadata?.model ?? "inherit"} · thinking ${actor.thinking ?? actor.metadata?.thinking ?? "inherit"}`
+				: actor.kind;
+			return `- ${target} · ${actor.id === RESEARCH_LEADER_ACTOR_ID ? "Leader Session" : actor.label} · ${runner} · ${state}`;
 		}) : ["No active Runtime Actor. Use /actors all to inspect registered and suspended Actors."]),
 	].join("\n");
 }
@@ -464,7 +469,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	let projectViewDirty = true;
 	let persistedProjectView: ProjectViewReceipt | undefined;
 	let latestProjectView: Awaited<ReturnType<typeof buildProjectView>> | undefined;
-	let latestCodexJobs: any[] = [];
+	const latestSubagentJobs = new Map<string, any[]>();
 	let runtimeDockTui: { requestRender?: () => void } | undefined;
 	const runtimeDockClock = createRuntimeDockClock(() => runtimeDockTui?.requestRender?.());
 	let attachmentLossNotified = false;
@@ -603,9 +608,11 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		});
 	};
 
-	const refreshDock = async (ctx: ExtensionContext, options: { snapshot?: RuntimeSnapshot; codexJobs?: any[] } = {}) => {
+	const refreshDock = async (ctx: ExtensionContext, options: { snapshot?: RuntimeSnapshot; backend?: string; jobs?: any[]; codexJobs?: any[] } = {}) => {
 		if (!ctx.hasUI || typeof ctx.ui.setWidget !== "function") return;
-		if (options.codexJobs) latestCodexJobs = options.codexJobs;
+		if (options.codexJobs) latestSubagentJobs.set("codex", options.codexJobs.map((job) => ({ ...job, backend: "codex", role: job.role ?? job.mode, thinking: job.thinking ?? job.reasoningEffort })));
+		if (options.backend && options.jobs) latestSubagentJobs.set(options.backend, options.jobs);
+		const jobs = [...latestSubagentJobs.values()].flat();
 		if (UI_RUNTIME_STRIP === "off") {
 			runtimeDockClock.stop();
 			runtimeDockTui = undefined;
@@ -625,11 +632,11 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			RUNTIME_DOCK_KEY,
 			(tui, theme) => {
 				runtimeDockTui = tui;
-				return new RuntimeDockComponent(model, latestCodexJobs, theme, { density: UI_DENSITY });
+				return new RuntimeDockComponent(model, jobs, theme, { density: UI_DENSITY });
 			},
 			{ placement: "aboveEditor" },
 		);
-		runtimeDockClock.setActive(runtimeDockNeedsClock(latestCodexJobs));
+		runtimeDockClock.setActive(runtimeDockNeedsClock(jobs));
 	};
 
 	const refreshStatus = async (ctx: ExtensionContext) => {
@@ -649,7 +656,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	};
 
 	registerRuntimeUiAdapter({
-		refresh: async (ctx: ExtensionContext, options: { codexJobs?: any[] } = {}) => refreshDock(ctx, options),
+		refresh: async (ctx: ExtensionContext, options: { backend?: string; jobs?: any[]; codexJobs?: any[] } = {}) => refreshDock(ctx, options),
 		deliver: async (ctx: ExtensionContext, options: { messageId: string }) => {
 			const activeRuntime = await getRuntime(ctx);
 			return await deliverLeaderMailboxMessage(activeRuntime, options.messageId, ctx, {
@@ -684,9 +691,12 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		);
 		if (result === "view") ctx.ui.notify(latestProjectView ? renderProjectView(latestProjectView, { includeDirectedMessages: !isAnalysisSession() }) : "", "info");
 		else if (result && typeof result === "object" && result.action === "watch") {
-			const watch = getCodexWatchAdapter();
+			const snapshot = await readRuntimeSnapshot(await getRuntime(ctx));
+			const actor = resolveRuntimeActor(snapshot, result.selector);
+			const backend = runtimeActorBackend(actor);
+			const watch = backend ? getSubagentWatchAdapter(backend) : undefined;
 			if (watch) await watch.open(ctx, result.selector);
-			else ctx.ui.notify("Codex Watch adapter is not loaded.", "warning");
+			else ctx.ui.notify(`${backend ?? actor.kind} Watch adapter is not loaded.`, "warning");
 		}
 	};
 
@@ -726,6 +736,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 					to: message.to,
 					requestId: message.metadata?.requestId ?? null,
 					jobId: message.metadata?.jobId ?? null,
+					backend: message.metadata?.backend ?? null,
 					transient: true,
 					attachmentEpoch: attachment.epoch ?? null,
 				},
@@ -858,9 +869,10 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 					settledByDelivery: true,
 				};
 		}
-		if (actor.kind === "codex") {
-			const adapter = getCodexRuntimeAdapter();
-			if (!adapter) return { status: "queued", detail: "Codex Runtime adapter is not loaded" };
+		const backend = runtimeActorBackend(actor);
+		if (backend) {
+			const adapter = getSubagentRuntimeAdapter(backend);
+			if (!adapter) return { status: "queued", detail: `${backend} Runtime adapter is not loaded` };
 			return await adapter.dispatch({ runtime: activeRuntime, actor, message, preempt: options.preempt === true, ctx });
 		}
 		return { status: "queued", detail: `${actor.label} has no live Provider adapter` };
@@ -871,6 +883,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		type?: string;
 		from?: string;
 		jobId?: string;
+		backend?: string;
 		status?: string;
 		mode?: string;
 		model?: string;
@@ -880,7 +893,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		const details = message.details ?? {};
 		if (details.messageId && details.type === "ask" && supersededMessageIds.has(String(details.messageId))) {
 			return new Text(
-				`${theme.fg("success", "✓")} ${theme.fg("dim", `CODEX / ASK settled · ${String(details.messageId).slice(-8)} · obsolete request`)}`,
+				`${theme.fg("success", "✓")} ${theme.fg("dim", `SUBAGENT / ASK settled · ${String(details.messageId).slice(-8)} · obsolete request`)}`,
 				0,
 				0,
 			);
@@ -889,7 +902,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			? message.content
 			: message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
 		const card = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
-		const isCodex = Boolean(details.jobId) || String(details.from ?? "").startsWith("codex:");
+		const isCodex = details.backend === "codex" || String(details.from ?? "").startsWith("codex:");
 		if (isCodex) {
 			const status = String(details.status ?? details.type ?? "result");
 			const icon = status === "completed"
@@ -1096,7 +1109,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		projectViewDirty = true;
 		persistedProjectView = undefined;
 		latestProjectView = undefined;
-		latestCodexJobs = [];
+		latestSubagentJobs.clear();
 		toolExecutionInputs.clear();
 		setSessionMode("project");
 	});
@@ -1225,7 +1238,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_execution_start", (event) => {
-		if (event.toolName === "codex_delegate") {
+		if (event.toolName === "subagent") {
 			toolExecutionInputs.set(event.toolCallId, (event.args ?? {}) as Record<string, unknown>);
 		}
 	});
@@ -1238,7 +1251,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		if (isAnalysisSession() && event.toolName === "bash") return;
 		if (projectViewToolMutates(event.toolName, input)) {
 			projectViewDirty = true;
-			const codexStatus = event.toolName === "codex_delegate" ? String(event.result?.details?.status ?? "") : "";
+			const codexStatus = event.toolName === "subagent" ? String(event.result?.details?.status ?? "") : "";
 			const codexTurnSettled = !codexStatus || ["completed", "failed", "cancelled", "outcome_unknown"].includes(codexStatus);
 			if (!event.isError && codexTurnSettled) {
 				projectWorkThisRun = true;

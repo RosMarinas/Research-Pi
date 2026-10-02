@@ -18,7 +18,7 @@ try {
 const manifest = JSON.parse(output)[0];
 const files = manifest.files.map((entry) => entry.path);
 const forbidden = files.filter((path) =>
-	/(?:^|\/)(?:\.env|auth\.json|models-store\.json|sessions|traces|memory\.sqlite|codex\/jobs|capabilities)(?:$|\/)/.test(path),
+	/(?:^|\/)(?:\.env|auth\.json|models-store\.json|sessions|subagents|traces|memory\.sqlite|codex\/jobs|capabilities)(?:$|\/)/.test(path),
 );
 assert.deepEqual(forbidden, [], `Sensitive runtime files would enter the npm package: ${forbidden.join(", ")}`);
 assert.ok(!files.includes(".pi/config.json"), "The user-local Research Pi config would enter the npm package");
@@ -29,6 +29,10 @@ for (const required of [
 	".pi/extensions/cache-audit.ts",
 	".pi/lib/cache-audit.mjs",
 	"docs/cache-diagnostics.md",
+	"docs/pi-1-migration.md",
+	".pi/lib/research-extensions.mjs",
+	".pi/lib/codex-collaboration.mjs",
+	".pi/lib/codex-resources.mjs",
 	"bin/pi.mjs",
 	".pi/APPEND_SYSTEM.md",
 	".pi/config.defaults.json",
@@ -36,7 +40,10 @@ for (const required of [
 	".pi/schemas/research-pi-config.schema.json",
 	".pi/themes/research-pi.json",
 	".pi/extensions/research-config.ts",
+	".pi/extensions/subagent-runners.ts",
 	".pi/lib/research-config.mjs",
+	".pi/lib/subagent-sessions.mjs",
+	".pi/lib/model-settings.mjs",
 	".pi/lib/research-analysis-bridge.mjs",
 	"docs/configuration.md",
 	".pi/extensions/project-boundary.ts",

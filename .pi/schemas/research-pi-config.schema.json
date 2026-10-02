@@ -6,10 +6,15 @@
   "required": ["version"],
   "properties": {
     "$schema": { "type": "string" },
-    "version": { "const": 2 },
+    "version": { "const": 3 },
     "pi": {
       "type": "object",
       "properties": {
+        "modelServiceTiers": {
+          "type": "object",
+          "description": "Per-model Leader speed, keyed by provider/model. Native Pi owns model and thinking defaults.",
+          "additionalProperties": { "enum": ["inherit", "standard", "fast"] }
+        },
         "settings": {
           "type": "object",
           "description": "Pi core settings, written to the generated internal settings.json adapter."
@@ -17,12 +22,31 @@
       },
       "additionalProperties": false
     },
+    "subagents": {
+      "type": "object",
+      "required": ["advisor", "executor", "environment", "general"],
+      "properties": {
+        "advisor": { "$ref": "#/$defs/runner" },
+        "executor": { "$ref": "#/$defs/runner" },
+        "environment": { "$ref": "#/$defs/runner" },
+        "general": { "$ref": "#/$defs/runner" }
+      },
+      "additionalProperties": false
+    },
     "codex": {
       "type": "object",
-      "required": ["advisor", "executor", "retention"],
+      "required": ["internalSubagent", "retention"],
       "properties": {
-        "advisor": { "$ref": "#/$defs/codexRole" },
-        "executor": { "$ref": "#/$defs/codexRole" },
+        "internalSubagent": {
+          "type": "object",
+          "required": ["model", "thinking"],
+          "properties": {
+            "model": { "type": "string", "minLength": 1 },
+            "thinking": { "enum": ["inherit", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] }
+          },
+          "additionalProperties": false
+        },
+        "maxExecutors": { "type": "integer", "minimum": 1, "description": "Concurrent executors per workspace; writing scopes must not overlap." },
         "retention": {
           "type": "object",
           "required": ["terminalDays", "keepTerminalJobs"],
@@ -40,15 +64,10 @@
       "properties": {
         "compaction": {
           "type": "object",
-          "required": ["softTokens", "hardTokens", "recentTailTokens", "summaryTargetTokens", "summaryMaxTokens"],
+          "required": ["softTokens", "hardTokens", "summaryTargetTokens", "summaryMaxTokens"],
           "properties": {
             "softTokens": { "type": "integer", "minimum": 1 },
             "hardTokens": { "type": "integer", "minimum": 1 },
-            "recentTailTokens": {
-              "type": "array",
-              "minItems": 1,
-              "items": { "type": "integer", "minimum": 1 }
-            },
             "summaryTargetTokens": { "type": "integer", "minimum": 1 },
             "summaryMaxTokens": { "type": "integer", "minimum": 1 }
           },
@@ -83,12 +102,14 @@
   },
   "additionalProperties": false,
   "$defs": {
-    "codexRole": {
+    "runner": {
       "type": "object",
-      "required": ["model", "reasoningEffort"],
+      "required": ["backend", "model", "thinking"],
       "properties": {
+        "backend": { "enum": ["codex", "antigravity", "pi"] },
         "model": { "type": "string", "minLength": 1 },
-        "reasoningEffort": { "enum": ["low", "medium", "high", "xhigh", "max", "ultra"] }
+        "thinking": { "enum": ["inherit", "off", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] },
+        "speed": { "enum": ["inherit", "standard", "fast"] }
       },
       "additionalProperties": false
     }

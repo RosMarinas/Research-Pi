@@ -1,264 +1,185 @@
-> **2026-09-06 · 重要前缀缓存修复**：移除动态 Delta，改为初始化/compact 时建立固定快照并保留通信历史；进一步修复 Runtime 消息唤醒后工具续轮的 system prompt 回退，避免长上下文前缀被反复改写。
-
 # Research Pi
 
 简体中文 · [English](README_en.md)
 
 > Session is not enough for research. Project is.
 
-Coding Agent不一定是好用的Research Agent。
+面向 AI、机器人、通信、优化与仿真的科研 Agent Harness，基于 **Pi Core 1.0.0**，支持 macOS、Linux 与 WSL2。
 
-Research Pi 面向 AI、机器人、通信、优化与仿真等计算实验科研。它最关心的不是“代码写的对不对”，而是：**代码能否支撑实验？这个实验告诉了我们什么？下一步高信息增益的实验是什么？**
+Research Pi 把研究目标、实验记录、关键决定和多 Agent 协作留在项目中。Session 可以轮换，模型可以更换，研究主线不必从头解释。它关注的不只是“代码是否正确”，还包括：实验是否检验了预期假设、证据允许什么结论、下一步做什么最有信息量。
 
-它不是一段更长的科研提示词，也不是一个号称能自动完成科研的 skill。它把项目进度、实验记录、讨论和 Agent 协作留在 Project 中，因此换一个 Session、换一个模型，也不用从头讲起。
+## 统一 subagent，不统一掉各自的能力
 
-`Pi Core 0.84.2` ·  `macOS / Linux / WSL2`
+Leader 通过一个 `subagent` 入口调度工作；Runtime 统一记录 Actor、任务、状态和消息。**Role 是分工，backend 是接入方式，model 与 thinking 是执行配置。** 用户可以设置默认值，Leader 也可以按任务选择。
 
-## 设计原则
+| 角色 | 默认 backend | 主要工作 |
+|---|---|---|
+| Pi Leader | Pi 原生 provider | 把握研究主线、组织证据、委派与整合结果 |
+| advisor | Codex | 设计、架构、竞争解释、只读审查 |
+| executor | Codex | 开发、实验执行、测试与验证 |
+| environment | Antigravity | 依赖、SDK、工具链与环境配置 |
+| general | Pi | 使用任意已接入 Pi 的模型完成独立任务 |
 
-1. **项目比对话更长寿**：Session 可以结束，模型可以更换，但研究问题、实验结果和关键决定应该留下来。
-2. **科研必须要人参与**：Agent 可以查资料、写代码、跑实验和整理证据，但不会因为命令成功就擅自宣布“方向成立”。
-3. **记住真正有用的东西**：重点保留问题、假设、证据、失败路线和下一步，而不是把所有聊天都塞回模型上下文。
-4. **让不同模型做擅长的事**：Pi 把握研究主线，Codex 负责长程执行，Pi-analysis 陪用户理解、质疑和讨论。它们交换的是短消息，不是彼此整段复制上下文。
-5. **先找到对的方向，再把代码写漂亮**：探索阶段允许大胆替换、快速试错和整体回滚；方向值得保留后，再补工程质量与复现能力。
-
-## 设计特点
-
-🧠 **换对话，不丢研究主线。** Harness 把项目目标、关键决定、最新进展和交接记录保存在对话之外。新 Session 按角色载入项目快照；compact 后接续记忆，不必每次从头解释。日常交流沿用当前历史，不反复塞入动态摘要。
-
-🔎 **实验做过，就能找回来。** 实验账本记录问题、干预、观察和有效性判断，失败实验也有位置。默认检索当前项目，也支持跨项目搜索全局已索引的实验记录，让过去的证据成为下一次判断的起点。
-
-📬 **各自思考，短消息协作。** Leader 推进主线，Codex 执行任务，Analysis 独立讨论。通信经过持久 mailbox：进度更新不打断思考，需要决策或任务结束时再交给当前 Leader；换 Session 后，待处理消息仍能接续。
-
-下面的通信流程简化自 thesis 中的通信图：
+这些是注入 Leader 提示词的调用倾向，不是四套独立工具或强制路由。Pi runner 复用 Leader 的模型目录与认证，支持单独配置模型和思考强度，不局限于 OpenCode Go。Codex 保持原生 Web Search 默认开启；可选的 DeepSeek 搜索不是使用 Research Pi 的前提。
 
 ```mermaid
-sequenceDiagram
-    actor U as 用户
-    participant L as Pi Leader
-    participant R as Project Runtime
-    participant C as Codex 执行器
-    participant A as Pi-analysis
-    U->>L: 研究问题与决策
-    L->>R: 委派任务
-    R->>C: 任务与项目上下文
-    C-->>R: 进度记录（不唤醒 Leader）
-    opt 需要输入
-        C->>R: ASK 写入 mailbox
-        R->>L: 投递给当前 Leader
-        L->>R: 回答 / 调整方向
-        R->>C: 继续原任务
-    end
-    C->>R: 结构化结果
-    R->>L: 投递结果并记录回执
-    A->>R: 讨论后的短便签（建议，不是证据）
-    R->>L: 合适时机投递，轮换后跟随新 Leader
-    L->>U: 证据、边界与下一步
-    Note over L,A: 对话各自保留，不复制整段历史
+flowchart LR
+    U[用户] <--> L[Pi Leader]
+    L <--> R[Project Runtime / mailbox]
+    U <-->|查看 · 发消息 · steer| R
+    R <--> C[Codex runner]
+    R <--> A[Antigravity runner]
+    R <--> P[Pi runner]
+    D[独立 Analysis Session] -->|讨论后的短综合| R
 ```
 
-## 我最喜欢的设计：双 Session 工作流
+每个 subagent 的界面都显示 **backend · role · model · thinking**；继承配置时会标示 `inherit`。用户不必经过 Leader，就能查看其行为和发送指令。切换 runner 时用普通任务与上下文消息接续，不额外生成 handoff 文件。
 
-得益于记忆、通信、权限机制的良好设计，Research Pi 可以同时开两个窗口：一边让 **Pi Leader** 推进实验，另一边在 **Pi-analysis** 里随时追问、质疑和展开想法。
+## 快速开始
 
-![Research Pi 双 Session 工作台：Pi Leader 推进实验，Pi-analysis 独立讨论，只向主线投递一张短便签](docs/assets/dual-session-workbench.png)
-
-Pi-analysis 的长对话留在自己的窗口里，不会挤进 Leader 的上下文。只有当讨论形成了值得主线知道的判断，才把它整理成一张短便签送过去。
-
-用户可以在一个终端让 Pi Leader 持续工作，在另一个终端随时进入 Pi-analysis：
+要求 Node.js `>=22.19` 与 Git。Windows 请在 WSL2 内安装和运行，并将项目放在 WSL 文件系统中，而不是 `/mnt/c` 等 Windows 挂载盘。
 
 ```sh
-# Terminal A：持续推进科研主线
-pi
+npm install -g 'git+https://github.com/RosMarinas/Research-Pi.git#main'
+pi setup
 
-# Terminal B：跟进、理解和讨论，不干扰 Leader
-pi --analysis
+cd /path/to/research-project
+pi
 ```
 
-Pi-analysis 看到的是同一个项目的最新工作视图，但它有自己的对话空间。讨论可以很长，真正发给 Leader 的只需要是一张简短“便签”：
+进入 Pi 后，用 `/login` 登录供应商，再用 `/model` 选择 Leader 模型。模型目录、订阅认证与自定义模型由 Pi 原生管理，Research Pi 不维护第二套 provider 目录。
+
+按需准备 subagent backend，不必全部安装：
+
+| Backend | 准备方式 | 认证与模型来源 |
+|---|---|---|
+| Pi | 在 Pi 内完成 `/login` | 与 Leader 共用 Pi provider 目录和认证 |
+| Codex | 安装 Codex CLI，运行 `codex login` | 独立的 Codex CLI 登录与模型目录 |
+| Antigravity | 安装提供 `agy` 命令的 CLI，首次交互运行 `agy` 登录 | 本机 Antigravity 登录与模型目录 |
+
+Pi 的 `/login` 不会登录 Codex CLI，也无需复制 OAuth token。API-key 供应商的可选凭据文件和实际目录用 `pi paths` 查询；详见[配置说明](docs/configuration.md)。
+
+首次接入现有项目，可以先说：
+
+```text
+先只读恢复当前研究状态：识别目标、竞争假设、已有证据、失败路线和关键未决问题。
+不要立即启动大实验；先说明下一步最有信息量的动作。
+```
+
+### 配置模型与思考强度
+
+`/models` 打开统一选择面板；`/models show` 查看 Leader 与各 subagent 角色的配置。模型候选来自各 backend 自身的目录。
+
+```text
+/models
+/models show
+/models advisor thinking high
+/models general backend pi
+/models general thinking high
+```
+
+在面板中为任意角色选择 backend、model 和 thinking；Leader 也可在单次 `subagent` 调用中指定这些值。角色默认值的更改只影响新任务，不会偷偷改变正在运行的任务。Pi 原生 `/model`、`/settings`、`/scoped-models` 和 `/login` 仍可使用。
+
+Codex worker 内部继续派生的 agents 属于它自己的调用树，可通过 `/models internal` 配置；它们不是额外的顶层 Runtime Actor。Codex Fast 等设置见[统一模型配置](docs/configuration.md#unified-model-settings)。
+
+### 查看与直接控制 subagent
+
+```text
+/actors
+/subagents
+/watch @actor
+/message notify @actor 请先汇报环境检查结果，暂不安装新依赖。
+/steer @actor 优先验证 CPU 路径，暂缓 GPU 实验。
+```
+
+将 `@actor` 替换为 `/actors` 中显示的 Actor 标识。`/watch` 按 backend 展示进度与工具活动，不把观察日志塞进 Leader 上下文；`/message reply @actor ...` 可回复需要输入的任务。消息复用 Runtime mailbox，具体何时执行取决于 backend 的安全接收点，不等于强行中断当前工具。
+
+Codex 保留持久任务、同工作区并发、写入范围协调及恢复机制。Pi／Antigravity runner 使用独立长驻进程承接后续消息，**目前只在所属 Pi 进程存活期间可继续操作，退出时会关闭，重启后不自动恢复**。统一入口不代表三个 backend 的恢复和授权能力完全相同。
+
+## 项目记忆，而非无限增长的聊天
+
+- **ProjectView**：初始化与 compact 时建立固定项目快照。日常进展通过对话、工具结果和消息追加，不反复改写已发送的前缀。
+- **实验账本**：用一条轻量记录保存问题、干预、观察、有效性和下一步；普通探针与成功命令不强制写文档，不复制原始证据。
+- **本地检索与 compact**：按需找回历史 Session 和实验记录；压缩保留结构化研究状态与来源，而不只是聊天摘要。
+
+长期项目可以维护一份短 `RESEARCH.md`，写清研究问题、最终目标、总体路线、非目标与判断原则。当前 run、每日 TODO 和流水账留给 Runtime 与实验记录。Anchor 在建立快照时读取，修改文件不会自动重写当前 Session 的上下文；急需生效的变化请在对话中说明。
+
+`/runtime rotate` 新建 Leader Session，继承项目状态但不复制旧 transcript。`/runtime new clean` 创建不继承项目记忆的 Session，**不会删除项目记录**。
+
+## 双 Session：主线继续，讨论独立
+
+一个终端运行 `pi` 推进工作，另一个运行 `pi --analysis` 阅读结果、追问和讨论。
+
+![Research Pi 双 Session 工作台](docs/assets/dual-session-workbench.png)
+
+Analysis 读取同一项目的工作视图，但不抢占 Leader，不修改代码、启动实验或调度 subagent。长讨论保留在自己的 Session，只有值得主线知道的综合才投递：
 
 ```text
 /analysis send 当前判断、关键依据、仍存不确定性与建议下一步
 ```
 
-这张便签通过 mailbox 交给 Leader，只包含讨论后的判断、依据和建议，不会把整段聊天塞进主线。Leader 空闲时可以立即看到；如果它正在工作，便签会等到合适的时机再送达。
-
-于是主线可以安静地跑，用户也始终有一张可以放心提问和思考的桌子。独立 Codex 讨论 Session 也能通过 `pi analysis context` / `pi analysis send` 使用同一张“便签”。
-
-## 快速开始
-
-要求 Node.js `>=22.19`。Research Pi 当前使用 Unix 风格的工具链；Windows 推荐通过 **WSL2** 使用，不建议直接在原生 PowerShell 中运行 Agent。
-
-### macOS / Linux
-
-```sh
-npm install -g 'git+https://github.com/RosMarinas/Research-Pi.git#main'
-pi setup
-pi paths
-```
-
-### Windows（推荐 WSL2）
-
-先在管理员 PowerShell 中安装 Ubuntu：
-
-```powershell
-wsl --install -d Ubuntu
-```
-
-随后打开 Ubuntu，先安装 Linux 版 Node.js `>=22.19`，再像 Linux 一样安装 `main`：
-
-```sh
-sudo apt update
-sudo apt install -y git zsh ripgrep fd-find
-node --version
-npm --version
-npm install -g 'git+https://github.com/RosMarinas/Research-Pi.git#main'
-pi setup
-pi paths
-```
-
-WSL2 本身就是 Linux 环境，因此可以直接使用 `main` 并获得最新功能。请把科研项目放在 `~/research/...` 等 WSL 文件系统中，不要放在 `/mnt/c` 或 `/mnt/d`。`windows-research-pi` 是额外阻断 Windows 挂载盘、`.exe` 和 PowerShell interop 的安全预览分支；需要给 Agent 较高自动执行权限时，可用它测试更严格的宿主隔离。
-
-进入 TUI 后用 Pi 原生 `/login` 登录供应商，再用 `/model` 切换模型；Research Pi 不再维护第二套模型/profile 目录。若供应商使用 API key，或需要 DeepSeek 小型搜索，也可以在 `pi paths` 给出的 `credentialsPath` 中填写：
-
-```dotenv
-DEEPSEEK_API_KEY=...
-ZAI_API_KEY=...
-OPENCODE_API_KEY=...
-```
-
-然后在科研项目中启动：
-
-```sh
-cd /path/to/research-project
-pi
-```
-
-如果只想阅读结果、讨论和分析，而不允许当前 Session 改代码或启动实验：
-
-```sh
-pi --analysis
-```
-
-首次接入现有项目时，可以直接说：
-
-```text
-先只读恢复当前研究状态：识别研究目标、竞争假设、已有证据、失效路线和关键未决问题。
-不要立即启动大实验；先说明 ProjectView 缺少什么，以及下一步最有信息量的动作。
-```
-
-## 核心能力
-
-| 能力 | 作用 |
-|---|---|
-| Research Contract | 让 Agent 默认采用探索、证伪、有效性检查和证据驱动收敛 |
-| Project Runtime | 维护 Project State、Actors、Actions、mailbox 与 Leader Session 所有权 |
-| Dual Session | Leader 持续推进主线，Pi-analysis 独立跟进与讨论，并只把最终短综合投递给 Leader |
-| ProjectView | 初始化与 compact 时载入固定项目快照：`RESEARCH.md`、Project Brief 与当前研究进展；日常轮次只追加对话和工具结果 |
-| Research Memory | 对历史 Session 和实验记录做本地全文检索，不依赖向量数据库 |
-| Research Compaction | 在模型 settled 后生成带 provenance 的结构化状态，而不只摘要聊天文本 |
-| Experiment Records | 一条结果写入一个轻量账本，不机械复制 Markdown 或 raw artifact；支持换轨与窄幅状态修订 |
-| Codex Collaboration | 以可续接 mission 调用 advisor/executor，并通过 Runtime mailbox 与 Pi 通信 |
-| Project Boundary | 默认把模型命令限制在当前项目；SSH、外部文件和宿主命令通过显式 capability 授权 |
-| Research Briefing | 在重大结果或阶段交接时恢复工作脉络，并把内部术语翻译成用户可判断的报告 |
-
-ProjectView 在项目上下文初始化和成功 compact 后捕获一次：用户维护的 `RESEARCH.md` 保留项目意图，Project Brief 概括总体方向与已结束阶段，当前研究进展补齐交接位置。快照在普通轮次间保持不变，不再自动追加或移动 Delta；新进展通过用户消息、工具结果和一次投递的通信进入历史，已消费的消息也保留在历史中。实时视图和实验账本仍可按需查看；角色或上下文显式切换时会重新建立快照，使日常轮次保持已发送前缀稳定。
-
-建议每个长期科研项目维护一份短 `RESEARCH.md`，只写不容易频繁变化的内容：项目要解决什么、最终成功是什么、总体路线、明确不做什么，以及用户最在意的判断原则。不要把实验流水账、当前 run 或每日 TODO 放进去。Research Pi 在建立快照时链接并载入前 3600 个字符；文件修改不会自动重写当前 Session 的前缀，急需生效的变化请在对话中说明或让 Agent 读取文件，下次 compact 或新 Session 再统一更新快照。
-
-```md
-# Project North Star
-
-## Problem and final goal
-...
-
-## Overall approach
-...
-
-## Non-goals and decision principles
-...
-```
-
-ProjectView 本身是派生视图，不提供会误删项目账本的“全局清空”按钮。需要不带项目记忆的独立环境时使用 `/runtime new clean`；Analysis Session 可用 `/runtime context off` 暂停注入。删除或修改 `RESEARCH.md` 只影响 Anchor，实验、Runtime 和历史 Session 都会保留。
+这是一条建议，不会自动成为科研证据。独立 Codex 讨论 Session 也可通过 `pi analysis context` / `pi analysis send` 使用同一通道。
 
 ## 常用入口
 
-| 命令 | 用途 |
+| 入口 | 用途 |
 |---|---|
-| `/runtime` | 查看 ProjectView、Actors、Actions、mailbox 和 Session 状态 |
-| `/runtime rotate` | 新建不复制旧 transcript、但继承 Project 状态的 Leader Session |
-| `pi --analysis` | 新开只读 Analysis Session；不抢占 Leader，不接收其 mailbox |
-| `/analysis send <摘要>` | 把有价值的讨论投递给 Leader；用 `/runtime promote <原因>` 转为 Leader |
-| `pi analysis context/send` | 让独立 Codex Session 读取 ProjectView 或向 Leader 投递不超过 1200 字符的综合 |
-| `/runtime context <on\|off>` | Analysis 保持只读角色，只切换后续轮次是否注入 ProjectView |
-| `/runtime new clean` | 新建不继承 ProjectView 的纯净 Session；用 `/runtime inherit` 恢复 |
-| `/memory <query>` | 搜索当前 Project 的历史 Session 与实验记录 |
-| `/side <问题>` | 隔离追问；有价值时用 `/side use <id>` 提升到主线 |
-| `/watch` | 观察 Codex 的命令、文件修改和 subagent 活动，不污染 Leader 上下文 |
-| `/actors`、`/inbox` | 查看活跃 Actor 和待处理 Runtime 消息 |
-| `/login`、`/model`、`/scoped-models` | 使用 Pi 原生认证、模型切换和模型范围；Research Pi 不再复制供应商目录 |
-| `/config` | 查看统一配置和切换主题 |
+| `/runtime` | 查看 ProjectView、Actors、Actions、mailbox 与 Session 状态 |
+| `/actors`、`/subagents`、`/watch` | 查看协作成员、任务与 backend 活动 |
+| `/message`、`/steer` | 直接向 Actor 发消息或调整任务方向 |
+| `/models`、`/config` | 配置模型分工与其他 Harness 设置 |
+| `/memory <query>` | 搜索项目历史与实验记录 |
+| `/side <问题>` | 隔离追问；用 `/side use <id>` 将有价值的结果引入主线 |
+| `/runtime rotate` | 轮换 Leader Session，保留项目状态 |
+| `pi --analysis`、`/analysis send` | 独立只读讨论，向 Leader 投递短综合 |
 | `/boundary doctor` | 检查项目、Git、Python、sandbox 与 Codex 环境 |
-| `pi --full-access` | 本次启动显式关闭 Leader/Codex executor 的项目沙箱；Analysis/advisor 仍只读 |
+| `pi paths` | 查看当前配置、认证目录和状态路径 |
 
-模型可直接调用的研究工具包括 `record_experiment`、`record_research_transition`、`amend_project_state`、`research_checkpoint`、`research_memory_search/read`、`codex_delegate` 和 `host_capability`。
+## 权限与本地数据
 
-## 安全与数据
+Leader、Pi runner 与 Codex worker 使用相应的项目边界和角色权限；宿主命令、SSH 与项目外读取通过显式授权处理。Antigravity 使用自身的 CLI sandbox；非 advisor 任务在该 sandbox 内自动批准工具，advisor 使用 plan 模式，不能把它视为与 Pi 权限协议完全等价。
 
-- 模型 shell 默认可读写当前项目和正常 Git 数据；其他项目、宿主凭据和 Unix socket 不自动开放。
-- SSH target、项目外只读文件和宿主命令需要一次、当前 Session 或当前 Project 范围的明确批准。
-- 私钥、`.env`、API key、keychain 和云凭据不能进入模型上下文。
-- 确实需要完整宿主权限时可显式使用 `pi --full-access`；它只对本次启动生效，并会在状态栏显示 `🔓 full access`。
-- 配置、Session、Runtime、Codex job、授权账本和 trace 位于用户状态目录，不进入科研仓库。
-- 项目本地 `.pi/` 通过 `.git/info/exclude` 自动隐藏；旧 Codex 终态任务按双门槛压入一个中央归档账本。
-- `pi-traced` 可能记录完整 prompt 与工具内容，只应短时诊断；默认 trace 和 Codex DEBUG SQLite 日志均关闭。
+`pi --full-access` 为本次启动显式扩大 Leader／Codex executor 的权限；Analysis／advisor 仍只读。凭据不得进入模型上下文、日志或提交。仅加载受信扩展，因为扩展运行在宿主进程内。
 
-## 配置与目录
+默认安装路径如下；源码 checkout 使用独立的配置与状态，实际以 `pi paths` 为准：
 
 ```text
 ~/.config/research-pi/        config.json、schema、credentials.env
-~/.local/state/research-pi/   sessions、Runtime、memory、Codex、grants、trace
-<research-project>/.pi/       本地轻量实验账本（自动从 Git 状态隐藏）
+~/.local/state/research-pi/   sessions、Runtime、memory、subagents、grants、trace
+<research-project>/.pi/       项目本地实验账本（自动从 Git 状态隐藏）
 ```
 
-实际路径以 `pi paths` 为准。Research Pi 的 `config.json` 只管理 Runtime、compact、Codex、搜索、资源与 UI；Leader 的供应商、模型、thinking 和自定义模型由 Pi 原生配置管理：
+配置与认证不提交到科研仓库。Trace 默认关闭；`pi-traced` 可能记录完整 prompt 和工具内容，只用于短时诊断。完整说明见[安全模型](docs/security-model.md)。
+
+## 升级与开发
+
+已有安装重新执行上面的安装命令，然后**退出并重启旧 Pi 进程**；`/reload` 不会替换已加载的 Core。v1／v2 配置会迁移到统一 subagent 配置，旧 Session、实验记录和 Codex 任务无需删除。升级后用 `/models show` 检查角色配置。
+
+从源码开发：
 
 ```sh
-pi config show
-# TUI 内：/login、/model、/scoped-models、/settings
-```
-
-Research Pi 关闭全局 skill/extension 自动发现，只显式加载审查过的 Harness 扩展、内置 `research-briefing` 和配置白名单。
-
-## 开发与验证
-
-```sh
-git clone git@github.com:RosMarinas/Research-Pi.git
+git clone https://github.com/RosMarinas/Research-Pi.git
 cd Research-Pi
-npm install --ignore-scripts
-cp .env.example .env
-./install-user.sh
+npm ci --ignore-scripts
+./run-pi.sh --workspace /path/to/research-project
 
 npm run check
 npm test
 npm run test:package
 ```
 
-- `pi`：运行 Research Pi Harness。
-- `pi-raw`：运行锁定的原始 Pi Core，便于行为对照。
-- `pi-traced`：临时启用敏感 trace。
-- `./run-pi.sh --workspace /path/to/project`：从源码 checkout 直接运行。
+`pi-raw` 可运行锁定的原始 Pi Core 作行为对照。测试覆盖真实 Pi Core 集成和模拟 runner 协议，不调用付费模型；通过测试不代表当前账号拥有全部模型权限，也不代表科研任务质量已验证。
 
 ## 文档
 
 - [基本使用指南](docs/pi-basic-guide.md)
-- [统一配置说明](docs/configuration.md)
-- [Project Runtime 测试与恢复](docs/research-runtime-test-guide.md)
+- [配置、模型与并发执行](docs/configuration.md)
+- [Pi 1.0 迁移与验证边界](docs/pi-1-migration.md)
+- [Runtime 测试与恢复](docs/research-runtime-test-guide.md)
 - [安全模型与本地数据](docs/security-model.md)
+- [缓存诊断](docs/cache-diagnostics.md)
 - [设计思想](thesis/ResearchPi.pdf)
-
-
 
 ## License
 
-Research Pi 的原创代码与文档采用 [MIT License](LICENSE)。第三方组件保留各自许可证，详见 [Third-Party Notices](THIRD_PARTY_NOTICES.md)。
+原创代码与文档采用 [MIT License](LICENSE)。第三方组件保留各自许可证，见 [Third-Party Notices](THIRD_PARTY_NOTICES.md)。

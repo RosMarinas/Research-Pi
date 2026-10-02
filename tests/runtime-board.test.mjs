@@ -9,8 +9,8 @@ function fixture() {
 		actors: [
 			{ id: "user", kind: "user", label: "User", metadata: {} },
 			{ id: "research-leader", kind: "leader", label: "Research Leader", metadata: {} },
-			{ id: "codex:active:executor", kind: "codex", label: "qualification executor", metadata: { threadId: "thread-active" } },
-			{ id: "codex:review:advisor", kind: "codex", label: "architecture reviewer", metadata: { threadId: "thread-review" } },
+			{ id: "codex:active:executor", kind: "subagent", label: "qualification executor", backend: "codex", role: "executor", model: "gpt-6-astra", thinking: "max", metadata: { threadId: "thread-active" } },
+			{ id: "codex:review:advisor", kind: "subagent", label: "architecture reviewer", backend: "codex", role: "advisor", model: "gpt-5.6-sol", thinking: "high", metadata: { threadId: "thread-review" } },
 		],
 		attachments: [{ actorId: "research-leader", sessionId: "session-current-12345678", branchAnchorId: "leaf-current", attachedAt: "2026-08-19T10:00:00Z" }],
 		actions: [
@@ -149,6 +149,7 @@ test("Runtime Board renders within terminal width and exposes keyboard sections 
 	const actors = overlay.render(78).join("\n");
 	assert.match(actors, /Stable Project Actors/);
 	assert.match(actors, /qualification executor/);
+	assert.match(actors, /codex · executor · gpt-6-astra · thinking max/);
 	assert.ok(renders > 0);
 	await overlay.refresh();
 	assert.equal(reloads, 1);
