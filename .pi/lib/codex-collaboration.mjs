@@ -4,6 +4,7 @@ import {
 	DEFAULT_CODEX_JOB_ROOT, isTerminalStatus, listCodexJobs, readCodexJob, readJson,
 	queueCodexCommand, writeJsonAtomic,
 } from "./codex-jobs.mjs";
+import { createRuntimeMessage, registerCodexRuntimeJob, resolveResearchRuntime } from "./research-runtime.mjs";
 
 export const CODEX_COLLABORATION_TOOL = {
 	type: "function",
@@ -85,11 +86,18 @@ export async function collaborateWithCodexPeers(sourceJobId, args, options = {})
 	if (!sameTeam(source, target)) throw new Error("Peer messages require another executor in the same workspace, Leader ownership, and research track");
 	if (target.status === "cancelling" || isTerminalStatus(target.status)) throw new Error("Peer is no longer active; consult Pi instead of restarting it");
 	if (target.dynamicToolProtocolVersion < 2 || !target.dynamicToolProtocolVersion) throw new Error("Peer uses an older protocol; Pi must refresh it before collaboration");
+	const runtime = await resolveResearchRuntime(source.cwd, { runtimeRoot: source.runtimeRoot
+		?? (jobRoot === DEFAULT_CODEX_JOB_ROOT ? undefined : join(jobRoot, "runtime")) });
+	const from = await registerCodexRuntimeJob(runtime, source);
+	const to = await registerCodexRuntimeJob(runtime, target);
+	const envelope = await createRuntimeMessage(runtime, { type: "notify", from, to, body: message,
+		metadata: { kind: "peer_message", transport: "codex_peer", workspaceKey: source.workspaceKey, sourceJobId: source.id, jobId: target.id } });
 	const { command } = await queueCodexCommand(target.id, {
 		type: "peer_message", fromJobId: source.id, fromMission: source.mission, message,
+		runtimeMessageId: envelope.id, runtimeRoot: runtime.runtimeRoot, runtimeActorId: to,
 	}, { jobRoot, expectedCwd: source.cwd });
 	await writeJsonAtomic(join(jobRoot, source.id, "peer-outbox", `${command.id}.json`), {
 		id: command.id, jobId: target.id, fromJobId: source.id, createdAt: command.createdAt,
 	});
-	return { id: command.id, targetJobId: target.id, status: "queued", note: "Not yet delivered; no automatic reply or restart is requested" };
+	return { id: command.id, messageId: envelope.id, targetJobId: target.id, status: "queued", note: "Not yet delivered; no automatic reply or restart is requested" };
 }

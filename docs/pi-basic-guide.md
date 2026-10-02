@@ -359,7 +359,9 @@ Transition 会立即影响后续 Session 的 ProjectView，不必等待 `/compac
 
 ## 5. 常用界面操作
 
-输入 `/` 会打开 slash command 补全。原生 `/login`、`/model`、`/scoped-models` 和 `/settings` 保持可用；统一模型分工用 `/models`，任务观察与控制用 `/subagents`、`/watch`、`/message` 和 `/steer`。
+输入 `/` 会打开 slash command 补全。原生 `/login`、`/model`、`/scoped-models` 和 `/settings` 保持可用。Harness 设置统一从 `/config` 的多级菜单进入；`/models` 是模型分工的快捷入口，修改后继续留在菜单，`Esc` 返回上一级。
+
+`/watch` 选择 subagent 后可切换当前终端或新开终端；也可在另一个 shell 执行 `pi watch --workspace /path/to/project`。监看界面顶部标注 backend、角色、模型和思考强度，直接输入即以 User 身份发消息；`Tab` 切换 agent、`PgUp/PgDn` 翻阅、空输入时 `Esc` 返回。它只观察已有 Actor，不会新开模型或接管 Leader。`/subagents`、`/message` 和 `/steer` 快捷入口仍保留。下面的按键表描述 Leader 主界面，不是监看视图。
 
 | 按键 | 作用 |
 |---|---|

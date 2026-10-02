@@ -69,7 +69,7 @@ Do not launch a large experiment yet; propose the most informative next action.
 
 ### Choose models and thinking levels
 
-`/models` opens the unified selector; `/models show` displays the Leader and subagent-role configuration. Model choices come from each backend's own catalog.
+Start with `/config`: Models and roles → Leader / Subagents / Codex internal subagents → role → backend, model, thinking. Edits keep the menu open; Esc goes back one level. `/models` goes straight to model settings, and `/models show` displays the full configuration. Choices come from each backend's own catalog.
 
 ```text
 /models
@@ -93,7 +93,15 @@ Agents spawned *inside* a Codex worker belong to its own call tree. Configure th
 /steer @actor Validate the CPU path first; defer GPU experiments.
 ```
 
-Replace `@actor` with the Actor identifier shown by `/actors`. `/watch` shows backend progress and tool activity without injecting observation logs into the Leader's context. Use `/message reply @actor ...` to answer a worker awaiting input. Messages use Runtime's mailbox; delivery takes effect at the backend's supported boundary, not necessarily by interrupting a running tool.
+`/watch` selects an Actor and then offers **Switch in this terminal** or **Open a new terminal**. From another shell, run `pi watch --workspace /path/to/project`. The full-terminal view uses Pi's chat renderer and editor, with backend, role, model, thinking, and status in its header, plus recent responses and tool activity. Observation logs are not injected into the Leader's context.
+
+Type directly as **User** to the selected subagent; `/ask`, `/reply`, and `/steer` are also available. Tab switches agents, PgUp/PgDn scroll, and Esc with an empty editor returns to the Leader. A separate viewer neither starts another model nor takes Leader ownership. If automatic terminal launch fails, it shows a copyable command.
+
+Runtime unifies **messages and receipts between User, Leader, Analysis, and Subagents**, not lifecycle calls or internal tools. `start/status/wait/cancel/reconcile` remain APIs. Codex retains its native transport; Pi receives messages at a safe boundary; Antigravity messages remain in Runtime until its current turn settles. Delivery is not proof of execution.
+
+### Reusing context across related work
+
+The Leader decides whether context is useful: keep the same `mission` to continue, select an exact `jobId`, or choose another mission / `reuse=never` for independent work. Runtime implements this for every backend without semantic task classification or rigid routing. Continuations keep captured model/thinking settings even if role defaults change. Pi/Antigravity require a fresh context to change their model settings.
 
 Codex retains durable jobs, same-workspace concurrency, write-scope coordination, and recovery. Pi and Antigravity runners keep independent processes for follow-up messages. **They are currently operable only while their owning Pi process is alive; shutdown closes them, and restart does not automatically recover them.** A unified entry point does not imply identical recovery or authorization capabilities.
 

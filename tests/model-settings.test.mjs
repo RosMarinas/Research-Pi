@@ -121,7 +121,8 @@ test("model center persists native Leader defaults, updates live worker defaults
 		assert.equal(defaultCodexServiceTier("executor"), "standard");
 		await handler("executor model inherit", ctx);
 		assert.match(notices.at(-1).message, /must name its model/);
-		ctx.ui.select = async (title, choices) => title.includes("select a role") ? choices[2] : title.endsWith("setting") ? "thinking" : "low";
+		const selections = ["Subagents", 1, 2, "low", undefined, undefined, undefined];
+		ctx.ui.select = async (_title, choices) => { const selection = selections.shift(); return typeof selection === "number" ? choices[selection] : selection; };
 		await handler("", ctx);
 		assert.equal(defaultCodexReasoningEffort("executor"), "low", "the interactive entry must reach the same live configuration");
 		await handler("show", ctx);

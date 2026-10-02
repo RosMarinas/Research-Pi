@@ -75,6 +75,11 @@ test("Antigravity stream-json keeps one Actor session and accepts direct follow-
 	assert.equal(job.status, "running");
 	assert.equal(spawnOptions.env.RESEARCH_PI_TEST_TOKEN, undefined);
 	assert.match(children[0].input[0], /configure the SDK/);
+	const queued = await manager.send(job.actorId, { from: "user", body: "wait for the installation" }, { jobId: job.id });
+	assert.equal(queued.status, "queued", "Runtime owns deferred Antigravity messages, not a second in-process mailbox");
+	assert.equal(children[0].input.length, 1);
+	await assert.rejects(manager.start({ id: "antigravity-other", actorId: job.actorId, backend: "antigravity", cwd: "/tmp", task: "duplicate" }), /already has a session/);
+	await assert.rejects(manager.send("antigravity:another", { body: "misdirected" }, { jobId: job.id }), /does not belong/);
 	children[0].stdout.write(`${JSON.stringify({ event: "init", conversation_id: "conversation-1", init: {} })}\n`);
 	children[0].stdout.write(`${JSON.stringify({ event: "result", result: { conversation_id: "conversation-1", status: "SUCCESS", response: "configured", usage: {} } })}\n`);
 	await tick();
@@ -88,9 +93,32 @@ test("Antigravity stream-json keeps one Actor session and accepts direct follow-
 	children[0].stdout.write(`${JSON.stringify({ event: "result", result: { conversation_id: "conversation-1", status: "SUCCESS", response: "verified", usage: {} } })}\n`);
 	await tick();
 	assert.equal(manager.get(job.id).turn, 2);
+	assert.notEqual(manager.get(job.id).actionId, job.actionId, "each turn is a new Action on the same Actor");
 	assert.equal(manager.get(job.id).result.summary, "verified");
 	assert.ok(updates.some((item) => item.event?.type === "done"));
 	await manager.dispose();
+});
+
+test("runner event projection remains ordered while Runtime updates await disk", async () => {
+	const child = fakeChild(), seen = [];
+	const manager = createSubagentSessionManager({
+		spawn: () => child,
+		onUpdate: async (job) => { await tick(); seen.push(`${job.turn}:${job.status}`); },
+	});
+	try {
+		const job = await manager.start({ id: "antigravity-ordered", actorId: "antigravity:ordered", backend: "antigravity", cwd: "/tmp", task: "inspect" });
+		child.stdout.write([
+			{ event: "init", conversation_id: "one" },
+			{ event: "step_update", step_update: { step_type: "agent_response", text_delta: "observed" } },
+			{ event: "result", result: { status: "SUCCESS", response: "done" } },
+		].map(JSON.stringify).join("\n") + "\n");
+		const done = await manager.wait(job.id);
+		assert.equal(done.result.summary, "done");
+		assert.equal(seen.at(-1), "1:completed");
+		await manager.resume(job.id, { followUp: "continue" });
+		assert.equal(manager.get(job.id).turn, 2);
+		assert.equal(seen.at(-1), "2:running");
+	} finally { await manager.dispose(); }
 });
 
 test("Pi RPC maps a direct user message to safe-boundary steering in the live isolated runner", async () => {
@@ -109,6 +137,7 @@ test("Pi RPC maps a direct user message to safe-boundary steering in the live is
 		const initial = JSON.parse(children[0].input[0]);
 		assert.equal(initial.type, "prompt");
 		assert.equal(initial.message, "inspect the alternative");
+		assert.equal(JSON.parse(children[0].input[1]).type, "get_state");
 		children[0].stdout.write(`${JSON.stringify({ type: "extension_ui_request", id: "approval-1", method: "confirm", title: "Outside project" })}\n`);
 		await tick();
 		assert.deepEqual(JSON.parse(children[0].input.at(-1)), { type: "extension_ui_response", id: "approval-1", cancelled: true });
@@ -121,6 +150,12 @@ test("Pi RPC maps a direct user message to safe-boundary steering in the live is
 		assert.equal(manager.get(job.id).status, "completed");
 		assert.equal(manager.get(job.id).model, "opencode-go/deepseek-v4-flash");
 		assert.equal(manager.get(job.id).result.summary, "assumption isolated");
+		const inherited = await manager.start({ id: "pi-inherited", actorId: "pi:inherited", backend: "pi", cwd: "/tmp", task: "inspect" });
+		children[1].stdout.write(`${JSON.stringify({ type: "response", command: "get_state", success: true,
+			data: { model: { provider: "provider", id: "selected-model" }, thinkingLevel: "high" } })}\n`);
+		await tick();
+		assert.equal(manager.get(inherited.id).model, "provider/selected-model");
+		assert.equal(manager.get(inherited.id).thinking, "high", "show effective inherited settings instead of hiding them behind inherit");
 	} finally {
 		await manager.dispose();
 		rmSync(stateRoot, { recursive: true, force: true });

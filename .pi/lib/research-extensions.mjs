@@ -6,7 +6,7 @@ export function researchPiExtensions(root, { search = false, anchor = false, tra
 		"project-boundary", "tool-activity", "research-config", "research-mode",
 		"record-experiment", "research-transition", "amend-project-state",
 		"research-checkpoint", "research-memory", "research-compaction",
-		"research-runtime", "research-side", "subagent-runners", "codex-watch", "codex-delegate", "cache-audit",
+		"research-runtime", "research-side", "subagent-runners", "subagent-watch", "codex-delegate", "cache-audit",
 	];
 	if (search) extensions.push("deepseek-web-search");
 	if (anchor) extensions.push("deepseek-v4-pro-anchor");

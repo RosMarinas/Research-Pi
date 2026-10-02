@@ -68,7 +68,7 @@ Pi 的 `/login` 不会登录 Codex CLI，也无需复制 OAuth token。API-key �
 
 ### 配置模型与思考强度
 
-`/models` 打开统一选择面板；`/models show` 查看 Leader 与各 subagent 角色的配置。模型候选来自各 backend 自身的目录。
+从 `/config` 进入分级菜单：模型与角色 → Leader / Subagents / Codex 内部 agents → 角色 → backend、model、thinking。修改后留在当前菜单，`Esc` 返回上一级；`/models` 是模型菜单的快捷入口。候选来自各 backend 自身的目录，`/models show` 查看全部配置。
 
 ```text
 /models
@@ -92,7 +92,15 @@ Codex worker 内部继续派生的 agents 属于它自己的调用树，可通�
 /steer @actor 优先验证 CPU 路径，暂缓 GPU 实验。
 ```
 
-将 `@actor` 替换为 `/actors` 中显示的 Actor 标识。`/watch` 按 backend 展示进度与工具活动，不把观察日志塞进 Leader 上下文；`/message reply @actor ...` 可回复需要输入的任务。消息复用 Runtime mailbox，具体何时执行取决于 backend 的安全接收点，不等于强行中断当前工具。
+`/watch` 先选 Actor，再选「切换当前终端」或「新开终端」；也可以在另一 shell 执行 `pi watch --workspace /path/to/project`。界面复用 Pi 的对话渲染与输入框，顶部保留 **backend、角色、模型、思考强度和状态**，显示近期回复与工具活动，不把观察日志塞进 Leader 上下文。
+
+监看界面输入消息会以 **User** 身份直接发给当前 subagent；支持 `/ask`、`/reply`、`/steer`，`Tab` 切换 agent，`PgUp/PgDn` 翻阅，空输入时 `Esc` 返回 Leader。独立窗口只是同一 Actor 的观察与消息入口，不另开模型、不接管 Leader。新终端自动打开失败时会给出可复制的命令。
+
+Runtime 统一的是 **User、Leader、Analysis、Subagent 之间的消息与回执**；`start/status/wait/cancel/reconcile` 仍是工具调用，内部工具执行也不经过 mailbox。Codex 保留原生投递通道，Pi 在安全接收点处理消息，Antigravity 忙时消息留在 Runtime，当前轮结束后继续；投递不等于已执行。
+
+### 连贯任务如何复用
+
+Leader 判断上下文是否相关：同一 `mission` 默认继续，同一 Actor 可用 `jobId` 显式继续；独立工作换任务名或设 `reuse=never`。Runtime 为三个 backend 实施相同入口，不做语义分类或强制路由。继续时保留已有模型与思考强度，不受角色默认值后续修改影响；Pi/Antigravity 要换模型时新开上下文即可。
 
 Codex 保留持久任务、同工作区并发、写入范围协调及恢复机制。Pi／Antigravity runner 使用独立长驻进程承接后续消息，**目前只在所属 Pi 进程存活期间可继续操作，退出时会关闭，重启后不自动恢复**。统一入口不代表三个 backend 的恢复和授权能力完全相同。
 

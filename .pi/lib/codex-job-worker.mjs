@@ -21,6 +21,7 @@ import { codexPermissionConfigArguments, resolveExecutablePath, runCodexSandboxP
 import { resolveSystemRuntimePolicy } from "./security-policy.mjs";
 import { CODEX_COLLABORATION_TOOL, collaborateWithCodexPeers, formatPeerMessage } from "./codex-collaboration.mjs";
 import { CODEX_RUN_TOOL, listCodexExternalRuns, registerCodexExternalRun, releaseCodexResources, settleCodexExternalRun } from "./codex-resources.mjs";
+import { resolveResearchRuntime, settleRuntimeMessage } from "./research-runtime.mjs";
 
 function now() {
 	return new Date().toISOString();
@@ -723,9 +724,17 @@ async function main() {
 						}
 						: {}),
 				});
+				if (command.runtimeMessageId) {
+					const runtime = await resolveResearchRuntime(request.cwd, { runtimeRoot: command.runtimeRoot });
+					await settleRuntimeMessage(runtime, command.runtimeMessageId, "delivered", { actorId: command.runtimeActorId });
+				}
 			} catch (error) {
 				const { response: _response, answers: _answers, ...safeCommand } = command ?? {};
 				await writeJsonAtomic(path, { ...safeCommand, status: "failed", failedAt: now(), error: error instanceof Error ? error.message : String(error) });
+				if (command?.runtimeMessageId) {
+					const runtime = await resolveResearchRuntime(request.cwd, { runtimeRoot: command.runtimeRoot });
+					await settleRuntimeMessage(runtime, command.runtimeMessageId, "superseded", { actorId: command.runtimeActorId, reason: "native_delivery_failed" });
+				}
 				enqueueJobUpdate({ progress: `command failed: ${error instanceof Error ? error.message : String(error)}` });
 			}
 		}

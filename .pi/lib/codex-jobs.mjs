@@ -721,11 +721,12 @@ export async function startCodexJob(options) {
 			workspaceRoot,
 			workspaceKey,
 			projectKey,
+			runtimeRoot: options.runtime?.runtimeRoot ?? options.runtimeRoot ?? null,
 			projectRevision: Number.isInteger(options.projectRevision) ? options.projectRevision : null,
 			researchTrackRef: options.researchTrackRef ?? "project:initial",
 			researchTrackLabel: options.researchTrackLabel ?? null,
 			leaderActorId: options.leaderActorId ?? null,
-			actorId: options.actorId ?? `codex:${jobId}`,
+			actorId: options.actorId ?? `codex:${jobId.toLowerCase()}`,
 			actionId: options.actionId ?? `action:${jobId}`,
 			leaderBranchAnchorId: options.leaderBranchAnchorId ?? null,
 			mission,
@@ -754,7 +755,7 @@ export async function startCodexJob(options) {
 			leaderSessionId: options.leaderSessionId ?? null,
 			leaderActorId: options.leaderActorId ?? null,
 			leaderBranchAnchorId: options.leaderBranchAnchorId ?? null,
-			actorId: options.actorId ?? `codex:${jobId}`,
+			actorId: options.actorId ?? `codex:${jobId.toLowerCase()}`,
 			actionId: options.actionId ?? `action:${jobId}`,
 			autoNotify: options.background ?? (mode === "executor"),
 			status: "starting",
@@ -770,6 +771,7 @@ export async function startCodexJob(options) {
 			workspaceRoot,
 			workspaceKey,
 			projectKey,
+			runtimeRoot: options.runtime?.runtimeRoot ?? options.runtimeRoot ?? null,
 			projectRevision: Number.isInteger(options.projectRevision) ? options.projectRevision : null,
 			researchTrackRef: options.researchTrackRef ?? "project:initial",
 			researchTrackLabel: options.researchTrackLabel ?? null,
@@ -933,23 +935,6 @@ export async function listCodexJobs(options = {}) {
 		}
 	}
 	return jobs.sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
-}
-
-export async function findReusableCodexJob(options) {
-	const mission = normalizeCodexMission(options.mission, { required: true });
-	const jobs = await listCodexJobs({
-		jobRoot: options.jobRoot,
-		cwd: options.cwd,
-		leaderSessionId: options.leaderSessionId,
-		projectKey: options.projectKey,
-		leaderActorId: options.leaderActorId,
-		actorId: options.actorId,
-		branchEntryIds: options.branchEntryIds,
-		missionKey: missionKey(mission),
-		mode: options.mode,
-		researchTrackRef: options.researchTrackRef,
-	});
-	return jobs.reverse().find((job) => !isTerminalStatus(job.status) || Boolean(job.threadId)) ?? null;
 }
 
 export async function listCodexMissions(options) {
@@ -1297,6 +1282,7 @@ export async function resumeCodexJob(jobId, options) {
 	return await startCodexJob({
 		...options,
 		cwd: previous.cwd,
+		runtimeRoot: options.runtime?.runtimeRoot ?? options.runtimeRoot ?? previous.runtimeRoot,
 		mode: options.mode ?? previous.mode,
 		role: options.role ?? previous.role ?? previous.mode,
 		writeScope: options.writeScope ?? previous.writeScope,
@@ -1369,6 +1355,7 @@ export function publicJobView(job) {
 		workspaceRoot: job.workspaceRoot ?? job.writerRoot ?? job.cwd,
 		workspaceKey: job.workspaceKey ?? null,
 		projectKey: job.projectKey ?? null,
+		runtimeRoot: job.runtimeRoot ?? null,
 		projectRevision: Number.isInteger(job.projectRevision) ? job.projectRevision : null,
 		researchTrackRef: job.researchTrackRef ?? "project:initial",
 		researchTrackLabel: job.researchTrackLabel ?? null,

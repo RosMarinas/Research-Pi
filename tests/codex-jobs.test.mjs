@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,7 +24,6 @@ import {
 	buildCodexContinuationNotice,
 	cancelCodexJob,
 	codexWriteScopesOverlap,
-	findReusableCodexJob,
 	listCodexJobs,
 	listCodexMissions,
 	maintainCodexJobRetention,
@@ -33,6 +33,7 @@ import {
 	reconcileCodexJobOutcome,
 	respondToCodexJob,
 	resumeCodexJob,
+	resolveCodexWorkspaceIdentity,
 	sanitizeCodexEnvironment,
 	startCodexJob,
 	steerCodexJob,
@@ -42,6 +43,9 @@ import {
 } from "../.pi/lib/codex-jobs.mjs";
 import { CODEX_ADVISOR_PROFILE, CODEX_EXECUTOR_PROFILE, CODEX_FULL_ACCESS_PROFILE } from "../.pi/lib/project-boundary.mjs";
 import { readCodexPeerMessages } from "../.pi/lib/codex-collaboration.mjs";
+import { readRuntimeSnapshot, resolveResearchRuntime } from "../.pi/lib/research-runtime.mjs";
+import { selectRuntimeSubagent } from "../.pi/lib/runtime-subagents.mjs";
+
 import { settleCodexExternalRun } from "../.pi/lib/codex-resources.mjs";
 import {
 	RESEARCH_LEADER_ACTOR_ID,
@@ -53,6 +57,53 @@ import {
 	prepareCapabilityRequest,
 	resolveCapabilityContext,
 } from "../.pi/lib/host-capabilities.mjs";
+
+async function reusableCodexInRuntime(options) {
+	return selectRuntimeSubagent(await listCodexJobs(options), { ...options, backend: "codex", role: options.mode,
+		runtime: await resolveCodexWorkspaceIdentity(options.cwd) });
+}
+
+test("the subagent extension dispatches through Runtime and records participant replies, not lifecycle calls", () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-dispatch-extension-"));
+	try {
+		const cwd = join(root, "workspace"); mkdirSync(cwd);
+		const code = `
+			import assert from "node:assert/strict";
+			import extension from ${JSON.stringify(new URL("../.pi/extensions/codex-delegate.ts", import.meta.url).href)};
+			import { initializeResearchRuntime, readRuntimeSnapshot } from ${JSON.stringify(new URL("../.pi/lib/research-runtime.mjs", import.meta.url).href)};
+			import { waitForCodexJob } from ${JSON.stringify(new URL("../.pi/lib/codex-jobs.mjs", import.meta.url).href)};
+			import { defaultResearchPiConfig, researchPiEnvironment } from ${JSON.stringify(new URL("../.pi/lib/research-config.mjs", import.meta.url).href)};
+			Object.assign(process.env, researchPiEnvironment(defaultResearchPiConfig()));
+			const runtime = await initializeResearchRuntime(${JSON.stringify(cwd)}, {sessionId:"leader",branchAnchorId:"leaf"});
+			let tool; const handlers = new Map();
+			extension({ registerTool(t){tool=t}, registerCommand(){}, on(n,h){handlers.set(n,h)}, sendMessage(){} });
+			const ctx = {cwd:${JSON.stringify(cwd)},hasUI:false,isIdle:()=>false,sessionManager:{getSessionId:()=>"leader",getLeafId:()=>"leaf",getBranch:()=>[]}};
+			const call = (input) => tool.execute("synthetic", input, AbortSignal.timeout(10000), undefined, ctx);
+			try {
+				const input={action:"start",backend:"codex",role:"advisor",mission:"same-context",task:"inspect design",background:false};
+				const first=(await call(input)).details;
+				assert.equal(first.status,"completed");
+				assert.equal((await readRuntimeSnapshot(runtime)).messages.length,0);
+				process.env.RESEARCH_PI_SUBAGENT_ADVISOR_MODEL="gpt-6-astra";
+				const next=(await call({...input,task:"verify design"})).details;
+				assert.equal(next.continuationOf,first.id); assert.equal(next.actorId,first.actorId); assert.equal(next.model,first.model);
+				const fresh=(await call({...input,reuse:"never"})).details;
+				assert.notEqual(fresh.actorId,first.actorId);
+				const paused=(await call({...input,mission:"question",task:"ask the leader live"})).details;
+				assert.equal(paused.status,"input_required");
+				await call({action:"respond",jobId:paused.id,requestId:paused.pendingRequest.id,response:"Choose H1"});
+				const done=await waitForCodexJob(paused.id,{pollMs:30,signal:AbortSignal.timeout(6000)});
+				assert.equal(done.status,"completed");
+				const reply=(await readRuntimeSnapshot(runtime)).messages.find(m=>m.type==="reply");
+				assert.equal(reply.from,"research-leader"); assert.equal(reply.to,paused.actorId); assert.equal(reply.status,"delivered");
+			} finally {await handlers.get("session_shutdown")?.({},ctx);}
+		`;
+		const result = spawnSync(process.execPath, ["--input-type=module", "-e", code], { encoding: "utf8", timeout: 20000,
+			env: { ...process.env, RESEARCH_PI_DEV_MODE: "0", RESEARCH_PI_STATE_DIR: join(root, "state"),
+				RESEARCH_PI_RUNTIME_DIR: join(root, "runtime"), PI_CODEX_BIN: makeFakeCodex(root, 50) } });
+		assert.equal(result.status, 0, result.stderr || result.error?.message);
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test("terminal Codex jobs supersede unresolved request records without changing resolved history", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-codex-request-settlement-"));
@@ -1142,7 +1193,7 @@ test("mission routing reuses only the same mode and workspace", async () => {
 		assert.match(first.projectKey, /^project-/);
 		assert.match(first.workspaceKey, /^workspace-/);
 
-		const reusable = await findReusableCodexJob({
+		const reusable = await reusableCodexInRuntime({
 			cwd: workspace,
 			jobRoot,
 			mode: "executor",
@@ -1150,11 +1201,11 @@ test("mission routing reuses only the same mode and workspace", async () => {
 		});
 		assert.equal(reusable.id, first.id);
 		assert.equal(
-			await findReusableCodexJob({ cwd: workspace, jobRoot, mode: "advisor", mission: "R2a qualification" }),
+			await reusableCodexInRuntime({ cwd: workspace, jobRoot, mode: "advisor", mission: "R2a qualification" }),
 			null,
 		);
 		assert.equal(
-			await findReusableCodexJob({ cwd: otherWorkspace, jobRoot, mode: "executor", mission: "R2a qualification" }),
+			await reusableCodexInRuntime({ cwd: otherWorkspace, jobRoot, mode: "executor", mission: "R2a qualification" }),
 			null,
 		);
 
@@ -1225,14 +1276,14 @@ test("automatic Codex reuse stays on one research route while explicit continuat
 			researchTrackLabel: "route A",
 		});
 		const first = await waitForCodexJob(firstStart.id, { jobRoot });
-		assert.equal((await findReusableCodexJob({
+		assert.equal((await reusableCodexInRuntime({
 			cwd: workspace,
 			jobRoot,
 			mode: "advisor",
 			mission: "compare world-model objectives",
 			researchTrackRef: "transition:route-a",
 		})).id, first.id);
-		assert.equal(await findReusableCodexJob({
+		assert.equal(await reusableCodexInRuntime({
 			cwd: workspace,
 			jobRoot,
 			mode: "advisor",
@@ -1324,7 +1375,7 @@ test("sibling branches in one Pi session cannot observe or reuse each other's Co
 		assert.deepEqual(jobsA.map((job) => job.id), [jobA.id]);
 		assert.deepEqual(jobsB.map((job) => job.id), [jobB.id]);
 
-		const reusableA = await findReusableCodexJob({
+		const reusableA = await reusableCodexInRuntime({
 			cwd: workspace,
 			jobRoot,
 			mode: "advisor",
@@ -1397,7 +1448,7 @@ test("project Actor ownership survives Pi session rotation without crossing work
 		assert.equal(seenFromSessionB.leaderSessionId, "pi-session-a");
 		assert.equal(seenFromSessionB.leaderActorId, leaderActorId);
 		assert.equal(seenFromSessionB.actorId, actorId);
-		const reusable = await findReusableCodexJob({
+		const reusable = await reusableCodexInRuntime({
 			cwd: workspace,
 			jobRoot,
 			mode: "advisor",
@@ -1946,6 +1997,10 @@ test("independent executor processes discover peers and exchange messages throug
 		assert.equal(b.outgoing[0].status, "applied");
 		assert.equal(b.incoming[0].fromJobId, sender.id);
 		assert.equal(a.incoming[0].fromJobId, receiver.id);
+		const runtime = await resolveResearchRuntime(workspace, { runtimeRoot: join(jobRoot, "runtime") });
+		const snapshot = await readRuntimeSnapshot(runtime);
+		assert.equal(snapshot.messages.length, 2);
+		assert.ok(snapshot.messages.every((message) => message.status === "delivered"));
 		assert.equal(readdirSync(workspace).filter((name) => name.endsWith(".md")).length, 0);
 	} finally {
 		for (const job of jobs) await cancelCodexJob(job, { jobRoot }).catch(() => undefined);

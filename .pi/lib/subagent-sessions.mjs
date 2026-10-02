@@ -37,12 +37,18 @@ function publicJob(job) {
 		role: job.role,
 		mode: job.role,
 		mission: job.mission,
+		task: job.task,
 		model: job.model,
 		thinking: job.thinking,
 		reasoningEffort: job.thinking,
 		status: job.status,
+		reusable: job.closed !== true,
 		progress: job.progress,
 		cwd: job.cwd,
+		workspaceKey: job.workspaceKey,
+		projectKey: job.projectKey,
+		researchTrackRef: job.researchTrackRef,
+		activityPath: job.activityPath,
 		createdAt: job.createdAt,
 		startedAt: job.startedAt,
 		finishedAt: job.finishedAt,
@@ -154,15 +160,24 @@ export function createSubagentSessionManager(options = {}) {
 		for (const waiter of job.waiters.splice(0)) waiter(publicJob(job));
 	};
 
-	const beginTurn = async (job, body) => {
+	// Preserve provider event order even when an update writes the Runtime ledger.
+	const enqueue = (job, operation) => {
+		job.records = job.records.then(operation).catch((error) => settle(job, "failed", null, error.message));
+		return job.records;
+	};
+
+	const beginTurn = async (job, body, source = "research-leader", messageId = null) => {
 		job.turn += 1;
+		job.actionId = `action:${job.id}:turn-${job.turn}`;
 		job.status = "running";
 		job.startedAt ??= now();
 		job.finishedAt = null;
 		job.result = null;
 		job.error = null;
+		job.cancelling = false;
+		job.lastResponse = "";
 		job.progress = `turn ${job.turn} running`;
-		await emit(job, { type: "message", summary: compact(body, 300), source: "user" });
+		await emit(job, { type: "message", text: body, summary: compact(body, 300), source, messageId });
 		if (job.backend === "pi") {
 			writeRecord(job.child, { id: `prompt-${job.turn}`, type: "prompt", message: body });
 		} else {
@@ -186,23 +201,32 @@ export function createSubagentSessionManager(options = {}) {
 			buffer += chunk.toString();
 			const lines = buffer.split("\n");
 			buffer = lines.pop() ?? "";
-			for (const line of lines) void handlePiRecord(job, line);
+			for (const line of lines) void enqueue(job, () => handlePiRecord(job, line));
 		});
 		child.stderr.on("data", (chunk) => {
 			job.stderr = compact(`${job.stderr}\n${chunk}`, 8000);
 		});
-		child.on("error", (error) => void settle(job, "failed", null, error.message));
+		child.on("error", (error) => { job.closed = true; void enqueue(job, () => settle(job, "failed", null, error.message)); });
 		child.on("close", (code, signal) => {
-			if (buffer.trim()) void handlePiRecord(job, buffer);
-			if (!FINAL_STATUSES.has(job.status)) void settle(job, job.cancelling ? "cancelled" : "failed", null, `Pi runner exited (${code ?? "?"}${signal ? `, ${signal}` : ""})`);
+			job.closed = true;
+			void enqueue(job, async () => {
+				if (buffer.trim()) await handlePiRecord(job, buffer);
+				if (!FINAL_STATUSES.has(job.status)) await settle(job, job.cancelling ? "cancelled" : "failed", null, `Pi runner exited (${code ?? "?"}${signal ? `, ${signal}` : ""})`);
+			});
 		});
 		await beginTurn(job, task);
+		writeRecord(child, { id: "initial-state", type: "get_state" });
 	};
 
 	const handlePiRecord = async (job, line) => {
 		let record;
 		try { record = JSON.parse(line); } catch { return; }
-		if (record.type === "extension_ui_request") {
+		if (record.type === "response" && record.command === "get_state" && record.success) {
+			const model = record.data?.model;
+			if (job.model === "inherit" && model?.id) job.model = model.provider ? `${model.provider}/${model.id}` : model.id;
+			if (job.thinking === "inherit" && record.data?.thinkingLevel) job.thinking = record.data.thinkingLevel;
+			await emit(job, { type: "progress", summary: "runner model settings resolved" });
+		} else if (record.type === "extension_ui_request") {
 			if (["select", "confirm", "input", "editor"].includes(record.method) && record.id) {
 				writeRecord(job.child, { type: "extension_ui_response", id: record.id, cancelled: true });
 				job.progress = `${record.method} request declined; interactive approvals stay with the Leader`;
@@ -216,7 +240,10 @@ export function createSubagentSessionManager(options = {}) {
 			await emit(job, { type: record.isError ? "error" : "tool", summary: job.progress, tool: record.toolName ?? null });
 		} else if (record.type === "message_end") {
 			const text = assistantText(record.message);
-			if (text) job.lastResponse = text;
+			if (text) {
+				job.lastResponse = text;
+				await emit(job, { type: "assistant", text, summary: compact(text, 300) });
+			}
 			if (record.message?.model && job.model === "inherit") job.model = record.message.model;
 		} else if (record.type === "agent_settled") {
 			if (job.cancelling) await settle(job, "cancelled", null, "cancelled by user");
@@ -240,15 +267,18 @@ export function createSubagentSessionManager(options = {}) {
 			buffer += chunk.toString();
 			const lines = buffer.split("\n");
 			buffer = lines.pop() ?? "";
-			for (const line of lines) void handleAntigravityRecord(job, line);
+			for (const line of lines) void enqueue(job, () => handleAntigravityRecord(job, line));
 		});
 		child.stderr.on("data", (chunk) => {
 			job.stderr = compact(`${job.stderr}\n${chunk}`, 8000);
 		});
-		child.on("error", (error) => void settle(job, "failed", null, error.message));
+		child.on("error", (error) => { job.closed = true; void enqueue(job, () => settle(job, "failed", null, error.message)); });
 		child.on("close", (code, signal) => {
-			if (buffer.trim()) void handleAntigravityRecord(job, buffer);
-			if (!FINAL_STATUSES.has(job.status)) void settle(job, job.cancelling ? "cancelled" : "failed", null, `Antigravity runner exited (${code ?? "?"}${signal ? `, ${signal}` : ""})`);
+			job.closed = true;
+			void enqueue(job, async () => {
+				if (buffer.trim()) await handleAntigravityRecord(job, buffer);
+				if (!FINAL_STATUSES.has(job.status)) await settle(job, job.cancelling ? "cancelled" : "failed", null, `Antigravity runner exited (${code ?? "?"}${signal ? `, ${signal}` : ""})`);
+			});
 		});
 		await beginTurn(job, `${job.systemPrompt}\n\nTask: ${task}`);
 	};
@@ -282,10 +312,6 @@ export function createSubagentSessionManager(options = {}) {
 		else if (result.status === "WAITING") await settle(job, "input_required", { summary: String(result.response ?? "").trim() }, result.error ?? null);
 		else if (["CANCELED", "INTERRUPTED"].includes(result.status)) await settle(job, "cancelled", null, result.error ?? result.status);
 		else await settle(job, "failed", null, result.error ?? `Antigravity ended with ${result.status ?? "ERROR"}`);
-		if (job.pending.length && job.status !== "failed" && job.status !== "cancelled") {
-			const next = job.pending.shift();
-			await beginTurn(job, next.body);
-		}
 	};
 
 	const start = async (input) => {
@@ -293,16 +319,22 @@ export function createSubagentSessionManager(options = {}) {
 		const backend = String(input.backend ?? "").toLowerCase();
 		if (!BACKENDS.has(backend)) throw new Error(`Unsupported process subagent backend: ${backend}`);
 		const id = input.id ?? createJobId(backend);
+		if (actorJobs.has(input.actorId)) throw new Error("This Actor already has a session; continue it instead of starting another process");
 		const job = {
 			id,
-			actionId: input.actionId ?? `action:${id}`,
+			actionId: input.actionId ?? `action:${id}:turn-1`,
 			actorId: input.actorId,
 			backend,
 			role: input.role ?? "general",
 			mission: input.mission ?? null,
+			task: input.task,
 			model: input.model ?? "inherit",
 			thinking: input.thinking ?? "inherit",
 			cwd: resolve(input.cwd),
+			workspaceKey: input.workspaceKey ?? null,
+			projectKey: input.projectKey ?? null,
+			researchTrackRef: input.researchTrackRef ?? "project:initial",
+			activityPath: input.activityPath ?? null,
 			systemPrompt: input.systemPrompt,
 			status: "starting",
 			progress: "starting runner",
@@ -313,7 +345,7 @@ export function createSubagentSessionManager(options = {}) {
 			result: null,
 			error: null,
 			events: [],
-			pending: [],
+			records: Promise.resolve(),
 			waiters: [],
 			stderr: "",
 			cancelling: false,
@@ -342,10 +374,13 @@ export function createSubagentSessionManager(options = {}) {
 		return id ? get(id) : null;
 	};
 
-	const send = async (actorId, message) => {
-		const id = actorJobs.get(actorId);
+	const send = async (actorId, message, { jobId } = {}) => {
+		const id = jobId ?? actorJobs.get(actorId);
 		const job = id ? jobs.get(id) : null;
 		if (!job) return { status: "queued", detail: `No live ${actorId} session is attached` };
+		if (job.actorId !== actorId) throw new Error("The job does not belong to this Actor");
+		if (job.closed) return { status: "queued", detail: "The backend process has closed; start a new subagent" };
+		if (job.status === "cancelling") return { status: "queued", detail: "Waiting for cancellation to settle" };
 		const body = String(message?.body ?? message ?? "").trim();
 		if (!body) throw new Error("Subagent message body is required");
 		if (job.backend === "pi") {
@@ -354,19 +389,28 @@ export function createSubagentSessionManager(options = {}) {
 				// matching Runtime's direct-message semantics without creating a
 				// second queued turn whose lifecycle would be ambiguous here.
 				writeRecord(job.child, { type: "steer", message: body });
-				await emit(job, { type: "message", source: "user", summary: compact(body, 300) });
+				await emit(job, { type: "message", source: message.from ?? "user", messageId: message.id, text: body, summary: compact(body, 300) });
 				return { status: "delivered", detail: `delivered to active Pi Actor ${actorId}` };
 			}
-			await beginTurn(job, body);
+			await beginTurn(job, body, message.from ?? "user", message.id);
 			return { status: "delivered", detail: `resumed Pi Actor ${actorId}` };
 		}
 		if (job.status === "running" || job.status === "starting") {
-			job.pending.push({ body });
-			await emit(job, { type: "message", source: "user", summary: `queued: ${compact(body, 280)}` });
-			return { status: "delivered", detail: `queued for Antigravity Actor ${actorId}; stream-json accepts the next turn after the current result` };
+			return { status: "queued", detail: `waiting in Runtime for Antigravity Actor ${actorId}; the next turn starts after the current result` };
 		}
-		await beginTurn(job, body);
+		await beginTurn(job, body, message.from ?? "user", message.id);
 		return { status: "delivered", detail: `resumed Antigravity Actor ${actorId}` };
+	};
+
+	const resume = async (id, input) => {
+		const job = jobs.get(id);
+		if (!job || job.closed) throw new Error("The backend process is no longer available; start a new subagent");
+		if ((input.model && input.model !== job.model) || (input.thinking && input.thinking !== job.thinking)) {
+			throw new Error("A live Pi/Antigravity session keeps its model settings; use reuse=never to choose another model or thinking level");
+		}
+		job.researchTrackRef = input.researchTrackRef ?? job.researchTrackRef;
+		await send(job.actorId, { body: input.followUp, from: "research-leader" }, { jobId: id });
+		return publicJob(job);
 	};
 
 	const cancel = async (id) => {
@@ -418,6 +462,7 @@ export function createSubagentSessionManager(options = {}) {
 		start,
 		get,
 		getByActor,
+		resume,
 		list: (backend) => [...jobs.values()].filter((job) => !backend || job.backend === backend).map(publicJob),
 		send,
 		cancel,

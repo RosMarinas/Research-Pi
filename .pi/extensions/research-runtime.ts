@@ -24,8 +24,6 @@ import {
 } from "../lib/project-view.mjs";
 import { RESEARCH_HARD_COMPACT_TOKENS, RESEARCH_SOFT_COMPACT_TOKENS } from "../lib/research-compact.mjs";
 import {
-	getSubagentRuntimeAdapter,
-	getSubagentWatchAdapter,
 	registerRuntimeUiAdapter,
 } from "../lib/research-runtime-adapters.mjs";
 import { buildRuntimeBoardModel } from "../lib/runtime-board.mjs";
@@ -38,6 +36,8 @@ import {
 } from "../lib/runtime-dock-ui.mjs";
 import { resolveResearchPiPaths } from "../lib/runtime-paths.mjs";
 import { createRuntimeMailboxWatcher } from "../lib/runtime-mailbox-watch.mjs";
+import { deliverSubagentMessage, drainSubagentMailbox } from "../lib/runtime-subagents.mjs";
+import { openSubagentWatch } from "../lib/subagent-watch-ui.mjs";
 import {
 	RESEARCH_LEADER_ACTOR_ID,
 	RUNTIME_EVENT_ENTRY_KIND,
@@ -691,12 +691,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		);
 		if (result === "view") ctx.ui.notify(latestProjectView ? renderProjectView(latestProjectView, { includeDirectedMessages: !isAnalysisSession() }) : "", "info");
 		else if (result && typeof result === "object" && result.action === "watch") {
-			const snapshot = await readRuntimeSnapshot(await getRuntime(ctx));
-			const actor = resolveRuntimeActor(snapshot, result.selector);
-			const backend = runtimeActorBackend(actor);
-			const watch = backend ? getSubagentWatchAdapter(backend) : undefined;
-			if (watch) await watch.open(ctx, result.selector);
-			else ctx.ui.notify(`${backend ?? actor.kind} Watch adapter is not loaded.`, "warning");
+			await openSubagentWatch(ctx, result.selector);
 		}
 	};
 
@@ -822,13 +817,14 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		const sessionId = ctx.sessionManager.getSessionId();
 		const attachment = runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID, sessionId);
 		if (!attachment) return null;
+		const subagentDeliveries = await drainSubagentMailbox(activeRuntime, ctx);
 		const open = unconsumedRuntimeMessages(snapshot, {
 			to: RESEARCH_LEADER_ACTOR_ID,
 			forSessionId: sessionId,
 			forAttachmentEpoch: attachment.epoch,
 		});
-		if (!open.length) return 0;
-		return await deliverOpenLeaderMessages(activeRuntime, snapshot, ctx, options);
+		if (!open.length) return subagentDeliveries;
+		return subagentDeliveries + await deliverOpenLeaderMessages(activeRuntime, snapshot, ctx, options);
 	};
 
 	const runtimeMailboxWatcher = createRuntimeMailboxWatcher({
@@ -871,9 +867,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		}
 		const backend = runtimeActorBackend(actor);
 		if (backend) {
-			const adapter = getSubagentRuntimeAdapter(backend);
-			if (!adapter) return { status: "queued", detail: `${backend} Runtime adapter is not loaded` };
-			return await adapter.dispatch({ runtime: activeRuntime, actor, message, preempt: options.preempt === true, ctx });
+			return await deliverSubagentMessage(activeRuntime, message, ctx);
 		}
 		return { status: "queued", detail: `${actor.label} has no live Provider adapter` };
 	};
@@ -1701,6 +1695,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 					from: USER_ACTOR_ID,
 					to: actor.id,
 					body,
+					metadata: { workspaceKey: activeRuntime.workspaceKey },
 				});
 				const result = await dispatchMessage(activeRuntime, message, actor, ctx);
 				if (result.status === "delivered" && !result.settledByDelivery) await settleRuntimeMessage(activeRuntime, message.id, "delivered", {
@@ -1734,6 +1729,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 					from: USER_ACTOR_ID,
 					to: actor.id,
 					body,
+					metadata: { workspaceKey: activeRuntime.workspaceKey, preempt },
 				});
 				const result = await dispatchMessage(activeRuntime, message, actor, ctx, { preempt });
 				if (result.status === "delivered" && !result.settledByDelivery) await settleRuntimeMessage(activeRuntime, message.id, "delivered", {

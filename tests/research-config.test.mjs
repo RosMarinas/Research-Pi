@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -13,10 +13,48 @@ import {
 	researchPiCredentialEnvironmentNames,
 	researchPiDeepSeekSearchEnabled,
 	researchPiEnvironment,
+	RESEARCH_PI_DEFAULT_CONFIG_PATH,
 	resolveResearchPiConfig,
 	writeResearchPiAgentConfig,
 	writeResearchPiConfig,
 } from "../.pi/lib/research-config.mjs";
+
+test("bundled defaults remain readable by loaded pre-cleanup validators without reviving the retired tail setting", () => {
+	const bundled = JSON.parse(readFileSync(RESEARCH_PI_DEFAULT_CONFIG_PATH, "utf8"));
+	// Already-running pre-cleanup modules re-read this file on every request
+	// and require a non-empty positive-integer array before merging user config.
+	const tail = bundled.research.compaction.recentTailTokens;
+	assert.ok(Array.isArray(tail) && tail.length > 0, "loaded validators require recentTailTokens in the raw defaults");
+	assert.ok(tail.every((value) => Number.isInteger(value) && value > 0));
+	const current = defaultResearchPiConfig();
+	assert.equal(Object.hasOwn(current.research.compaction, "recentTailTokens"), false);
+	assert.equal(Object.hasOwn(resolveResearchPiConfig(bundled).research.compaction, "recentTailTokens"), false);
+	assert.equal(Object.hasOwn(researchPiEnvironment(current), "RESEARCH_PI_COMPACT_RECENT_TAIL_TOKENS"), false);
+});
+
+test("a loaded config reader keeps its bundled defaults snapshot while user settings remain live", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-config-upgrade-"));
+	try {
+		const library = join(root, "lib", "research-config.mjs");
+		const defaultsPath = join(root, "config.defaults.json");
+		const configPath = join(root, "config.json");
+		mkdirSync(join(root, "lib"));
+		copyFileSync(new URL("../.pi/lib/research-config.mjs", import.meta.url), library);
+		copyFileSync(RESEARCH_PI_DEFAULT_CONFIG_PATH, defaultsPath);
+		writeFileSync(configPath, JSON.stringify({ ui: { density: "compact" } }));
+		const reader = await import(pathToFileURL(library).href);
+		const before = reader.readResearchPiConfig(configPath);
+		// Simulate updating the checkout while this reader is still in memory.
+		writeFileSync(defaultsPath, JSON.stringify({ ...before, version: before.version + 1 }));
+		assert.deepEqual(reader.readResearchPiConfig(configPath), before);
+		writeFileSync(configPath, JSON.stringify({ ui: { density: "balanced" } }));
+		assert.equal(reader.readResearchPiConfig(configPath).ui.density, "balanced");
+		reader.defaultResearchPiConfig().subagents.general.model = "caller-local-change";
+		assert.equal(reader.defaultResearchPiConfig().subagents.general.model, before.subagents.general.model);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
 
 test("Research Pi config owns research runtime settings, not the Leader model catalog", () => {
 	const config = defaultResearchPiConfig();
@@ -278,6 +316,12 @@ test("/config keeps Research Pi themes while exposing Pi Core model commands", a
 		assert.match(notices.at(-1), /\/model/);
 		assert.match(notices.at(-1), /\/scoped-models/);
 		assert.equal(autocompleteFactory, undefined);
+		const visited = [], choices = ["Models and roles", undefined, "Current configuration", undefined];
+		ctx.ui.select = async (title, items) => { visited.push(title); const choice = choices.shift(); if (choice) assert.ok(items.includes(choice)); return choice; };
+		await commands.get("config").handler("", ctx);
+		assert.equal(visited.length, 4);
+		assert.match(visited[1], /Models/);
+		assert.equal(visited[2], visited[0], "Esc in the model submenu returns to Config");
 		await commands.get("config").handler("theme research-graphite", ctx);
 		assert.equal(selectedTheme, "research-graphite");
 		assert.equal(readResearchPiConfig(configPath).pi.settings.theme, "research-graphite");

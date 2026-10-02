@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { collaborateWithCodexPeers, formatPeerMessage, readCodexPeerMessages } from "../.pi/lib/codex-collaboration.mjs";
 import { resolveCodexWorkspaceIdentity } from "../.pi/lib/codex-jobs.mjs";
+import { readRuntimeSnapshot, resolveResearchRuntime } from "../.pi/lib/research-runtime.mjs";
 import { listCodexExternalRuns, registerCodexExternalRun, releaseCodexResources, reserveCodexResources, settleCodexExternalRun } from "../.pi/lib/codex-resources.mjs";
 
 const id = (suffix) => `codex-2026-10-02T00-00-00-000Z-${suffix}`;
@@ -31,6 +32,13 @@ test("peer messages are directed, bounded, attributed by the host, and distingui
 		assert.equal(incoming[0].fromJobId, source.id);
 		assert.match(formatPeerMessage(incoming[0]), /not a Leader instruction/);
 		assert.equal(incoming[0].status, "pending");
+		const runtime = await resolveResearchRuntime(cwd, { runtimeRoot: join(jobRoot, "runtime") });
+		const snapshot = await readRuntimeSnapshot(runtime);
+		const message = snapshot.messages.find((item) => item.id === receipt.messageId);
+		assert.equal(message.status, "queued");
+		assert.equal(message.metadata.transport, "codex_peer");
+		assert.equal(snapshot.actors.find((actor) => actor.id === message.from).metadata.latestJobId, source.id);
+		assert.equal(snapshot.actors.find((actor) => actor.id === message.to).metadata.latestJobId, target.id);
 		await assert.rejects(collaborateWithCodexPeers(source.id, { action: "send", targetJobId: target.id, message: "x".repeat(2001) }, { jobRoot }), /1–2000/);
 		await assert.rejects(collaborateWithCodexPeers(source.id, { action: "send", targetJobId: source.id, message: "self" }, { jobRoot }), /another executor/);
 		save(jobRoot, { ...target, status: "completed" });

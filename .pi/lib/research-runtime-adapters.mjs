@@ -1,5 +1,4 @@
 const subagentAdapters = new Map();
-const subagentWatchAdapters = new Map();
 let runtimeUiAdapter;
 let hostCapabilityUiAdapter;
 
@@ -15,22 +14,6 @@ export function registerSubagentRuntimeAdapter(backend, adapter) {
 
 export function getSubagentRuntimeAdapter(backend) {
 	return subagentAdapters.get(normalizeBackend(backend));
-}
-
-export function listSubagentRuntimeAdapters() {
-	return [...subagentAdapters.entries()].map(([backend, adapter]) => ({ backend, adapter }));
-}
-
-export function registerSubagentWatchAdapter(backend, adapter) {
-	subagentWatchAdapters.set(normalizeBackend(backend), adapter);
-}
-
-export function getSubagentWatchAdapter(backend) {
-	return subagentWatchAdapters.get(normalizeBackend(backend));
-}
-
-export function listSubagentWatchAdapters() {
-	return [...subagentWatchAdapters.entries()].map(([backend, adapter]) => ({ backend, adapter }));
 }
 
 export function registerRuntimeUiAdapter(adapter) {

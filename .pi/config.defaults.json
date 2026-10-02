@@ -61,6 +61,7 @@
     "compaction": {
       "softTokens": 368640,
       "hardTokens": 393216,
+      "recentTailTokens": [24576, 32768, 40960],
       "summaryTargetTokens": 8192,
       "summaryMaxTokens": 16384
     },

@@ -181,6 +181,10 @@ export function compactCodexAuditEvent(message, options = {}) {
 
 	const params = message.params ?? {};
 	const item = params.item ?? {};
+	if (method === "item/completed" && item.type === "agentMessage" && typeof item.text === "string") {
+		const text = SENSITIVE_TEXT.test(item.text) ? "[protected content]" : item.text.slice(0, 16000);
+		return { ...activityBase(message, options.timestamp), category: "assistant", text, summary: "Assistant message", phase: "completed" };
+	}
 	const summary = describeCodexNotification(message);
 	if (!summary) return null;
 	const base = activityBase(message, options.timestamp);
@@ -266,6 +270,7 @@ export function projectCodexActivityUpdate(message, options = {}) {
 	if (message?.method !== "item/started" && message?.method !== "item/completed") return null;
 	const record = compactCodexAuditEvent(message, options);
 	if (!record?.summary || !record?.category) return null;
+	if (record.category === "assistant") return null; // Visible text is not a job-state transition.
 	const at = record.timestamp ?? options.timestamp ?? now();
 	return {
 		phase: record.phase,

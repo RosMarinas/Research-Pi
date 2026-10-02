@@ -268,6 +268,10 @@ async function spawnCore(argv) {
 
 async function main() {
 	const argv = process.argv.slice(2);
+	if (argv[0] === "watch") {
+		const { runSubagentWatch } = await import("../.pi/lib/subagent-watch-ui.mjs");
+		return await runSubagentWatch(argv.slice(1), paths);
+	}
 	if (argv[0] === "setup") return setup();
 	if (argv[0] === "config") return configCommand(argv.slice(1));
 	if (argv[0] === "analysis") return analysisCommand(argv.slice(1));

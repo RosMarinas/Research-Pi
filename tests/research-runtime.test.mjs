@@ -3,7 +3,8 @@ import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFile
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { getRuntimeUiAdapter } from "../.pi/lib/research-runtime-adapters.mjs";
+import { getRuntimeUiAdapter, registerSubagentRuntimeAdapter } from "../.pi/lib/research-runtime-adapters.mjs";
+import { queueSubagentMessage } from "../.pi/lib/runtime-subagents.mjs";
 import { acknowledgeDirectCodexTerminalResult } from "../.pi/extensions/codex-delegate.ts";
 import researchRuntimeExtension, {
 	analysisSessionToolBlockReason,
@@ -32,6 +33,7 @@ import {
 	initializeResearchRuntime,
 	pendingRuntimeMessages,
 	readRuntimeSnapshot,
+	registerSubagentRuntimeJob,
 	reconcileCodexRuntimeAsks,
 	recordRuntimeEvidence,
 	recordResearchTransition,
@@ -791,6 +793,15 @@ test("ordinary Leader claim starts the mailbox watcher immediately", async () =>
 		});
 		await new Promise((resolve) => setTimeout(resolve, RUNTIME_TEST_WATCH_SETTLE_MS));
 		assert.equal(sent.filter((item) => item.message?.details?.messageId === "msg-after-ordinary-claim").length, 1);
+		const accepted = [];
+		registerSubagentRuntimeAdapter("pi", { dispatch: async ({ message }) => { accepted.push(message); return { status: "delivered" }; } });
+		await registerSubagentRuntimeJob(runtime, { id: "pi-synthetic", actorId: "pi:direct-user", backend: "pi", role: "general",
+			status: "running", cwd: workspace, workspaceKey: runtime.workspaceKey });
+		const userMessage = await queueSubagentMessage(runtime, { actorId: "pi:direct-user", body: "Direct correction from another terminal" });
+		await waitUntil(async () => (await readRuntimeSnapshot(runtime)).messages.find((message) => message.id === userMessage.id)?.status === "delivered");
+		assert.equal(accepted.length, 1);
+		assert.equal(accepted[0].from, "user");
+		assert.equal(sent.length, 1, "a direct User-to-subagent message must not create a Leader model turn");
 		await handlers.get("session_shutdown")({ type: "session_shutdown" }, ctx);
 	} finally {
 		if (previousRoot === undefined) delete process.env.RESEARCH_PI_RUNTIME_DIR;

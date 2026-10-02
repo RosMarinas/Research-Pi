@@ -107,6 +107,8 @@ executor 的 job 先记录 `intent_recorded`，在 App Server `turn/start` 前�
 
 ## 4. 通信如何发生
 
+这里的通信仅指 User、Leader、Analysis、Subagent 之间的消息；启动、查询、等待、取消、reconcile、内部工具与 host capability 执行仍是工具/API，不需要包成消息。Runtime 负责上下文选择和消息回执，各 backend 保留原生投递通道。连贯性由 Leader 判断：同一 mission 默认继续，独立任务用另一 mission 或 `reuse=never`，显式 `jobId` 可指定既有 Actor。
+
 ### 4.1 正常委派和结果
 
 ```mermaid
@@ -224,6 +226,8 @@ exact workspaceKey/root               文件与副作用边界，不可跨 workt
 ```
 
 Runtime mailbox 会保存消息正文，因此不要在这些命令中输入 API key、私钥或其他凭据。
+
+`/watch` 现在统一提供当前终端切换和新终端选项；独立 shell 使用 `pi watch --workspace /path/to/project`。顶部必须包含 backend、role、model、thinking；输入以 User 身份直达选中 Actor。测试时分别检查：普通消息、待答问题的 `/reply`、Tab 切换 Actor、Esc 返回 Leader，以及关闭观察窗口不会停止任务。Pi/Antigravity 只复用仍存活的 runner；Antigravity 忙时消息留在 Runtime，结果到达后再投递，不维护第二份待发队列。
 
 `/runtime` 默认打开只读 Project Board。四个分页分别显示研究/记忆概览、稳定 Actor 与最新 Action、未消费 mailbox、当前 Leader attachment 与显式 handoff。面板只在打开和按 `r` 时读取既有投影，不写 heartbeat、不把展示内容加入模型上下文，也不把 Research Leader 从另一 Session attach 回当前窗口；持续执行细节仍由 `/watch` 展示。
 

@@ -1188,6 +1188,9 @@ export async function registerSubagentRuntimeJob(runtime, job) {
 		thinking,
 		metadata: {
 			backend,
+			cwd: job.cwd ?? null,
+			workspaceKey: job.workspaceKey ?? null,
+			activityPath: job.activityPath ?? null,
 			mission: job.mission ?? null,
 			missionKey: job.missionKey ?? null,
 			role,
@@ -1210,6 +1213,10 @@ export async function registerSubagentRuntimeJob(runtime, job) {
 		externalId: job.id,
 		metadata: {
 			backend,
+			cwd: job.cwd ?? null,
+			workspaceKey: job.workspaceKey ?? null,
+			activityPath: job.activityPath ?? null,
+			turn: job.turn ?? null,
 			role,
 			threadId: job.threadId ?? null,
 			backendSessionId: job.backendSessionId ?? job.threadId ?? job.conversationId ?? job.sessionId ?? null,

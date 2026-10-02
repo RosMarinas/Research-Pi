@@ -141,8 +141,15 @@ export function validateResearchPiConfig(config) {
 	return config;
 }
 
+// Pin bundled defaults to the loaded code, not each provider request: a live
+// process can outlast an update to its checkout. User config remains live-read.
+// Migration strips the raw defaults' compatibility-only recentTailTokens field.
+const BUNDLED_DEFAULT_CONFIG = validateResearchPiConfig(
+	migrateLegacyConfig(JSON.parse(readFileSync(RESEARCH_PI_DEFAULT_CONFIG_PATH, "utf8"))).migrated,
+);
+
 export function defaultResearchPiConfig() {
-	return validateResearchPiConfig(JSON.parse(readFileSync(RESEARCH_PI_DEFAULT_CONFIG_PATH, "utf8")));
+	return clone(BUNDLED_DEFAULT_CONFIG);
 }
 
 function migrateLegacyConfig(input = {}) {

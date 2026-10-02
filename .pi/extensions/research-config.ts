@@ -211,13 +211,8 @@ export function registerModelSettings(pi: ExtensionAPI, {
 			const parts = args.trim().split(/\s+/).filter(Boolean);
 			if (parts.length > 3) throw new Error("Usage: /models <role> <backend|model|thinking|speed> <value>");
 			if (parts[0] === "show" || (!parts.length && !ctx.hasUI)) { ctx.ui.notify(summary(ctx), "info"); return; }
-			let role = parts[0] as Role | undefined;
-			if (!role) {
-				const rows = summary(ctx).split("\n").slice(0, roleNames.length);
-				const selected = await ctx.ui.select("Research Pi / Models — select a role", rows);
-				if (!selected) return;
-				role = roleNames[rows.indexOf(selected)];
-			}
+			if (!parts.length) { await showModelPanel(ctx); return; }
+			const role = parts[0] as Role;
 			if (!roleNames.includes(role!)) throw new Error("Usage: /models [show|leader|advisor|executor|environment|general|internal] [backend|model|thinking|speed] [value]");
 			let field = parts[1];
 			if (!field) {
@@ -252,6 +247,38 @@ export function registerModelSettings(pi: ExtensionAPI, {
 			}
 			if (value) await apply(role!, field, value, ctx, catalog);
 		} catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); }
+	};
+	const editRole = async (role: Role, ctx: ExtensionContext) => {
+		while (true) {
+			const config = load();
+			const runner = role === "leader"
+				? { model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "not selected", thinking: pi.getThinkingLevel(), speed: config.pi.modelServiceTiers[`${ctx.model?.provider}/${ctx.model?.id}`] ?? "inherit" }
+				: role === "internal" ? config.codex.internalSubagent : config.subagents[role];
+			const fields = role === "leader" ? ["model", "thinking", ...(ctx.model && supportsLeaderSpeed(ctx.model) ? ["speed"] : [])]
+				: role === "internal" ? ["model", "thinking"] : ["backend", "model", "thinking", ...(runner.backend === "codex" ? ["speed"] : [])];
+			const rows = fields.map((field) => `${field}  ·  ${runner[field] ?? "inherit"}`);
+			const chosen = await ctx.ui.select(`Config / Models / ${role} — Esc: back`, rows);
+			if (!chosen) return;
+			await handler(`${role} ${fields[rows.indexOf(chosen)]}`, ctx);
+		}
+	};
+	const showModelPanel = async (ctx: ExtensionContext) => {
+		while (true) {
+			const choice = await ctx.ui.select("Config / Models — Esc: back", ["Leader", "Subagents", "Codex internal subagents"]);
+			if (!choice) return;
+			if (choice === "Leader") await editRole("leader", ctx);
+			else if (choice === "Codex internal subagents") await editRole("internal", ctx);
+			else {
+				while (true) {
+					const config = load();
+					const roles = ["advisor", "executor", "environment", "general"] as const;
+					const rows = roles.map((role) => { const r = config.subagents[role]; return `${role}  ·  ${r.backend} / ${r.model} / ${r.thinking}`; });
+					const selected = await ctx.ui.select("Config / Models / Subagents — Esc: back", rows);
+					if (!selected) break;
+					await editRole(roles[rows.indexOf(selected)], ctx);
+				}
+			}
+		}
 	};
 	pi.registerCommand("models", { description: "Configure Leader and subagent backend, model, thinking and speed", handler });
 	pi.registerCommand("fast", {
@@ -326,7 +353,7 @@ export default function researchConfigExtension(pi: ExtensionAPI) {
 	};
 
 	pi.registerCommand("config", {
-		description: "Research Pi settings; /config models opens unified model settings, /login stays native",
+		description: "Open hierarchical settings: models and roles, appearance, configuration",
 		handler: async (args, ctx) => {
 			try {
 				const input = args.trim();
@@ -335,7 +362,17 @@ export default function researchConfigExtension(pi: ExtensionAPI) {
 					return;
 				}
 				if (!input) {
-					ctx.ui.notify(`${researchPiConfigSummary(loadConfig(), configPath)}\n\nUse /login for provider authentication, /model to switch, /scoped-models to curate cycling, and /settings for thinking defaults.`, "info");
+					if (!ctx.hasUI || typeof ctx.ui.select !== "function") {
+						ctx.ui.notify(`${researchPiConfigSummary(loadConfig(), configPath)}\n\nUse /login, /model, /scoped-models and /settings for native Pi settings.`, "info");
+						return;
+					}
+					while (true) {
+						const choice = await ctx.ui.select("Research Pi / Config — Esc: close", ["Models and roles", "Appearance", "Current configuration", "Configuration path"]);
+						if (!choice) break;
+						if (choice === "Models and roles") await modelSettings("", ctx);
+						else if (choice === "Appearance") await showThemeSelector(ctx);
+						else ctx.ui.notify(choice === "Configuration path" ? configPath : researchPiConfigSummary(loadConfig(), configPath), "info");
+					}
 					return;
 				}
 				const [action, name] = input.split(/\s+/, 2);
