@@ -94,6 +94,9 @@ test("Tailnet integration inspects the signed-in account and refuses occupied or
 	await assert.rejects(inspectWebTailnet({ run }), /already has/);
 	serve = { Foreground: { "another-session": { TCP: { 8443: { HTTPS: true } } } } };
 	await assert.rejects(inspectWebTailnet({ run }), /already has/);
+	const available = await inspectWebTailnet({ run, chooseAvailable: true });
+	assert.equal(available.httpsPort, 8444);
+	assert.equal(available.origin, "https://desktop.test.ts.net:8444");
 	assert.equal(parseWebOptions(["--web-tailscale", "--web-port", "9000", "--workspace", "/tmp"]).port, 9000);
 	assert.deepEqual(parseWebOptions(["--web", "--analysis"]).args, ["--analysis"]);
 	assert.throws(() => parseWebOptions(["--web-port", "0"]), /requires a port/);

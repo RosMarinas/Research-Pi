@@ -76,6 +76,9 @@ test("Research Pi config owns research runtime settings, not the Leader model ca
 	assert.equal(config.research.compaction.summaryMaxTokens, 16 * 1024);
 	assert.equal(config.research.search.model, "deepseek-v4-flash");
 	assert.equal(config.ui.density, "balanced");
+	assert.deepEqual(config.ui.web, { mode: "off", persistent: true, port: 0, httpsPort: 8443 });
+	assert.throws(() => resolveResearchPiConfig({ ui: { web: { mode: "public" } } }), /ui.web/);
+	assert.throws(() => resolveResearchPiConfig({ ui: { web: { httpsPort: 0 } } }), /ui.web.httpsPort/);
 	assert.equal(config.pi.settings.theme, "research-pi");
 });
 

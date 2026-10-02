@@ -17,6 +17,7 @@ node_modules
 .pi/codex/
 .pi/subagents/
 .pi/runtime/
+.pi/web/
 .pi/capabilities/
 .pi/agent/*
 .pi/config.json

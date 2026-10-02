@@ -101,7 +101,17 @@
       "properties": {
         "density": { "enum": ["compact", "balanced"] },
         "runtimeStrip": { "enum": ["auto", "always", "off"] },
-        "configPanelRows": { "type": "integer", "minimum": 3, "maximum": 20 }
+        "configPanelRows": { "type": "integer", "minimum": 3, "maximum": 20 },
+        "web": {
+          "type": "object",
+          "properties": {
+            "mode": { "enum": ["off", "local", "tailscale"] },
+            "persistent": { "type": "boolean" },
+            "port": { "type": "integer", "minimum": 0, "maximum": 65535 },
+            "httpsPort": { "type": "integer", "minimum": 1, "maximum": 65535 }
+          },
+          "additionalProperties": false
+        }
       },
       "additionalProperties": false
     },

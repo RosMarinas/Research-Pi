@@ -242,7 +242,8 @@ Pi Core's `dark` and `light` remain available. Persist a Research Pi theme with 
   "ui": {
     "density": "balanced",
     "runtimeStrip": "auto",
-    "configPanelRows": 8
+    "configPanelRows": 8,
+    "web": { "mode": "off", "persistent": true, "port": 0, "httpsPort": 8443 }
   },
   "diagnostics": {
     "trace": false,
@@ -252,6 +253,8 @@ Pi Core's `dark` and `light` remain available. Persist a Research Pi theme with 
 ```
 
 `runtimeStrip=auto` shows the Project/Actor dock only while work is active or Runtime state needs attention; `always` keeps an idle view and `off` removes it. `density` is `compact` or `balanced`.
+
+`pi config web tailscale` opts into automatic private Web access on interactive launches; `local` limits it to this computer and `off` disables automatic access. With `persistent=true`, each workspace has one background Pi and desktop terminals attach to it. Closing a terminal leaves it running; `pi web status` prints the private pairing URL and `pi web stop` stops it. Port 0 lets the OS choose a local port; HTTPS starts at `httpsPort` and skips occupied Serve/Funnel ports unless explicitly pinned on the command line. See [mobile access](mobile-web.md).
 
 `diagnostics.trace` enables sensitive prompt/tool tracing. `diagnostics.codexSqliteLogs` restores Codex App Server TRACE/DEBUG SQLite logging. Both default to false because they can cause substantial disk writes and should only be enabled briefly for diagnosis.
 

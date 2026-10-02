@@ -196,9 +196,12 @@ Original code and documentation are [MIT licensed](LICENSE). Third-party compone
 
 ## Mobile browser access
 
-Start a new session with:
+Save the preference once, then normal interactive launches start or attach to the workspace's resident Pi:
 
-    pi --workspace /path/to/project --web-tailscale
+    pi config web tailscale
+    pi --workspace /path/to/project
+
+Closing the desktop terminal leaves Pi running; Ctrl+] detaches explicitly. Use pi web start for a background launch, pi web status for its pairing URL, and pi web stop to stop it. These commands accept --workspace. Use --no-web for one ordinary launch; noninteractive model calls do not automatically start Web access.
 
 Open the private pairing link printed in the terminal from a phone on the existing Tailscale account. Chat, Actors, and Project Runtime have mobile views; the shared terminal preserves native dialogs, custom TUI components, commands, and session navigation. Browser disconnects do not stop the agent. Use --web for localhost only.
 

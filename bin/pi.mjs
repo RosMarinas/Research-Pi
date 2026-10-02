@@ -168,6 +168,14 @@ function configCommand(argv) {
 		}
 		return;
 	}
+	if (action === "web") {
+		const mode = argv[1];
+		if (mode === undefined) { process.stdout.write(JSON.stringify(config.ui.web, null, 2) + "\n"); return; }
+		if (!["off", "local", "tailscale"].includes(mode)) throw new Error("Usage: pi config web [off|local|tailscale]");
+		writeResearchPiConfig(paths.configPath, { ...config, ui: { ...config.ui, web: { ...config.ui.web, mode } } });
+		process.stdout.write("Web default: " + mode + ". Applies when starting pi; --no-web disables it for one launch.\n");
+		return;
+	}
 	if (action === "theme") {
 		const name = argv[1];
 		if (!name || !RESEARCH_PI_THEME_CHOICES.some((theme) => theme.name === name)) {
@@ -181,7 +189,7 @@ function configCommand(argv) {
 		process.stdout.write(`${researchPiConfigSummary(next, paths.configPath)}\n`);
 		return;
 	}
-	throw new Error("Usage: pi config [show|path|themes|theme <name>]");
+	throw new Error("Usage: pi config [show|path|themes|theme <name>|web [off|local|tailscale]]");
 }
 
 async function readStandardInput() {
@@ -210,11 +218,13 @@ async function analysisCommand(argv) {
 	throw new Error("Usage: pi analysis [context|send <message>]");
 }
 
-async function spawnCore(argv) {
+async function spawnCore(argv, { background = false } = {}) {
 	const baseConfig = prepareConfig();
-	const web = parseWebOptions(argv);
+	if (background && baseConfig.ui.web.mode === "off" && !argv.includes("--web-tailscale") && !argv.includes("--web")) argv = [...argv, "--web"];
+	const web = parseWebOptions(argv, baseConfig.ui.web, { interactive: background || Boolean(process.stdin.isTTY && process.stdout.isTTY) });
 	const { workspace, args: userArgs, config, sessionMode, fullAccess } = takeResearchOptions(web.args, baseConfig);
-	if (web.enabled && userArgs.some((arg) => ["--mode", "--print", "-p"].includes(arg))) throw new Error("--web requires interactive TUI mode");
+	if (web.enabled && userArgs.some((arg) => ["--mode", "--print", "-p"].includes(arg) || arg.startsWith("--mode="))) throw new Error("--web requires interactive TUI mode");
+	if (background && !web.enabled) throw new Error("pi web start requires Web mode");
 	writeResearchPiAgentConfig(paths.agentDir, config, { coreVersion });
 	if (!existsSync(workspace)) throw new Error(`Research workspace does not exist: ${workspace}`);
 	loadConfigurationEnvironment();
@@ -228,6 +238,7 @@ async function spawnCore(argv) {
 	process.env.PI_CODING_AGENT_DIR = paths.agentDir;
 	process.env.RESEARCH_PI_CONFIG_DIR = paths.configRoot;
 	process.env.RESEARCH_PI_STATE_DIR = paths.stateRoot;
+	process.env.RESEARCH_PI_SESSION_DIR = paths.sessionDir;
 	process.env.RESEARCH_PI_HARNESS_ROOT = packageRoot;
 	process.env.RESEARCH_PI_CORE_CLI = coreCli;
 	if (sessionMode === "analysis") process.env.RESEARCH_PI_INITIAL_SESSION_MODE = "analysis";
@@ -256,6 +267,20 @@ async function spawnCore(argv) {
 	args.push(...userArgs);
 
 	if (web.enabled && !informational) {
+		if (web.persistent || background) {
+			if (!background && (!process.stdin.isTTY || !process.stdout.isTTY)) throw new Error("Use pi web start to launch a resident Pi without an interactive terminal");
+			const { ensureResidentWeb } = await import("../.pi/lib/web-resident.mjs");
+			const record = await ensureResidentWeb({ stateRoot: paths.stateRoot, cwd: workspace, env: process.env, packageRoot,
+				executable: process.execPath, args: [coreCli, ...args], options: web,
+				hasSessionOptions: userArgs.length > 0 || argv.includes("--analysis") || argv.includes("--full-access") });
+			printWebRecord(record);
+			if (!background) {
+				process.stderr.write("Ctrl+] detaches this terminal; Pi and Web stay running. Use pi web stop to stop the service.\n");
+				const { attachResidentTerminal } = await import("../.pi/lib/web-terminal.mjs");
+				await attachResidentTerminal(record);
+			}
+			return;
+		}
 		const { launchResearchWeb } = await import("../.pi/lib/web-launcher.mjs");
 		process.exitCode = await launchResearchWeb({ executable: process.execPath, args: [coreCli, ...args], cwd: workspace, env: process.env, packageRoot, options: web });
 		return;
@@ -276,8 +301,27 @@ async function spawnCore(argv) {
 	});
 }
 
+function printWebRecord(record) {
+	process.stdout.write(`Research Pi Web: ${record.url}\nWorkspace: ${record.state?.cwd ?? record.cwd}\nProcess: ${record.pid}\nState: ${record.state?.ready ? record.state.idle ? "idle" : "running" : "starting"}\n`);
+}
+
+async function webCommand(argv) {
+	const action = argv[0] ?? "status";
+	if (action === "start") return await spawnCore(argv.slice(1), { background: true });
+	if (!["status", "stop"].includes(action)) throw new Error("Usage: pi web [start|status|stop] [--workspace <path>]");
+	const { workspace, args } = takeResearchOptions(argv.slice(1), {});
+	if (args.some((arg) => arg !== "--json")) throw new Error("Usage: pi web [status|stop] [--workspace <path>] [--json]");
+	const { findResidentWeb, stopResidentWeb } = await import("../.pi/lib/web-resident.mjs");
+	const record = await findResidentWeb(paths.stateRoot, workspace);
+	if (action === "stop" && record) { await stopResidentWeb(record); process.stdout.write("Stopped resident Pi for " + workspace + "\n"); return; }
+	if (args.includes("--json")) process.stdout.write(JSON.stringify(record, null, 2) + "\n");
+	else if (record) printWebRecord(record);
+	else process.stdout.write("No resident Pi for " + workspace + "\n");
+}
+
 async function main() {
 	const argv = process.argv.slice(2);
+	if (argv[0] === "web") return await webCommand(argv.slice(1));
 	if (argv[0] === "watch") {
 		const { runSubagentWatch } = await import("../.pi/lib/subagent-watch-ui.mjs");
 		return await runSubagentWatch(argv.slice(1), paths);

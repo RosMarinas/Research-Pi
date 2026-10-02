@@ -135,6 +135,13 @@ export function validateResearchPiConfig(config) {
 	if (!Number.isInteger(config.ui?.configPanelRows) || config.ui.configPanelRows < 3 || config.ui.configPanelRows > 20) {
 		throw new Error("ui.configPanelRows must be between 3 and 20");
 	}
+	const web = config.ui?.web;
+	if (!plainObject(web) || !["off", "local", "tailscale"].includes(web.mode) || typeof web.persistent !== "boolean") {
+		throw new Error("ui.web requires mode off, local, or tailscale and a boolean persistent setting");
+	}
+	for (const [key, minimum] of [["port", 0], ["httpsPort", 1]]) {
+		if (!Number.isInteger(web[key]) || web[key] < minimum || web[key] > 65535) throw new Error(`ui.web.${key} must be a port from ${minimum} to 65535`);
+	}
 	if (typeof config.diagnostics?.trace !== "boolean" || typeof config.diagnostics?.codexSqliteLogs !== "boolean") {
 		throw new Error("diagnostics.trace and diagnostics.codexSqliteLogs must be boolean");
 	}
@@ -358,5 +365,6 @@ export function researchPiConfigSummary(config, path) {
 		`Research compact: ${config.research.compaction.softTokens}/${config.research.compaction.hardTokens} tokens · summary target/max ${config.research.compaction.summaryTargetTokens}/${config.research.compaction.summaryMaxTokens}`,
 		`Search: ${config.research.search.enabled} · deepseek/${config.research.search.model} · max ${config.research.search.maxSources} sources`,
 		`UI: theme ${config.pi.settings.theme ?? "research-pi"} · ${config.ui.density} · runtime strip ${config.ui.runtimeStrip}`,
+		`Web: ${config.ui.web.mode} · ${config.ui.web.persistent ? "resident" : "foreground"}`,
 	].join("\n");
 }

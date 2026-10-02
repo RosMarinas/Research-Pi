@@ -106,9 +106,12 @@ Codex 保留持久任务、同工作区并发、写入范围协调及恢复机�
 
 ## 手机网页访问
 
-计划启动新会话时使用：
+保存一次偏好，以后正常运行 pi 就会自动开启私有网页，并连接该项目的同一个常驻 Pi：
 
-    pi --workspace /path/to/project --web-tailscale
+    pi config web tailscale
+    pi --workspace /path/to/project
+
+关闭电脑终端后后台任务继续；Ctrl+] 可主动断开终端。pi web start 可仅在后台启动，pi web status 查看配对网址，pi web stop 停止服务。这三个命令也支持 --workspace。单次关闭网页可用 --no-web，非交互模型调用不自动开启网页。
 
 手机连接当前 Tailscale 网络，打开终端提供的私有配对链接。对话、Agents、Project Runtime 使用手机界面；完整终端视图保留 /config、/watch、/login、会话树和自定义 TUI。电脑与手机共用同一个 Pi 进程，关闭网页不会停止任务。
 

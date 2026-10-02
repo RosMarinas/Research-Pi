@@ -23,6 +23,7 @@ const forbidden = files.filter((path) =>
 assert.deepEqual(forbidden, [], `Sensitive runtime files would enter the npm package: ${forbidden.join(", ")}`);
 assert.ok(!files.includes(".pi/config.json"), "The user-local Research Pi config would enter the npm package");
 assert.ok(!files.some((path) => path.startsWith(".pi/agent/")), "Generated Pi agent state would enter the npm package");
+assert.ok(!files.some((path) => path.startsWith(".pi/web/")), "Private resident Web access records would enter the npm package");
 for (const required of [
 	"README.md",
 	"web/index.html",
@@ -32,6 +33,9 @@ for (const required of [
 	".pi/extensions/research-web.ts",
 	".pi/lib/web-server.mjs",
 	".pi/lib/web-launcher.mjs",
+	".pi/lib/web-resident.mjs",
+	".pi/lib/web-host.mjs",
+	".pi/lib/web-terminal.mjs",
 	".pi/lib/web-dialogs.mjs",
 	".pi/lib/web-tailscale.mjs",
 	"scripts/prepare-web.mjs",

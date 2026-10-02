@@ -82,7 +82,8 @@
   "ui": {
     "density": "balanced",
     "runtimeStrip": "auto",
-    "configPanelRows": 8
+    "configPanelRows": 8,
+    "web": { "mode": "off", "persistent": true, "port": 0, "httpsPort": 8443 }
   },
   "diagnostics": {
     "trace": false,

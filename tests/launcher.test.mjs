@@ -54,9 +54,13 @@ test("packaged launcher creates external config/state and runs the pinned core",
 		const version = spawnSync(process.execPath, [launcher, "--version"], { encoding: "utf8", env: environment });
 		assert.equal(version.status, 0, version.stderr);
 		assert.equal(version.stdout.trim(), "1.0.0");
+		const configureWeb = spawnSync(process.execPath, [launcher, "config", "web", "tailscale"], { encoding: "utf8", env: environment });
+		assert.equal(configureWeb.status, 0, configureWeb.stderr);
+		assert.equal(JSON.parse(readFileSync(configPath, "utf8")).ui.web.mode, "tailscale");
 		const fullAccessVersion = spawnSync(process.execPath, [launcher, "--full-access", "--version"], { encoding: "utf8", env: environment });
 		assert.equal(fullAccessVersion.status, 0, fullAccessVersion.stderr);
 		assert.equal(fullAccessVersion.stdout.trim(), "1.0.0");
+		assert.equal(existsSync(join(state, "web")), false, "Informational commands must not start a resident host");
 		assert.equal(existsSync(join(state, "agent", "models.json")), false);
 	} finally {
 		rmSync(temp, { recursive: true, force: true });

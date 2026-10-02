@@ -15,7 +15,7 @@ const env = { ...cleanEnv, RESEARCH_PI_DEV_MODE: "0", RESEARCH_PI_CONFIG_DIR: jo
 	RESEARCH_PI_STATE_DIR: join(temporary, "state") };
 delete env.RESEARCH_PI_CONFIG_FILE;
 delete env.PI_CODING_AGENT_DIR;
-const child = spawn(process.execPath, [join(root, "bin/pi.mjs"), "--workspace", workspace, process.argv.includes("--tailscale") ? "--web-tailscale" : "--web", "--web-port", process.env.WEB_DEMO_PORT ?? "8791",
+const child = spawn(process.execPath, [join(root, "bin/pi.mjs"), "--workspace", workspace, process.argv.includes("--tailscale") ? "--web-tailscale" : "--web", "--web-foreground", "--web-port", process.env.WEB_DEMO_PORT ?? "8791",
 	"--provider", "web-demo", "--model", "demo", "--thinking", "low",
 	"-e", join(root, "tests/fixtures/web-demo.ts")], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
 let output = "";
