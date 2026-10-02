@@ -202,4 +202,6 @@ Start a new session with:
 
 Open the private pairing link printed in the terminal from a phone on the existing Tailscale account. Chat, Actors, and Project Runtime have mobile views; the shared terminal preserves native dialogs, custom TUI components, commands, and session navigation. Browser disconnects do not stop the agent. Use --web for localhost only.
 
+Keep using your usual pi launcher. For a source checkout, run-pi.sh preserves authentication and sessions in that checkout's .pi directory; add --resume to select an existing conversation. Direct node bin/pi.mjs defaults to separate user-level storage, which can appear as missing login and session history.
+
 The gateway requires authentication and exact same-origin requests. Tailscale access uses the currently signed-in identity without replacing existing Serve endpoints. An already running Pi process needs a planned restart into Web mode. See [mobile access and security](docs/mobile-web.md).

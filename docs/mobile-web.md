@@ -8,13 +8,19 @@ Web 模式为一个 Research Pi 进程提供两种界面：手机对话页和完
 
     npm run setup:web
 
-在计划启动的新会话中启用手机访问：
+使用平时运行 Research Pi 的同一个入口，在计划启动时添加 Web 参数：
 
     pi --workspace /path/to/research-project --web-tailscale
 
-如果正在试用隔离 worktree 中的版本，直接运行该 worktree 的入口；现有全局 pi 命令仍指向原版本：
+从源码目录使用开发版时，入口是 run-pi.sh：
 
-    node /path/to/worktree/bin/pi.mjs --workspace /path/to/research-project --web-tailscale
+    /path/to/Research-Pi/run-pi.sh --workspace /path/to/research-project --web-tailscale
+
+恢复已有对话时，在相同入口后加 --resume，然后在终端视图选择会话：
+
+    pi --workspace /path/to/research-project --web-tailscale --resume
+
+**不要用直接运行 node bin/pi.mjs 来替代已有的 run-pi.sh 入口。** run-pi.sh 设置 RESEARCH_PI_DEV_MODE=1，读取源码目录的 .env、.pi/agent 和 .pi/sessions。直接运行 Node 入口且未设置该变量时，默认读取用户级配置与状态目录；这可能表现为需要重新 /login、/resume 列表为空。隔离 worktree 的 run-pi.sh 也使用该 worktree 自己的 .pi，不会自动共享原 checkout 的登录或历史。--workspace 选择研究项目，不选择认证和会话存储目录。
 
 默认本地端口 8787，Tailscale HTTPS 端口 8443。更换端口：
 
@@ -27,6 +33,8 @@ Web 模式为一个 Research Pi 进程提供两种界面：手机对话页和完
 终端会打印含临时配对令牌的链接，以及权限为 0600 的 access.json 路径。手机连接当前已登录的同一 Tailscale 账号/网络，打开该链接；也可以打开不含片段的基础地址后手动输入令牌。登录后网页清除 URL 片段，认证使用 HttpOnly、SameSite=Strict cookie，HTTPS 下设置 Secure。令牌和 cookie 随进程退出失效，不要把配对链接发给其他人。
 
 当前会话内的 /web 会把链接重新打印到启动终端，不会写入模型对话。多个标签页访问相同进程；不会创建新 Leader。
+
+网页的令牌配对与模型 /login 是两件事：配对保护远程控制入口，模型认证沿用电脑上这次 Pi 启动所选择的 agent 目录。已有模型登录有效时，手机无需另做一次模型登录。若同时出现重新登录和历史列表为空，先核对启动入口与数据目录，不要复制凭据或搬移会话来掩盖目录差异。
 
 **此入口必须在 Pi 启动时启用。** 它不能接管一个先前未启用 Web 的任意终端进程。不要为访问正在工作的 Leader 同时恢复同一 Session；在下一次计划启动时使用新入口。有活跃任务时不要通过 /reload 升级 Core 或重启 Pi。
 
