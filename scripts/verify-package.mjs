@@ -63,6 +63,8 @@ for (const required of [
 	".pi/lib/research-config.mjs",
 	".pi/lib/subagent-sessions.mjs",
 	".pi/lib/model-settings.mjs",
+	".pi/lib/model-context.mjs",
+	".pi/lib/model-picker.mjs",
 	".pi/lib/research-analysis-bridge.mjs",
 	"docs/configuration.md",
 	".pi/extensions/project-boundary.ts",

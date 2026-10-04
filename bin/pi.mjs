@@ -149,7 +149,7 @@ function expandUserPath(path) {
 	return resolve(path);
 }
 
-function configCommand(argv) {
+async function configCommand(argv) {
 	const config = prepareConfig();
 	loadConfigurationEnvironment();
 	const action = argv[0] ?? "show";
@@ -176,6 +176,16 @@ function configCommand(argv) {
 		process.stdout.write("Web default: " + mode + ". Applies when starting pi; --no-web disables it for one launch.\n");
 		return;
 	}
+	if (action === "context") {
+		const [id, value] = argv.slice(1);
+		const split = id?.indexOf("/") ?? -1;
+		if (split < 1 || split === id.length - 1 || value === undefined || argv.length !== 3) throw new Error("Usage: pi config context <provider/model> <tokens|872k|1m|inherit>");
+		const { parseContextWindow, setModelContextWindow } = await import("../.pi/lib/model-context.mjs");
+		const tokens = parseContextWindow(value);
+		await setModelContextWindow(paths.agentDir, id.slice(0, split), id.slice(split + 1), tokens);
+		process.stdout.write(`${id}: context ${tokens ?? "catalog default"}. Saved in native models.json; refresh /model or start a new Pi to apply.\n`);
+		return;
+	}
 	if (action === "theme") {
 		const name = argv[1];
 		if (!name || !RESEARCH_PI_THEME_CHOICES.some((theme) => theme.name === name)) {
@@ -189,7 +199,7 @@ function configCommand(argv) {
 		process.stdout.write(`${researchPiConfigSummary(next, paths.configPath)}\n`);
 		return;
 	}
-	throw new Error("Usage: pi config [show|path|themes|theme <name>|web [off|local|tailscale]]");
+	throw new Error("Usage: pi config [show|path|themes|theme <name>|web [off|local|tailscale]|context <provider/model> <tokens|inherit>]");
 }
 
 async function readStandardInput() {

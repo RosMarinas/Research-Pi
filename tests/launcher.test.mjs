@@ -51,6 +51,7 @@ test("packaged launcher creates external config/state and runs the pinned core",
 		assert.equal(Object.hasOwn(settings, "enabledModels"), false);
 		assert.equal(existsSync(join(state, "agent", "models.json")), false);
 
+
 		const version = spawnSync(process.execPath, [launcher, "--version"], { encoding: "utf8", env: environment });
 		assert.equal(version.status, 0, version.stderr);
 		assert.equal(version.stdout.trim(), "1.0.0");
@@ -62,6 +63,12 @@ test("packaged launcher creates external config/state and runs the pinned core",
 		assert.equal(fullAccessVersion.stdout.trim(), "1.0.0");
 		assert.equal(existsSync(join(state, "web")), false, "Informational commands must not start a resident host");
 		assert.equal(existsSync(join(state, "agent", "models.json")), false);
+		const context = spawnSync(process.execPath, [launcher, "config", "context", "openai-codex/gpt-6.1-sol", "872k"], { encoding: "utf8", env: environment });
+		assert.equal(context.status, 0, context.stderr);
+		assert.equal(JSON.parse(readFileSync(join(state, "agent", "models.json"), "utf8")).providers["openai-codex"].modelOverrides["gpt-6.1-sol"].contextWindow, 872000);
+		const resetContext = spawnSync(process.execPath, [launcher, "config", "context", "openai-codex/gpt-6.1-sol", "inherit"], { encoding: "utf8", env: environment });
+		assert.equal(resetContext.status, 0, resetContext.stderr);
+		assert.equal(JSON.parse(readFileSync(join(state, "agent", "models.json"), "utf8")).providers["openai-codex"], undefined);
 	} finally {
 		rmSync(temp, { recursive: true, force: true });
 	}

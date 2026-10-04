@@ -16,6 +16,8 @@ import {
 	writeResearchPiConfig,
 } from "../lib/research-config.mjs";
 import { resolveResearchPiPaths } from "../lib/runtime-paths.mjs";
+import { parseContextWindow, setModelContextWindow } from "../lib/model-context.mjs";
+import { selectModel } from "../lib/model-picker.mjs";
 import {
 	codexReasoningChoices,
 	codexSupportsFast,
@@ -82,7 +84,7 @@ export function registerModelSettings(pi: ExtensionAPI, {
 		const config = load();
 		const modelId = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "not selected";
 		return [
-			`Leader: ${modelId} · ${pi.getThinkingLevel()} · speed ${config.pi.modelServiceTiers[modelId] ?? "inherit"}`,
+			`Leader: ${modelId} · ${pi.getThinkingLevel()} · context ${ctx.model?.contextWindow ?? "unknown"} · speed ${config.pi.modelServiceTiers[modelId] ?? "inherit"}`,
 			...(["advisor", "executor", "environment", "general"] as const).map((role) => {
 				const runner = config.subagents[role];
 				return `${role}: ${runner.backend} · ${runner.model} · ${runner.thinking}${runner.speed ? ` · speed ${runner.speed}` : ""}`;
@@ -109,8 +111,14 @@ export function registerModelSettings(pi: ExtensionAPI, {
 		return await ctx.ui.confirm("Enable Fast?", "Fast uses additional quota (currently 2.5× included subscription usage; credits/PAYG 2×). Account/model eligibility still applies. It changes speed, not reasoning effort.");
 	};
 	const nativeModels = async (ctx: ExtensionContext) => {
-		await ctx.modelRegistry.refresh();
+		await ctx.modelRegistry.refresh({ allowNetwork: false });
 		return ctx.modelRegistry.getAvailable();
+	};
+	const contextModel = async (role: Role, ctx: ExtensionContext) => {
+		const runner = role === "leader" ? null : load().subagents[role];
+		if (role !== "leader" && runner?.backend !== "pi") throw new Error("Context controls are available for the Leader and Pi runners");
+		const id = !runner || runner.model === "inherit" ? ctx.model && `${ctx.model.provider}/${ctx.model.id}` : runner.model;
+		return (await nativeModels(ctx)).find((model) => `${model.provider}/${model.id}` === id);
 	};
 	const modelChoices = async (backend: string, ctx: ExtensionContext) => {
 		if (backend === "pi") return (await nativeModels(ctx)).map((model) => ({ model: `${model.provider}/${model.id}`, native: model }));
@@ -128,7 +136,18 @@ export function registerModelSettings(pi: ExtensionAPI, {
 	};
 	const apply = async (role: Role, field: string, value: string, ctx: ExtensionContext, catalog?: any[]) => {
 		const config = load();
-		if (!["backend", "model", "thinking", "speed"].includes(field)) throw new Error("Setting must be backend, model, thinking, or speed");
+		if (!["backend", "model", "thinking", "speed", "context"].includes(field)) throw new Error("Setting must be backend, model, thinking, speed, or context");
+		if (field === "context") {
+			const model = await contextModel(role, ctx);
+			if (!model) throw new Error("Select an authenticated Pi model first");
+			if (!ctx.isIdle()) throw new Error("Wait until the Leader is idle before changing context metadata");
+			await setModelContextWindow(agentDir, model.provider, model.id, parseContextWindow(value));
+			await ctx.modelRegistry.refresh({ allowNetwork: false });
+			const refreshed = ctx.modelRegistry.find(model.provider, model.id);
+			if (ctx.model?.provider === model.provider && ctx.model.id === model.id && refreshed && !await pi.setModel(refreshed)) throw new Error("Saved context override; reselect the model to apply it");
+			ctx.ui.notify(`${model.provider}/${model.id}: context ${refreshed?.contextWindow ?? value} tokens. Saved in native models.json; new Pi jobs share it. Server limits and compaction thresholds remain independently configured.`, "info");
+			return;
+		}
 		if (role === "leader") {
 			if (field === "backend") throw new Error("Leader provider is selected through its model; use /login and /models leader model");
 			if (!ctx.isIdle()) throw new Error("Wait until the Leader is idle before changing its model settings");
@@ -209,18 +228,18 @@ export function registerModelSettings(pi: ExtensionAPI, {
 	const handler = async (args: string, ctx: ExtensionContext) => {
 		try {
 			const parts = args.trim().split(/\s+/).filter(Boolean);
-			if (parts.length > 3) throw new Error("Usage: /models <role> <backend|model|thinking|speed> <value>");
+			if (parts.length > 3) throw new Error("Usage: /models <role> <backend|model|thinking|speed|context> <value>");
 			if (parts[0] === "show" || (!parts.length && !ctx.hasUI)) { ctx.ui.notify(summary(ctx), "info"); return; }
 			if (!parts.length) { await showModelPanel(ctx); return; }
 			const role = parts[0] as Role;
-			if (!roleNames.includes(role!)) throw new Error("Usage: /models [show|leader|advisor|executor|environment|general|internal] [backend|model|thinking|speed] [value]");
+			if (!roleNames.includes(role!)) throw new Error("Usage: /models [show|leader|advisor|executor|environment|general|internal] [backend|model|thinking|speed|context] [value]");
 			let field = parts[1];
 			if (!field) {
-				if (role === "leader") field = await ctx.ui.select(`${role}: setting`, ["model", "thinking", "speed"]);
+				if (role === "leader") field = await ctx.ui.select(`${role}: setting`, ["model", "thinking", "speed", "context"]);
 				else if (role === "internal") field = await ctx.ui.select(`${role}: setting`, ["model", "thinking"]);
 				else {
 					const runner = load().subagents[role!];
-					field = await ctx.ui.select(`${role}: setting`, ["backend", "model", "thinking", ...(runner.backend === "codex" ? ["speed"] : [])]);
+					field = await ctx.ui.select(`${role}: setting`, ["backend", "model", "thinking", ...(runner.backend === "codex" ? ["speed"] : runner.backend === "pi" ? ["context"] : [])]);
 				}
 			}
 			if (!field) return;
@@ -229,6 +248,13 @@ export function registerModelSettings(pi: ExtensionAPI, {
 			if (!value) {
 				const config = load();
 				let choices: string[];
+				if (field === "context") {
+					const model = await contextModel(role, ctx);
+					if (!model) throw new Error("Select an authenticated Pi model first");
+					value = await ctx.ui.input(`Context window: ${model.provider}/${model.id} (tokens; inherit resets catalog default)`, String(model.contextWindow));
+					if (value) await apply(role, field, value, ctx);
+					return;
+				}
 				if (field === "backend") choices = ["codex", "antigravity", "pi"];
 				else if (field === "speed") choices = ["inherit", "standard", "fast"];
 				else if (role === "leader") {
@@ -243,7 +269,9 @@ export function registerModelSettings(pi: ExtensionAPI, {
 					if (field === "model" && runner.backend !== "codex") choices.unshift("inherit");
 				}
 				if (!choices.length) throw new Error("No choices available; check the selected backend login");
-				value = await ctx.ui.select(`${role}: ${field}`, choices);
+				const runner = role === "leader" ? null : role === "internal" ? config.codex.internalSubagent : config.subagents[role];
+				value = field === "model" ? await selectModel(ctx, `${role}: model`, choices, role === "leader" ? ctx.model && `${ctx.model.provider}/${ctx.model.id}` : runner?.model)
+					: await ctx.ui.select(`${role}: ${field}`, choices);
 			}
 			if (value) await apply(role!, field, value, ctx, catalog);
 		} catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); }
@@ -254,9 +282,11 @@ export function registerModelSettings(pi: ExtensionAPI, {
 			const runner = role === "leader"
 				? { model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "not selected", thinking: pi.getThinkingLevel(), speed: config.pi.modelServiceTiers[`${ctx.model?.provider}/${ctx.model?.id}`] ?? "inherit" }
 				: role === "internal" ? config.codex.internalSubagent : config.subagents[role];
-			const fields = role === "leader" ? ["model", "thinking", ...(ctx.model && supportsLeaderSpeed(ctx.model) ? ["speed"] : [])]
-				: role === "internal" ? ["model", "thinking"] : ["backend", "model", "thinking", ...(runner.backend === "codex" ? ["speed"] : [])];
-			const rows = fields.map((field) => `${field}  ·  ${runner[field] ?? "inherit"}`);
+			const fields = role === "leader" ? ["model", "thinking", ...(ctx.model && supportsLeaderSpeed(ctx.model) ? ["speed"] : []), "context"]
+				: role === "internal" ? ["model", "thinking"] : ["backend", "model", "thinking", ...(runner.backend === "codex" ? ["speed"] : runner.backend === "pi" ? ["context"] : [])];
+			const effectiveModel = role === "leader" || runner.model === "inherit" ? ctx.model
+				: ctx.modelRegistry.getAvailable().find((model) => `${model.provider}/${model.id}` === runner.model);
+			const rows = fields.map((field) => `${field}  ·  ${field === "context" ? `${effectiveModel?.contextWindow ?? "unknown"} tokens` : runner[field] ?? "inherit"}`);
 			const chosen = await ctx.ui.select(`Config / Models / ${role} — Esc: back`, rows);
 			if (!chosen) return;
 			await handler(`${role} ${fields[rows.indexOf(chosen)]}`, ctx);
@@ -280,7 +310,7 @@ export function registerModelSettings(pi: ExtensionAPI, {
 			}
 		}
 	};
-	pi.registerCommand("models", { description: "Configure Leader and subagent backend, model, thinking and speed", handler });
+	pi.registerCommand("models", { description: "Configure Leader and subagent model, thinking, speed and Pi context window", handler });
 	pi.registerCommand("fast", {
 		description: "Configure GPT Leader Fast mode (extra quota): /fast [on|off|status|inherit]",
 		handler: async (args, ctx) => {

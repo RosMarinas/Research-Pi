@@ -83,7 +83,7 @@ For GPT subscription use, `/login openai-codex` keeps the existing Codex route. 
 }
 ```
 
-These values do not define or filter models. Research Pi never creates or overwrites native `models.json`.
+These values do not define or filter models. Research Pi preserves native `models.json`; explicit context edits merge only the selected model's `contextWindow` override.
 
 Research Pi explicitly loads `builtin:codemode` and `builtin:tool-search` because Pi 1.0's `--no-extensions` disables built-ins too. Codemode is enabled by default; the `on` mode retains direct tool calls as well. MCP and llama.cpp remain opt-in (`-e builtin:mcp` or `-e builtin:llama.cpp`). Analysis Sessions keep their read-only tool allowlist and do not expose codemode's model operations.
 
@@ -112,6 +112,22 @@ The defaults deliberately make Codex advisor/executor the main design, implement
 The Pi runner launches Pi Core in a separate RPC Session. It reuses the same Pi provider catalog and authentication directory as the Leader, while retaining an independent model, thinking level, conversation, and Runtime Actor. It loads the project boundary; any approval dialog that cannot be represented in the isolated RPC channel is declined and reported rather than hanging or silently widening authority. The Antigravity runner uses its documented [bidirectional streaming JSON protocol](https://antigravity.google/docs/cli/headless/) and keeps the same process for follow-up messages; launch `agy` interactively once for [first-time authentication](https://antigravity.google/docs/cli/install/). Because headless mode cannot display permission prompts, non-advisor Antigravity Actions auto-approve tools inside the CLI's explicit `--sandbox`; advisor remains plan mode without that override. Neither runner creates a handoff file; task context and later steering travel through their live message stream and the Runtime mailbox.
 
 ### Unified model settings
+
+Model choices use a searchable, scrolling list, including the full Pi provider catalog. Type a model name or provider to filter; use arrows and Enter to select, and Esc to return. The same picker works in the shared mobile terminal.
+
+Pi Core takes each model's context length from provider/catalog metadata. Users can override it in `<agentDir>/models.json` through `providers.<provider>.modelOverrides.<model>.contextWindow`. Research Pi exposes this native field in the Leader and Pi-runner settings menus:
+
+```text
+/models leader context 872k
+/models general context 1m
+/models leader context inherit
+```
+
+The field belongs to the selected **provider/model**, so every Pi role using that model shares the override. `inherit` removes this field and restores catalog metadata. An idle Leader applies its edit immediately; new Pi runners load it at startup. Existing running Actions keep their captured settings. Codex CLI and Antigravity runners use their own context configuration.
+
+Outside a session, use `pi config context openai-codex/gpt-6.1-sol 872k`, then refresh model selection or start Pi again. Values accept positive token counts, decimal `k`/`m`, or `inherit`. Existing provider authentication and other overrides are preserved.
+
+This changes Pi's context accounting, not the provider's server limit. OpenAI's public API documents [GPT-6.1 Sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol) and [GPT-6 Sol](https://developers.openai.com/api/docs/models/gpt-6-sol) with 1,050,000 context tokens and 128,000 maximum output tokens; this does not establish the corresponding Codex subscription route's accepted request length. Research Pi's separate soft/hard compaction thresholds still apply; increasing the model window does not increase those thresholds.
 
 Codex jobs are durable and may recover across Leader Sessions. Pi and Antigravity runners currently belong to the Pi process that started them: follow-up messages reuse their live backend Session, shutdown closes them, and a new Pi process does not automatically restore them. Runtime records remain inspectable. The shared interface does not extend Codex's scoped concurrency, resource scheduler, or host broker to the other backends.
 
