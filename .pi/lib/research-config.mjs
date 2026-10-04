@@ -110,6 +110,13 @@ export function validateResearchPiConfig(config) {
 	positiveInteger(compact.softTokens, "research.compaction.softTokens");
 	positiveInteger(compact.hardTokens, "research.compaction.hardTokens");
 	if (compact.softTokens >= compact.hardTokens) throw new Error("research.compaction.softTokens must be below hardTokens");
+	if (!plainObject(compact.modelOverrides)) throw new Error("research.compaction.modelOverrides must be an object");
+	for (const [model, thresholds] of Object.entries(compact.modelOverrides)) {
+		if (!plainObject(thresholds)) throw new Error(`Compaction override for ${model} must be an object`);
+		positiveInteger(thresholds.softTokens, `compaction ${model}.softTokens`);
+		positiveInteger(thresholds.hardTokens, `compaction ${model}.hardTokens`);
+		if (thresholds.softTokens >= thresholds.hardTokens) throw new Error(`Compaction ${model}.softTokens must be below hardTokens`);
+	}
 	positiveInteger(compact.summaryTargetTokens, "research.compaction.summaryTargetTokens");
 	positiveInteger(compact.summaryMaxTokens, "research.compaction.summaryMaxTokens");
 	if (compact.summaryTargetTokens >= compact.summaryMaxTokens) {

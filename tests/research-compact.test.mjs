@@ -264,32 +264,37 @@ test("short-context Leader models compact before their model window", () => {
 	assert.ok(hy3.softTokens < hy3.hardTokens);
 });
 
-test("large-context GPT uses 360k/384k without a hidden 75 percent soft cap", () => {
+test("large-context GPT uses 480k/512k without a hidden 75 percent soft cap", () => {
+	for (const id of ["gpt-6-sol", "gpt-5.6-sol", "gpt-6.1-sol", "gpt-6-astra"]) {
+		assert.deepEqual(researchCompactionThresholds({ provider: "openai-codex", id, contextWindow: 872000 }), { softTokens: 491520, hardTokens: 524288 });
+	}
+	assert.deepEqual(researchCompactionThresholds({ provider: "other", id: "gpt-6-sol", contextWindow: 872000 }), { softTokens: RESEARCH_SOFT_COMPACT_TOKENS, hardTokens: RESEARCH_HARD_COMPACT_TOKENS });
+	assert.ok(researchCompactionThresholds({ provider: "openai-codex", id: "gpt-6-sol", contextWindow: 272000 }).hardTokens < 272000);
 	const handlers = new Map();
-	let tokens = 360 * 1024 - 1;
+	let tokens = 480 * 1024 - 1;
 	let compactOptions;
 	const notices = [];
 	researchCompactionExtension({ on(name, handler) { handlers.set(name, handler); }, registerCommand() {} });
 	const ctx = {
-		model: { contextWindow: 1_050_000 }, hasUI: true,
+		model: { provider: "openai-codex", id: "gpt-6.1-sol", contextWindow: 872000 }, hasUI: true,
 		getContextUsage: () => ({ tokens }),
 		ui: { notify: (message, level) => notices.push({ message, level }) },
 		compact: (options) => { compactOptions = options; },
 	};
-	assert.deepEqual(researchCompactionThresholds(ctx.model), { softTokens: 368640, hardTokens: 393216 });
+	assert.deepEqual(researchCompactionThresholds(ctx.model), { softTokens: 491520, hardTokens: 524288 });
 	handlers.get("turn_end")({}, ctx);
 	handlers.get("agent_settled")({}, ctx);
-	assert.equal(compactOptions, undefined, "must not compact below 360k");
+	assert.equal(compactOptions, undefined, "must not compact below 480k");
 	assert.equal(notices.length, 0);
-	tokens = 360 * 1024;
+	tokens = 480 * 1024;
 	handlers.get("turn_end")({}, ctx);
 	assert.equal(notices[0].level, "info");
 	assert.equal(compactOptions, undefined, "do not interrupt the current run");
-	tokens = 384 * 1024;
+	tokens = 512 * 1024;
 	handlers.get("turn_end")({}, ctx);
 	assert.equal(notices[1].level, "warning");
 	handlers.get("agent_settled")({}, ctx);
-	assert.match(compactOptions.customInstructions, /hard compaction at 393216/);
+	assert.match(compactOptions.customInstructions, /hard compaction at 524288/);
 });
 
 function experimentEntry(id, parentId, validityJudgment) {

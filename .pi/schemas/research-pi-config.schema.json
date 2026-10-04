@@ -66,6 +66,18 @@
           "type": "object",
           "required": ["softTokens", "hardTokens", "summaryTargetTokens", "summaryMaxTokens"],
           "properties": {
+            "modelOverrides": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "required": ["softTokens", "hardTokens"],
+                "properties": {
+                  "softTokens": { "type": "integer", "minimum": 1 },
+                  "hardTokens": { "type": "integer", "minimum": 1 }
+                },
+                "additionalProperties": false
+              }
+            },
             "softTokens": { "type": "integer", "minimum": 1 },
             "hardTokens": { "type": "integer", "minimum": 1 },
             "recentTailTokens": {

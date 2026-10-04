@@ -6,7 +6,9 @@
     "settings": {
       "theme": "research-pi",
       "tuiMode": "regular",
-      "defaultTools": ["+codemode"],
+      "defaultTools": [
+        "+codemode"
+      ],
       "retry": {
         "enabled": true,
         "maxRetries": 2,
@@ -61,9 +63,31 @@
     "compaction": {
       "softTokens": 368640,
       "hardTokens": 393216,
-      "recentTailTokens": [24576, 32768, 40960],
+      "recentTailTokens": [
+        24576,
+        32768,
+        40960
+      ],
       "summaryTargetTokens": 8192,
-      "summaryMaxTokens": 16384
+      "summaryMaxTokens": 16384,
+      "modelOverrides": {
+        "gpt-6-sol": {
+          "softTokens": 491520,
+          "hardTokens": 524288
+        },
+        "gpt-5.6-sol": {
+          "softTokens": 491520,
+          "hardTokens": 524288
+        },
+        "gpt-6.1-sol": {
+          "softTokens": 491520,
+          "hardTokens": 524288
+        },
+        "gpt-6-astra": {
+          "softTokens": 491520,
+          "hardTokens": 524288
+        }
+      }
     },
     "search": {
       "enabled": "off",
@@ -83,7 +107,12 @@
     "density": "balanced",
     "runtimeStrip": "auto",
     "configPanelRows": 8,
-    "web": { "mode": "off", "persistent": true, "port": 0, "httpsPort": 8443 }
+    "web": {
+      "mode": "off",
+      "persistent": true,
+      "port": 0,
+      "httpsPort": 8443
+    }
   },
   "diagnostics": {
     "trace": false,

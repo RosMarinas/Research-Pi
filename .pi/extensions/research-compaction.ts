@@ -23,6 +23,10 @@ import {
 	selectResearchCompactionPolicy,
 } from "../lib/research-compact.mjs";
 import { readRuntimeSnapshot, resolveResearchRuntime, runtimeSessionInheritancePolicy } from "../lib/research-runtime.mjs";
+import { defaultResearchPiConfig, readResearchPiConfig } from "../lib/research-config.mjs";
+import { resolveResearchPiPaths } from "../lib/runtime-paths.mjs";
+
+const defaultCompaction = { ...defaultResearchPiConfig().research.compaction, softTokens: RESEARCH_SOFT_COMPACT_TOKENS, hardTokens: RESEARCH_HARD_COMPACT_TOKENS };
 
 function fileLists(fileOps: { read: Set<string>; written: Set<string>; edited: Set<string> }) {
 	const modified = new Set([...fileOps.written, ...fileOps.edited]);
@@ -33,21 +37,27 @@ function fileLists(fileOps: { read: Set<string>; written: Set<string>; edited: S
 }
 
 
-export function researchCompactionThresholds(model?: { contextWindow?: number } | null) {
+export function researchCompactionThresholds(model?: { contextWindow?: number; id?: string; provider?: string } | null, config = defaultCompaction) {
+	const override = ["openai", "openai-codex"].includes(model?.provider ?? "") && config.modelOverrides?.[model?.id ?? ""];
+	const soft = override?.softTokens ?? config.softTokens;
+	const hard = override?.hardTokens ?? config.hardTokens;
 	const contextWindow = Number(model?.contextWindow);
 	if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
-		return { softTokens: RESEARCH_SOFT_COMPACT_TOKENS, hardTokens: RESEARCH_HARD_COMPACT_TOKENS };
+		return { softTokens: soft, hardTokens: hard };
 	}
 	const reserved = Math.max(32 * 1024, Math.floor(contextWindow * 0.1));
 	const modelSafeHard = Math.max(64 * 1024, contextWindow - reserved);
-	const hardTokens = Math.min(RESEARCH_HARD_COMPACT_TOKENS, modelSafeHard);
+	const hardTokens = Math.min(hard, modelSafeHard);
 	// Scale the configured ratio only for smaller models. A fixed 75% cap would
 	// silently turn the requested 360k/384k thresholds into 288k/384k.
-	const softTokens = Math.min(RESEARCH_SOFT_COMPACT_TOKENS, Math.floor(hardTokens * RESEARCH_SOFT_COMPACT_TOKENS / RESEARCH_HARD_COMPACT_TOKENS));
+	const softTokens = Math.min(soft, Math.floor(hardTokens * soft / hard));
 	return { softTokens, hardTokens };
 }
 
 export default function (pi: ExtensionAPI) {
+	const compactConfig = process.env.RESEARCH_PI_HARNESS_ROOT
+		? readResearchPiConfig(resolveResearchPiPaths({ harnessRoot: process.env.RESEARCH_PI_HARNESS_ROOT }).configPath).research.compaction
+		: defaultCompaction;
 	let compactionRunning = false;
 	let scheduledCompaction: { trigger: "soft" | "hard"; tokens: number } | undefined;
 
@@ -63,7 +73,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("turn_end", (_event, ctx) => {
 		const usage = ctx.getContextUsage();
-		const thresholds = researchCompactionThresholds(ctx.model);
+		const thresholds = researchCompactionThresholds(ctx.model, compactConfig);
 		if (!usage || usage.tokens === null || usage.tokens < thresholds.softTokens || compactionRunning) return;
 
 		const trigger = usage.tokens >= thresholds.hardTokens ? "hard" : "soft";
@@ -109,6 +119,9 @@ export default function (pi: ExtensionAPI) {
 		// raw entries here would reintroduce omitted/replaced messages.
 		const preparation = event.preparation;
 		const policy = selectResearchCompactionPolicy(branchEntries, preparation.settings.keepRecentTokens);
+		const thresholds = researchCompactionThresholds(ctx.model, compactConfig);
+		policy.softTriggerTokens = thresholds.softTokens;
+		policy.hardTriggerTokens = thresholds.hardTokens;
 		const sessionId = ctx.sessionManager.getSessionId();
 		const sessionEvidence = collectResearchEvidence(branchEntries, sessionId, preparation.firstKeptEntryId, {
 			inheritancePolicy,

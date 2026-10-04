@@ -186,6 +186,8 @@ Ordinary questions, fixes, probes, and successful commands need no permanent mem
 
 ## Research compact and ProjectView
 
+GPT-6 Sol, GPT-5.6 Sol, GPT-6.1 Sol and GPT-6 Astra on Pi's OpenAI providers use soft/hard thresholds of **480k/512k** (491,520/524,288 tokens, following the existing 1024-token unit). These are `research.compaction.modelOverrides` entries keyed by model ID; other models retain the global defaults below. A smaller model window still caps both thresholds before the window is exhausted. `/reload` loads edited threshold settings for an idle Leader. This Research Pi scheduling policy does not change the independently managed Codex CLI compaction policy or Pi RPC runners that load only the boundary extension.
+
 ```json
 {
   "research": {
