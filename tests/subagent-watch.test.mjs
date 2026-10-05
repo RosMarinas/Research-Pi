@@ -7,7 +7,7 @@ import { initTheme } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import { initializeResearchRuntime, registerSubagentRuntimeJob, readRuntimeSnapshot } from "../.pi/lib/research-runtime.mjs";
 import { createSubagentWatchClient, openSubagentTerminal, subagentWatchTranscript } from "../.pi/lib/subagent-watch.mjs";
-import { SubagentWatchView } from "../.pi/lib/subagent-watch-ui.mjs";
+import { SubagentWatchView, openSubagentWatch } from "../.pi/lib/subagent-watch-ui.mjs";
 import { createSubagentActivityWriter } from "../.pi/lib/subagent-activity.mjs";
 
 test("a separate watch client observes the same Actor and queues User messages without claiming Leader ownership", async () => {
@@ -34,6 +34,13 @@ test("a separate watch client observes the same Actor and queues User messages w
 		assert.equal(snapshot.messages.at(-1).from, "user");
 		assert.equal(snapshot.messages.at(-1).to, job.actorId);
 		assert.equal(snapshot.messages.at(-1).status, "queued");
+		const previous = process.env.RESEARCH_PI_STATE_DIR;
+		try {
+			process.env.RESEARCH_PI_STATE_DIR = stateRoot;
+			let overlay;
+			await openSubagentWatch({ cwd, ui: { select: async () => "Switch in this terminal", notify: (message) => { throw new Error(message); }, custom: async (_factory, options) => { overlay = options; } } }, job.actorId);
+			assert.deepEqual(overlay, { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", anchor: "top-left" } });
+		} finally { if (previous === undefined) delete process.env.RESEARCH_PI_STATE_DIR; else process.env.RESEARCH_PI_STATE_DIR = previous; }
 	} finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -48,11 +55,19 @@ test("the full-terminal watch reuses Pi chat components, identifies the backend,
 	try {
 		await new Promise((done) => setImmediate(done));
 		const rows = ui.render(80);
+		assert.equal(rows.length, 30, "watch fits exactly within the terminal height");
 		assert.ok(rows.every((row) => visibleWidth(row) <= 80));
 		const text = stripTerminalSequences(rows.join("\n"));
 		assert.match(text, /pi · executor/);
 		assert.match(text, /provider\/model · thinking high/);
 		assert.match(text, /Validation passed/);
+		for (const width of [20, 37, 80, 120]) assert.ok(ui.render(width).every(row => visibleWidth(row) <= width));
+		ui.editor.setText("unsent draft"); ui.handleInput("\x04");
+		assert.equal(closed, false, "Ctrl+D with a draft must not leave the viewer");
+		ui.handleInput("\x03"); assert.equal(ui.editor.getText(), "");
+		ui.tui.terminal.rows = 8; ui.editor.setText("line\n".repeat(12));
+		assert.equal(ui.render(20).length, 8, "short phone viewport still fits a multiline editor");
+		ui.tui.terminal.rows = 30; ui.editor.setText("");
 		await ui.submit("/reply Continue the check");
 		assert.deepEqual(sent, [{ body: "Continue the check", type: "reply" }]);
 		ui.handleInput("\x1b");

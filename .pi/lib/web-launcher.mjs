@@ -7,6 +7,8 @@ import { randomUUID } from "node:crypto";
 import { createWebGateway } from "./web-server.mjs";
 import { inspectWebTailnet, startWebTailnet } from "./web-tailscale.mjs";
 import { createDesktopTerminal } from "./web-terminal.mjs";
+import { persistentWebToken } from "./web-token.mjs";
+import { residentTmux, residentControlDirectory } from "./web-tmux.mjs";
 
 const require = createRequire(import.meta.url);
 export function parseWebOptions(argv, defaults = {}, { interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY) } = {}) {
@@ -27,7 +29,7 @@ export function parseWebOptions(argv, defaults = {}, { interactive = Boolean(pro
 	const explicitHttpsPort = args.includes("--web-https-port");
 	const port = takePort("--web-port", defaults.port ?? 8787);
 	const httpsPort = takePort("--web-https-port", defaults.httpsPort ?? 8443);
-	const noninteractive = args.some((arg) => ["--mode", "--print", "-p", "--version", "--help", "-h"].includes(arg) || arg.startsWith("--mode="));
+	const noninteractive = args.some((arg) => ["--analysis", "--mode", "--print", "-p", "--version", "--help", "-h"].includes(arg) || arg.startsWith("--mode="));
 	const mode = disabled ? "off" : tailscale ? "tailscale" : enabled ? "local" : interactive && !noninteractive ? defaults.mode ?? "off" : "off";
 	return { enabled: mode !== "off", tailscale: mode === "tailscale", persistent: defaults.persistent === true && !foreground,
 		autoHttpsPort: !explicitHttpsPort, port, httpsPort, args };
@@ -40,14 +42,15 @@ export async function launchResearchWeb({ executable, args, cwd, env, packageRoo
 	const tailnet = options.tailscale ? await inspectWebTailnet({ httpsPort: options.httpsPort, chooseAvailable: options.autoHttpsPort }) : null;
 	const privateDir = await mkdtemp(join(tmpdir(), "rpi-web-"));
 	await chmod(privateDir, 0o700);
-	const socketPath = join(privateDir, "bridge.sock");
-	let bridge, child, gateway, serving, desktop;
+	const socketPath = join(residentDir ? await residentControlDirectory(residentDir) : privateDir, "bridge.sock");
+	let bridge, child, gateway, serving, desktop, tmux;
 	const instance = randomUUID();
 	const recordPath = residentDir ? join(residentDir, "access.json") : null;
 	const terminalSocket = join(privateDir, "terminal.sock");
 	let lastState = { ready: false, cwd };
 	let closed = false, childExited = false, stopping = false;
 	let seq = 0;
+	let resizeTimer;
 	const pending = new Map();
 	const terminal = new Terminal({ cols: process.stdout.columns || 100, rows: process.stdout.rows || 30, scrollback: 2000, allowProposedApi: true });
 	const serializer = new SerializeAddon();
@@ -98,9 +101,14 @@ export async function launchResearchWeb({ executable, args, cwd, env, packageRoo
 		return result;
 	};
 	const resize = (cols, rows) => {
-		if (cols === terminal.cols && rows === terminal.rows) return;
-		terminal.resize(cols, rows); child?.resize(cols, rows);
-		broadcast({ type: "terminal_resize", cols, rows });
+		clearTimeout(resizeTimer);
+		resizeTimer = setTimeout(() => {
+			if (closed || childExited || cols === terminal.cols && rows === terminal.rows) return;
+			try {
+				child?.resize(cols, rows); terminal.resize(cols, rows);
+				broadcast({ type: "terminal_resize", cols, rows });
+			} catch (error) { process.stderr.write("Terminal resize rejected: " + error.message + "\n"); }
+		}, 50);
 	};
 	const localInput = (data) => child?.write(data.toString());
 	const localResize = () => resize(process.stdout.columns || 100, process.stdout.rows || 30);
@@ -108,10 +116,16 @@ export async function launchResearchWeb({ executable, args, cwd, env, packageRoo
 		write: (data) => child?.write(data), resize,
 		snapshot: () => new Promise((resolve) => terminal.write("", () => resolve({ data: serializer.serialize(), cols: terminal.cols, rows: terminal.rows, seq }))),
 	};
-	const signal = () => { stopping = true; if (child && !childExited) child.kill("SIGTERM"); else void serving?.stop(); };
+	const signal = () => {
+		stopping = true;
+		if (tmux) void tmux.stop().catch((error) => process.stderr.write("tmux stop: " + error.message + "\n"));
+		else if (child && !childExited) child.kill("SIGTERM");
+		else void serving?.stop();
+	};
 	const shutdown = async () => {
 		if (closed) return;
 		closed = true;
+		clearTimeout(resizeTimer);
 		await serving?.stop();
 		await desktop?.close();
 		process.off("SIGTERM", signal); process.off("SIGINT", signal); process.off("SIGHUP", signal);
@@ -123,15 +137,19 @@ export async function launchResearchWeb({ executable, args, cwd, env, packageRoo
 		pending.clear();
 		await gateway?.close();
 		await new Promise((resolve) => ipc.close(resolve));
+		await unlink(socketPath).catch((error) => { if (error.code !== "ENOENT") throw error; });
 		terminal.dispose();
 		if (recordPath && await readFile(recordPath, "utf8").then((data) => JSON.parse(data).instance === instance).catch(() => false)) await unlink(recordPath);
 		await rm(privateDir, { recursive: true, force: true });
 	};
 	process.once("SIGTERM", signal); process.once("SIGINT", signal); process.once("SIGHUP", signal);
 	try {
+		// Only reached after the resident registry proved there is no live gateway.
+		if (residentDir) await unlink(socketPath).catch((error) => { if (error.code !== "ENOENT") throw error; });
 		await new Promise((resolve, reject) => { ipc.once("error", reject); ipc.listen(socketPath, resolve); });
 		await chmod(socketPath, 0o600);
 		gateway = await createWebGateway({
+			token: env.RESEARCH_PI_STATE_DIR ? await persistentWebToken(env.RESEARCH_PI_STATE_DIR) : undefined,
 			port: options.port, publicOrigin: tailnet?.origin, tailscaleLogin: tailnet?.login,
 			assetsRoot: join(packageRoot, "web"), command,
 			terminal: terminalControl,
@@ -142,9 +160,11 @@ export async function launchResearchWeb({ executable, args, cwd, env, packageRoo
 			await serving.ready;
 		}
 		if (stopping) throw new Error("Web startup was cancelled");
-		child = pty.spawn(executable, args, {
+		const piEnv = { ...env, TERM: "xterm-256color", RESEARCH_PI_WEB_SOCKET: socketPath };
+		if (residentDir) tmux = await residentTmux({ directory: residentDir, executable, args, cwd, env: piEnv, cols: terminal.cols, rows: terminal.rows, hasSessionOptions: options.hasSessionOptions });
+		child = pty.spawn(tmux?.executable ?? executable, tmux?.args ?? args, {
 			name: "xterm-256color", cols: terminal.cols, rows: terminal.rows, cwd,
-			env: { ...env, TERM: "xterm-256color", RESEARCH_PI_WEB_SOCKET: socketPath },
+			env: tmux?.env ?? piEnv,
 		});
 		child.onData((data) => {
 			if (localTerminal) process.stdout.write(data);
@@ -154,6 +174,7 @@ export async function launchResearchWeb({ executable, args, cwd, env, packageRoo
 		if (residentDir) desktop = await createDesktopTerminal({ path: terminalSocket, instance, terminal: terminalControl, stop: signal,
 			state: () => ({ ready: lastState.ready, cwd: lastState.cwd, sessionId: lastState.sessionId, idle: lastState.idle, model: lastState.model }) });
 		const record = JSON.stringify({ url: gateway.accessUrl, localUrl: gateway.localAccessUrl, cwd, pid: process.pid, instance,
+			...(tmux ? { tmuxSocket: tmux.socket, recovered: tmux.recovered } : {}),
 			...(residentDir ? { terminalSocket, agentDir: env.PI_CODING_AGENT_DIR, sessionDir: env.RESEARCH_PI_SESSION_DIR } : {}) });
 		await writeFile(join(privateDir, "access.json"), record, { mode: 0o600 });
 		if (recordPath) {

@@ -23,6 +23,7 @@ export default function researchWebExtension(pi: ExtensionAPI) {
 	let watch: Awaited<ReturnType<typeof createSubagentWatchClient>> | undefined;
 	let nativePrompt: any;
 	let snapshotTimer: ReturnType<typeof setTimeout> | undefined;
+	let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 	const statuses = new Map<string, string>();
 	const seenEvents = new Map<string, any[]>();
 	let originalNotify: any;
@@ -132,25 +133,34 @@ export default function researchWebExtension(pi: ExtensionAPI) {
 		if (!process.env.RESEARCH_PI_WEB_SOCKET) return;
 		generation++;
 		context = ctx;
-		socket = createConnection(process.env.RESEARCH_PI_WEB_SOCKET);
-		await new Promise<void>((resolve, reject) => { socket!.once("connect", resolve); socket!.once("error", reject); });
-		let buffer = "";
-		socket.on("data", (chunk) => {
-			buffer += chunk.toString();
-			let index;
-			while ((index = buffer.indexOf("\n")) >= 0) {
-				const line = buffer.slice(0, index); buffer = buffer.slice(index + 1);
-				let request: any;
-				try { request = JSON.parse(line); } catch { continue; }
-				if (request.type !== "command") continue;
-				const replySocket = socket;
-				handle(request).then(
-					(result) => { if (!replySocket?.destroyed) replySocket?.write(JSON.stringify({ type: "response", id: request.id, result }) + "\n"); },
-					(error) => { if (!replySocket?.destroyed) replySocket?.write(JSON.stringify({ type: "response", id: request.id, error: error.message }) + "\n"); },
-				);
-			}
-		});
-		socket.on("error", () => {});
+		const connect = () => {
+			if (!context) return;
+			const connection = createConnection(process.env.RESEARCH_PI_WEB_SOCKET!);
+			socket = connection;
+			connection.on("connect", () => sendState());
+			connection.on("close", () => {
+				if (socket !== connection || !context) return;
+				reconnectTimer = setTimeout(connect, 1000); reconnectTimer.unref();
+			});
+			connection.on("error", () => {});
+			let buffer = "";
+			connection.on("data", (chunk) => {
+				buffer += chunk.toString();
+				let index;
+				while ((index = buffer.indexOf("\n")) >= 0) {
+					const line = buffer.slice(0, index); buffer = buffer.slice(index + 1);
+					let request: any;
+					try { request = JSON.parse(line); } catch { continue; }
+					if (request.type !== "command") continue;
+					const replySocket = connection;
+					handle(request).then(
+						(result) => { if (!replySocket?.destroyed) replySocket?.write(JSON.stringify({ type: "response", id: request.id, result }) + "\n"); },
+						(error) => { if (!replySocket?.destroyed) replySocket?.write(JSON.stringify({ type: "response", id: request.id, error: error.message }) + "\n"); },
+					);
+				}
+			});
+		};
+		connect();
 		patchedUi = ctx.ui;
 		dialogs = attachWebDialogs(patchedUi, publish);
 		originalNotify = patchedUi.notify;
@@ -170,6 +180,8 @@ export default function researchWebExtension(pi: ExtensionAPI) {
 	pi.on("ui_prompt_end", async () => { nativePrompt = undefined; if (socket) sendState(); });
 	pi.on("session_shutdown", async () => {
 		generation++;
+		context = undefined;
+		clearTimeout(reconnectTimer);
 		clearTimeout(snapshotTimer);
 		dialogs?.dispose(); dialogs = undefined;
 		if (patchedUi) { patchedUi.notify = originalNotify; patchedUi.setStatus = originalStatus; }

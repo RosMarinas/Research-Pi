@@ -65,6 +65,8 @@ for (const required of [
 	".pi/lib/model-settings.mjs",
 	".pi/lib/model-context.mjs",
 	".pi/lib/model-picker.mjs",
+	".pi/lib/web-token.mjs",
+	".pi/lib/web-tmux.mjs",
 	".pi/lib/research-analysis-bridge.mjs",
 	"docs/configuration.md",
 	".pi/extensions/project-boundary.ts",

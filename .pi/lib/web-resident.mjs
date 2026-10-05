@@ -47,13 +47,13 @@ export async function ensureResidentWeb({ stateRoot, cwd, env, packageRoot, exec
 		let child;
 		try {
 			child = spawn(process.execPath, [join(packageRoot, ".pi/lib/web-host.mjs")], {
-				cwd, env, detached: true, stdio: ["pipe", log.fd, log.fd],
+				cwd, env: { ...env, RESEARCH_PI_STATE_DIR: stateRoot }, detached: true, stdio: ["pipe", log.fd, log.fd],
 			});
 		} finally { await log.close(); }
 		let failure;
 		child.on("error", (error) => { failure = error; });
 		child.stdin.on("error", (error) => { failure = error; });
-		child.stdin.end(JSON.stringify({ executable, args, cwd, packageRoot, options, residentDir: directory }));
+		child.stdin.end(JSON.stringify({ executable, args, cwd, packageRoot, options: { ...options, hasSessionOptions }, residentDir: directory }));
 		child.unref();
 		const deadline = Date.now() + 35_000;
 		while (Date.now() < deadline) {

@@ -256,6 +256,8 @@ async function spawnCore(argv, { background = false } = {}) {
 	if (process.env.RESEARCH_PI_TRACE === "1") process.env.PI_TRACE_DIR = paths.traceDir;
 
 	const args = ["--no-skills", "--no-extensions", "--no-themes"];
+	// A shared, resizable terminal needs an application-owned scroll viewport.
+	if (web.enabled && !userArgs.includes("--tui-mode")) args.push("--tui-mode", "fullscreen");
 	const skillPaths = [
 		join(packageRoot, ".pi", "skills", "research-briefing"),
 		...config.resources.skills.map((configuredPath) => expandUserPath(configuredPath)),

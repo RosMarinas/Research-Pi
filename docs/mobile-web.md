@@ -2,6 +2,14 @@
 
 Web 模式为一个 Research Pi 进程提供两种界面：手机对话页和完整 TUI 终端。模型、工具、权限和 subagents 仍由这个 Pi 进程持有；关闭网页不会停止任务。
 
+同一安装实例的所有项目现在共用 `stateRoot/web/token` 中的持久令牌（文件权限 0600）。重启不会更新令牌，cookie 名保持稳定，已配对浏览器在 30 天有效期内仍可访问。隔离 worktree 和独立安装使用各自的 stateRoot。需要撤销令牌时，先停止该安装实例的所有 Web 服务，删除 token 文件，再启动并重新配对；不要把配对链接写入 Git 或发给其他人。
+
+`pi --analysis` 默认独立启动只读 Analysis 终端，不自动启用 Web，可以与同 workspace 的常驻 Leader 同时运行。
+
+安装 tmux 时，后台 Pi 由独立的私有 tmux 服务持有。Web 网关意外退出后，再次运行 pi 会接回同一个存活进程，Web bridge 也会重连。`pi web stop` 仍明确结束该 Pi；Pi 自身退出后也会结束服务。没有 tmux 时继续使用直接 PTY 托管，支持电脑断开，但不具备网关崩溃后的 Pi 保留。
+
+Web 默认使用 Pi 原生 fullscreen TUI，支持应用内滚动；可用 `--tui-mode regular` 显式覆盖。窗口缩放请求合并处理。`/watch` 复用 Pi 原生消息、工具组件与 CustomEditor，支持鼠标滚动、输入历史、Ctrl+C 清空草稿，以及空输入时 Ctrl+D 返回；它展示 Actor 公开消息日志，仍不等同于后端的完整私有 transcript。
+
 ## 启动
 
 正常安装会准备 Web 依赖。源码安装如果使用了 npm ci --ignore-scripts，再执行：
@@ -50,7 +58,7 @@ Web 模式为一个 Research Pi 进程提供两种界面：手机对话页和完
 
 已有常驻服务时，pi --resume 或带模型等启动参数的再次启动会提示先连接当前服务，在其终端执行 /resume、/model；不会忽略参数或另开一个 Pi 写入同一会话。
 
-终端会打印含临时配对令牌的链接，以及权限为 0600 的 access.json 路径。手机连接当前已登录的同一 Tailscale 账号/网络，打开该链接；也可以打开不含片段的基础地址后手动输入令牌。登录后网页清除 URL 片段，认证使用 HttpOnly、SameSite=Strict cookie，HTTPS 下设置 Secure。令牌和 cookie 随进程退出失效，不要把配对链接发给其他人。
+终端会打印含持久配对令牌的链接，以及权限为 0600 的 access.json 路径。手机连接当前已登录的同一 Tailscale 账号/网络，打开该链接；也可以打开不含片段的基础地址后手动输入令牌。登录后网页清除 URL 片段，认证使用 HttpOnly、SameSite=Strict cookie，HTTPS 下设置 Secure。
 
 当前会话内的 /web 会把链接重新打印到启动终端，不会写入模型对话。多个标签页访问相同进程；不会创建新 Leader。
 

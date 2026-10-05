@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual, createHash } from "node:crypto";
 import { join } from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
 
@@ -11,9 +11,8 @@ const secretEquals = (a, b) => typeof a === "string" && Buffer.byteLength(a) ===
 const fail = (status, message) => Object.assign(new Error(message), { status });
 const MAX_BODY = 8 * 1024 * 1024;
 
-export async function createWebGateway({ port = 8787, publicOrigin, tailscaleLogin, assetsRoot, command, terminal }) {
-	const token = randomBytes(32).toString("base64url");
-	const cookieName = "rpi_web_" + randomBytes(8).toString("hex");
+export async function createWebGateway({ port = 8787, publicOrigin, tailscaleLogin, assetsRoot, command, terminal, token = randomBytes(32).toString("base64url") }) {
+	const cookieName = "rpi_web_" + createHash("sha256").update(token).digest("hex").slice(0, 16);
 	const clients = new Set();
 	const calls = new Map();
 	const origins = new Set();
@@ -56,7 +55,7 @@ export async function createWebGateway({ port = 8787, publicOrigin, tailscaleLog
 		return cookies.some((part) => part.startsWith(cookieName + "=") && secretEquals(part.slice(cookieName.length + 1), token));
 	}
 	const cookie = (req, clear = false) => cookieName + "=" + (clear ? "" : token) +
-		"; HttpOnly; SameSite=Strict; Path=/; Max-Age=" + (clear ? "0" : "86400") +
+		"; HttpOnly; SameSite=Strict; Path=/; Max-Age=" + (clear ? "0" : "2592000") +
 		(publicUrl && req.headers.host === publicUrl.host ? "; Secure" : "");
 	async function body(req) {
 		const chunks = [];
