@@ -412,8 +412,10 @@ details > pre {
 .actor-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+  grid-auto-rows: max-content;
+  flex: 0 0 auto;
+  min-width: 0;
   gap: 12px;
-  overflow: auto;
 }
 .actor-card {
   text-align: left;
@@ -421,7 +423,11 @@ details > pre {
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 12px;
-  display: block;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  white-space: normal;
   width: 100%;
 }
 .actor-card strong {
@@ -448,6 +454,8 @@ details > pre {
   overflow: auto;
 }
 #actor-detail {
+  flex: 0 0 auto;
+  min-width: 0;
   margin-top: 24px;
   padding-top: 20px;
   border-top: 1px solid var(--line);
