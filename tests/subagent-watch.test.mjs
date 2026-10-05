@@ -88,6 +88,28 @@ test("new-terminal launch passes literal paths and does not start another model 
 	assert.doesNotMatch(result.command, /--resume|--model/);
 });
 
+test("watch styles Markdown structure, keeps literal code, and fills the screen after notices expire", async () => {
+	initTheme("dark");
+	const actor = { id: "codex:actor-long-opaque-id", label: "回归验证", backend: "codex", role: "executor" };
+	const summary = "### 回归入口\n\n**有效观察**\n\n```bash\nprintf '# literal code'\n```\n\n- 保留原始记录";
+	const view = { actor, actors: [actor], job: { status: "running", model: "gpt-6.1-sol", thinking: "high", result: { summary } }, events: [], messages: [], leaderConnected: true };
+	const ui = new SubagentWatchView({ terminal: { rows: 30, columns: 80 }, requestRender() {} }, { read: async () => view }, actor.id, () => {});
+	try {
+		await new Promise(resolve => setImmediate(resolve));
+		ui.noticeExpiry = Date.now() - 1;
+		const lines = ui.render(80), text = stripTerminalSequences(lines.join("\n"));
+		assert.equal(lines.length, 30);
+		assert.match(text, /回归入口/); assert.match(text, /# literal code/);
+		assert.doesNotMatch(text, /```|### 回归入口|codex:actor-long-opaque-id|Watching as User/);
+		assert.match(text, /running · codex · executor/); assert.match(text, /gpt-6.1-sol · thinking high/);
+		for (const width of [20, 37, 80]) {
+			ui.tui.terminal.rows = 8; ui.editor.setText("中文草稿\n".repeat(12));
+			assert.equal(ui.render(width).length, 8);
+			assert.ok(ui.render(width).every(line => visibleWidth(line) <= width));
+		}
+	} finally { ui.dispose(); }
+});
+
 test("streamed display text is batched without persisting raw provider events", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-watch-stream-"));
 	try {

@@ -4,7 +4,7 @@ const escape = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&":
 const md = (value) => DOMPurify.sanitize(marked.parse(String(value ?? ""), { breaks: true }));
 let state = { ready: false }, socket, reconnectTimer, activeTab = "chat", selectedActor, activeDialog, images = [], models = [], stream = "";
 let ctrlLatch = false, streamTimer, pendingSend, pendingActorSend, lastActorReceipt, lastActors = "";
-let terminal, fit, terminalSeq = 0, paired = false, toastTimer, lastMessages = "", busySending = false;
+let terminal, fit, terminalSeq = 0, paired = false, toastTimer, lastMessages = "", busySending = false, terminalFitTimer;
 const unreadDialogs = new Map();
 function toast(message) { $("toast").textContent = message; $("toast").hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $("toast").hidden = true, 5500); }
 async function jsonFetch(path, options = {}) {
@@ -122,7 +122,7 @@ function agentEvent(event) {
 }
 function showPending() {
 	const count = unreadDialogs.size;
-	$("pending-banner").hidden = !count && !state.nativePrompt;
+	$("pending-banner").hidden = !count && (!state.nativePrompt || activeTab === "terminal");
 	$("pending-banner").querySelector("span").textContent = count ? "有 " + count + " 项等待你回答" : "Pi 正在等待终端操作";
 	if (count && !activeDialog && !$("settings").open) openPending();
 }
@@ -152,12 +152,13 @@ async function answer(cancelled) {
 }
 async function switchTab(tab) {
 	activeTab = tab;
+	showPending();
 	for (const button of $("tabs").children) button.classList.toggle("active", button.dataset.tab === tab);
 	for (const id of ["chat", "agents", "project", "terminal"]) $(id + "-view").hidden = id !== tab;
 	try {
 		if (tab === "agents") await loadActors();
 		if (tab === "project") await loadProject();
-		if (tab === "terminal") { initTerminal(); terminal.refresh(0, terminal.rows - 1); }
+		if (tab === "terminal") { initTerminal(); terminal.refresh(0, terminal.rows - 1); requestAnimationFrame(fitTerminal); }
 	} catch (error) { toast(error.message); }
 }
 async function nativeCommand(value) {
@@ -170,7 +171,13 @@ async function loadActors() {
 	const signature = JSON.stringify(actors);
 	if (signature !== lastActors) {
 	lastActors = signature;
-	$("actors").innerHTML = actors.length ? actors.map((actor, index) => '<button class="actor-card" data-index="' + index + '"><span class="tag">' + escape(actor.action?.status ?? "registered") + "</span><strong>" + escape(actor.label) + "</strong><small>" + escape([actor.backend ?? actor.provider, actor.role ?? actor.metadata?.role, actor.model ?? "inherit", actor.thinking ?? "inherit"].join(" · ")) + "</small></button>").join("") : '<div class="empty">当前项目还没有 subagent。</div>';
+	$("actors").innerHTML = actors.length ? actors.map((actor, index) => {
+		const status = actor.action?.status ?? "registered";
+		const role = actor.role ?? actor.metadata?.role ?? "";
+		const model = actor.model ?? "inherit";
+		const backend = actor.backend ?? actor.provider ?? "";
+		return '<button class="actor-card" data-index="' + index + '"><span class="tag">' + escape(status) + "</span><strong>" + escape(actor.label) + "</strong><small>" + escape([role, backend, model, actor.thinking ?? "inherit"].filter(Boolean).join(" · ")) + "</small></button>";
+	}).join("") : '<div class="empty">当前项目还没有 subagent。</div>';
 	$("actors").querySelectorAll("button").forEach((button) => button.onclick = async () => { selectedActor = actors[button.dataset.index].id; await loadActor(); });
 	}
 	if (selectedActor) await loadActor();
@@ -181,7 +188,12 @@ async function loadActor() {
 	if (receipt) $("actor-receipt").textContent = receipt.status + " · " + receipt.id;
 	$("actor-detail").hidden = false; $("actor-title").textContent = view.actor.label;
 	const el = $("actor-messages"), atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
-	const html = view.rows.map((row) => '<article class="message"><div class="message-label">' + escape(row.label ?? row.kind) + "</div>" + md(row.text) + "</article>").join("");
+	const kindLabel = { user: "You", assistant: view.actor.backend ?? view.actor.provider ?? "Agent", tool: "Activity" };
+	const html = view.rows.map((row) => {
+		const label = row.label ?? kindLabel[row.kind] ?? row.kind;
+		const cls = row.kind === "user" ? " user" : row.kind === "assistant" ? " assistant" : "";
+		return '<article class="message' + cls + '"><div class="message-label">' + escape(label) + "</div>" + md(row.text) + "</article>";
+	}).join("");
 	if (el.innerHTML !== html) el.innerHTML = html;
 	if (atBottom) el.scrollTop = el.scrollHeight;
 }
@@ -203,6 +215,7 @@ function initTerminal() {
 	terminal = new Terminal({ cursorBlink: true, fontSize: 13, fontFamily: "Menlo, Consolas, monospace", theme: { background: "#18201d", foreground: "#e0e8df", cursor: "#91c9ac" }, scrollback: 2000, convertEol: false });
 	fit = new FitAddon.FitAddon(); terminal.loadAddon(fit); terminal.open($("terminal"));
 	terminal.onData((data) => terminalInput(data));
+	new ResizeObserver(() => { clearTimeout(terminalFitTimer); terminalFitTimer = setTimeout(fitTerminal, 100); }).observe($("terminal"));
 }
 function terminalInput(data) { if (ctrlLatch && data.length === 1) { data = String.fromCharCode(data.toUpperCase().charCodeAt(0) & 31); ctrlLatch = false; document.querySelector('[data-key="ctrl"]').classList.remove("active"); } if (socket?.readyState === WebSocket.OPEN) { socket.send(JSON.stringify({ type: "input", data })); return true; } toast("连接断开，按键未发送"); return false; }
 function fitTerminal() {
@@ -295,5 +308,10 @@ window.addEventListener("hashchange", () => {
 const token = new URLSearchParams(location.hash.slice(1)).get("token");
 try { if (token) await login(token); else await enter(); } catch (error) { showPair(); if (token) $("pair-error").textContent = error.message; }
 
-const viewport = () => document.documentElement.style.setProperty("--viewport-height", (window.visualViewport?.height ?? window.innerHeight) + "px");
+let viewportTimer;
+const viewport = () => {
+	document.documentElement.style.setProperty("--viewport-height", (window.visualViewport?.height ?? window.innerHeight) + "px");
+	clearTimeout(viewportTimer);
+	viewportTimer = setTimeout(fitTerminal, 150);
+};
 window.visualViewport?.addEventListener("resize", viewport); viewport();

@@ -85,8 +85,13 @@ export function subagentWatchTranscript(view) {
 	if (summary && !rows.some((row) => row.kind === "assistant" && row.text === summary)) {
 		rows.push({ kind: "assistant", text: summary, timestamp: view.job.finishedAt ?? view.actor.updatedAt });
 	}
-	for (const message of view.messages) rows.push({ kind: "user", label: `${message.from} → ${message.to === view.actor.id ? "this subagent" : message.to} · ${message.type} · ${message.status}`,
-		text: publicSubagentText(message.body), timestamp: message.queuedAt });
+	for (const message of view.messages) {
+		const sender = message.from === "user" ? "You" : message.from;
+		const recipient = message.to === view.actor.id ? "agent" : message.to;
+		const kind = message.type === "notify" ? "" : ` ${message.type}`;
+		rows.push({ kind: "user", label: `${sender} → ${recipient}${kind} · ${message.status}`,
+			text: publicSubagentText(message.body), timestamp: message.queuedAt });
+	}
 	return rows.sort((a, b) => String(a.timestamp ?? "").localeCompare(String(b.timestamp ?? "")));
 }
 
