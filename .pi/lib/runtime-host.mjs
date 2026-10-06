@@ -31,7 +31,8 @@ export async function createRuntimeHost({ runtime, socketPath, sessionDir, state
 	};
 	const interactions = createRuntimeInteractions(publish, () => epoch);
 	const state = () => ({ ready: !closing && !switching, hostEpoch, sessionEpoch: epoch, seq,
-		sessionId: runtime.session.sessionId, name: runtime.session.sessionName ?? "Research Pi", cwd: runtime.cwd,
+		sessionId: runtime.session.sessionId, name: runtime.session.sessionName ?? "Research Pi", sessionName: runtime.session.sessionName, cwd: runtime.cwd,
+		footer: { autoCompactEnabled: runtime.session.autoCompactionEnabled, subscription: runtime.session.model ? runtime.session.modelRuntime.isUsingSubscription(runtime.session.model.provider) : false },
 		idle: runtime.session.isIdle, model: publicModel(runtime.session.model), thinking: runtime.session.thinkingLevel,
 		usage: runtime.session.getContextUsage(), stats: { tokens: runtime.session.getSessionStats().tokens, cost: runtime.session.getSessionStats().cost }, liveTools: [...liveTools.values()], entries: publicWebEntries(runtime.session.sessionManager.getBranch()),
 		historyCount: publicWebEntries(runtime.session.sessionManager.getBranch(), Infinity).length,

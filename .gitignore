@@ -33,3 +33,5 @@ node_modules
 /output/runtime-review/
 /.playwright/
 /.playwright-cli/
+
+.pi/harness/

@@ -55,7 +55,7 @@ Gateway 现在是当前安装与 stateRoot 共享的多项目入口，不再每�
 
 启动选项只能用于创建 Host。已有 Host 上的模型和会话切换使用 `/model`、`/resume` 等操作；若要改变启动资源，应先保存并显式停止 Host。发现旧 tmux resident 时新 Host 会拒绝启动；先用旧路径继续使用，在空闲后再迁移，防止两个写入者同时管理会话。
 
-TUI：`Ctrl+]` 分离，`Ctrl+C` 中止当前轮，`Ctrl+D` 退出客户端，`Ctrl+P` 模型选择，`Ctrl+O` 思考块，`Ctrl+E` 工具展开，`Alt+Enter` steer，`PgUp/PgDn` 历史翻页；Host 连接丢失后 `Ctrl+R` 重连。
+TUI：`Ctrl+]` 分离，`Ctrl+C` 中止当前轮，`Ctrl+D` 退出客户端，`Ctrl+P` 模型选择，`Ctrl+O` 工具展开，`Ctrl+T` 思考块，`Alt+Enter` steer，`PgUp/PgDn` 历史翻页；Host 连接丢失后 `Ctrl+R` 重连。
 
 本机网页有项目与会话侧栏、对话、Agents 和项目页；手机使用同一入口与窄屏布局。对话合并命令、通知、审批和工具操作，按原生 toolCallId 配对调用与结果，显示思考块、Shell 输出、文件操作和结构化 Subagent 卡片；Research 状态 dock 与用量、上下文、队列始终在工作台可见。命令按钮与补全直接使用原 Host 命令，独立操作页仅保留给旧终端兼容路径。原生 `/model /thinking /resume /new /clone /import /tree /fork /compact /login /logout /settings /session /name /export /copy /reload /trust` 由 Host 执行。Research 的 `/runtime /watch /config /models /side` 等命令沿用原扩展；`/queue` 查看队列，`/queue clear` 清空。技能和提示模板沿用 Pi 原生展开。
 
@@ -119,3 +119,9 @@ WebKit 增量验收：审批在项目切换后保留原请求；另一个项目�
 视觉方案由 Antigravity 的 Claude Opus 4.6 负责，沿用同一 worktree。暖黄底色与白色内容区、深色正文替代主导绿色；字号、字距、行高与卡片留白按研究工作台的密度调整。手机输入保持 16px，保留短视口、触摸操作和长名称换行。调整仅涉及 Web 视觉，不改变 Runtime、审批、认证或项目路由。
 
 WebKit 视觉复核：桌面正文 14px、手机正文 15px、输入 16px；桌面工具卡片高度约 231px → 189px，首个 Actor 卡片约 106px → 89px（同一离线数据）。手机项目选择器占满可用宽度，命令按钮高 40px。390×844 与 390×420 的对话/Watch 输入区在视口内，无水平溢出；32 个 Actor 卡片无重叠，系统深色偏好仍保持暖色浅底。打包检查通过。
+
+## 原生 TUI 呈现回归修复
+
+分离时的简化客户端错误地省略了原生 Footer、Research dock 和工具渲染器。本次注册原有 Research 主题，使用原生 Footer/ToolExecution/Assistant/User/Editor 组件，并让原生扩展与远程 TUI 共用同一 Subagent renderCall/renderResult。Research dock 复用原组件，恢复底部布局、thinking 输入边框和原生工具快捷键。无需关闭或重启 Host：Ctrl+] 分离当前客户端后重新运行 pi 即可加载新的客户端。
+
+验证：280 项测试通过；真实 PTY 110×38 → 64×22 缩放、Ctrl+] 分离退出码 0，Host 仍可连接；工具卡片、Research dock、原生用量/缓存命中/模型 Footer 均显示。Web 配色与布局未改动。
