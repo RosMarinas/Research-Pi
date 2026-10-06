@@ -86,3 +86,31 @@ node scripts/native-runtime-review.mjs stop
 依赖原生私有方法的生命周期与物理终端动作适配只针对当前固定版本。升级 Pi 时必须先运行上述功能回归，不能只检查界面截图。
 
 本次没有重新加入多项目统一入口、新 Web 设计或全部呈现控制器的独立进程。这些应在此原生兼容接缝经实际验收后继续实现，避免同时改三个边界而再次丢失功能。
+
+## Analysis handoff and compaction scheduling
+
+An explicit `analysis_send_to_leader`, `/analysis send`, or CLI analysis handoff
+now wakes the attached Leader at an idle boundary. It remains a proposal, not a
+Project State update or new execution authorization. Ordinary `notify` messages
+still attach silently to the next turn. Busy Leaders retain Analysis mail in the
+durable mailbox until they can handle it.
+
+Research threshold compaction reserves the settle boundary before scheduling the
+native `ctx.compact()` call on the next event-loop tick. If another extension has
+started a continuation or queued input, compaction waits for the next settle.
+The reservation blocks Leader mailbox wakes and is released by native completion
+or failure callbacks, rather than `session_compact`, which fires before Pi clears
+its compaction state. Manual compaction still follows native Pi semantics; this
+change does not automatically resume work deliberately interrupted by `/compact`.
+
+Mailbox scans deferred during a run or compaction retry after the engine becomes
+idle. Successful and failed compaction events also schedule a scan, so no new
+user input or unrelated ledger write is required. Stopping or replacing a watcher
+cancels its pending retry and fences in-flight scans from a newer Session.
+
+Regression coverage includes Analysis wake versus ordinary notify, mail deferred
+through successful and failed compaction, reservation cleanup, session shutdown,
+and a real offline native SDK settle continuation followed by compaction. The
+model-generated summary is replaced with a synthetic summary in the scheduling
+test; paid provider behavior and historical interruption causes are not inferred
+from this test.

@@ -34,6 +34,7 @@ test('complete original InteractiveMode preserves custom UI, approval, model men
   const socket=createConnection(f.terminalSocket);await new Promise(r=>socket.once('connect',r));socket.write(JSON.stringify({type:'attach',instance:f.instance})+'\n');socket.destroy();
   assert.equal(f.answer,undefined);assert.equal(f.host.state().ready,true);
   f.host.terminal.resize(64,20);f.host.terminal.input('\r');await until(()=>f.answer!==undefined);
+  await until(()=>f.host.mode.onInputCallback);
   const old=f.runtime.session.sessionId;submit(f.host,'/probe-new');await until(()=>f.runtime.session.sessionId!==old);await until(()=>f.host.mode.editor.getText().includes('native restored draft'));
   f.host.terminal.input('\x1b[D');await until(async()=> (await f.host.terminal.snapshot()).data.includes('native restored draft')); 
  }finally{await f.close()}
@@ -55,4 +56,38 @@ test('external editing and suspend are dispatched to the desktop client rather t
   action=undefined;socket.write(JSON.stringify({type:'input',data:'\x1a',instance:f.instance})+'\n');await until(()=>action?.action==='suspend');assert.equal(f.host.state().ready,true);
   socket.write(JSON.stringify({type:'action_result',id:action.id,result:{},instance:f.instance})+'\n');
  }finally{socket.destroy();await f.close()}
+});
+
+test('native SDK settle continuation finishes before Research automatic compaction',async()=>{
+ const {default:researchCompaction}=await import('../.pi/extensions/research-compaction.ts');
+ const root=await mkdtemp(join(tmpdir(),'native-pi-compact-'));
+ const faux=fauxProvider();let continued=false,compacted=false,armed=false;const errors=[];const events=[];
+ faux.setResponses([fauxAssistantMessage('Seed reply'),fauxAssistantMessage('First reply'),async()=>{
+  await new Promise(r=>setTimeout(r,50));return fauxAssistantMessage('Continuation completed');
+ }]);
+ let host;
+ const runtime=await createResearchSessionRuntime({cwd:root,args:['--no-extensions','--no-skills','--no-themes','--no-context-files'],agentDir:join(root,'agent'),sessionDir:join(root,'sessions'),model:faux.getModel(),settingsManager:SettingsManager.inMemory({compaction:{enabled:false,keepRecentTokens:64,reserveTokens:100},retry:{enabled:false},quietStartup:true}),extensionFactories:[pi=>{
+  pi.registerProvider(faux.provider);
+  pi.on('agent_settled',()=>{if(armed&&!continued){continued=true;pi.sendMessage({customType:'synthetic-continuation',content:'Continue the already requested task',display:false},{triggerTurn:true});}});
+ },pi=>researchCompaction({...pi,on:(name,handler)=>{
+  // Isolate scheduling from model-generated research summaries; native compact
+  // itself, abort, deferred settle actions and projection remain unmodified.
+  if(name!=='session_before_compact')pi.on(name,handler);
+ }}),pi=>{
+  pi.on('session_before_compact',event=>{compacted=true;return {compaction:{summary:'Synthetic retained state',firstKeptEntryId:event.preparation.firstKeptEntryId,tokensBefore:event.preparation.tokensBefore}};});
+ }]});
+ try{
+  host=await createNativeRuntimeHost({runtime,instance:crypto.randomUUID(),terminalSocket:join(root,'terminal.sock')});
+  runtime.session.subscribe(e=>{if(e.type==='extension_error')errors.push(e.error);if(['compaction_start','compaction_end','agent_settled'].includes(e.type))events.push(e)});
+  await runtime.session.prompt('Synthetic prior completed turn '.repeat(2000));
+  armed=true;
+  const usage=runtime.session.getContextUsage.bind(runtime.session);
+  runtime.session.getContextUsage=()=>compacted?usage():{tokens:600000};
+  await runtime.session.prompt('Synthetic history '.repeat(2000));
+  await until(()=>compacted&&runtime.session.isIdle).catch(e=>{throw Error(JSON.stringify({compacted,continued,idle:runtime.session.isIdle,events,errors}))});
+  const replies=runtime.session.messages.filter(m=>m.role==='assistant');
+  assert.ok(replies.some(m=>m.content.some(c=>c.type==='text'&&c.text==='Continuation completed')));
+  assert.equal(replies.some(m=>m.stopReason==='aborted'),false,'compact must not abort the settle continuation');
+  assert.equal(errors.length,0);
+ }finally{if(host)await host.close();else await runtime.dispose();await rm(root,{recursive:true,force:true});}
 });
