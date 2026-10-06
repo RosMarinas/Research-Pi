@@ -4,7 +4,6 @@ import { Container, Input, SelectList, Text, fuzzyFilter } from "@earendil-works
 // list so keyboard navigation stays visible even in a small phone terminal.
 export async function selectModel(ctx, title, choices, selected) {
 	const items = [...new Set(choices)].map((value) => ({ value, label: value }));
-	if (typeof ctx.ui.selectModel === "function") return ctx.ui.selectModel(title, items.map((item) => item.value), selected);
 	return await ctx.ui.custom((tui, theme, keys, done) => {
 		const container = new Container();
 		container.addChild(new Text(theme.fg("accent", title), 0, 0));

@@ -9,21 +9,11 @@ import { readRuntimeSnapshot, RESEARCH_LEADER_ACTOR_ID, runtimeActorAttachment }
 const text = (value: any) => String(value ?? "").replace(/\x1b\[[0-9;]*m/g, "");
 const modelView = (model: any) => model ? { id: model.id, name: model.name, provider: model.provider, contextWindow: model.contextWindow } : null;
 
-export function publicWebEntries(entries: any[], limit = 160) {
-	return entries.flatMap((entry) => {
-		if (entry.type === "custom" && entry.customType === "research-side") {
-			const side = entry.data;
-			return [{ id: entry.id, type: "custom_message", customType: "research-side", display: true, timestamp: entry.timestamp,
-				content: `SIDE / ${text(side.id)}\n\n${text(side.question)}\n\n${text(side.answer)}\n\n/side use ${text(side.id)}` }];
-		}
-		if (entry.type === "message" && entry.message?.role === "bashExecution") {
-			const shell = entry.message;
-			return [{ ...entry, message: { role: "toolResult", toolName: "Shell · " + text(shell.command), isError: Boolean(shell.exitCode || shell.cancelled),
-				content: [{ type: "text", text: text(shell.output) + `\nExit: ${shell.exitCode ?? "cancelled"}` }], timestamp: shell.timestamp } }];
-		}
-		if (entry.type === "custom_message" ? entry.display !== false : entry.type === "message" && ["user", "assistant", "toolResult"].includes(entry.message?.role)) return [entry];
-		return [];
-	}).slice(-limit);
+export function publicWebEntries(entries: any[]) {
+	return entries.filter((entry) =>
+		entry.type === "custom_message" ? entry.display !== false :
+		entry.type === "message" && ["user", "assistant", "toolResult", "bashExecution"].includes(entry.message?.role),
+	).slice(-160);
 }
 
 export default function researchWebExtension(pi: ExtensionAPI) {

@@ -229,20 +229,18 @@ async function analysisCommand(argv) {
 }
 
 async function spawnCore(argv, { background = false } = {}) {
-	const legacyUi = argv.includes("--legacy-ui");
-	argv = argv.filter((arg) => arg !== "--legacy-ui" && arg !== "--runtime");
 	const baseConfig = prepareConfig();
-	if (background && baseConfig.ui.web.mode === "off" && !argv.includes("--no-web") && !argv.includes("--web-tailscale") && !argv.includes("--web")) argv = [...argv, "--web"];
+	if (background && baseConfig.ui.web.mode === "off" && !argv.includes("--web-tailscale") && !argv.includes("--web")) argv = [...argv, "--web"];
 	const web = parseWebOptions(argv, baseConfig.ui.web, { interactive: background || Boolean(process.stdin.isTTY && process.stdout.isTTY) });
 	const { workspace, args: userArgs, config, sessionMode, fullAccess } = takeResearchOptions(web.args, baseConfig);
 	if (web.enabled && userArgs.some((arg) => ["--mode", "--print", "-p"].includes(arg) || arg.startsWith("--mode="))) throw new Error("--web requires interactive TUI mode");
-	if (legacyUi && background && !web.enabled) throw new Error("pi web start requires Web mode");
+	if (background && !web.enabled) throw new Error("pi web start requires Web mode");
 	writeResearchPiAgentConfig(paths.agentDir, config, { coreVersion });
 	if (!existsSync(workspace)) throw new Error(`Research workspace does not exist: ${workspace}`);
 	loadConfigurationEnvironment();
 	applyConfigurationEnvironment(config);
 	writeResearchPiAgentConfig(paths.agentDir, config, { coreVersion, environment: process.env });
-	const informational = userArgs.some((arg) => ["--version", "--help", "-h", "--list-models"].includes(arg));
+	const informational = userArgs.some((arg) => ["--version", "--help", "-h"].includes(arg));
 	const deepSeekSearchEnabled = informational ? false : researchPiDeepSeekSearchEnabled(config, process.env);
 	const coreCli = join(packageRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
 	if (!existsSync(coreCli)) throw new Error(`Pinned Pi core is missing: ${coreCli}`);
@@ -279,19 +277,6 @@ async function spawnCore(argv, { background = false } = {}) {
 		trace: process.env.RESEARCH_PI_TRACE === "1",
 	})) args.push("--extension", extension);
 	args.push(...userArgs);
-	const headless = userArgs.some((arg) => ["--mode", "--print", "-p", "--export"].includes(arg) || arg.startsWith("--mode="));
-	if (!legacyUi && !informational && !headless && (background || process.stdin.isTTY && process.stdout.isTTY)) {
-		const { launchRuntime } = await import("../.pi/lib/runtime-launcher.mjs");
-		const runtimeArgs = args.filter((arg, index) => arg !== "--tui-mode" && args[index - 1] !== "--tui-mode");
-		// Web interaction is now owned by the Host, not injected into a TUI process.
-		const webExtension = join(packageRoot, ".pi/extensions/research-web.ts");
-		const index = runtimeArgs.indexOf(webExtension); if (index >= 0) runtimeArgs.splice(index - 1, 2);
-		await launchRuntime({ stateRoot: paths.stateRoot, cwd: workspace, env: process.env, packageRoot, args: runtimeArgs,
-			agentDir: paths.agentDir, sessionDir: paths.sessionDir, background, analysis: sessionMode === "analysis",
-			hasSessionOptions: userArgs.length > 0 || argv.includes("--full-access"),
-			web: { ...web, enabled: web.enabled, port: argv.includes("--web-port") ? web.port : 0 } });
-		return;
-	}
 
 	if (web.enabled && !informational) {
 		if (web.persistent || background) {
@@ -336,27 +321,8 @@ async function webCommand(argv) {
 	const action = argv[0] ?? "status";
 	if (action === "start") return await spawnCore(argv.slice(1), { background: true });
 	if (!["status", "stop"].includes(action)) throw new Error("Usage: pi web [start|status|stop] [--workspace <path>]");
-	const { workspace, args, sessionMode } = takeResearchOptions(argv.slice(1), {});
+	const { workspace, args } = takeResearchOptions(argv.slice(1), {});
 	if (args.some((arg) => arg !== "--json")) throw new Error("Usage: pi web [status|stop] [--workspace <path>] [--json]");
-	const { findRuntime } = await import("../.pi/lib/runtime-resident.mjs");
-	const runtime = await findRuntime(paths.stateRoot, workspace, sessionMode === "analysis");
-	if (runtime) {
-		const { findRuntimeGateway } = await import("../.pi/lib/runtime-launcher.mjs");
-		const gateway = await findRuntimeGateway(runtime);
-		if (action === "stop") { if (gateway) process.kill(gateway.pid, "SIGTERM"); process.stdout.write("Stopped Web gateway; Runtime continues running.\n"); return; }
-		if (args.includes("--json")) process.stdout.write(JSON.stringify({ runtime: { pid: runtime.pid, cwd: runtime.cwd }, gateway }, null, 2) + "\n");
-		else if (gateway) process.stdout.write(`Local Web: ${gateway.localUrl}\nWeb: ${gateway.url}\nRuntime: ${runtime.pid}\n`);
-		else process.stdout.write("Runtime is running; no Web gateway. Use pi web start.\n");
-		return;
-	}
-	const { findRuntimeGateway } = await import("../.pi/lib/runtime-launcher.mjs");
-	const shared = await findRuntimeGateway({ stateRoot: paths.stateRoot });
-	if (shared) {
-		if (action === "stop") { process.kill(shared.pid, "SIGTERM"); process.stdout.write("Stopped Harness gateway; all project Runtimes continue running.\n"); }
-		else if (args.includes("--json")) process.stdout.write(JSON.stringify(shared, null, 2) + "\n");
-		else process.stdout.write(`Harness: ${shared.url}\nLocal: ${shared.localUrl}\n`);
-		return;
-	}
 	const { findResidentWeb, stopResidentWeb } = await import("../.pi/lib/web-resident.mjs");
 	const record = await findResidentWeb(paths.stateRoot, workspace);
 	if (action === "stop" && record) { await stopResidentWeb(record); process.stdout.write("Stopped resident Pi for " + workspace + "\n"); return; }
@@ -365,41 +331,8 @@ async function webCommand(argv) {
 	else process.stdout.write("No resident Pi for " + workspace + "\n");
 }
 
-async function harnessCommand(argv) {
-	const action = argv[0] ?? "status";
-	const { findRuntimeGateway, ensureRuntimeGateway } = await import("../.pi/lib/runtime-launcher.mjs");
-	const record = { stateRoot: paths.stateRoot };
-	if (action === "start") {
-		const config = prepareConfig(); loadConfigurationEnvironment(); applyConfigurationEnvironment(config);
-		let args = argv.slice(1); if (config.ui.web.mode === "off" && !args.includes("--web") && !args.includes("--web-tailscale")) args = [...args, "--web"];
-		const web = parseWebOptions(args, config.ui.web, { interactive: true });
-		if (web.args.length || !web.enabled) throw new Error("Usage: pi harness start [--web|--web-tailscale] [--web-port port]");
-		Object.assign(process.env, { RESEARCH_PI_STATE_DIR: paths.stateRoot, RESEARCH_PI_CONFIG_DIR: paths.configRoot, PI_CODING_AGENT_DIR: paths.agentDir });
-		const gateway = await ensureRuntimeGateway({ stateRoot: paths.stateRoot, packageRoot, env: process.env, web });
-		process.stdout.write(`Research Pi Harness: ${gateway.url}\nLocal: ${gateway.localUrl}\n`); return;
-	}
-	if (!["status", "stop"].includes(action)) throw new Error("Usage: pi harness [start|status|stop]");
-	const gateway = await findRuntimeGateway(record);
-	if (!gateway) { process.stdout.write("No Harness gateway running\n"); return; }
-	if (action === "stop") { process.kill(gateway.pid, "SIGTERM"); process.stdout.write("Stopped Harness gateway; project Runtimes continue running\n"); }
-	else process.stdout.write(`Research Pi Harness: ${gateway.url}\nLocal: ${gateway.localUrl}\n`);
-}
-
 async function main() {
 	const argv = process.argv.slice(2);
-	if (argv[0] === "harness") return harnessCommand(argv.slice(1));
-	if (argv[0] === "runtime") {
-		const action = argv[1] ?? "status";
-		if (action === "start") return spawnCore(argv.slice(2), { background: true });
-		const { workspace, args, sessionMode } = takeResearchOptions(argv.slice(2), {});
-		if (!["status", "stop"].includes(action) || args.some((x) => x !== "--json")) throw new Error("Usage: pi runtime [start|status|stop] [--workspace path] [--analysis]");
-		const { findRuntime } = await import("../.pi/lib/runtime-resident.mjs");
-		const record = await findRuntime(paths.stateRoot, workspace, sessionMode === "analysis");
-		if (!record) { process.stdout.write("No Runtime for this workspace\n"); return; }
-		if (action === "stop") { const { stopRuntime } = await import("../.pi/lib/runtime-launcher.mjs"); await stopRuntime(record); process.stdout.write("Runtime stop requested\n"); }
-		else process.stdout.write(JSON.stringify({ pid: record.pid, cwd: record.cwd, state: { ready: record.state.ready, idle: record.state.idle, sessionId: record.state.sessionId } }, null, 2) + "\n");
-		return;
-	}
 	if (argv[0] === "web") return await webCommand(argv.slice(1));
 	if (argv[0] === "watch") {
 		const { runSubagentWatch } = await import("../.pi/lib/subagent-watch-ui.mjs");

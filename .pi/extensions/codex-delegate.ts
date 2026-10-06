@@ -594,82 +594,6 @@ export async function acknowledgeDirectCodexTerminalResult({
 	}))[0];
 }
 
-
-// Presentation-only: shared by the native extension and detached TUI client.
-export function createSubagentToolRenderers(backendForRole = (role: string) => role === "environment" ? "antigravity" : role === "general" ? "pi" : "codex") {
-	return {
-		renderCall(args, theme) {
-			const role = args.role ?? "executor";
-			const backend = args.backend ?? backendForRole(role);
-			const target = args.jobId ? shortJobId(args.jobId) : args.mission ?? role;
-			const task = args.task ?? args.followUp ?? args.message ?? "";
-			const preview = task ? codexResultPreview({ summary: task }, 100) : "";
-			return new Text([
-				`${theme.fg("toolTitle", theme.bold("Subagent"))} ${theme.fg("accent", args.action)} ${theme.fg("muted", `· ${backend}/${role} · ${target}`)}`,
-				preview ? theme.fg("dim", `  ${preview}`) : "",
-			].filter(Boolean).join("\n"), 0, 0);
-		},
-		renderResult(result, { expanded, isPartial }, theme) {
-			const details = result.details as CodexJobView | { missions?: unknown[] } | undefined;
-			if (!details || !("id" in details)) {
-				const content = result.content.find((item) => item.type === "text");
-				return new Text(content?.type === "text" ? content.text : "Subagent returned no result.", 0, 0);
-			}
-
-			const job = details as CodexJobView;
-			const container = new Container();
-			const terminal = TERMINAL_JOB_STATUSES.has(job.status);
-			const outcome = job.status === "completed" ? String(job.result?.outcome ?? "") : "";
-			const semanticIncomplete = Boolean(outcome && outcome !== "succeeded");
-			const icon = job.status === "completed"
-				? theme.fg(semanticIncomplete ? "warning" : "success", semanticIncomplete ? "!" : "✓")
-				: job.status === "input_required" || job.status === "outcome_unknown"
-					? theme.fg("warning", job.status === "input_required" ? "?" : "!")
-					: job.status === "failed" || job.status === "cancelled"
-						? theme.fg("error", "✗")
-						: theme.fg("accent", "●");
-			container.addChild(new Text(
-				`${icon} ${theme.fg("toolTitle", theme.bold(`${(job as any).backend ?? "codex"} ${(job as any).role ?? job.mode}`))} ${theme.fg("accent", shortJobId(job.id))} ${theme.fg(terminal ? "muted" : "warning", `· ${job.status}${outcome ? `/${outcome}` : ""}`)}`,
-				0,
-				0,
-			));
-			container.addChild(new Text(
-				theme.fg("dim", [job.mission, job.model, (job as any).thinking ?? job.reasoningEffort].filter(Boolean).join(" · ")),
-				0,
-				0,
-			));
-			if (job.externalRuns?.length) container.addChild(new Text(externalRunSummary(job), 0, 0));
-			if (job.heldResources?.length) container.addChild(new Text(theme.fg("warning", `Held resources: ${job.heldResources.join(", ")}`), 0, 0));
-
-			if (job.result) {
-				container.addChild(new Spacer(1));
-				if (expanded) {
-					container.addChild(new Markdown(codexResultMarkdown(job.result), 0, 0, getMarkdownTheme()));
-					container.addChild(new Spacer(1));
-					container.addChild(new Text(theme.fg("dim", "Ctrl+O collapses · /watch for objective subagent events"), 0, 0));
-				} else {
-					container.addChild(new Text(codexResultPreview(job.result), 0, 0));
-					const counts = codexResultCounts(job.result);
-					if (counts) container.addChild(new Text(theme.fg("muted", counts), 0, 0));
-					container.addChild(new Text(theme.fg("dim", "Ctrl+O expands the subagent response"), 0, 0));
-				}
-				return container;
-			}
-
-			const message = job.status === "failed" || job.status === "cancelled"
-				? job.error ?? job.progress
-				: job.status === "outcome_unknown"
-					? "Side effects may have occurred; inspect external state before reconciliation."
-					: job.status === "input_required" && job.pendingRequest
-						? job.pendingRequest.question
-						: jobActivityText(job);
-			container.addChild(new Text(theme.fg(job.status === "failed" ? "error" : "muted", String(message ?? "waiting")), 0, 0));
-			if (isPartial) container.addChild(new Text(theme.fg("dim", "Subagent is still running..."), 0, 0));
-			return container;
-		},
-	};
-}
-
 export default function codexDelegateExtension(pi: ExtensionAPI) {
 	const EVENT_KIND = "codex-delegation-event";
 	const activeJobs = new Map<string, CodexJobView>();
@@ -1331,7 +1255,75 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		],
 		parameters: ParamsSchema,
 		executionMode: "sequential",
-		...createSubagentToolRenderers((role) => configuredRunner(role).backend),
+		renderCall(args, theme) {
+			const role = args.role ?? "executor";
+			const backend = args.backend ?? configuredRunner(role).backend;
+			const target = args.jobId ? shortJobId(args.jobId) : args.mission ?? role;
+			const task = args.task ?? args.followUp ?? args.message ?? "";
+			const preview = task ? codexResultPreview({ summary: task }, 100) : "";
+			return new Text([
+				`${theme.fg("toolTitle", theme.bold("Subagent"))} ${theme.fg("accent", args.action)} ${theme.fg("muted", `· ${backend}/${role} · ${target}`)}`,
+				preview ? theme.fg("dim", `  ${preview}`) : "",
+			].filter(Boolean).join("\n"), 0, 0);
+		},
+		renderResult(result, { expanded, isPartial }, theme) {
+			const details = result.details as CodexJobView | { missions?: unknown[] } | undefined;
+			if (!details || !("id" in details)) {
+				const content = result.content.find((item) => item.type === "text");
+				return new Text(content?.type === "text" ? content.text : "Subagent returned no result.", 0, 0);
+			}
+
+			const job = details as CodexJobView;
+			const container = new Container();
+			const terminal = TERMINAL_JOB_STATUSES.has(job.status);
+			const outcome = job.status === "completed" ? String(job.result?.outcome ?? "") : "";
+			const semanticIncomplete = Boolean(outcome && outcome !== "succeeded");
+			const icon = job.status === "completed"
+				? theme.fg(semanticIncomplete ? "warning" : "success", semanticIncomplete ? "!" : "✓")
+				: job.status === "input_required" || job.status === "outcome_unknown"
+					? theme.fg("warning", job.status === "input_required" ? "?" : "!")
+					: job.status === "failed" || job.status === "cancelled"
+						? theme.fg("error", "✗")
+						: theme.fg("accent", "●");
+			container.addChild(new Text(
+				`${icon} ${theme.fg("toolTitle", theme.bold(`${(job as any).backend ?? "codex"} ${(job as any).role ?? job.mode}`))} ${theme.fg("accent", shortJobId(job.id))} ${theme.fg(terminal ? "muted" : "warning", `· ${job.status}${outcome ? `/${outcome}` : ""}`)}`,
+				0,
+				0,
+			));
+			container.addChild(new Text(
+				theme.fg("dim", [job.mission, job.model, (job as any).thinking ?? job.reasoningEffort].filter(Boolean).join(" · ")),
+				0,
+				0,
+			));
+			if (job.externalRuns?.length) container.addChild(new Text(externalRunSummary(job), 0, 0));
+			if (job.heldResources?.length) container.addChild(new Text(theme.fg("warning", `Held resources: ${job.heldResources.join(", ")}`), 0, 0));
+
+			if (job.result) {
+				container.addChild(new Spacer(1));
+				if (expanded) {
+					container.addChild(new Markdown(codexResultMarkdown(job.result), 0, 0, getMarkdownTheme()));
+					container.addChild(new Spacer(1));
+					container.addChild(new Text(theme.fg("dim", "Ctrl+O collapses · /watch for objective subagent events"), 0, 0));
+				} else {
+					container.addChild(new Text(codexResultPreview(job.result), 0, 0));
+					const counts = codexResultCounts(job.result);
+					if (counts) container.addChild(new Text(theme.fg("muted", counts), 0, 0));
+					container.addChild(new Text(theme.fg("dim", "Ctrl+O expands the subagent response"), 0, 0));
+				}
+				return container;
+			}
+
+			const message = job.status === "failed" || job.status === "cancelled"
+				? job.error ?? job.progress
+				: job.status === "outcome_unknown"
+					? "Side effects may have occurred; inspect external state before reconciliation."
+					: job.status === "input_required" && job.pendingRequest
+						? job.pendingRequest.question
+						: jobActivityText(job);
+			container.addChild(new Text(theme.fg(job.status === "failed" ? "error" : "muted", String(message ?? "waiting")), 0, 0));
+			if (isPartial) container.addChild(new Text(theme.fg("dim", "Subagent is still running..."), 0, 0));
+			return container;
+		},
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const startRole = (params.role ?? "executor") as typeof SUBAGENT_ROLES[number];

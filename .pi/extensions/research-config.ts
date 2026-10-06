@@ -347,11 +347,6 @@ export default function researchConfigExtension(pi: ExtensionAPI) {
 	const showThemeSelector = async (ctx: ExtensionContext) => {
 		const config = loadConfig();
 		const items = themeSelectItems(config, ctx.ui.getAllThemes());
-		if (typeof (ctx.ui as any).openView === "function") {
-			const chosen = await ctx.ui.select("Research Pi / Themes", items.map((item) => item.value));
-			if (chosen) await activateTheme(chosen, ctx);
-			return;
-		}
 		const selected = await ctx.ui.custom<string | null>((tui, theme, _keybindings, done) => {
 			const container = new Container();
 			container.addChild(new DynamicBorder((text) => theme.fg("borderAccent", text)));

@@ -104,17 +104,20 @@ Leader 判断上下文是否相关：同一 `mission` 默认继续，同一 Acto
 
 Codex 保留持久任务、同工作区并发、写入范围协调及恢复机制。Pi／Antigravity runner 使用独立长驻进程承接后续消息，**目前只在所属 Pi 进程存活期间可继续操作，退出时会关闭，重启后不自动恢复**。统一入口不代表三个 backend 的恢复和授权能力完全相同。
 
-## 手机与本机网页访问
+## 手机网页访问
 
-UI 与 Runtime 现在分离：独立 Host 持有原生 Pi 会话、模型、工具与权限，TUI、电脑网页和手机网页连接同一个 Host。
+保存一次偏好，以后正常运行 pi 就会自动开启私有网页，并连接该项目的同一个常驻 Pi：
 
-    pi harness start          # 一个网页入口管理多个项目
-    pi config web local       # 本机浏览器；使用 tailscale 可启用手机访问
+    pi config web tailscale
     pi --workspace /path/to/project
 
-`Ctrl+]` 分离 TUI，关闭浏览器不停止任务。`pi web start` 开启网页，`pi web status` 查看私有配对链接，`pi web stop` 只关闭 Gateway；`pi runtime stop` 才停止 Host。网页提供多项目与会话侧栏；对话融合工具/Subagent 卡片、命令、审批、Research 状态和用量。一个入口只需配对一次，切换项目不停止各自的 Host。模型、登录、配置和会话操作直接交给 Host。
+关闭电脑终端后后台任务继续；Ctrl+] 可主动断开终端。pi web start 可仅在后台启动，pi web status 查看配对网址，pi web stop 停止服务。这三个命令也支持 --workspace。单次关闭网页可用 --no-web，非交互模型调用不自动开启网页。
 
-源码开发版继续使用 `run-pi.sh` 保留该 checkout 的 `.pi` 登录与历史。`--legacy-ui` 保留旧原生界面；已有旧 tmux resident 不会自动搬迁或被新 Host 接管。[实现、使用与验收](docs/ui-runtime-review.md)，[手机安全说明](docs/mobile-web.md)。
+手机连接当前 Tailscale 网络，打开终端提供的私有配对链接。对话、Agents、Project Runtime 使用手机界面；完整终端视图保留 /config、/watch、/login、会话树和自定义 TUI。电脑与手机共用同一个 Pi 进程，关闭网页不会停止任务。
+
+复用平时的 pi 入口；源码开发版使用 run-pi.sh，以保留 .pi 中的登录与历史。恢复旧会话可加 --resume。直接 node bin/pi.mjs 默认读取另一套用户级数据目录，可能出现需要重新登录和历史为空。
+
+仅本机试用可用 --web。服务只监听 localhost，要求令牌与同源请求；Tailscale 模式限定当前用户身份，保留已有 Serve 配置。正在运行且未启用 Web 的 Pi 需要等下一次计划启动再使用。[使用方式、功能范围与安全说明](docs/mobile-web.md)。
 
 ## 项目记忆，而非无限增长的聊天
 
