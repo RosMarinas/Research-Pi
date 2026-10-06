@@ -1,10 +1,12 @@
 import { marked } from "/vendor/marked.js";
 const $ = (id) => document.getElementById(id);
+const uiClientId = sessionStorage.getItem("rpi_ui_client") ?? crypto.randomUUID(); sessionStorage.setItem("rpi_ui_client", uiClientId);
 const escape = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const md = (value) => DOMPurify.sanitize(marked.parse(String(value ?? ""), { breaks: true }));
-let state = { ready: false }, socket, reconnectTimer, activeTab = "chat", selectedActor, activeDialog, images = [], models = [], stream = "";
+let state = { ready: false }, socket, reconnectTimer, activeTab = "chat", selectedActor, activeDialog, images = [], models = [], stream = "", olderEntries = [], sessionsEpoch, navigating = false;
 let ctrlLatch = false, streamTimer, pendingSend, pendingActorSend, lastActorReceipt, lastActors = "";
 let terminal, fit, terminalSeq = 0, paired = false, toastTimer, lastMessages = "", busySending = false, terminalFitTimer;
+let lastEventSeq = 0, lastHostEpoch, draftRevision = 0;
 const unreadDialogs = new Map();
 function toast(message) { $("toast").textContent = message; $("toast").hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $("toast").hidden = true, 5500); }
 async function jsonFetch(path, options = {}) {
@@ -17,7 +19,7 @@ async function jsonFetch(path, options = {}) {
 	return data.result ?? data;
 }
 async function command(method, params = {}, id = crypto.randomUUID()) {
-	return await jsonFetch("/api/command", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, method, params, sessionId: state.sessionId }) });
+	return await jsonFetch("/api/command", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, method, params, sessionId: state.sessionId, sessionEpoch: state.sessionEpoch, uiClientId }) });
 }
 function showPair() { paired = false; clearTimeout(reconnectTimer); socket?.close(); $("pair").hidden = false; $("app").hidden = true; }
 async function login(token) {
@@ -47,7 +49,10 @@ function connect() {
 	socket.onerror = () => socket.close();
 	socket.onmessage = ({ data }) => {
 		const event = JSON.parse(data);
-		if (event.type === "state") updateState(event.state);
+		if (event.hostEpoch && event.hostEpoch !== lastHostEpoch) { lastHostEpoch = event.hostEpoch; lastEventSeq = 0; }
+		if (event.seq != null) lastEventSeq = Math.max(lastEventSeq, event.seq);
+		if (event.targetClientId && event.targetClientId !== uiClientId) return;
+		if (event.type === "state") updateState(event.seq != null ? { ...event.state, seq: event.seq } : event.state);
 		if (event.type === "terminal_snapshot") { initTerminal(); terminal.reset(); terminal.resize(event.cols, event.rows); terminal.write(event.data); terminalSeq = event.seq; }
 		if (event.type === "terminal" && event.seq > terminalSeq) { terminalSeq = event.seq; terminal?.write(event.data); }
 		if (event.type === "terminal_resize") terminal?.resize(event.cols, event.rows);
@@ -56,6 +61,17 @@ function connect() {
 		if (event.type === "notice") toast(event.message);
 		if (event.type === "status") { state.statuses ??= {}; state.statuses[event.key] = event.value; renderRunState(); }
 		if (event.type === "agent_event") agentEvent(event.event);
+		if (event.type === "view") {
+			if (event.view === "runtime") switchTab("project");
+			else if (event.view === "actor") { selectedActor = event.params.actorId; switchTab("agents").then(loadActor); }
+			else if (["tree", "fork"].includes(event.view)) openTree(event.view);
+		}
+		if (event.type === "shell") appendOperation(event.text);
+		if (event.type === "notice") appendOperation(event.message);
+		if (event.type === "auth_event") renderAuth(event.event);
+		if (event.type === "tools_expanded") { state.toolsExpanded = event.expanded; lastMessages = ""; renderMessages(); }
+		if (event.type === "draft") { draftRevision++; $("message").value = event.text; reportDraft(); }
+		if (event.type === "copy") navigator.clipboard?.writeText(event.text).then(() => toast("已复制"), () => appendOperation(event.text));
 	};
 }
 function renderRunState() {
@@ -63,11 +79,25 @@ function renderRunState() {
 	$("run-state").textContent = status + (state.statuses?.boundary ? " · " + state.statuses.boundary : "");
 }
 function updateState(next) {
-	if (next.sessionId && next.sessionId !== state.sessionId) { stream = ""; lastMessages = ""; selectedActor = null; $("actor-detail").hidden = true; }
+	if (next.hostEpoch && next.hostEpoch !== lastHostEpoch) { lastHostEpoch = next.hostEpoch; lastEventSeq = 0; }
+	if (next.seq != null && next.seq < lastEventSeq) return;
+	if (next.seq != null) lastEventSeq = next.seq;
+	if (next.hostEpoch === state.hostEpoch && next.seq != null && next.seq < (state.seq ?? 0)) return;
+	if (next.sessionId && (next.sessionId !== state.sessionId || next.sessionEpoch !== state.sessionEpoch)) { stream = ""; lastMessages = ""; olderEntries = []; selectedActor = null; $("actor-detail").hidden = true; $("agents-view").classList.remove("watching"); }
 	state = next;
+	$("app").classList.toggle("runtime-layout", next.detachedRuntime === true);
+	if (next.detachedRuntime) {
+		$("session-sidebar").hidden = false;
+		$("runtime-controls").hidden = false;
+		for (const selector of [".terminal-actions", "#terminal", ".keybar", ".terminal-input", ".terminal-note"]) document.querySelector(selector).hidden = true;
+		$("tabs").querySelector('[data-tab="terminal"]').textContent = "操作";
+		if (next.ready && sessionsEpoch !== next.sessionEpoch) { sessionsEpoch = next.sessionEpoch; loadSessions().catch((e) => toast(e.message)); }
+		stream = next.activeMessage?.content?.filter((p) => p.type === "text").map((p) => p.text).join("") ?? "";
+		renderAuth(next.authInfo);
+	}
 	$("workspace").textContent = next.cwd?.split("/").filter(Boolean).slice(-2).join(" / ") ?? "Pi 正在切换会话";
 	$("model-label").textContent = next.model ? next.model.provider + " / " + (next.model.name || next.model.id) + " · " + next.thinking : "等待 Pi";
-	renderRunState();
+	renderRunState(); updateNavigation();
 	$("abort").hidden = !next.ready || next.idle;
 	$("send").disabled = !next.ready || busySending;
 	if (next.idle) { stream = ""; $("activity").hidden = true; }
@@ -79,6 +109,7 @@ function contentHtml(message) {
 	if (typeof message.content === "string") return md(message.content);
 	return (message.content ?? []).map((part) => {
 		if (part.type === "text") return md(part.text);
+		if ((part.type === "thinking" || part.type === "reasoning") && state.hideThinking) return "";
 		if (part.type === "thinking" || part.type === "reasoning") return "<details><summary>思考过程</summary><div>" + md(part.thinking ?? part.text) + "</div></details>";
 		if (part.type === "toolCall" || part.type === "tool_call") return "<details><summary>" + escape(part.name) + "</summary><pre>" + escape(JSON.stringify(part.arguments, null, 2)) + "</pre></details>";
 		if (part.type === "image" && part.data && /^image\/(png|jpeg|webp|gif)$/.test(part.mimeType)) return '<img alt="对话图片" src="data:' + part.mimeType + ";base64," + escape(part.data) + '">';
@@ -86,21 +117,27 @@ function contentHtml(message) {
 	}).join("");
 }
 function renderMessages() {
-	const entries = state.entries ?? [];
+	const entries = [...olderEntries, ...(state.entries ?? [])];
 	const messages = entries.filter((entry) => (entry.type === "message" && !["system", "developer"].includes(entry.message?.role)) || (entry.type === "custom_message" && entry.display !== false)).map((entry) => entry.message ?? entry);
-	const signature = JSON.stringify(messages) + stream;
+	const signature = JSON.stringify(messages) + stream + Boolean(state.hideThinking) + Boolean(state.toolsExpanded);
 	if (signature === lastMessages) return;
 	lastMessages = signature;
 	const el = $("messages"), atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
-	el.innerHTML = messages.map((message) => {
+	el.innerHTML = (state.detachedRuntime && entries.length < state.historyCount ? '<button id="older-history" class="quiet">加载更早的对话</button>' : "") + messages.map((message) => {
 		const role = message.role ?? "runtime";
 		const content = contentHtml(message);
 		if (!content) return "";
-		if (role === "toolResult") return '<details class="tool-result"><summary>' + escape(message.toolName ?? "工具结果") + (message.isError ? " · 失败" : "") + "</summary><div>" + content + "</div></details>";
+		if (message.customType === "research-side") return '<details class="tool-result"' + (state.toolsExpanded ? " open" : "") + '><summary>SIDE</summary><div>' + content + "</div></details>";
+		if (role === "toolResult") return '<details class="tool-result"' + (state.toolsExpanded ? ' open' : '') + '><summary>' + escape(message.toolName ?? "工具结果") + (message.isError ? " · 失败" : "") + "</summary><div>" + content + "</div></details>";
 		return '<article class="message ' + (role === "user" ? "user" : "assistant") + '"><div class="message-label">' + escape(role === "user" ? "You" : role === "assistant" ? "Pi" : "Runtime") + "</div>" + content + "</article>";
 	}).join("") + (stream ? '<article id="stream-message" class="message assistant"><div class="message-label">Pi · 正在回复</div>' + md(stream) + "</article>" : "");
 	if (!el.innerHTML) el.innerHTML = '<div class="empty"><h2>把研究继续下去。</h2><p>同一个项目，同一个 Pi。</p></div>';
 	el.querySelectorAll("a").forEach((a) => { a.target = "_blank"; a.rel = "noopener noreferrer"; });
+	const older = $("older-history"); if (older) older.onclick = async () => {
+		const remaining = state.historyCount - entries.length, start = Math.max(0, remaining - 100);
+		try { olderEntries = [...await command("history", { offset: start, limit: remaining - start }), ...olderEntries]; lastMessages = ""; renderMessages(); }
+		catch (e) { toast(e.message); }
+	};
 	if (atBottom) el.scrollTop = el.scrollHeight;
 }
 function renderStream() {
@@ -112,6 +149,7 @@ function renderStream() {
 	if (bottom) el.scrollTop = el.scrollHeight;
 }
 function agentEvent(event) {
+	if (state.detachedRuntime && event.type === "agent_settled") loadSessions().catch((error) => toast(error.message));
 	if (event.type === "message_end") { stream = ""; clearTimeout(streamTimer); document.getElementById("stream-message")?.remove(); }
 	if (event.type === "message_update") {
 		const update = event.assistantMessageEvent;
@@ -137,8 +175,13 @@ function openPending() {
 		const select = document.createElement("select"); select.id = "approval-value"; select.setAttribute("aria-label", "选择");
 		for (const value of request.options) { const option = document.createElement("option"); option.value = value; option.textContent = value; select.append(option); }
 		$("approval-fields").append(select);
-	} else if (request.kind === "input") {
-		const input = document.createElement("input"); input.id = "approval-value"; input.placeholder = request.placeholder ?? ""; input.autocomplete = "off"; input.setAttribute("aria-label", "回答"); $("approval-fields").append(input);
+		if (request.searchable) {
+			const search = document.createElement("input"); search.placeholder = "搜索选项…"; search.setAttribute("aria-label", "搜索选项");
+			search.oninput = () => { select.replaceChildren(); for (const value of request.options.filter((v) => v.toLowerCase().includes(search.value.toLowerCase()))) { const option = document.createElement("option"); option.value = value; option.textContent = value; select.append(option); } };
+			$("approval-fields").prepend(search);
+		}
+	} else if (request.kind === "input" || request.kind === "editor") {
+		const input = document.createElement(request.kind === "editor" ? "textarea" : "input"); input.id = "approval-value"; input.placeholder = request.placeholder ?? ""; if (request.kind === "editor") input.value = request.placeholder ?? ""; if (request.secret) input.type = "password"; input.autocomplete = "off"; input.setAttribute("aria-label", "回答"); $("approval-fields").append(input);
 	}
 	$("approval-submit").textContent = request.kind === "confirm" ? "允许" : "提交";
 	$("approval-cancel").textContent = request.kind === "confirm" ? "拒绝" : "取消";
@@ -158,11 +201,12 @@ async function switchTab(tab) {
 	try {
 		if (tab === "agents") await loadActors();
 		if (tab === "project") await loadProject();
-		if (tab === "terminal") { initTerminal(); terminal.refresh(0, terminal.rows - 1); requestAnimationFrame(fitTerminal); }
+		if (tab === "terminal" && !state.detachedRuntime) { initTerminal(); terminal.refresh(0, terminal.rows - 1); requestAnimationFrame(fitTerminal); }
 	} catch (error) { toast(error.message); }
 }
 async function nativeCommand(value) {
 	if (!value) return;
+	if (state.detachedRuntime) { try { await command("prompt", { message: value }); return true; } catch (e) { toast(e.message); return false; } }
 	try { await command("terminal.command", { command: value }); await switchTab("terminal"); return true; }
 	catch (error) { toast(error.message); await switchTab("terminal"); }
 }
@@ -180,12 +224,13 @@ async function loadActors() {
 	}).join("") : '<div class="empty">当前项目还没有 subagent。</div>';
 	$("actors").querySelectorAll("button").forEach((button) => button.onclick = async () => { selectedActor = actors[button.dataset.index].id; await loadActor(); });
 	}
-	if (selectedActor) await loadActor();
+	if (selectedActor) await loadActor(); else $("agents-view").classList.remove("watching");
 }
 async function loadActor() {
 	const view = await command("actor.read", { actorId: selectedActor });
 	const receipt = view.messages?.find((message) => message.id === lastActorReceipt);
 	if (receipt) $("actor-receipt").textContent = receipt.status + " · " + receipt.id;
+	$("agents-view").classList.add("watching"); $("agents-view").scrollTop = 0;
 	$("actor-detail").hidden = false; $("actor-title").textContent = view.actor.label;
 	const el = $("actor-messages"), atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
 	const kindLabel = { user: "You", assistant: view.actor.backend ?? view.actor.provider ?? "Agent", tool: "Activity" };
@@ -228,9 +273,9 @@ $("tabs").onclick = (event) => { if (event.target.dataset.tab) switchTab(event.t
 $("composer").onsubmit = async (event) => {
 	event.preventDefault();
 	if (busySending) return;
-	const message = $("message").value.trim();
+	const message = $("message").value.trim(), originalDraftRevision = draftRevision;
 	if (!message && !images.length) return;
-	if (message.startsWith("/") || message.startsWith("!")) { if (await nativeCommand(message)) $("message").value = ""; return; }
+	if (message.startsWith("/") || message.startsWith("!")) { if (await nativeCommand(message) && draftRevision === originalDraftRevision) $("message").value = ""; return; }
 	busySending = true; $("send").disabled = true;
 	try {
 		const params = { message, behavior: $("send-mode").value, images };
@@ -238,10 +283,14 @@ $("composer").onsubmit = async (event) => {
 		if (pendingSend?.signature !== signature) pendingSend = { id: crypto.randomUUID(), signature };
 		await command("prompt", params, pendingSend.id);
 		pendingSend = null;
-		$("message").value = ""; images = []; renderAttachments(); $("composer-status").textContent = "已提交给当前 Pi";
+		if (draftRevision === originalDraftRevision) $("message").value = ""; reportDraft(); images = []; renderAttachments(); $("composer-status").textContent = "已提交给当前 Pi";
 	} catch (error) { if (error.responded) pendingSend = null; toast(error.message); }
 	finally { busySending = false; $("send").disabled = !state.ready; }
 };
+const reportDraft = () => { if (paired && state.detachedRuntime && state.ready) void command("ui.draft", { hasDraft: Boolean($("message").value.trim()) }).catch(() => {}); };
+let hadDraft = false;
+$("message").oninput = () => { const value = Boolean($("message").value.trim()); if (value !== hadDraft) { hadDraft = value; reportDraft(); } };
+setInterval(reportDraft, 15000);
 $("message").onkeydown = (event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.isComposing) { event.preventDefault(); $("composer").requestSubmit(); } };
 $("abort").onclick = () => command("abort").catch((error) => toast(error.message));
 $("pending-open").onclick = openPending;
@@ -249,7 +298,7 @@ $("approval-form").onsubmit = (event) => { event.preventDefault(); answer(false)
 $("approval-cancel").onclick = () => answer(true);
 $("approval").oncancel = (event) => { event.preventDefault(); answer(true); };
 $("refresh-agents").onclick = () => loadActors().catch((error) => toast(error.message));
-$("close-actor").onclick = () => { selectedActor = null; $("actor-detail").hidden = true; };
+$("close-actor").onclick = () => { selectedActor = null; $("actor-detail").hidden = true; $("agents-view").classList.remove("watching"); };
 $("actor-form").onsubmit = async (event) => {
 	event.preventDefault();
 	const button = $("actor-form").querySelector("button"); button.disabled = true;
@@ -299,6 +348,49 @@ $("image-input").onchange = async (event) => {
 	}
 	event.target.value = ""; renderAttachments();
 };
+function appendOperation(message) {
+	const row = document.createElement("pre"); row.textContent = message; $("operation-log").prepend(row);
+	while ($("operation-log").children.length > 20) $("operation-log").lastChild.remove();
+}
+function renderAuth(info) {
+	const el = $("auth-info"); el.hidden = !info; el.replaceChildren(); if (!info) return;
+	const text = document.createElement("p"); text.textContent = [info.message, info.instructions, info.userCode].filter(Boolean).join("\n"); el.append(text);
+	for (const target of [info.url, info.verificationUri, ...(info.links ?? []).map((l) => l.url)].filter(Boolean)) {
+		if (!/^https?:\/\//.test(target)) continue;
+		const link = document.createElement("a"); link.href = target; link.textContent = "打开授权页面"; link.target = "_blank"; link.rel = "noopener noreferrer"; el.append(link);
+	}
+}
+async function loadSessions() {
+	if (!state.detachedRuntime || !state.ready) return;
+	const sessions = await command("sessions"), el = $("session-list"); el.replaceChildren();
+	for (const item of sessions) {
+		const button = document.createElement("button"); button.className = "session-card" + (item.id === state.sessionId ? " selected" : "");
+		const label = document.createElement("strong"); label.textContent = item.name || item.firstMessage || "新会话";
+		const date = document.createElement("small"); date.textContent = new Date(item.modified ?? item.timestamp ?? item.created).toLocaleString();
+		button.append(label, date); button.onclick = () => navigateSession("session.resume", { id: item.id }); el.append(button);
+	}
+	updateNavigation();
+}
+function updateNavigation() { for (const button of document.querySelectorAll("#session-list button, #new-session")) button.disabled = navigating || !state.ready; }
+async function navigateSession(method, params = {}) {
+	if (navigating || !state.ready) return; navigating = true; updateNavigation();
+	try { const result = await command(method, params); updateState(await jsonFetch("/api/session")); return result; }
+	catch (e) { toast(e.message); } finally { navigating = false; updateNavigation(); }
+}
+async function openTree(mode) {
+	try {
+		const tree = await command("tree"), rows = [];
+		const visit = (nodes, depth = 0) => { for (const node of nodes) { if (mode !== "fork" || node.entry.message?.role === "user") rows.push({ id: node.entry.id, label: "  ".repeat(depth) + node.entry.type + " · " + (node.entry.message?.role ?? "") }); visit(node.children ?? [], depth + 1); } }; visit(tree);
+		await switchTab("terminal"); const el = $("operation-log"); el.replaceChildren();
+		for (const row of rows) { const button = document.createElement("button"); button.textContent = row.label; button.onclick = () => navigateSession(mode === "fork" ? "session.fork" : "session.tree", { entryId: row.id }).then((result) => { if (result?.selectedText) { $("message").value = result.selectedText; reportDraft(); } switchTab("chat"); }).catch((e) => toast(e.message)); el.append(button); }
+	} catch (e) { toast(e.message); }
+}
+$("new-session").onclick = () => navigateSession("session.new");
+$("refresh-sessions").onclick = () => loadSessions().catch((e) => toast(e.message));
+$("runtime-command-form").onsubmit = async (event) => { event.preventDefault(); const input = $("runtime-command"); if (await nativeCommand(input.value.trim())) input.value = ""; };
+for (const value of ["/resume", "/model", "/thinking", "/config", "/models", "/runtime", "/watch", "/tree", "/compact", "/queue", "/queue clear", "/login", "/settings", "/help"]) {
+	const button = document.createElement("button"); button.textContent = value; button.onclick = () => nativeCommand(value); $("command-buttons").append(button);
+}
 document.addEventListener("visibilitychange", () => { if (!document.hidden && paired) jsonFetch("/api/session").then(updateState).catch((error) => toast(error.message)); });
 setInterval(() => { if (!paired || document.hidden || !state.ready) return; if (activeTab === "agents") loadActors().catch(() => {}); if (activeTab === "project") loadProject().catch(() => {}); }, 3500);
 window.addEventListener("hashchange", () => {

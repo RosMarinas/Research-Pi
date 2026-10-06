@@ -177,6 +177,7 @@ export async function openSubagentWatch(ctx, selector = "") {
 			selector = actors[labels.indexOf(chosen)].id;
 		}
 		const { actor } = await client.read(selector);
+		if (typeof ctx.ui.openView === "function") { ctx.ui.openView("actor", { actorId: actor.id }); return; }
 		const mode = await ctx.ui.select("Subagent terminal", ["Switch in this terminal", "Open a new terminal"]);
 		if (!mode) return;
 		if (mode === "Open a new terminal") {

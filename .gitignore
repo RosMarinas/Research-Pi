@@ -18,6 +18,7 @@ node_modules
 .pi/subagents/
 .pi/runtime/
 .pi/web/
+.pi/hosts/
 .pi/capabilities/
 .pi/agent/*
 .pi/config.json
@@ -29,5 +30,6 @@ node_modules
 
 # Local browser acceptance artifacts and pairing pointers
 /output/playwright/
+/output/runtime-review/
 /.playwright/
 /.playwright-cli/

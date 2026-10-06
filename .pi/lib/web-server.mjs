@@ -74,7 +74,7 @@ export async function createWebGateway({ port = 8787, publicOrigin, tailscaleLog
 	};
 	async function execute(input) {
 		if (typeof input.id !== "string" || !/^[a-zA-Z0-9_-]{8,100}$/.test(input.id)) throw fail(400, "A request ID is required");
-		const serialized = JSON.stringify({ method: input.method, params: input.params, sessionId: input.sessionId });
+		const serialized = JSON.stringify({ method: input.method, params: input.params, sessionId: input.sessionId, sessionEpoch: input.sessionEpoch });
 		const previous = calls.get(input.id);
 		if (previous) {
 			if (previous.serialized !== serialized) throw fail(409, "Request ID was already used for a different operation");
@@ -136,15 +136,23 @@ export async function createWebGateway({ port = 8787, publicOrigin, tailscaleLog
 	});
 	wss.on("connection", async (ws) => {
 		try {
+			if (!terminal) {
+				clients.add(ws);
+				const state = await command({ method: "state" });
+				if (ws.readyState !== WebSocket.OPEN) { clients.delete(ws); return; }
+				ws.send(JSON.stringify({ type: "state", state }));
+			} else {
 			const replay = await terminal.snapshot();
 			if (ws.readyState !== WebSocket.OPEN) return;
 			ws.send(JSON.stringify({ type: "terminal_snapshot", ...replay }));
 			clients.add(ws);
+			}
 			ws.send(JSON.stringify({ type: "connected" }));
 		} catch (error) { ws.close(1011, "Terminal unavailable"); }
 		ws.on("message", (raw) => {
 			try {
 				const input = JSON.parse(raw.toString());
+				if (!terminal) throw new Error("Runtime clients use structured commands");
 				if (input.type === "input" && typeof input.data === "string" && input.data.length <= 64 * 1024) terminal.write(input.data);
 				else if (input.type === "resize" && Number.isInteger(input.cols) && Number.isInteger(input.rows) &&
 					input.cols >= 20 && input.cols <= 300 && input.rows >= 8 && input.rows <= 150) terminal.resize(input.cols, input.rows);

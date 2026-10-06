@@ -194,17 +194,13 @@ Use `pi-raw` for comparison against the pinned, unmodified Pi Core. Tests exerci
 Original code and documentation are [MIT licensed](LICENSE). Third-party components retain their own licenses; see [Third-Party Notices](THIRD_PARTY_NOTICES.md).
 
 
-## Mobile browser access
+## Desktop and mobile browser access
 
-Save the preference once, then normal interactive launches start or attach to the workspace's resident Pi:
+An independent Runtime Host owns the native Pi Session, model, tools and permissions. TUI, desktop Web and mobile Web connect to that same Host.
 
-    pi config web tailscale
+    pi config web local       # use tailscale for mobile access
     pi --workspace /path/to/project
 
-Closing the desktop terminal leaves Pi running; Ctrl+] detaches explicitly. Use pi web start for a background launch, pi web status for its pairing URL, and pi web stop to stop it. These commands accept --workspace. Use --no-web for one ordinary launch; noninteractive model calls do not automatically start Web access.
+Ctrl+] detaches the TUI. Closing a browser does not stop execution. `pi web stop` stops only the Gateway; `pi runtime stop` stops the Host. Web provides chat, Actors, project state, structured commands and a desktop Session sidebar.
 
-Open the private pairing link printed in the terminal from a phone on the existing Tailscale account. Chat, Actors, and Project Runtime have mobile views; the shared terminal preserves native dialogs, custom TUI components, commands, and session navigation. Browser disconnects do not stop the agent. Use --web for localhost only.
-
-Keep using your usual pi launcher. For a source checkout, run-pi.sh preserves authentication and sessions in that checkout's .pi directory; add --resume to select an existing conversation. Direct node bin/pi.mjs defaults to separate user-level storage, which can appear as missing login and session history.
-
-The gateway requires authentication and exact same-origin requests. Tailscale access uses the currently signed-in identity without replacing existing Serve endpoints. An already running Pi process needs a planned restart into Web mode. See [mobile access and security](docs/mobile-web.md).
+Use the usual launcher to retain authentication and Session storage. `--legacy-ui` retains the old native interface; existing tmux residents are not automatically migrated. See [implementation and review](docs/ui-runtime-review.md) and [mobile security](docs/mobile-web.md).

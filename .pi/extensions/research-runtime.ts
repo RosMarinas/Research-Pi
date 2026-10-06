@@ -676,6 +676,10 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		// commands use `claim: true` explicitly when they need ownership.
 		await getRuntime(ctx);
 		const initial = await runtimeBoardModel(ctx);
+		if (typeof (ctx.ui as any).openView === "function") {
+			(ctx.ui as any).openView("runtime", { model: initial });
+			return;
+		}
 		const result = await ctx.ui.custom<"close" | "view" | { action: "watch"; selector: string }>(
 			(tui, theme, _keybindings, done) => new RuntimeBoardOverlay(
 				tui,

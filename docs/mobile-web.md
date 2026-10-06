@@ -1,5 +1,7 @@
 # Research Pi 手机网页访问
 
+> 当前默认路径已改为独立 Runtime Host + TUI/Web 客户端，见 [实现与验收](ui-runtime-review.md)。`pi web stop` 在新路径只关闭 Gateway，`pi runtime stop` 才结束 Host。下文记录的是 `--legacy-ui` 的旧 PTY/tmux 路径与其历史验收结果；其终端和停止语义不用于新 Host。鉴权、持久 token、同源和 Tailscale 安全边界继续沿用。
+
 Web 模式为一个 Research Pi 进程提供两种界面：手机对话页和完整 TUI 终端。模型、工具、权限和 subagents 仍由这个 Pi 进程持有；关闭网页不会停止任务。
 
 同一安装实例的所有项目现在共用 `stateRoot/web/token` 中的持久令牌（文件权限 0600）。重启不会更新令牌，cookie 名保持稳定，已配对浏览器在 30 天有效期内仍可访问。隔离 worktree 和独立安装使用各自的 stateRoot。需要撤销令牌时，先停止该安装实例的所有 Web 服务，删除 token 文件，再启动并重新配对；不要把配对链接写入 Git 或发给其他人。
