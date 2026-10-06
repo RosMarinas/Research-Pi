@@ -20,7 +20,7 @@ export async function createRuntimeHost({ runtime, socketPath, sessionDir, state
 	const commandScope = new AsyncLocalStorage();
 	const hostEpoch = randomUUID(); let epoch = randomUUID(), seq = 0, context, unsubscribe, watch;
 	let activeMessage, stateTimer, closing = false, switching = false, promptStarting = false, commandRunning = false, toolsExpanded = false, authInfo;
-	const statuses = {}, actorEvents = new Map(), drafts = new Map();
+	const statuses = {}, actorEvents = new Map(), drafts = new Map(), liveTools = new Map();
 	const send = (socket, value) => { if (!socket.destroyed) socket.write(JSON.stringify(value) + "\n"); };
 	const publish = (event) => {
 		const value = { ...event, hostEpoch, sessionEpoch: epoch, sessionId: runtime.session.sessionId, seq: ++seq };
@@ -33,7 +33,7 @@ export async function createRuntimeHost({ runtime, socketPath, sessionDir, state
 	const state = () => ({ ready: !closing && !switching, hostEpoch, sessionEpoch: epoch, seq,
 		sessionId: runtime.session.sessionId, name: runtime.session.sessionName ?? "Research Pi", cwd: runtime.cwd,
 		idle: runtime.session.isIdle, model: publicModel(runtime.session.model), thinking: runtime.session.thinkingLevel,
-		usage: runtime.session.getContextUsage(), entries: publicWebEntries(runtime.session.sessionManager.getBranch()),
+		usage: runtime.session.getContextUsage(), stats: { tokens: runtime.session.getSessionStats().tokens, cost: runtime.session.getSessionStats().cost }, liveTools: [...liveTools.values()], entries: publicWebEntries(runtime.session.sessionManager.getBranch()),
 		historyCount: publicWebEntries(runtime.session.sessionManager.getBranch(), Infinity).length,
 		activeMessage, authInfo, toolsExpanded, hideThinking: runtime.services.settingsManager.getHideThinkingBlock(), uiTheme: runtime.services.settingsManager.getTheme(), statuses: { ...statuses }, dialogs: interactions.list(), detachedRuntime: true,
 		projectTrusted: runtime.services.settingsManager.isProjectTrusted(), queue: runtime.session.pendingMessageCount });
@@ -60,9 +60,12 @@ export async function createRuntimeHost({ runtime, socketPath, sessionDir, state
 		setTheme(name) { const result = setTheme(name); if (result.success) publish({ type: "theme", name }); return result; },
 	};
 	async function bind() {
-		unsubscribe?.(); interactions.cancelAll(); activeMessage = undefined; drafts.clear();
+		unsubscribe?.(); interactions.cancelAll(); activeMessage = undefined; drafts.clear(); liveTools.clear();
 		watch = await createSubagentWatchClient({ cwd: runtime.cwd, stateRoot }); actorEvents.clear();
 		unsubscribe = runtime.session.subscribe((event) => {
+			if (event.type === "tool_execution_start") liveTools.set(event.toolCallId, { id: event.toolCallId, name: event.toolName, arguments: event.args, status: "running", startedAt: Date.now() });
+			if (event.type === "tool_execution_update") { const tool = liveTools.get(event.toolCallId); if (tool) tool.result = event.partialResult; }
+			if (event.type === "tool_execution_end") liveTools.delete(event.toolCallId);
 			if (event.type === "message_update") activeMessage = event.message;
 			if (event.type === "message_end" || event.type === "agent_end") activeMessage = undefined;
 			publish({ type: "agent_event", event }); update();

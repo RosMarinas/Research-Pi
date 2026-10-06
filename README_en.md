@@ -198,9 +198,10 @@ Original code and documentation are [MIT licensed](LICENSE). Third-party compone
 
 An independent Runtime Host owns the native Pi Session, model, tools and permissions. TUI, desktop Web and mobile Web connect to that same Host.
 
+    pi harness start          # One Web entry for multiple projects
     pi config web local       # use tailscale for mobile access
     pi --workspace /path/to/project
 
-Ctrl+] detaches the TUI. Closing a browser does not stop execution. `pi web stop` stops only the Gateway; `pi runtime stop` stops the Host. Web provides chat, Actors, project state, structured commands and a desktop Session sidebar.
+Ctrl+] detaches the TUI. Closing a browser does not stop execution. `pi web stop` stops only the Gateway; `pi runtime stop` stops the Host. Web provides project and Session navigation, with tool/Subagent cards, commands, approvals, Research status and usage in chat. Pair once for the shared entry; switching projects preserves each independent Host.
 
 Use the usual launcher to retain authentication and Session storage. `--legacy-ui` retains the old native interface; existing tmux residents are not automatically migrated. See [implementation and review](docs/ui-runtime-review.md) and [mobile security](docs/mobile-web.md).

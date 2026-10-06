@@ -21,7 +21,14 @@ await new Promise((resolveRun, reject) => {
 	child.on("exit", (code) => code === 0 ? resolveRun() : reject(new Error(output.replace(/#token=[^\s]+/g, "#token=[redacted]"))));
 });
 const record = await findRuntime(stateRoot, workspace), gateway = await findRuntimeGateway(record);
+const secondWorkspace = join(temporary, "second-project"); await mkdir(secondWorkspace);
+await writeFile(join(secondWorkspace, "RESEARCH.md"), "# 第二个离线研究项目\n\n验证单入口、独立 Runtime 和会话路由。\n");
+await new Promise((resolveRun, reject) => {
+	const child = spawn(process.execPath, [join(root, "bin/pi.mjs"), "runtime", "start", "--no-web", "--workspace", secondWorkspace, "--provider", "web-demo", "--model", "demo", "-e", join(root, "tests/fixtures/runtime-demo.ts")], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] }); let output = "";
+	child.stdout.on("data", (d) => { output += d; }); child.stderr.on("data", (d) => { output += d; }); child.on("error", reject); child.on("exit", (code) => code === 0 ? resolveRun() : reject(new Error(output.replace(/#token=[^\s]+/g, "#token=[redacted]"))));
+});
+const secondRecord = await findRuntime(stateRoot, secondWorkspace);
 await mkdir(join(root, "output/runtime-review"), { recursive: true });
-await writeFile(join(root, "output/runtime-review/access.json"), JSON.stringify({ temporary, workspace, stateRoot, configRoot, record, gateway }), { mode: 0o600 });
+await writeFile(join(root, "output/runtime-review/access.json"), JSON.stringify({ temporary, workspace, stateRoot, configRoot, record, records: [record, secondRecord], gateway }), { mode: 0o600 });
 console.log("Offline Runtime + desktop/mobile Web ready. Private access details: output/runtime-review/access.json");
 console.log("Host PID: " + record.pid + "; Gateway PID: " + gateway.pid);

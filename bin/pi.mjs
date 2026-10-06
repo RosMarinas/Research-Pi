@@ -349,6 +349,14 @@ async function webCommand(argv) {
 		else process.stdout.write("Runtime is running; no Web gateway. Use pi web start.\n");
 		return;
 	}
+	const { findRuntimeGateway } = await import("../.pi/lib/runtime-launcher.mjs");
+	const shared = await findRuntimeGateway({ stateRoot: paths.stateRoot });
+	if (shared) {
+		if (action === "stop") { process.kill(shared.pid, "SIGTERM"); process.stdout.write("Stopped Harness gateway; all project Runtimes continue running.\n"); }
+		else if (args.includes("--json")) process.stdout.write(JSON.stringify(shared, null, 2) + "\n");
+		else process.stdout.write(`Harness: ${shared.url}\nLocal: ${shared.localUrl}\n`);
+		return;
+	}
 	const { findResidentWeb, stopResidentWeb } = await import("../.pi/lib/web-resident.mjs");
 	const record = await findResidentWeb(paths.stateRoot, workspace);
 	if (action === "stop" && record) { await stopResidentWeb(record); process.stdout.write("Stopped resident Pi for " + workspace + "\n"); return; }
@@ -357,8 +365,29 @@ async function webCommand(argv) {
 	else process.stdout.write("No resident Pi for " + workspace + "\n");
 }
 
+async function harnessCommand(argv) {
+	const action = argv[0] ?? "status";
+	const { findRuntimeGateway, ensureRuntimeGateway } = await import("../.pi/lib/runtime-launcher.mjs");
+	const record = { stateRoot: paths.stateRoot };
+	if (action === "start") {
+		const config = prepareConfig(); loadConfigurationEnvironment(); applyConfigurationEnvironment(config);
+		let args = argv.slice(1); if (config.ui.web.mode === "off" && !args.includes("--web") && !args.includes("--web-tailscale")) args = [...args, "--web"];
+		const web = parseWebOptions(args, config.ui.web, { interactive: true });
+		if (web.args.length || !web.enabled) throw new Error("Usage: pi harness start [--web|--web-tailscale] [--web-port port]");
+		Object.assign(process.env, { RESEARCH_PI_STATE_DIR: paths.stateRoot, RESEARCH_PI_CONFIG_DIR: paths.configRoot, PI_CODING_AGENT_DIR: paths.agentDir });
+		const gateway = await ensureRuntimeGateway({ stateRoot: paths.stateRoot, packageRoot, env: process.env, web });
+		process.stdout.write(`Research Pi Harness: ${gateway.url}\nLocal: ${gateway.localUrl}\n`); return;
+	}
+	if (!["status", "stop"].includes(action)) throw new Error("Usage: pi harness [start|status|stop]");
+	const gateway = await findRuntimeGateway(record);
+	if (!gateway) { process.stdout.write("No Harness gateway running\n"); return; }
+	if (action === "stop") { process.kill(gateway.pid, "SIGTERM"); process.stdout.write("Stopped Harness gateway; project Runtimes continue running\n"); }
+	else process.stdout.write(`Research Pi Harness: ${gateway.url}\nLocal: ${gateway.localUrl}\n`);
+}
+
 async function main() {
 	const argv = process.argv.slice(2);
+	if (argv[0] === "harness") return harnessCommand(argv.slice(1));
 	if (argv[0] === "runtime") {
 		const action = argv[1] ?? "status";
 		if (action === "start") return spawnCore(argv.slice(2), { background: true });

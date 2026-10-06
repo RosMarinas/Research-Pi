@@ -108,10 +108,11 @@ Codex 保留持久任务、同工作区并发、写入范围协调及恢复机�
 
 UI 与 Runtime 现在分离：独立 Host 持有原生 Pi 会话、模型、工具与权限，TUI、电脑网页和手机网页连接同一个 Host。
 
+    pi harness start          # 一个网页入口管理多个项目
     pi config web local       # 本机浏览器；使用 tailscale 可启用手机访问
     pi --workspace /path/to/project
 
-`Ctrl+]` 分离 TUI，关闭浏览器不停止任务。`pi web start` 开启网页，`pi web status` 查看私有配对链接，`pi web stop` 只关闭 Gateway；`pi runtime stop` 才停止 Host。网页包含对话、Agents、项目、结构化命令与桌面会话侧栏，模型、登录、配置和会话操作直接交给 Host。
+`Ctrl+]` 分离 TUI，关闭浏览器不停止任务。`pi web start` 开启网页，`pi web status` 查看私有配对链接，`pi web stop` 只关闭 Gateway；`pi runtime stop` 才停止 Host。网页提供多项目与会话侧栏；对话融合工具/Subagent 卡片、命令、审批、Research 状态和用量。一个入口只需配对一次，切换项目不停止各自的 Host。模型、登录、配置和会话操作直接交给 Host。
 
 源码开发版继续使用 `run-pi.sh` 保留该 checkout 的 `.pi` 登录与历史。`--legacy-ui` 保留旧原生界面；已有旧 tmux resident 不会自动搬迁或被新 Host 接管。[实现、使用与验收](docs/ui-runtime-review.md)，[手机安全说明](docs/mobile-web.md)。
 

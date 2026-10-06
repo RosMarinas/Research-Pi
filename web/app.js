@@ -1,3 +1,4 @@
+import { renderTimeline } from "/timeline.js";
 import { marked } from "/vendor/marked.js";
 const $ = (id) => document.getElementById(id);
 const uiClientId = sessionStorage.getItem("rpi_ui_client") ?? crypto.randomUUID(); sessionStorage.setItem("rpi_ui_client", uiClientId);
@@ -7,6 +8,8 @@ let state = { ready: false }, socket, reconnectTimer, activeTab = "chat", select
 let ctrlLatch = false, streamTimer, pendingSend, pendingActorSend, lastActorReceipt, lastActors = "";
 let terminal, fit, terminalSeq = 0, paired = false, toastTimer, lastMessages = "", busySending = false, terminalFitTimer;
 let lastEventSeq = 0, lastHostEpoch, draftRevision = 0;
+let harness = false, projects = [], activeProject, projectSelection = 0, lastProjects = "";
+const projectDrafts = new Map();
 const unreadDialogs = new Map();
 function toast(message) { $("toast").textContent = message; $("toast").hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $("toast").hidden = true, 5500); }
 async function jsonFetch(path, options = {}) {
@@ -19,18 +22,26 @@ async function jsonFetch(path, options = {}) {
 	return data.result ?? data;
 }
 async function command(method, params = {}, id = crypto.randomUUID()) {
-	return await jsonFetch("/api/command", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, method, params, sessionId: state.sessionId, sessionEpoch: state.sessionEpoch, uiClientId }) });
+	const project = activeProject;
+	const result = await jsonFetch("/api/command", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, method, params, projectId: project, sessionId: state.sessionId, sessionEpoch: state.sessionEpoch, uiClientId }) });
+	if (harness && !["projects", "project.add"].includes(method) && project !== activeProject) throw Object.assign(new Error("项目已切换；操作仍属于原项目"), { responded: true, superseded: true });
+	return result;
 }
 function showPair() { paired = false; clearTimeout(reconnectTimer); socket?.close(); $("pair").hidden = false; $("app").hidden = true; }
 async function login(token) {
 	await jsonFetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token }) });
 	$("token").value = "";
-	history.replaceState(null, "", location.pathname);
+	history.replaceState(null, "", location.pathname + location.search);
 	await enter();
 }
 async function enter() {
 	paired = true; $("pair").hidden = true; $("app").hidden = false;
-	updateState(await jsonFetch("/api/session"));
+	const initial = await jsonFetch("/api/session");
+	if (initial.harness) {
+		harness = true; renderProjects(initial.projects ?? []);
+		const requested = new URLSearchParams(location.search).get("project") ?? sessionStorage.getItem("rpi_project");
+		await selectProject(projects.some((p) => p.id === requested) ? requested : undefined);
+	} else updateState(initial);
 	connect();
 }
 function updateConnection(connected) { $("send").disabled = !connected || !state.ready || busySending; $("connection").classList.toggle("live", connected); $("connection").querySelector("span").textContent = connected ? "已连接" : "正在重连"; }
@@ -38,21 +49,24 @@ function connect() {
 	clearTimeout(reconnectTimer);
 	if (!paired) return;
 	socket = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
-	socket.onopen = async () => { updateConnection(true); try { updateState(await jsonFetch("/api/session")); } catch (error) { toast(error.message); } };
+	socket.onopen = async () => { updateConnection(true); try { updateState(await jsonFetch(sessionEndpoint())); } catch (error) { toast(error.message); } };
 	socket.onclose = () => {
 		updateConnection(false);
 		if (paired) reconnectTimer = setTimeout(async () => {
-			try { updateState(await jsonFetch("/api/session")); if (paired) connect(); }
+			try { updateState(await jsonFetch(sessionEndpoint())); if (paired) connect(); }
 			catch { if (paired) reconnectTimer = setTimeout(connect, 3000); }
 		}, 1800);
 	};
 	socket.onerror = () => socket.close();
 	socket.onmessage = ({ data }) => {
 		const event = JSON.parse(data);
+		if (event.type === "projects") { renderProjects(event.projects); return; }
+		if (harness && !event.projectId && event.type === "state") { renderProjects(event.state.projects ?? projects); return; }
+		if (harness && event.projectId !== activeProject) return;
 		if (event.hostEpoch && event.hostEpoch !== lastHostEpoch) { lastHostEpoch = event.hostEpoch; lastEventSeq = 0; }
 		if (event.seq != null) lastEventSeq = Math.max(lastEventSeq, event.seq);
 		if (event.targetClientId && event.targetClientId !== uiClientId) return;
-		if (event.type === "state") updateState(event.seq != null ? { ...event.state, seq: event.seq } : event.state);
+		if (event.type === "state") updateState({ ...event.state, ...(event.seq != null ? { seq: event.seq } : {}), ...(harness ? { harness: true, projectId: event.projectId } : {}) });
 		if (event.type === "terminal_snapshot") { initTerminal(); terminal.reset(); terminal.resize(event.cols, event.rows); terminal.write(event.data); terminalSeq = event.seq; }
 		if (event.type === "terminal" && event.seq > terminalSeq) { terminalSeq = event.seq; terminal?.write(event.data); }
 		if (event.type === "terminal_resize") terminal?.resize(event.cols, event.rows);
@@ -75,29 +89,32 @@ function connect() {
 	};
 }
 function renderRunState() {
-	const status = !state.ready ? "等待 Pi" : state.nativePrompt ? "等待操作" : state.idle ? "就绪" : "处理中";
+	const status = !state.ready ? "等待 Pi" : (state.nativePrompt || state.dialogs?.length || unreadDialogs.size) ? "等待操作" : state.idle ? "就绪" : "处理中";
 	$("run-state").textContent = status + (state.statuses?.boundary ? " · " + state.statuses.boundary : "");
 }
 function updateState(next) {
+	if (harness && next.projectId !== activeProject) return;
 	if (next.hostEpoch && next.hostEpoch !== lastHostEpoch) { lastHostEpoch = next.hostEpoch; lastEventSeq = 0; }
 	if (next.seq != null && next.seq < lastEventSeq) return;
 	if (next.seq != null) lastEventSeq = next.seq;
 	if (next.hostEpoch === state.hostEpoch && next.seq != null && next.seq < (state.seq ?? 0)) return;
 	if (next.sessionId && (next.sessionId !== state.sessionId || next.sessionEpoch !== state.sessionEpoch)) { stream = ""; lastMessages = ""; olderEntries = []; selectedActor = null; $("actor-detail").hidden = true; $("agents-view").classList.remove("watching"); }
 	state = next;
-	$("app").classList.toggle("runtime-layout", next.detachedRuntime === true);
+	$("app").classList.toggle("runtime-layout", next.detachedRuntime === true || harness);
 	if (next.detachedRuntime) {
 		$("session-sidebar").hidden = false;
 		$("runtime-controls").hidden = false;
 		for (const selector of [".terminal-actions", "#terminal", ".keybar", ".terminal-input", ".terminal-note"]) document.querySelector(selector).hidden = true;
-		$("tabs").querySelector('[data-tab="terminal"]').textContent = "操作";
+		$("terminal-tab").hidden = true; $("chat-command-buttons").hidden = false;
 		if (next.ready && sessionsEpoch !== next.sessionEpoch) { sessionsEpoch = next.sessionEpoch; loadSessions().catch((e) => toast(e.message)); }
 		stream = next.activeMessage?.content?.filter((p) => p.type === "text").map((p) => p.text).join("") ?? "";
 		renderAuth(next.authInfo);
 	}
-	$("workspace").textContent = next.cwd?.split("/").filter(Boolean).slice(-2).join(" / ") ?? "Pi 正在切换会话";
+	$("workspace").textContent = harness && !activeProject ? "所有研究项目" : next.cwd?.split("/").filter(Boolean).slice(-2).join(" / ") ?? "Pi 正在切换会话";
 	$("model-label").textContent = next.model ? next.model.provider + " / " + (next.model.name || next.model.id) + " · " + next.thinking : "等待 Pi";
-	renderRunState(); updateNavigation();
+	renderRunState(); updateNavigation(); $("settings-button").disabled = harness && !next.ready; $("stop-project").hidden = !harness || !next.ready;
+	$("workspace-stopped").hidden = !harness || !activeProject || next.ready || !next.stopped;
+	renderUsage();
 	$("abort").hidden = !next.ready || next.idle;
 	$("send").disabled = !next.ready || busySending;
 	if (next.idle) { stream = ""; $("activity").hidden = true; }
@@ -119,18 +136,14 @@ function contentHtml(message) {
 function renderMessages() {
 	const entries = [...olderEntries, ...(state.entries ?? [])];
 	const messages = entries.filter((entry) => (entry.type === "message" && !["system", "developer"].includes(entry.message?.role)) || (entry.type === "custom_message" && entry.display !== false)).map((entry) => entry.message ?? entry);
-	const signature = JSON.stringify(messages) + stream + Boolean(state.hideThinking) + Boolean(state.toolsExpanded);
+	const signature = JSON.stringify(messages) + JSON.stringify(state.liveTools) + JSON.stringify(state.activeMessage) + stream + Boolean(state.hideThinking) + Boolean(state.toolsExpanded);
 	if (signature === lastMessages) return;
 	lastMessages = signature;
 	const el = $("messages"), atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
-	el.innerHTML = (state.detachedRuntime && entries.length < state.historyCount ? '<button id="older-history" class="quiet">加载更早的对话</button>' : "") + messages.map((message) => {
-		const role = message.role ?? "runtime";
-		const content = contentHtml(message);
-		if (!content) return "";
-		if (message.customType === "research-side") return '<details class="tool-result"' + (state.toolsExpanded ? " open" : "") + '><summary>SIDE</summary><div>' + content + "</div></details>";
-		if (role === "toolResult") return '<details class="tool-result"' + (state.toolsExpanded ? ' open' : '') + '><summary>' + escape(message.toolName ?? "工具结果") + (message.isError ? " · 失败" : "") + "</summary><div>" + content + "</div></details>";
-		return '<article class="message ' + (role === "user" ? "user" : "assistant") + '"><div class="message-label">' + escape(role === "user" ? "You" : role === "assistant" ? "Pi" : "Runtime") + "</div>" + content + "</article>";
-	}).join("") + (stream ? '<article id="stream-message" class="message assistant"><div class="message-label">Pi · 正在回复</div>' + md(stream) + "</article>" : "");
+	const expandedIds = [...el.querySelectorAll("[data-tool-call] details[open]")].map((node) => node.closest("[data-tool-call]").dataset.toolCall);
+	el.innerHTML = (state.detachedRuntime && entries.length < state.historyCount ? '<button id="older-history" class="quiet">加载更早的对话</button>' : "") + renderTimeline(entries, { escape, md, activeMessage: state.activeMessage, liveTools: state.liveTools, hiddenThinking: state.hideThinking, expanded: state.toolsExpanded });
+	for (const card of el.querySelectorAll("[data-tool-call]")) if (expandedIds.includes(card.dataset.toolCall)) card.querySelector("details").open = true;
+	el.querySelectorAll("[data-watch]").forEach((button) => button.onclick = () => { selectedActor = button.dataset.watch; switchTab("agents").then(loadActor).catch((e) => toast(e.message)); });
 	if (!el.innerHTML) el.innerHTML = '<div class="empty"><h2>把研究继续下去。</h2><p>同一个项目，同一个 Pi。</p></div>';
 	el.querySelectorAll("a").forEach((a) => { a.target = "_blank"; a.rel = "noopener noreferrer"; });
 	const older = $("older-history"); if (older) older.onclick = async () => {
@@ -141,6 +154,7 @@ function renderMessages() {
 	if (atBottom) el.scrollTop = el.scrollHeight;
 }
 function renderStream() {
+	if (state.detachedRuntime) { renderMessages(); return; }
 	if (!stream) return;
 	const el = $("messages"), bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
 	let row = document.getElementById("stream-message");
@@ -149,6 +163,7 @@ function renderStream() {
 	if (bottom) el.scrollTop = el.scrollHeight;
 }
 function agentEvent(event) {
+	if (state.detachedRuntime && event.type === "message_update") state.activeMessage = event.message;
 	if (state.detachedRuntime && event.type === "agent_settled") loadSessions().catch((error) => toast(error.message));
 	if (event.type === "message_end") { stream = ""; clearTimeout(streamTimer); document.getElementById("stream-message")?.remove(); }
 	if (event.type === "message_update") {
@@ -160,13 +175,14 @@ function agentEvent(event) {
 }
 function showPending() {
 	const count = unreadDialogs.size;
+	renderRunState();
 	$("pending-banner").hidden = !count && (!state.nativePrompt || activeTab === "terminal");
 	$("pending-banner").querySelector("span").textContent = count ? "有 " + count + " 项等待你回答" : "Pi 正在等待终端操作";
 	if (count && !activeDialog && !$("settings").open) openPending();
 }
 function openPending() {
 	const request = unreadDialogs.values().next().value;
-	if (!request) { switchTab("terminal"); return; }
+	if (!request) { switchTab(state.detachedRuntime ? "chat" : "terminal"); return; }
 	activeDialog = request;
 	$("approval-title").textContent = request.title;
 	$("approval-message").textContent = request.message ?? "";
@@ -349,8 +365,8 @@ $("image-input").onchange = async (event) => {
 	event.target.value = ""; renderAttachments();
 };
 function appendOperation(message) {
-	const row = document.createElement("pre"); row.textContent = message; $("operation-log").prepend(row);
-	while ($("operation-log").children.length > 20) $("operation-log").lastChild.remove();
+	const row = document.createElement("details"); row.className = "operation-entry"; const summary = document.createElement("summary"); summary.textContent = String(message).split("\n")[0].slice(0, 120); const body = document.createElement("div"); body.innerHTML = md(message); row.append(summary, body); const target = state.detachedRuntime ? $("chat-events") : $("operation-log"); target.hidden = false; target.append(row); while (target.children.length > 30) target.firstChild.remove();
+
 }
 function renderAuth(info) {
 	const el = $("auth-info"); el.hidden = !info; el.replaceChildren(); if (!info) return;
@@ -374,14 +390,14 @@ async function loadSessions() {
 function updateNavigation() { for (const button of document.querySelectorAll("#session-list button, #new-session")) button.disabled = navigating || !state.ready; }
 async function navigateSession(method, params = {}) {
 	if (navigating || !state.ready) return; navigating = true; updateNavigation();
-	try { const result = await command(method, params); updateState(await jsonFetch("/api/session")); return result; }
+	try { const result = await command(method, params); updateState(await jsonFetch(sessionEndpoint())); return result; }
 	catch (e) { toast(e.message); } finally { navigating = false; updateNavigation(); }
 }
 async function openTree(mode) {
 	try {
 		const tree = await command("tree"), rows = [];
 		const visit = (nodes, depth = 0) => { for (const node of nodes) { if (mode !== "fork" || node.entry.message?.role === "user") rows.push({ id: node.entry.id, label: "  ".repeat(depth) + node.entry.type + " · " + (node.entry.message?.role ?? "") }); visit(node.children ?? [], depth + 1); } }; visit(tree);
-		await switchTab("terminal"); const el = $("operation-log"); el.replaceChildren();
+		await switchTab(state.detachedRuntime ? "chat" : "terminal"); const el = $("chat-events"); el.hidden = false; el.replaceChildren();
 		for (const row of rows) { const button = document.createElement("button"); button.textContent = row.label; button.onclick = () => navigateSession(mode === "fork" ? "session.fork" : "session.tree", { entryId: row.id }).then((result) => { if (result?.selectedText) { $("message").value = result.selectedText; reportDraft(); } switchTab("chat"); }).catch((e) => toast(e.message)); el.append(button); }
 	} catch (e) { toast(e.message); }
 }
@@ -389,16 +405,15 @@ $("new-session").onclick = () => navigateSession("session.new");
 $("refresh-sessions").onclick = () => loadSessions().catch((e) => toast(e.message));
 $("runtime-command-form").onsubmit = async (event) => { event.preventDefault(); const input = $("runtime-command"); if (await nativeCommand(input.value.trim())) input.value = ""; };
 for (const value of ["/resume", "/model", "/thinking", "/config", "/models", "/runtime", "/watch", "/tree", "/compact", "/queue", "/queue clear", "/login", "/settings", "/help"]) {
-	const button = document.createElement("button"); button.textContent = value; button.onclick = () => nativeCommand(value); $("command-buttons").append(button);
+	const button = document.createElement("button"); button.textContent = value; button.onclick = () => nativeCommand(value); $("command-buttons").append(button); if (["/model", "/config", "/resume", "/watch", "/runtime", "/queue"].includes(value)) { const chatButton = button.cloneNode(true); chatButton.onclick = button.onclick; $("chat-command-buttons").append(chatButton); }
 }
-document.addEventListener("visibilitychange", () => { if (!document.hidden && paired) jsonFetch("/api/session").then(updateState).catch((error) => toast(error.message)); });
+document.addEventListener("visibilitychange", () => { if (!document.hidden && paired) jsonFetch(sessionEndpoint()).then(updateState).catch((error) => toast(error.message)); });
 setInterval(() => { if (!paired || document.hidden || !state.ready) return; if (activeTab === "agents") loadActors().catch(() => {}); if (activeTab === "project") loadProject().catch(() => {}); }, 3500);
 window.addEventListener("hashchange", () => {
 	const nextToken = new URLSearchParams(location.hash.slice(1)).get("token");
 	if (nextToken) login(nextToken).catch((error) => { showPair(); $("pair-error").textContent = error.message; });
 });
-const token = new URLSearchParams(location.hash.slice(1)).get("token");
-try { if (token) await login(token); else await enter(); } catch (error) { showPair(); if (token) $("pair-error").textContent = error.message; }
+
 
 let viewportTimer;
 const viewport = () => {
@@ -407,3 +422,88 @@ const viewport = () => {
 	viewportTimer = setTimeout(fitTerminal, 150);
 };
 window.visualViewport?.addEventListener("resize", viewport); viewport();
+
+function sessionEndpoint() { return harness && activeProject ? "/api/session?project=" + encodeURIComponent(activeProject) : "/api/session"; }
+function renderProjects(next) {
+	projects = next; $("project-select").hidden = !harness; $("add-project").hidden = !harness;
+	$("project-navigation").hidden = !harness;
+	if (!harness) return;
+	const current = next.find((p) => p.id === activeProject);
+	// The directory confirms a stopped Host; this projection has no Host event sequence.
+	if (current && !current.running && !current.unavailable && (state.ready || !state.stopped)) updateState({ ...state, seq: undefined, ready: false, stopped: true, executionUnknown: false, idle: true, dialogs: [] });
+	const signature = JSON.stringify(next); if (signature === lastProjects) return; lastProjects = signature;
+	const selector = $("project-select"); selector.replaceChildren(new Option("项目总览", ""));
+	for (const project of next) selector.append(new Option(project.name + (project.analysis ? " · Analysis" : "") + (project.running ? project.idle ? " · 就绪" : " · 运行中" : " · 未启动"), project.id));
+	selector.value = activeProject ?? "";
+	for (const target of [$("project-list"), $("project-home-list")]) {
+		target.replaceChildren();
+		for (const project of next) {
+			const button = document.createElement("button"); button.className = "project-link" + (project.id === activeProject ? " selected" : ""); button.dataset.project = project.id;
+			const name = document.createElement("strong"); name.textContent = project.name + (project.analysis ? " · Analysis" : "");
+			const status = document.createElement("small"); status.textContent = (project.unavailable ? "不可达" : project.running ? project.idle ? "就绪" : "运行中" : "未启动") + (project.pending ? ` · ${project.pending} 项待回答` : "");
+			button.append(name, status); if (target.id === "project-home-list") { const path = document.createElement("span"); path.textContent = project.cwd; button.append(path); }
+			button.onclick = () => selectProject(project.id).catch((e) => toast(e.message)); target.append(button);
+		}
+	}
+}
+async function selectProject(id) {
+	const selection = ++projectSelection;
+	if (activeProject) { projectDrafts.set(activeProject, { text: $("message").value, images }); if (state.ready) void command("ui.draft", { hasDraft: false }).catch(() => {}); }
+	activeProject = id || undefined; sessionStorage.setItem("rpi_project", activeProject ?? "");
+	const url = new URL(location.href); activeProject ? url.searchParams.set("project", activeProject) : url.searchParams.delete("project"); history.replaceState(null, "", url.pathname + url.search);
+	lastEventSeq = 0; lastHostEpoch = undefined; sessionsEpoch = undefined; olderEntries = []; lastMessages = ""; lastActors = ""; selectedActor = undefined;
+	unreadDialogs.clear(); $("approval").close(); activeDialog = undefined; $("settings").close(); navigating = false; busySending = false; pendingSend = undefined; pendingActorSend = undefined;
+	$("chat-events").replaceChildren(); $("chat-events").hidden = true; $("runtime-dock").hidden = true; $("session-list").replaceChildren();
+	const draft = projectDrafts.get(activeProject); $("message").value = draft?.text ?? ""; images = draft?.images ?? []; renderAttachments();
+	$("project-home").hidden = Boolean(activeProject); $("tabs").hidden = !activeProject; $("chat-view").hidden = !activeProject; $("agents-view").hidden = true; $("project-view").hidden = true; $("terminal-view").hidden = true;
+	activeTab = "chat"; $("tabs").querySelectorAll("button").forEach((b) => b.classList.toggle("active", b.dataset.tab === "chat"));
+	state = { harness: true, projectId: activeProject, ready: false, entries: [], dialogs: [] }; updateNavigation();
+	$("project-select").value = activeProject ?? ""; lastProjects = ""; renderProjects(projects);
+	const snapshot = await jsonFetch(sessionEndpoint()); if (selection !== projectSelection) return; updateState(snapshot);
+	if (activeProject && snapshot.ready) { reportDraft(); await refreshDock(); }
+	else if (!activeProject) { $("workspace").textContent = "所有研究项目"; $("session-sidebar").hidden = false; }
+}
+$("project-select").onchange = (e) => selectProject(e.target.value).catch((error) => toast(error.message));
+$("project-home-button").onclick = () => selectProject().catch((e) => toast(e.message));
+for (const id of ["add-project", "home-add-project"]) $(id).onclick = () => $("project-dialog").showModal();
+$("project-cancel").onclick = () => $("project-dialog").close();
+$("project-form").onsubmit = async (e) => {
+	e.preventDefault(); try {
+		const project = await command("project.add", { cwd: $("project-path").value, name: $("project-name").value, analysis: $("project-analysis").checked });
+		renderProjects(await command("projects")); $("project-dialog").close(); await selectProject(project.id);
+	} catch (error) { toast(error.message); }
+};
+$("start-project").onclick = async () => {
+	const button = $("start-project"); button.disabled = true;
+	try { const snapshot = await command("project.start"); updateState(snapshot); renderProjects(await command("projects")); await refreshDock(); }
+	catch (e) { toast(e.message); } finally { button.disabled = false; }
+};
+function renderUsage() {
+	const stats = state.stats, usage = state.usage, compact = (n) => Number(n ?? 0) >= 1000000 ? (n / 1000000).toFixed(1) + "M" : Number(n ?? 0) >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n ?? 0);
+	$("usage-status").textContent = !stats ? "" : `↑ ${compact(stats.tokens?.input)} · ↓ ${compact(stats.tokens?.output)} · 缓存 ${compact(stats.tokens?.cacheRead)} · $${Number(stats.cost ?? 0).toFixed(3)} · 上下文 ${usage?.percent == null ? "—" : usage.percent.toFixed(1) + "%"} / ${compact(usage?.contextWindow)} · 队列 ${state.queue ?? 0}`;
+}
+async function refreshDock() {
+	if (!state.detachedRuntime || !state.ready || activeTab !== "chat") return;
+	const view = await command("runtime"); if (!view) return;
+	const actors = await command("actors"), active = actors.filter((a) => ["running", "starting", "input_required", "cancelling"].includes(a.action?.status));
+	const dock = $("runtime-dock"); dock.hidden = false;
+	const wasOpen = dock.querySelector("details")?.open;
+	dock.innerHTML = `<details${wasOpen ? " open" : ""}><summary><strong>◈ RESEARCH ${escape(view.project.name)}</strong><span>${escape(view.leader.inheritancePolicy)} · ${view.leader.isCurrentSessionAttached ? "Leader here" : "Leader elsewhere"} · ${view.counts.active} active · ${view.counts.waiting} waiting · ${view.counts.openMessages} open</span></summary><p>${escape(view.research.question ?? "")}</p>${active.slice(0, 4).map((a) => `<button class="dock-actor" data-watch="${escape(a.id)}"><strong>${escape(a.label)}</strong><small>${escape([a.action?.status, a.model, a.thinking, a.action?.metadata?.progress].filter(Boolean).join(" · "))}</small></button>`).join("")}<button id="dock-board" class="quiet">Runtime 面板</button></details>`;
+	dock.querySelectorAll("[data-watch]").forEach((b) => b.onclick = () => { selectedActor = b.dataset.watch; switchTab("agents").then(loadActor).catch((e) => toast(e.message)); });
+	$("dock-board").onclick = () => switchTab("project").catch((e) => toast(e.message));
+}
+setInterval(() => { if (paired && !document.hidden) void refreshDock().catch(() => {}); }, 3500);
+const builtInCommands = ["/model", "/models", "/thinking", "/runtime", "/watch", "/config", "/resume", "/new", "/tree", "/fork", "/compact", "/login", "/logout", "/settings", "/queue", "/help"];
+function suggestCommands() {
+	const text = $("message").value, el = $("command-suggestions"); el.replaceChildren(); el.hidden = !text.startsWith("/") || text.includes(" "); if (el.hidden) return;
+	for (const value of builtInCommands.filter((c) => c.startsWith(text))) { const button = document.createElement("button"); button.type = "button"; button.textContent = value; button.onclick = () => { $("message").value = value + " "; el.hidden = true; $("message").focus(); reportDraft(); }; el.append(button); }
+}
+$("message").addEventListener("input", suggestCommands);
+
+const token = new URLSearchParams(location.hash.slice(1)).get("token");
+try { if (token) await login(token); else await enter(); } catch (error) { showPair(); if (token) $("pair-error").textContent = error.message; }
+
+$("stop-project").onclick = async () => {
+	if (!window.confirm("停止当前项目 Runtime？当前轮会中止，其他项目继续运行。")) return;
+	try { await command("runtime.stop"); updateState({ ...state, seq: undefined, ready: false }); $("settings").close(); } catch (e) { toast(e.message); }
+};

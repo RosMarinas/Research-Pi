@@ -178,3 +178,7 @@ UI连接/断开、切换页面、调整尺寸、语言与样式只改变客户�
 ## 11. 本次实现
 
 独立分支已完成 SDK Host、共享 Socket 协议、交互 broker、TUI 客户端和独立 Web Gateway，并新增桌面会话侧栏与手机结构化操作。具体使用方式、验收步骤和已知兼容边界见 [实现与验收](ui-runtime-review.md)。旧 tmux resident 不自动搬迁；用户验收前保留 worktree，不合并或推送。
+
+## 2026-10-06 多项目工作台增量
+
+共享 Gateway 管理私有项目目录与认证；每个项目和 Analysis 分别持有独立 Host。所有 Host 操作显式指定 projectId，客户端切换隔离事件、快照、待处理审批和草稿。对话合并操作与类型化工具渲染，参考 [Pi Web UI 调研](pi-web-harness-research.md)。具体入口与边界见 [验收说明](ui-runtime-review.md)。用户验收前不合并、不推送、不删除 worktree。

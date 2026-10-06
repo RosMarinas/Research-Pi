@@ -29,7 +29,7 @@ export async function createWebGateway({ port = 8787, publicOrigin, tailscaleLog
 		"/vendor/marked.js": require.resolve("marked"),
 		"/vendor/purify.js": require.resolve("dompurify").replace(/purify\.cjs\.js$/, "purify.min.js"),
 	};
-	const assets = { "/": "index.html", "/app.js": "app.js", "/style.css": "style.css", "/icon.svg": "icon.svg", "/manifest.webmanifest": "manifest.webmanifest" };
+	const assets = { "/": "index.html", "/app.js": "app.js", "/timeline.js": "timeline.js", "/style.css": "style.css", "/icon.svg": "icon.svg", "/manifest.webmanifest": "manifest.webmanifest" };
 	const headers = {
 		"Cache-Control": "no-store",
 		"X-Content-Type-Options": "nosniff",
@@ -74,7 +74,7 @@ export async function createWebGateway({ port = 8787, publicOrigin, tailscaleLog
 	};
 	async function execute(input) {
 		if (typeof input.id !== "string" || !/^[a-zA-Z0-9_-]{8,100}$/.test(input.id)) throw fail(400, "A request ID is required");
-		const serialized = JSON.stringify({ method: input.method, params: input.params, sessionId: input.sessionId, sessionEpoch: input.sessionEpoch });
+		const serialized = JSON.stringify({ method: input.method, params: input.params, projectId: input.projectId, sessionId: input.sessionId, sessionEpoch: input.sessionEpoch });
 		const previous = calls.get(input.id);
 		if (previous) {
 			if (previous.serialized !== serialized) throw fail(409, "Request ID was already used for a different operation");
@@ -113,7 +113,7 @@ export async function createWebGateway({ port = 8787, publicOrigin, tailscaleLog
 			if (req.method !== "GET") throw fail(405, "Method not allowed");
 			if (url.pathname === "/api/session") {
 				if (!authenticated(req)) throw fail(401, "Pair this browser first");
-				return send(res, 200, { ok: true, result: await command({ method: "state" }) });
+				return send(res, 200, { ok: true, result: await command({ method: "state", projectId: url.searchParams.get("project") ?? undefined }) });
 			}
 			const path = vendor[url.pathname] ?? (assets[url.pathname] && join(assetsRoot, assets[url.pathname]));
 			if (!path) throw fail(404, "Not found");

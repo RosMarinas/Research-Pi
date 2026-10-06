@@ -28,26 +28,35 @@
   <header class="topbar">
     <img src="/icon.svg" width="34" height="34" alt="">
     <div class="identity"><strong>Research Pi</strong><span id="workspace">正在连接</span></div>
+    <select id="project-select" aria-label="选择项目" hidden></select>
+    <button id="add-project" class="icon-button" aria-label="添加项目" hidden>＋</button>
     <span id="connection" class="connection"><i></i><span>连接中</span></span>
     <button id="settings-button" class="icon-button" aria-label="模型与设置">⚙</button>
   </header>
   <aside id="session-sidebar" hidden>
+    <section id="project-navigation" hidden><div class="section-title"><h2>项目</h2><button id="project-home-button" class="quiet">总览</button></div><div id="project-list"></div></section>
     <div class="section-title"><h2>会话</h2><button id="new-session" class="quiet">＋ 新建</button></div>
     <button id="refresh-sessions" class="quiet">刷新会话</button>
     <div id="session-list"></div>
     <small>界面可随时关闭，Runtime 继续运行。</small>
   </aside>
   <nav id="tabs" class="tabs" aria-label="工作区">
-    <button data-tab="chat" class="active">对话</button><button data-tab="agents">Agents</button><button data-tab="project">项目</button><button data-tab="terminal">终端</button>
+    <button data-tab="chat" class="active">对话</button><button data-tab="agents">Agents</button><button data-tab="project">项目</button><button data-tab="terminal" id="terminal-tab">终端</button>
   </nav>
   <div id="pending-banner" class="pending-banner" hidden><span>Pi 正在等待操作</span><button id="pending-open">查看</button></div>
   <main>
+    <section id="project-home" hidden><h1>Research Pi 工作台</h1><p>选择一个项目继续研究。关闭界面后，各项目的 Runtime 继续运行。</p><div id="project-home-list"></div><button id="home-add-project" class="primary">添加项目</button></section>
     <div id="auth-info" hidden></div>
     <section id="chat-view" class="view">
+      <div id="workspace-stopped" hidden><p>项目 Runtime 尚未启动。</p><button id="start-project" class="primary">启动此项目</button></div>
       <div class="conversation-meta"><span id="model-label">—</span><span id="run-state">等待连接</span></div>
+      <div id="chat-command-buttons" class="chat-command-buttons" hidden></div>
       <div id="messages" class="messages" aria-live="polite"><div class="empty"><h2>把研究继续下去。</h2><p>同一个项目，同一个 Pi。</p></div></div>
+      <div id="chat-events" class="chat-events" hidden></div>
+      <div id="runtime-dock" class="runtime-dock" hidden></div>
       <div id="activity" class="activity" hidden></div>
       <form id="composer" class="composer">
+        <div id="command-suggestions" class="command-suggestions" hidden></div>
         <div id="attachments" class="attachments"></div>
         <textarea id="message" rows="2" placeholder="继续讨论，或输入 / 命令" aria-label="消息"></textarea>
         <div class="composer-actions">
@@ -56,6 +65,7 @@
           <button type="button" id="abort" class="quiet" hidden>停止当前轮</button>
           <button type="submit" id="send" class="primary">发送 ↑</button>
         </div>
+        <div id="usage-status" class="usage-status"></div>
         <small id="composer-status">内容由电脑上的 Pi 处理</small>
       </form>
     </section>
@@ -89,8 +99,9 @@
     </section>
   </main>
 </div>
+<dialog id="project-dialog"><form id="project-form"><h2>添加电脑上的项目</h2><label for="project-path">项目目录</label><input id="project-path" placeholder="/Users/你的用户名/项目" required><label for="project-name">名称（可选）</label><input id="project-name"><label><input id="project-analysis" type="checkbox"> 只读 Analysis 界面</label><p>仅登记目录；点击启动后创建独立 Runtime。提供方认证继续留在电脑。</p><div class="dialog-actions"><button id="project-cancel" type="button" class="quiet">取消</button><button type="submit" class="primary">添加</button></div></form></dialog>
 <dialog id="approval"><form id="approval-form"><p class="eyebrow">PI 正在等待你</p><h2 id="approval-title"></h2><p id="approval-message"></p><div id="approval-fields"></div><div class="dialog-actions"><button id="approval-cancel" type="button" class="quiet">取消</button><button id="approval-submit" type="submit" class="primary">确认</button></div></form></dialog>
-<dialog id="settings"><div class="section-title"><h2>模型与设置</h2><button id="settings-close" class="quiet">关闭</button></div><label for="model-select">Leader 模型</label><select id="model-select"></select><label for="thinking-select">思考强度</label><select id="thinking-select"><option>off</option><option>minimal</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option><option>ultra</option></select><button id="save-model" class="primary">应用</button><hr><button id="full-config" class="quiet">完整 Research 配置</button><button id="logout" class="quiet">断开此浏览器</button></dialog>
+<dialog id="settings"><div class="section-title"><h2>模型与设置</h2><button id="settings-close" class="quiet">关闭</button></div><label for="model-select">Leader 模型</label><select id="model-select"></select><label for="thinking-select">思考强度</label><select id="thinking-select"><option>off</option><option>minimal</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option><option>ultra</option></select><button id="save-model" class="primary">应用</button><hr><button id="full-config" class="quiet">完整 Research 配置</button><button id="stop-project" class="quiet" hidden>停止当前项目 Runtime</button><button id="logout" class="quiet">断开此浏览器</button></dialog>
 <div id="toast" role="status" hidden></div>
 <script src="/vendor/xterm.js"></script><script src="/vendor/fit.js"></script><script src="/vendor/purify.js"></script><script type="module" src="/app.js"></script>
 </body></html>

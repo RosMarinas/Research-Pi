@@ -9,7 +9,8 @@ flowchart LR
   TUI[本机 TUI 客户端] -->|私有 Unix Socket| Host[独立 Runtime Host]
   Desktop[本机 Web 客户端] --> Gateway[独立 Web Gateway]
   Phone[手机 Web 客户端] -->|当前 Tailscale HTTPS| Gateway
-  Gateway -->|同一个协议| Host
+  Gateway -->|显式 projectId 路由| Host
+  Gateway --> Host2[另一个项目的独立 Host]
   Host --> Pi[原生 AgentSessionRuntime]
   Pi --> Session[原生 Session JSONL]
   Pi --> Research[Research 扩展、权限、Ledger、Subagents]
@@ -22,6 +23,11 @@ Host 是模型循环、工具、权限、交互和会话的唯一拥有者。TUI
 ## 使用
 
 ```bash
+# 独立开启多项目总入口，无需先进入某个项目
+pi harness start
+pi harness status
+# 只关闭总入口，所有项目 Host 保留
+pi harness stop
 # 设置本机网页偏好，然后在目标项目启动；再次运行会连接同一个 Host
 pi config web local
 pi
@@ -45,13 +51,13 @@ pi --analysis
 pi --legacy-ui
 ```
 
-默认本机网页仅监听 loopback，自动选择空闲端口。手机端继续使用已有 Tailscale Serve 和当前登录身份；未开启 Funnel，未改动 tailnet 身份。工作区无关的持久配对 token 沿用已有实现，原始 token 和提供方凭据不会进入版本库。`--web-port`、`--web-tailscale` 等原有网页参数保持可用，具体参数见 [手机网页说明](mobile-web.md)。
+Gateway 现在是当前安装与 stateRoot 共享的多项目入口，不再每个项目开一个网页服务。`pi harness start` 默认监听本机配置端口；普通项目启动仍可自动选择空闲端口。网页只需配对一次，项目目录登记和启动通过入口完成；发现已有新版 Host 时直接连接。不同项目、Leader 与 Analysis 保持独立 Host、会话和权限。每个修改请求携带明确的 projectId、Session ID 和 epoch；切换项目不会停止后台任务，也不会把迟到响应写入另一项目。目录登记并不自动启动模型，启动须点项目的启动按钮。默认本机网页仅监听 loopback。手机端继续使用已有 Tailscale Serve 和当前登录身份；未开启 Funnel，未改动 tailnet 身份。工作区无关的持久配对 token 沿用已有实现，原始 token 和提供方凭据不会进入版本库。`--web-port`、`--web-tailscale` 等原有网页参数保持可用，具体参数见 [手机网页说明](mobile-web.md)。
 
 启动选项只能用于创建 Host。已有 Host 上的模型和会话切换使用 `/model`、`/resume` 等操作；若要改变启动资源，应先保存并显式停止 Host。发现旧 tmux resident 时新 Host 会拒绝启动；先用旧路径继续使用，在空闲后再迁移，防止两个写入者同时管理会话。
 
 TUI：`Ctrl+]` 分离，`Ctrl+C` 中止当前轮，`Ctrl+D` 退出客户端，`Ctrl+P` 模型选择，`Ctrl+O` 思考块，`Ctrl+E` 工具展开，`Alt+Enter` steer，`PgUp/PgDn` 历史翻页；Host 连接丢失后 `Ctrl+R` 重连。
 
-本机网页有会话侧栏、对话、Agents、项目和操作页；手机自动使用窄屏布局。原生 `/model /thinking /resume /new /clone /import /tree /fork /compact /login /logout /settings /session /name /export /copy /reload /trust` 由 Host 执行。Research 的 `/runtime /watch /config /models /side` 等命令沿用原扩展；`/queue` 查看队列，`/queue clear` 清空。技能和提示模板沿用 Pi 原生展开。
+本机网页有项目与会话侧栏、对话、Agents 和项目页；手机使用同一入口与窄屏布局。对话合并命令、通知、审批和工具操作，按原生 toolCallId 配对调用与结果，显示思考块、Shell 输出、文件操作和绿色 Subagent 卡片；Research 状态 dock 与用量、上下文、队列始终在工作台可见。命令按钮与补全直接使用原 Host 命令，独立操作页仅保留给旧终端兼容路径。原生 `/model /thinking /resume /new /clone /import /tree /fork /compact /login /logout /settings /session /name /export /copy /reload /trust` 由 Host 执行。Research 的 `/runtime /watch /config /models /side` 等命令沿用原扩展；`/queue` 查看队列，`/queue clear` 清空。技能和提示模板沿用 Pi 原生展开。
 
 ## 本次隔离验收
 
@@ -69,7 +75,7 @@ node scripts/runtime-review.mjs stop  # 只关闭本次隔离验收服务
 
 建议检查：
 
-1. 在 Web 发消息，TUI 同时显示同一历史；关闭其中一个界面后另一个继续工作。
+1. 在总入口切换两个离线项目，无需再次配对；各自的对话和会话应独立。在 Web 发消息，TUI 同时显示同一历史；关闭其中一个界面后另一个继续工作。
 2. 在网页或 TUI 输入 `/web-test-dialog`，看到审批后关闭界面，再从另一界面回答同一个请求。
 3. 使用 `/models`、`/config`、`/side collapse`、`/resume` 和 `/fork`；会话恢复显示已有内容，fork 将待编辑文字放回输入框。
 4. Agents 页打开 `pi:web-demo`，发送文字，查看投递回执和“已通过 Runtime 收到”回复。历史长名称卡片可完整展开，不应互相覆盖。
@@ -92,10 +98,18 @@ UI 只上报是否有草稿的短期状态，用于保留既有“用户输入�
 
 ### 本次实测结果
 
-- 完整 `npm test`：275/275 通过，其中 Host 相关 16 项覆盖断线审批、去重、epoch、请求前缀、模板、草稿恢复和 Gateway 重连。
+- 完整 `npm test`：277/277 通过，其中 Host 相关 16 项覆盖断线审批、去重、epoch、请求前缀、模板、草稿恢复和 Gateway 重连。
 - `npm run check` 与 npm 打包验证通过。
 - WebKit：桌面会话侧栏、新建后快速恢复历史、模型筛选；32 个长名称 Actor 无重叠；390×420 短视口输入区可见；Actor 消息投递回环成功；刷新后审批 ID 不变。
 - 真实 PTY：帮助、模型选择、100×30 → 52×16 缩放和 Ctrl+] 分离成功；退出码 0，Host 保持可连接，无遗留审批。
 - 隔离 CLI：关闭/重开 Gateway 保持 Host PID；单独启动无 Web 的 Analysis Host，原 Leader 保持，Actor 写操作被拒绝。
 
 上述结果来自 macOS、固定 Pi 1.0.0 和离线合成 provider；没有把它当作真实提供方 OAuth、服务端缓存命中或所有第三方 UI 扩展的验证。
+
+## 多项目工作台参考
+
+[本次调研](pi-web-harness-research.md)对照了 DeepSeek Harness、本机官方 Pi 组件和社区 Pi Web UI。采用其项目/会话导航与结构化工具卡片思路，保留本项目固定的 Pi 1.0.0、Research 权限和唯一 Host 权威；没有引入第二个浏览器 Agent 或把提供方凭据移到浏览器。集中入口目前是本机同一用户的 Harness，不代表多人共享服务或已达到 Codex App 全部功能。
+
+新增验证覆盖单次配对访问两个项目、显式路由、冷启动、会话隔离、跨项目旧 Session 拒绝、Gateway 关闭保留 Hosts，以及工具结果配对和参数转义。
+
+WebKit 增量验收：审批在项目切换后保留原请求；另一个项目可独立发送消息。网页登记第三个目录并通过真实 CLI 冷启动 Host，未发送模型请求；停止该项目后另外两个 Host 保持运行，网页自动恢复启动按钮。1440×1000、390×844、390×420 布局检查通过；短视口输入框可见，无水平溢出。

@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
-import { mkdir, chmod, readFile, writeFile, unlink, open } from "node:fs/promises";
+import { mkdir, chmod, readFile, writeFile, unlink, open, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { residentWebDirectory, findResidentWeb } from "./web-resident.mjs";
 import { residentControlDirectory } from "./web-tmux.mjs";
 import { withOwnerFileLock } from "./owner-file-lock.mjs";
+import { registerHarnessProject, projectId } from "./harness-projects.mjs";
 import { RuntimeClient } from "./runtime-client.mjs";
 
 export async function runtimeDirectory(stateRoot, cwd, analysis = false) {
@@ -17,7 +18,7 @@ export async function findRuntime(stateRoot, cwd, analysis = false) {
 	try { record = JSON.parse(await readFile(join(directory, "runtime.json"), "utf8")); }
 	catch (e) { if (e.code === "ENOENT") return null; throw e; }
 	const client = new RuntimeClient(record.socketPath);
-	try { await client.connect(); return { ...record, directory, state: client.state }; }
+	try { await client.connect(); return { ...record, projectId: projectId(await realpath(record.cwd), analysis), stateRoot, directory, state: client.state }; }
 	catch (e) {
 		try { process.kill(record.pid, 0); } catch (probe) { if (probe.code === "ESRCH") { await unlink(join(directory, "runtime.json")); return null; } throw probe; }
 		throw new Error(`Runtime ${record.pid} is alive but unavailable: ${e.message}`);
@@ -25,6 +26,7 @@ export async function findRuntime(stateRoot, cwd, analysis = false) {
 }
 
 export async function ensureRuntime({ stateRoot, cwd, env, packageRoot, args, agentDir, sessionDir, hasSessionOptions = false, analysis = false }) {
+	await registerHarnessProject(stateRoot, cwd, { analysis });
 	const directory = await runtimeDirectory(stateRoot, cwd, analysis);
 	await mkdir(directory, { recursive: true, mode: 0o700 }); await chmod(directory, 0o700);
 	return withOwnerFileLock(join(directory, "startup.lock"), async () => {
