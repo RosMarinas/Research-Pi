@@ -206,3 +206,7 @@ npm run test:package
 ## License
 
 原创代码与文档采用 [MIT License](LICENSE)。第三方组件保留各自许可证，见 [Third-Party Notices](THIRD_PARTY_NOTICES.md)。
+
+## 原生 TUI / Runtime 分离候选方案
+
+独立 Host 保留完整 Pi InteractiveMode，桌面终端与 Web Gateway 可以分离退出。当前需显式启用 `pi --resident-runtime --web`，默认启动行为保持不变。[边界、使用与验收](docs/native-ui-runtime-boundary.md)。

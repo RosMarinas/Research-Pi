@@ -229,8 +229,10 @@ async function analysisCommand(argv) {
 }
 
 async function spawnCore(argv, { background = false } = {}) {
+	let nativeRuntime = argv.includes("--resident-runtime");
+	argv = argv.filter(arg => arg !== "--resident-runtime");
 	const baseConfig = prepareConfig();
-	if (background && baseConfig.ui.web.mode === "off" && !argv.includes("--web-tailscale") && !argv.includes("--web")) argv = [...argv, "--web"];
+	if (background && baseConfig.ui.web.mode === "off" && !argv.includes("--no-web") && !argv.includes("--web-tailscale") && !argv.includes("--web")) argv = [...argv, "--web"];
 	const web = parseWebOptions(argv, baseConfig.ui.web, { interactive: background || Boolean(process.stdin.isTTY && process.stdout.isTTY) });
 	const { workspace, args: userArgs, config, sessionMode, fullAccess } = takeResearchOptions(web.args, baseConfig);
 	if (web.enabled && userArgs.some((arg) => ["--mode", "--print", "-p"].includes(arg) || arg.startsWith("--mode="))) throw new Error("--web requires interactive TUI mode");
@@ -271,13 +273,25 @@ async function spawnCore(argv, { background = false } = {}) {
 		"--append-system-prompt", join(packageRoot, ".pi", "APPEND_SYSTEM.md"),
 	);
 	for (const extension of researchPiExtensions(packageRoot, {
-		web: web.enabled,
+		web: web.enabled || nativeRuntime,
 		search: deepSeekSearchEnabled,
 		anchor: process.env.RESEARCH_PI_DEEPSEEK_ANCHOR === "1" || userArgs.some((arg) => arg === "--v4-pro-anchor" || arg.startsWith("--v4-pro-anchor=")),
 		trace: process.env.RESEARCH_PI_TRACE === "1",
 	})) args.push("--extension", extension);
 	args.push(...userArgs);
 
+	if (!informational && !nativeRuntime) {
+		const { findNativeRuntime } = await import("../.pi/lib/native-runtime-launcher.mjs");
+		if (await findNativeRuntime(paths.stateRoot, workspace, sessionMode === "analysis")) nativeRuntime = true;
+	}
+	if (!informational && nativeRuntime) {
+		if (userArgs.some(arg => ["--mode", "--print", "-p"].includes(arg) || arg.startsWith("--mode="))) throw new Error("Resident native presentation supports interactive mode; print/RPC require a separate invocation without an active native Host");
+		const { launchNativeRuntime } = await import("../.pi/lib/native-runtime-launcher.mjs");
+		await launchNativeRuntime({ stateRoot: paths.stateRoot, agentDir: paths.agentDir, sessionDir: paths.sessionDir,
+			cwd: workspace, args, packageRoot, env: process.env, web, background,
+			analysis: sessionMode === "analysis", hasSessionOptions: userArgs.length > 0 || argv.includes("--full-access") });
+		return;
+	}
 	if (web.enabled && !informational) {
 		if (web.persistent || background) {
 			if (!background && (!process.stdin.isTTY || !process.stdout.isTTY)) throw new Error("Use pi web start to launch a resident Pi without an interactive terminal");
@@ -321,8 +335,17 @@ async function webCommand(argv) {
 	const action = argv[0] ?? "status";
 	if (action === "start") return await spawnCore(argv.slice(1), { background: true });
 	if (!["status", "stop"].includes(action)) throw new Error("Usage: pi web [start|status|stop] [--workspace <path>]");
-	const { workspace, args } = takeResearchOptions(argv.slice(1), {});
+	const { workspace, args, sessionMode } = takeResearchOptions(argv.slice(1), {});
 	if (args.some((arg) => arg !== "--json")) throw new Error("Usage: pi web [status|stop] [--workspace <path>] [--json]");
+	const { findNativeRuntime, stopNativeGateway } = await import("../.pi/lib/native-runtime-launcher.mjs");
+	const native = await findNativeRuntime(paths.stateRoot, workspace, sessionMode === "analysis");
+	if (native) {
+		if (action === "stop") { await stopNativeGateway(native); process.stdout.write("Stopped Web gateway; Native Runtime continues running\n"); }
+		else if (args.includes("--json")) process.stdout.write(JSON.stringify(native, null, 2) + "\n");
+		else if (native.url) printWebRecord(native);
+		else process.stdout.write("Native Runtime is running without a Web gateway\n");
+		return;
+	}
 	const { findResidentWeb, stopResidentWeb } = await import("../.pi/lib/web-resident.mjs");
 	const record = await findResidentWeb(paths.stateRoot, workspace);
 	if (action === "stop" && record) { await stopResidentWeb(record); process.stdout.write("Stopped resident Pi for " + workspace + "\n"); return; }
@@ -340,6 +363,21 @@ async function main() {
 	}
 	if (argv[0] === "setup") return setup();
 	if (argv[0] === "config") return configCommand(argv.slice(1));
+	if (argv[0] === "native-runtime") {
+		const action = argv[1] ?? "status";
+		if (action === "start") return spawnCore([...argv.slice(2), "--resident-runtime"], { background: true });
+		const { workspace, sessionMode } = takeResearchOptions(argv.slice(2), prepareConfig());
+		const { findNativeRuntime, stopNativeGateway } = await import("../.pi/lib/native-runtime-launcher.mjs");
+		const { residentRequest, attachResidentTerminal } = await import("../.pi/lib/web-terminal.mjs");
+		const record = await findNativeRuntime(paths.stateRoot, workspace, sessionMode === "analysis");
+		if (!record) { process.stdout.write("No native Runtime Host running\n"); return; }
+		if (action === "stop") { await stopNativeGateway(record); await residentRequest(record, "stop"); }
+		else if (action === "web-stop") await stopNativeGateway(record);
+		else if (action === "attach") await attachResidentTerminal(record);
+		else if (action === "status") process.stdout.write(JSON.stringify({ pid: record.pid, cwd: record.cwd, state: record.state, web: Boolean(record.url) }, null, 2) + "\n");
+		else throw new Error("Usage: pi native-runtime [start|attach|status|web-stop|stop]");
+		return;
+	}
 	if (argv[0] === "analysis") return analysisCommand(argv.slice(1));
 	if (argv[0] === "paths") {
 		process.stdout.write(`${JSON.stringify(paths, null, 2)}\n`);
