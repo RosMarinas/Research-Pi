@@ -3,9 +3,9 @@ import test from "node:test";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { initializeResearchRuntime, readRuntimeSnapshot } from "../.pi/lib/research-runtime.mjs";
+import { initializeResearchRuntime, readRuntimeSnapshot, registerSubagentRuntimeJob } from "../.pi/lib/research-runtime.mjs";
 import { registerSubagentRuntimeAdapter } from "../.pi/lib/research-runtime-adapters.mjs";
-import { dispatchRuntimeSubagent, queueSubagentMessage, drainSubagentMailbox } from "../.pi/lib/runtime-subagents.mjs";
+import { dispatchRuntimeSubagent, queueSubagentMessage, drainSubagentMailbox, deliverSubagentMessage } from "../.pi/lib/runtime-subagents.mjs";
 
 for (const backend of ["codex", "pi", "antigravity"]) {
 	test(`${backend}: Runtime owns reuse, fresh contexts, direct messages, and captured settings`, async () => {
@@ -50,3 +50,27 @@ for (const backend of ["codex", "pi", "antigravity"]) {
 		} finally { rmSync(root, { recursive: true, force: true }); }
 	});
 }
+
+
+test("different mailbox messages serialize turn decisions for the same Actor", async () => {
+ const root=mkdtempSync(join(tmpdir(),"rpi-actor-delivery-"));
+ try {
+  const cwd=join(root,"workspace");mkdirSync(cwd);
+  const runtime=await initializeResearchRuntime(cwd,{sessionId:"leader"},{runtimeRoot:join(root,"runtime")});
+  await registerSubagentRuntimeJob(runtime,{id:"old",actorId:"codex:actor-serial",backend:"codex",role:"executor",status:"completed",cwd,workspaceKey:runtime.workspaceKey});
+  const ctx={sessionManager:{getSessionId:()=>"leader"}};
+  let inFlight=0,maxInFlight=0,resumes=0,active=false;const actions=[];
+  registerSubagentRuntimeAdapter("codex",{dispatch:async()=>{
+   inFlight++;maxInFlight=Math.max(maxInFlight,inFlight);
+   const resume=!active;await new Promise(r=>setTimeout(r,25));
+   if(resume){resumes++;active=true;actions.push("resume");}else actions.push("steer");
+   inFlight--;return {status:"delivered",detail:"synthetic turn receipt"};
+  }});
+  const a=await queueSubagentMessage(runtime,{actorId:"codex:actor-serial",jobId:"old",body:"first"});
+  const b=await queueSubagentMessage(runtime,{actorId:"codex:actor-serial",jobId:"old",body:"second"});
+  await Promise.all([deliverSubagentMessage(runtime,a,ctx),deliverSubagentMessage(runtime,b,ctx)]);
+  assert.equal(maxInFlight,1);assert.equal(resumes,1);assert.deepEqual(actions,["resume","steer"]);
+  const snapshot=await readRuntimeSnapshot(runtime);
+  assert.equal(snapshot.messages.filter(m=>[a.id,b.id].includes(m.id)&&m.status==="delivered").length,2);
+ } finally {rmSync(root,{recursive:true,force:true});}
+});

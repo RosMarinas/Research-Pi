@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import codexDelegateExtension, {
 	codexJobVisibleForRecovery,
+	selectCodexMailboxJob,
 	codexRuntimeDeliveryDecision,
 	codexResultMarkdown,
 	codexResultPreview,
@@ -2102,4 +2103,19 @@ test("Codex retention archives only old excess terminal jobs and exact result lo
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
+});
+
+
+test("Codex mailbox follows a stale turn only along its Actor continuation chain", () => {
+ const old={id:"old",actorId:"actor",status:"completed",researchTrackRef:"track"};
+ const mid={...old,id:"mid",continuationOf:"old"};
+ const live={...old,id:"live",continuationOf:"mid",status:"input_required"};
+ const unrelated={...old,id:"unrelated",status:"running"};
+ const otherTrack={...old,id:"other-track",continuationOf:"live",researchTrackRef:"another-track"};
+ const jobs=[old,mid,live,unrelated,otherTrack];
+ assert.equal(selectCodexMailboxJob(jobs,"old"),live);
+ assert.equal(selectCodexMailboxJob(jobs,"mid"),live);
+ assert.equal(selectCodexMailboxJob(jobs,"old","original-request"),old,"a reply must not answer a successor question");
+ assert.equal(selectCodexMailboxJob(jobs,"missing"),undefined);
+ assert.equal(selectCodexMailboxJob([old,unrelated],"old"),old,"no routing to an unrelated thread");
 });

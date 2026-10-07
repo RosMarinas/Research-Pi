@@ -67,8 +67,14 @@ export async function deliverSubagentMessage(runtime, message, ctx) {
 		}
 		const adapter = getSubagentRuntimeAdapter(runtimeActorBackend(actor));
 		if (!adapter?.dispatch) return { status: "queued", detail: "waiting for the subagent backend" };
-		const receipt = await adapter.dispatch({ runtime, actor, message: current, ctx,
-			jobId: current.metadata?.jobId ?? undefined, preempt: current.metadata?.preempt === true });
+		// Different messages for one Actor must not both resume the same terminal
+		// turn. Keep per-message receipts, and serialize backend turn decisions.
+		const actorLock = `${Buffer.from(actor.id).toString("hex")}.actor-delivery.lock`;
+		const receipt = await withOwnerFileLock(join(runtime.projectDir, actorLock), async () => {
+			await assertRuntimeActorAttachment(runtime, RESEARCH_LEADER_ACTOR_ID, { sessionId: ctx.sessionManager.getSessionId() });
+			return await adapter.dispatch({ runtime, actor, message: current, ctx,
+				jobId: current.metadata?.jobId ?? undefined, preempt: current.metadata?.preempt === true });
+		});
 		if (receipt.status === "delivered" || receipt.status === "superseded") {
 			await settleRuntimeMessage(runtime, current.id, receipt.status, { actorId: actor.id });
 		}
