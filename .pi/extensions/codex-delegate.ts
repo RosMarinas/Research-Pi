@@ -45,6 +45,28 @@ import {
 import { formatSubagentSessionJob } from "../lib/subagent-sessions.mjs";
 import { dispatchRuntimeSubagent, queueSubagentMessage, deliverSubagentMessage } from "../lib/runtime-subagents.mjs";
 
+// A mailbox jobId identifies the turn observed by the sender, not necessarily
+// the current turn of a durable Actor. Only follow actual continuation links.
+export function selectCodexMailboxJob(jobs: any[], jobId?: string, requestId?: string) {
+	if (!jobId) return jobs.at(-1);
+	const target = jobs.find((job) => job.id === jobId);
+	if (!target || requestId) return target;
+	const byId = new Map(jobs.map((job) => [job.id, job]));
+	const descendsFrom = (candidate: any) => {
+		const seen = new Set();
+		while (candidate && !seen.has(candidate.id)) {
+			if (candidate.id === target.id) return true;
+			seen.add(candidate.id);
+			candidate = byId.get(candidate.continuationOf);
+		}
+		return false;
+	};
+	return [...jobs].reverse().find((job) =>
+		job.actorId === target.actorId
+		&& (job.researchTrackRef ?? "project:initial") === (target.researchTrackRef ?? "project:initial")
+		&& descendsFrom(job)) ?? target;
+}
+
 const SUBAGENT_ROLES = ["advisor", "executor", "environment", "general"] as const;
 const SUBAGENT_BACKENDS = ["codex", "antigravity", "pi"] as const;
 
@@ -1074,13 +1096,13 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 				leaderActorId: owner.leaderActorId,
 				actorId: actor.id,
 			});
-			const latest = jobId ? jobs.find((job) => job.id === jobId) : jobs.at(-1);
+			const latest = selectCodexMailboxJob(jobs, jobId, message.metadata?.requestId);
 			if (!latest) return { status: "queued", detail: `${actor.label} has no resumable Codex thread yet` };
 			const ownerCheck = projectJobManagementScope(ctx, owner);
 			const live = !TERMINAL_JOB_STATUSES.has(latest.status);
 			const instruction = runtimeMessageText(message, (await readRuntimeSnapshot(runtime)).actors);
 			let nextJob = latest;
-			if (message.metadata?.requestId && message.metadata.requestId !== latest.pendingRequest?.id) {
+			if (message.metadata?.requestId && (!live || message.metadata.requestId !== latest.pendingRequest?.id)) {
 				return { status: "superseded", detail: "The Codex question is no longer pending; the late reply was not injected into another turn" };
 			}
 
@@ -1098,22 +1120,27 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 				const queued = await withCurrentLeader(owner, () => steerCodexJob(latest.id, { message: instruction, ...ownerCheck }));
 				nextJob = queued.job;
 			} else {
-				nextJob = await withCurrentLeader(owner, async () => {
-					if (live) await cancelCodexJob(latest.id, ownerCheck);
-					if (!latest.threadId) return null;
-					return await resumeCodexJob(latest.id, {
-						followUp: instruction,
-						leaderSessionId: owner.leaderSessionId,
-						leaderBranchAnchorId: owner.leaderBranchAnchorId,
-						leaderActorId: owner.leaderActorId,
-						actorId: actor.id,
-						projectRevision: owner.projectRevision,
-						researchTrackRef: owner.researchTrackRef,
-						researchTrackLabel: owner.researchTrackLabel,
-						background: true,
-						...ownerCheck,
+				try {
+					nextJob = await withCurrentLeader(owner, async () => {
+						if (live) await cancelCodexJob(latest.id, ownerCheck);
+						if (!latest.threadId) return null;
+						return await resumeCodexJob(latest.id, {
+							followUp: instruction,
+							leaderSessionId: owner.leaderSessionId,
+							leaderBranchAnchorId: owner.leaderBranchAnchorId,
+							leaderActorId: owner.leaderActorId,
+							actorId: actor.id,
+							projectRevision: owner.projectRevision,
+							researchTrackRef: owner.researchTrackRef,
+							researchTrackLabel: owner.researchTrackLabel,
+							background: true,
+							...ownerCheck,
+						});
 					});
-				});
+				} catch (error) {
+					if (error?.code !== "CODEX_MISSION_BUSY") throw error;
+					return { status: "queued", detail: "A Codex continuation became active during delivery; retry against the current Actor turn" };
+				}
 				if (!nextJob) return { status: "queued", detail: `${actor.label} has no resumable Codex thread` };
 			}
 

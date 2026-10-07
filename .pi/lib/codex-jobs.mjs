@@ -496,7 +496,12 @@ async function acquireWriterLock(jobRoot, cwd, jobId, writeScope, maxExecutors, 
 		}
 		await assertNoUnknownWriterOutcome(jobRoot, cwd, writeScope);
 		const activeMission = mission && active.find((claim) => claim.missionKey === missionKey(mission));
-		if (activeMission) throw new Error(`Codex mission "${mission}" already has active job ${activeMission.jobId}; steer or respond to that job instead of starting a duplicate`);
+		if (activeMission) {
+			const error = new Error(`Codex mission "${mission}" already has active job ${activeMission.jobId}; steer or respond to that job instead of starting a duplicate`);
+			error.code = "CODEX_MISSION_BUSY";
+			error.jobId = activeMission.jobId;
+			throw error;
+		}
 		const conflict = active.find((claim) => codexWriteScopesOverlap(writeScope, claim.writeScope));
 		if (conflict) throw new Error(`Codex executor ${conflict.jobId} is already writing an overlapping scope in ${cwd}: ${JSON.stringify(conflict.writeScope ?? ["."])}. Assign disjoint writeScope paths or wait for that job.`);
 		if (active.length >= maxExecutors) throw new Error(`Codex executor limit reached (${maxExecutors}) in ${cwd}; wait for a result before dispatching more work`);
