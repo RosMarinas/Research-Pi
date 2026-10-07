@@ -35,6 +35,7 @@ import {
 	runtimeDockVisible,
 } from "../lib/runtime-dock-ui.mjs";
 import { resolveResearchPiPaths } from "../lib/runtime-paths.mjs";
+import { runtimeCompactionReserved } from "../lib/runtime-compaction-gate.mjs";
 import { createRuntimeMailboxWatcher } from "../lib/runtime-mailbox-watch.mjs";
 import { deliverSubagentMessage, drainSubagentMailbox } from "../lib/runtime-subagents.mjs";
 import { openSubagentWatch } from "../lib/subagent-watch-ui.mjs";
@@ -722,7 +723,8 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		if (!idle && options.deferWhenBusy) {
 			return { status: "queued" as const, detail: "The Leader is still running; delivery remains in the Runtime mailbox" };
 		}
-		const triggerTurn = message.type !== "notify" && (options.triggerTurn ?? true);
+		const needsResponse = message.type !== "notify" || message.metadata?.kind === "analysis_handoff";
+		const triggerTurn = needsResponse && (options.triggerTurn ?? true);
 		pi.sendMessage(
 			{
 				customType: RUNTIME_MESSAGE_KIND,
@@ -759,6 +761,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		ctx: ExtensionContext,
 		options: { preempt?: boolean; triggerTurn?: boolean; deferWhenBusy?: boolean } = {},
 	): Promise<"delivered" | "deferred" | "handled"> => {
+		if (runtimeCompactionReserved(ctx)) return "deferred";
 		if (deliveringMessageIds.has(messageId)) return "deferred";
 		deliveringMessageIds.add(messageId);
 		try {
@@ -833,6 +836,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 
 	const runtimeMailboxWatcher = createRuntimeMailboxWatcher({
 		intervalMs: RUNTIME_MAILBOX_WATCH_INTERVAL_MS,
+		retryWhen: (ctx) => !ctx.isIdle() || runtimeCompactionReserved(ctx),
 		drain: async (activeRuntime, ctx) => {
 			if (sessionInheritancePolicy !== "project" || runtime !== activeRuntime) return null;
 			return await drainLeaderMailboxIfAttached(activeRuntime, ctx, {
@@ -1307,7 +1311,11 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		};
 	});
 
+	pi.on("session_compact_failed", () => runtimeMailboxWatcher.wake());
+
 	pi.on("session_compact", async (event, ctx) => {
+		// Pi is still compacting here; watcher retries once it becomes idle.
+		runtimeMailboxWatcher.wake();
 		// A completed local compact is an intentional prefix boundary, even when
 		// Analysis compaction cannot write the shared scientific Project State.
 		persistedProjectView = undefined;

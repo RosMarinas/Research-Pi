@@ -793,6 +793,7 @@ test("ordinary Leader claim starts the mailbox watcher immediately", async () =>
 		});
 		await new Promise((resolve) => setTimeout(resolve, RUNTIME_TEST_WATCH_SETTLE_MS));
 		assert.equal(sent.filter((item) => item.message?.details?.messageId === "msg-after-ordinary-claim").length, 1);
+		assert.equal(sent[0].options.triggerTurn, false, "ordinary notify remains silent");
 		const accepted = [];
 		registerSubagentRuntimeAdapter("pi", { dispatch: async ({ message }) => { accepted.push(message); return { status: "delivered" }; } });
 		await registerSubagentRuntimeJob(runtime, { id: "pi-synthetic", actorId: "pi:direct-user", backend: "pi", role: "general",
@@ -810,7 +811,7 @@ test("ordinary Leader claim starts the mailbox watcher immediately", async () =>
 	}
 });
 
-test("Analysis notify reaches only the attached Leader without starting an autonomous turn", async () => {
+test("Analysis handoff wakes only the attached Leader at a safe boundary", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-analysis-wake-"));
 	const previousRoot = process.env.RESEARCH_PI_RUNTIME_DIR;
 	process.env.RESEARCH_PI_RUNTIME_DIR = join(root, "runtime");
@@ -903,7 +904,7 @@ test("Analysis notify reaches only the attached Leader without starting an auton
 		await waitUntil(() => leaderSent.length === 1);
 		assert.equal(analysisSent.length, 0, "Analysis Session must never materialize the Leader mailbox locally");
 		assert.equal(leaderSent[0].message.details.messageId, first.details.messageId);
-		assert.equal(leaderSent[0].options.triggerTurn, false);
+		assert.equal(leaderSent[0].options.triggerTurn, true);
 		let runtime = await resolveResearchRuntime(workspace);
 		let snapshot = await readRuntimeSnapshot(runtime);
 		assert.equal(snapshot.messages.find((message) => message.id === first.details.messageId)?.status, "delivered");
@@ -926,7 +927,7 @@ test("Analysis notify reaches only the attached Leader without starting an auton
 		await leaderHandlers.get("agent_settled")({ type: "agent_settled" }, leaderCtx);
 		await waitUntil(() => leaderSent.length === 2);
 		assert.equal(leaderSent[1].message.details.messageId, second.details.messageId);
-		assert.equal(leaderSent[1].options.triggerTurn, false);
+		assert.equal(leaderSent[1].options.triggerTurn, true);
 		await new Promise((resolve) => setTimeout(resolve, RUNTIME_TEST_WATCH_SETTLE_MS));
 		assert.equal(leaderSent.length, 2, "ledger delivery receipts must not wake the Leader again");
 
@@ -1868,3 +1869,36 @@ test("a completed Leader work turn becomes a durable cross-Session handoff witho
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+for (const outcome of ['session_compact', 'session_compact_failed']) {
+ test(`Leader receives Analysis mail after ${outcome} without user input or another ledger event`, async()=>{
+  const {reserveRuntimeCompaction}=await import('../.pi/lib/runtime-compaction-gate.mjs');
+  const root=mkdtempSync(join(tmpdir(),'research-pi-compact-mail-'));
+  const previousRoot=process.env.RESEARCH_PI_RUNTIME_DIR;
+  process.env.RESEARCH_PI_RUNTIME_DIR=join(root,'runtime');
+  const handlers=new Map(),sent=[];let idle=true,release;
+  const workspace=join(root,'workspace');mkdirSync(workspace,{recursive:true});
+  const ctx={cwd:workspace,hasUI:false,sessionManager:{getSessionId:()=>`session-${outcome}`,
+   getLeafId:()=>null,getBranch:()=>[]},getContextUsage:()=>null,isIdle:()=>idle,abort(){}};
+  researchRuntimeExtension({on:(n,h)=>handlers.set(n,h),registerCommand(){},registerTool(){},
+   registerMessageRenderer(){},registerEntryRenderer(){},appendEntry(){},sendMessage:(m,o)=>sent.push({message:m,options:o})});
+  try {
+   await handlers.get('session_start')({reason:'startup'},ctx);
+   const runtime=await resolveResearchRuntime(workspace);
+   idle=false;release=reserveRuntimeCompaction(ctx);
+   await createRuntimeMessage(runtime,{id:`mail-${outcome}`,type:'notify',from:'analysis:synthetic',
+    to:RESEARCH_LEADER_ACTOR_ID,body:'User-requested analysis synthesis',metadata:{kind:'analysis_handoff'}});
+   await new Promise(r=>setTimeout(r,RUNTIME_TEST_WATCH_SETTLE_MS));assert.equal(sent.length,0);
+   await handlers.get(outcome)({compactionEntry:{type:'compaction'}},ctx);
+   assert.equal(sent.length,0,'session_compact event still occurs while the native engine is busy');
+   release();idle=true;
+   await waitUntil(()=>sent.length===1);
+   assert.equal(sent[0].options.triggerTurn,true);
+   await new Promise(r=>setTimeout(r,RUNTIME_TEST_WATCH_SETTLE_MS));assert.equal(sent.length,1);
+  } finally {
+   release?.();await handlers.get('session_shutdown')({},ctx);
+   if(previousRoot===undefined)delete process.env.RESEARCH_PI_RUNTIME_DIR;else process.env.RESEARCH_PI_RUNTIME_DIR=previousRoot;
+   rmSync(root,{recursive:true,force:true});
+  }
+ });
+}

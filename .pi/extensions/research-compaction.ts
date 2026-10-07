@@ -26,6 +26,8 @@ import { readRuntimeSnapshot, resolveResearchRuntime, runtimeSessionInheritanceP
 import { defaultResearchPiConfig, readResearchPiConfig } from "../lib/research-config.mjs";
 import { resolveResearchPiPaths } from "../lib/runtime-paths.mjs";
 
+import { reserveRuntimeCompaction } from "../lib/runtime-compaction-gate.mjs";
+
 const defaultCompaction = { ...defaultResearchPiConfig().research.compaction, softTokens: RESEARCH_SOFT_COMPACT_TOKENS, hardTokens: RESEARCH_HARD_COMPACT_TOKENS };
 
 function fileLists(fileOps: { read: Set<string>; written: Set<string>; edited: Set<string> }) {
@@ -59,14 +61,30 @@ export default function (pi: ExtensionAPI) {
 		? readResearchPiConfig(resolveResearchPiPaths({ harnessRoot: process.env.RESEARCH_PI_HARNESS_ROOT }).configPath).research.compaction
 		: defaultCompaction;
 	let compactionRunning = false;
+	let releaseCompaction: (() => void) | undefined;
+	let compactTimer: ReturnType<typeof setTimeout> | undefined;
 	let scheduledCompaction: { trigger: "soft" | "hard"; tokens: number } | undefined;
 
 	pi.on("session_start", () => {
+		if (compactTimer) clearTimeout(compactTimer);
+		compactTimer = undefined;
+		releaseCompaction?.();
+		releaseCompaction = undefined;
 		compactionRunning = false;
 		scheduledCompaction = undefined;
 	});
 
 	pi.on("session_compact", () => {
+		// Native Pi emits this before it clears its compaction state.
+		// Release the automatic reservation only from onComplete/onError.
+		scheduledCompaction = undefined;
+	});
+
+	pi.on("session_shutdown", () => {
+		if (compactTimer) clearTimeout(compactTimer);
+		compactTimer = undefined;
+		releaseCompaction?.();
+		releaseCompaction = undefined;
 		compactionRunning = false;
 		scheduledCompaction = undefined;
 	});
@@ -90,18 +108,35 @@ export default function (pi: ExtensionAPI) {
 	pi.on("agent_settled", (_event, ctx) => {
 		const scheduled = scheduledCompaction;
 		if (!scheduled || compactionRunning) return;
-		scheduledCompaction = undefined;
 		compactionRunning = true;
-		ctx.compact({
-			customInstructions: `Automatic research ${scheduled.trigger} compaction at ${scheduled.tokens} context tokens.`,
-			onComplete: () => {
-				compactionRunning = false;
-			},
-			onError: (error) => {
-				compactionRunning = false;
-				if (ctx.hasUI) ctx.ui.notify(`Research compaction failed: ${error.message}`, "warning");
-			},
-		});
+		releaseCompaction = reserveRuntimeCompaction(ctx);
+		// Leave agent_settled before invoking the native manual interface. Other
+		// extensions may already have queued a continuation at this boundary.
+		compactTimer = setTimeout(() => {
+			compactTimer = undefined;
+			const release = releaseCompaction;
+			const finish = () => {
+				release?.();
+				if (releaseCompaction === release) {
+					releaseCompaction = undefined;
+					compactionRunning = false;
+				}
+			};
+			if (!ctx.isIdle() || ctx.hasPendingMessages()) {
+				// Keep the request for the next settle; never abort a new run.
+				finish();
+				return;
+			}
+			scheduledCompaction = undefined;
+			ctx.compact({
+				customInstructions: `Automatic research ${scheduled.trigger} compaction at ${scheduled.tokens} context tokens.`,
+				onComplete: finish,
+				onError: (error) => {
+					finish();
+					if (ctx.hasUI) ctx.ui.notify(`Research compaction failed: ${error.message}`, "warning");
+				},
+			});
+		}, 0);
 	});
 
 	pi.on("session_before_compact", async (event, ctx) => {

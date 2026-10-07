@@ -214,7 +214,7 @@ test("clean compaction state stays local when the Session later restores Project
 	);
 });
 
-test("research threshold compaction waits until the agent run settles", () => {
+test("research threshold compaction waits until the agent run settles", async () => {
 	const handlers = new Map();
 	const notices = [];
 	let compactOptions;
@@ -235,6 +235,8 @@ test("research threshold compaction waits until the agent run settles", () => {
 		getContextUsage() {
 			return { tokens: RESEARCH_SOFT_COMPACT_TOKENS + 1 };
 		},
+		isIdle: () => true,
+		hasPendingMessages: () => false,
 		compact(options) {
 			compactOptions = options;
 		},
@@ -245,12 +247,15 @@ test("research threshold compaction waits until the agent run settles", () => {
 	assert.match(notices[0].message, /scheduled after the current run settles/);
 
 	handlers.get("agent_settled")({ type: "agent_settled" }, ctx);
+	assert.equal(compactOptions, undefined, "must leave all settle handlers before compacting");
+	await new Promise((resolve) => setTimeout(resolve, 10));
 	assert.match(compactOptions.customInstructions, /Automatic research soft compaction/);
 
 	const firstOptions = compactOptions;
 	handlers.get("turn_end")({ type: "turn_end" }, ctx);
 	handlers.get("agent_settled")({ type: "agent_settled" }, ctx);
 	assert.equal(compactOptions, firstOptions, "a running compaction must not be duplicated");
+	firstOptions.onComplete();
 });
 
 test("short-context Leader models compact before their model window", () => {
@@ -264,7 +269,7 @@ test("short-context Leader models compact before their model window", () => {
 	assert.ok(hy3.softTokens < hy3.hardTokens);
 });
 
-test("large-context GPT uses 480k/512k without a hidden 75 percent soft cap", () => {
+test("large-context GPT uses 480k/512k without a hidden 75 percent soft cap", async () => {
 	for (const id of ["gpt-6-sol", "gpt-5.6-sol", "gpt-6.1-sol", "gpt-6-astra"]) {
 		assert.deepEqual(researchCompactionThresholds({ provider: "openai-codex", id, contextWindow: 872000 }), { softTokens: 491520, hardTokens: 524288 });
 	}
@@ -277,6 +282,7 @@ test("large-context GPT uses 480k/512k without a hidden 75 percent soft cap", ()
 	researchCompactionExtension({ on(name, handler) { handlers.set(name, handler); }, registerCommand() {} });
 	const ctx = {
 		model: { provider: "openai-codex", id: "gpt-6.1-sol", contextWindow: 872000 }, hasUI: true,
+		isIdle: () => true, hasPendingMessages: () => false,
 		getContextUsage: () => ({ tokens }),
 		ui: { notify: (message, level) => notices.push({ message, level }) },
 		compact: (options) => { compactOptions = options; },
@@ -294,7 +300,9 @@ test("large-context GPT uses 480k/512k without a hidden 75 percent soft cap", ()
 	handlers.get("turn_end")({}, ctx);
 	assert.equal(notices[1].level, "warning");
 	handlers.get("agent_settled")({}, ctx);
+	await new Promise((resolve) => setTimeout(resolve, 10));
 	assert.match(compactOptions.customInstructions, /hard compaction at 524288/);
+	compactOptions.onComplete();
 });
 
 function experimentEntry(id, parentId, validityJudgment) {

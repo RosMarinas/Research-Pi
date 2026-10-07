@@ -31,3 +31,9 @@ node_modules
 /output/playwright/
 /.playwright/
 /.playwright-cli/
+
+# Local experimental owner registries and private review artifacts
+.pi/native-hosts/
+.pi/hosts/
+.pi/harness/
+/output/runtime-review/
