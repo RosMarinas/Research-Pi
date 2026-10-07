@@ -36,7 +36,7 @@ test('complete original InteractiveMode preserves custom UI, approval, model men
   f.host.terminal.resize(64,20);f.host.terminal.input('\r');await until(()=>f.answer!==undefined);
   await until(()=>f.host.mode.onInputCallback);
   const old=f.runtime.session.sessionId;submit(f.host,'/probe-new');await until(()=>f.runtime.session.sessionId!==old);await until(()=>f.host.mode.editor.getText().includes('native restored draft'));
-  f.host.terminal.input('\x1b[D');await until(async()=> (await f.host.terminal.snapshot()).data.includes('native restored draft')); 
+  f.host.terminal.input('\x1b[D');await until(async()=> (await f.host.terminal.snapshot()).data.includes('native restored draft'));
  }finally{await f.close()}
 });
 test('native quit detaches presentation, retains Host and the unmodified native model loop',async()=>{
