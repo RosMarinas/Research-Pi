@@ -106,18 +106,89 @@ Codex 保留持久任务、同工作区并发、写入范围协调及恢复机�
 
 ## 手机网页访问
 
-保存一次偏好，以后正常运行 pi 就会自动开启私有网页，并连接该项目的同一个常驻 Pi：
+Native Runtime Host 唯一拥有模型、工具、权限和 Session。桌面 TUI 与手机 Web 都连接这个 Host，不会各自启动一个 Agent。Leader 可以使用 full access；Analysis 使用同一项目视图，但始终保持只读，并使用独立 Host。
 
-    pi config web tailscale
-    pi --workspace /path/to/project
+先保存一次 Tailscale Web 偏好：
 
-关闭电脑终端后后台任务继续；Ctrl+] 可主动断开终端。pi web start 可仅在后台启动，pi web status 查看配对网址，pi web stop 停止服务。这三个命令也支持 --workspace。单次关闭网页可用 --no-web，非交互模型调用不自动开启网页。
+```bash
+pi config web tailscale
+```
 
-手机连接当前 Tailscale 网络，打开终端提供的私有配对链接。对话、Agents、Project Runtime 使用手机界面；完整终端视图保留 /config、/watch、/login、会话树和自定义 TUI。电脑与手机共用同一个 Pi 进程，关闭网页不会停止任务。
+### 场景一：项目使用 full access，同时开启 Analysis 与远程 Web
 
-复用平时的 pi 入口；源码开发版使用 run-pi.sh，以保留 .pi 中的登录与历史。恢复旧会话可加 --resume。直接 node bin/pi.mjs 默认读取另一套用户级数据目录，可能出现需要重新登录和历史为空。
+在第一个终端从项目目录启动 Leader：
 
-仅本机试用可用 --web。服务只监听 localhost，要求令牌与同源请求；Tailscale 模式限定当前用户身份，保留已有 Serve 配置。正在运行且未启用 Web 的 Pi 需要等下一次计划启动再使用。[使用方式、功能范围与安全说明](docs/mobile-web.md)。
+```bash
+cd /path/to/project
+pi --resident-runtime --full-access --web-tailscale
+```
+
+终端会显示私有配对网址。手机加入当前登录的同一个 Tailscale 网络后打开该网址，即可操作这个 Leader Session。保存过 Web 偏好后，启动命令可简化为 `pi --resident-runtime --full-access`。
+
+在第二个终端启动独立 Analysis：
+
+```bash
+cd /path/to/project
+pi --resident-runtime --analysis --no-web
+```
+
+`--full-access` 只扩大 Leader 与相应 Codex executor 的权限；Analysis／advisor 仍只读。Analysis 可用 `/analysis send <综合>` 把当前判断、依据和建议投递给 Leader。当前远程 Web 主要连接 Leader，Analysis 建议继续使用独立 TUI。
+
+### 场景二：终端关闭后恢复 TUI 和 Web
+
+关闭桌面终端不会关闭 Native Host 或 Web Gateway。回到同一个项目运行 `pi` 会自动发现并重新连接已有 Leader：
+
+```bash
+cd /path/to/project
+pi
+```
+
+也可以显式连接 Leader 或 Analysis：
+
+```bash
+pi native-runtime attach --workspace /path/to/project
+pi native-runtime attach --analysis --workspace /path/to/project
+```
+
+建议用 `Ctrl+]` 主动断开 TUI；它不会中断 Runtime。如果 Host 仍在而 Web Gateway 已停止，只重开 Web：
+
+```bash
+pi web start --workspace /path/to/project --web-tailscale
+```
+
+Web token 保存在 Research Pi 状态目录中，手机浏览器配对后还会保存站点 cookie。使用同一个浏览器和 Tailscale 地址、不清理站点数据且不使用无痕模式时，Gateway 重启通常不需要重新认证。如果电脑重启或 Host 已被显式停止，可以重新启动并选择原会话：
+
+```bash
+cd /path/to/project
+pi --resident-runtime --full-access --web-tailscale --resume
+```
+
+### 场景三：忘记网址或检查运行状态
+
+在项目目录查看 Web 状态和私有网址：
+
+```bash
+pi web status
+```
+
+从其他目录检查时显式指定项目：
+
+```bash
+pi web status --workspace /path/to/project
+pi native-runtime status --workspace /path/to/project
+```
+
+如果状态显示 Native Runtime 正在运行但没有 Web Gateway，执行 `pi web start --workspace /path/to/project --web-tailscale` 即可恢复网页。以下两个停止操作的范围不同：
+
+```bash
+# 只关闭 Web，模型 Session 与 TUI Host 继续运行
+pi web stop --workspace /path/to/project
+
+# 显式停止整个 Leader Host
+pi native-runtime stop --workspace /path/to/project
+```
+
+配对网址包含私有认证信息，不要分享或提交。仅本机试用可用 `--web`；服务只监听 localhost，并要求令牌与同源请求。Tailscale 模式限定当前登录用户身份，不启用 Funnel。源码开发版使用 `run-pi.sh`，以保留本项目 `.pi` 中的登录与历史；直接运行 `node bin/pi.mjs` 可能读取另一套用户级目录。[Web 功能与安全说明](docs/mobile-web.md)，[Native Runtime 生命周期与边界](docs/native-ui-runtime-boundary.md)。
 
 ## 项目记忆，而非无限增长的聊天
 
