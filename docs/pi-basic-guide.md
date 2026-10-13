@@ -4,6 +4,8 @@
 
 ## 1. 启动
 
+首次使用先按 [README 的三步教程](../README.md#快速开始) 安装、填入 API key 并选择模型。
+
 ```bash
 cd /path/to/research-project
 pi
@@ -68,7 +70,7 @@ pi-traced
 
 科研 prompt、DeepSeek 配置、研究工具、Codex executor 和 session 由 harness 提供；文件操作、Git checkpoint、Codex 委派和实验账本作用在启动 `pi` 时所在的研究仓库。所有项目的 Research Pi session 集中保存在当前运行形态的状态目录，每个 session header 仍记录其原始工作目录。
 
-稳定包首次安装后运行 `pi setup`。进入 TUI 后用 Pi 原生 `/login` 登录供应商，用 `/model` 切换模型；`/scoped-models` 控制模型轮换范围，`/settings` 调节 thinking 等 Pi 设置。若供应商使用 API key，或需要 DeepSeek 原生小型搜索，也可以在 `~/.config/research-pi/credentials.env` 填入 `DEEPSEEK_API_KEY`、`ZAI_API_KEY` 或 `OPENCODE_API_KEY`。Research Pi 自己的 Runtime/compact/Codex/search/UI 配置位于 `~/.config/research-pi/config.json`；session、Project Runtime、memory、Codex job、grant 和 trace 默认集中在 `~/.local/state/research-pi/`。源码开发入口使用 checkout 的 `.env`、`.pi/config.json` 与 `.pi/` 状态；每个开发 worktree 的配置和运行状态彼此隔离。`pi paths` 可确认当前运行形态和 Pi 原生 agent 目录。
+稳定包首次安装后运行 `pi setup`，再用 `pi paths` 找到 `credentialsPath`。DeepSeek、OpenCode Go、Z.AI 的 API key 统一填入该文件，默认是 `~/.config/research-pi/credentials.env`；变量名依次为 `DEEPSEEK_API_KEY`、`OPENCODE_API_KEY`、`ZAI_API_KEY`。随后启动 Pi，用 `/model` 选择对应 provider 的模型。订阅登录或通过交互保存 API key 可用原生 `/login`；`/scoped-models` 控制模型轮换范围，`/settings` 调节 thinking 等 Pi 设置。Research Pi 自己的 Runtime/compact/Codex/search/UI 配置位于 `~/.config/research-pi/config.json`；session、Project Runtime、memory、Codex job、grant 和 trace 默认集中在 `~/.local/state/research-pi/`。源码开发入口 `run-pi.sh` 使用 Research Pi checkout 根目录的 `.env`、`.pi/config.json` 与 `.pi/` 状态；每个开发 worktree 的配置和运行状态彼此隔离。目标科研项目的 `.env` 不作为 Harness 凭据文件。实际目录以 `pi paths` 为准。
 
 查看 Research Pi 配置：
 
@@ -432,7 +434,7 @@ Transition 会立即影响后续 Session 的 ProjectView，不必等待 `/compac
 
 ## 8. 当前边界
 
-- API key 只放在项目 `.env`，不要粘贴进 prompt、日志或实验文档；
+- API key 放在 `pi paths` 的 `credentialsPath` 或 Pi 原生登录存储中；安装版默认使用 `~/.config/research-pi/credentials.env`，源码版使用 Research Pi 仓库根目录的 `.env`。不要粘贴进 prompt、日志或实验文档；
 - DeepSeek Web Search 会额外产生模型和搜索相关 token 开销；简单检索也应保持有界；
 - Pi 的模型 shell 受 OS 级 sandbox runtime 约束，Codex executor 使用 project-only permission profile：项目可写、Git commit 可用、公网开放，项目外用户文件和 Unix sockets 默认不可用；Pi shell 的通用系统 temp 写入被关闭，仅保留 Apple Git 所需的窄 `xcrun_db` 系统缓存例外；Codex CLI 0.146 仍自带系统 temp 兼容路径，Harness 已将 `TMPDIR` 指向项目内并禁止主动越界，但这一处目前是纵深防御，不与 Pi shell 等强；
 - `pi --full-access` 是单次启动的显式例外：Leader 和新建 Codex executor 不再受项目 OS 沙箱限制，状态栏会明确显示；Analysis/advisor 不随之放宽；

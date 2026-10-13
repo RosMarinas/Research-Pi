@@ -8,6 +8,61 @@
 
 Research Pi 把研究目标、实验记录、关键决定和多 Agent 协作留在项目中。Session 可以轮换，模型可以更换，研究主线不必从头解释。它关注的不只是“代码是否正确”，还包括：实验是否检验了预期假设、证据允许什么结论、下一步做什么最有信息量。
 
+## 快速开始
+
+要求 Node.js `>=22.19` 与 Git。Windows 请在 WSL2 内安装和运行，并将项目放在 WSL 文件系统中，而不是 `/mnt/c` 等 Windows 挂载盘。
+
+DeepSeek、OpenCode Go、Z.AI 都按同一流程接入：**安装 → 在凭据文件填 API key → 启动并选择模型**。
+
+### 1. 安装并创建配置
+
+```sh
+npm install -g 'git+https://github.com/RosMarinas/Research-Pi.git#main'
+pi setup
+pi paths
+```
+
+`pi setup` 会创建配置和空的凭据文件。`pi paths` 输出中的 **`credentialsPath` 就是 API key 应该放的文件**。
+
+### 2. 填入 API key
+
+安装版默认编辑这个文件：
+
+```sh
+nano ~/.config/research-pi/credentials.env
+```
+
+三家供应商共用一个文件；只填你使用的供应商，其余行保持空白：
+
+```dotenv
+DEEPSEEK_API_KEY=
+OPENCODE_API_KEY=
+ZAI_API_KEY=
+```
+
+| 供应商 / 获取 key | 凭据变量 | Pi 中的 provider | 模型示例 |
+|---|---|---|---|
+| [DeepSeek 官方 API](https://api-docs.deepseek.com/) | `DEEPSEEK_API_KEY` | `deepseek` | `deepseek/deepseek-flash` |
+| [OpenCode Console](https://opencode.ai/console/)（开通 Go） | `OPENCODE_API_KEY` | `opencode-go` | `opencode-go/deepseek-v4.1-flash` |
+| [Z.AI Coding Plan 获取 key](https://docs.z.ai/devpack/quick-start) | `ZAI_API_KEY` | `zai` | `zai/glm-5.3-flash` |
+
+例如只使用 OpenCode Go，就把第二行改成 `OPENCODE_API_KEY=你的实际key`。Go 使用 `OPENCODE_API_KEY`，模型选择 `opencode-go`；内置 `zai` 使用 Z.AI 的 Coding Plan 接口。
+
+**源码版的位置不同**：通过 `./run-pi.sh` 或指向它的 `pi` 启动时，凭据文件是 **Research Pi 仓库根目录的 `.env`**，不是目标科研项目的 `.env`。在仓库内运行 `./run-pi.sh setup` 和 `./run-pi.sh paths` 确认路径。安装版若设置了 XDG 或 Research Pi 目录覆盖，也以 `credentialsPath` 为准。
+
+每行只写 `变量名=key`，注释单独占一行。API key 放在上述私有凭据文件中，避免写入 `config.json`、聊天或 Git 提交。文件在 Pi 进程启动时读取；修改后需重新启动使用它的 Pi Host，重连终端或 `/reload` 不会重新加载凭据。
+
+### 3. 启动并选择模型
+
+```sh
+cd /path/to/research-project
+pi
+```
+
+进入 Pi 后输入 `/model`，搜索上表的 provider 并选择模型；在选择器中按 `Ctrl+S` 可保存为后续新 Session 的默认模型。已有 key 的这三条 API 路径可以直接使用。需要订阅登录时，使用 Pi 原生 `/login`；[认证方式、凭据优先级与常见问题](docs/configuration.md#api-keys-one-file-for-all-three-providers)见配置说明。
+
+模型列表若缺少已接入的供应商，先核对 `credentialsPath` 和变量名，再检查 `/scoped-models` 是否限制了范围；更新模型目录可在终端运行 `pi update --models`。
+
 ## 统一 subagent，不统一掉各自的能力
 
 Leader 通过一个 `subagent` 入口调度工作；Runtime 统一记录 Actor、任务、状态和消息。**Role 是分工，backend 是接入方式，model 与 thinking 是执行配置。** 用户可以设置默认值，Leader 也可以按任务选择。
@@ -35,29 +90,17 @@ flowchart LR
 
 每个 subagent 的界面都显示 **backend · role · model · thinking**；继承配置时会标示 `inherit`。用户不必经过 Leader，就能查看其行为和发送指令。切换 runner 时用普通任务与上下文消息接续，不额外生成 handoff 文件。
 
-## 快速开始
-
-要求 Node.js `>=22.19` 与 Git。Windows 请在 WSL2 内安装和运行，并将项目放在 WSL 文件系统中，而不是 `/mnt/c` 等 Windows 挂载盘。
-
-```sh
-npm install -g 'git+https://github.com/RosMarinas/Research-Pi.git#main'
-pi setup
-
-cd /path/to/research-project
-pi
-```
-
-进入 Pi 后，用 `/login` 登录供应商，再用 `/model` 选择 Leader 模型。模型目录、订阅认证与自定义模型由 Pi 原生管理，Research Pi 不维护第二套 provider 目录。
+### 可选：接入其他 subagent 后端
 
 按需准备 subagent backend，不必全部安装：
 
 | Backend | 准备方式 | 认证与模型来源 |
 |---|---|---|
-| Pi | 在 Pi 内完成 `/login` | 与 Leader 共用 Pi provider 目录和认证 |
+| Pi | 复用上面配置的 API key，或在 Pi 内完成 `/login` | 与 Leader 共用 Pi provider 目录和认证 |
 | Codex | 安装 Codex CLI，运行 `codex login` | 独立的 Codex CLI 登录与模型目录 |
 | Antigravity | 安装提供 `agy` 命令的 CLI，首次交互运行 `agy` 登录 | 本机 Antigravity 登录与模型目录 |
 
-Pi 的 `/login` 不会登录 Codex CLI，也无需复制 OAuth token。API-key 供应商的可选凭据文件和实际目录用 `pi paths` 查询；详见[配置说明](docs/configuration.md)。
+Pi 的 `/login` 不会登录 Codex CLI，Codex 后端需单独运行 `codex login`。
 
 首次接入现有项目，可以先说：
 
@@ -255,6 +298,9 @@ Leader、Pi runner 与 Codex worker 使用相应的项目边界和角色权限�
 git clone https://github.com/RosMarinas/Research-Pi.git
 cd Research-Pi
 npm ci --ignore-scripts
+./run-pi.sh setup
+./run-pi.sh paths
+# 按上面的第二步填入仓库根目录的 .env，再启动
 ./run-pi.sh --workspace /path/to/research-project
 
 npm run check

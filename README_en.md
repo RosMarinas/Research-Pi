@@ -8,6 +8,61 @@ A research-first agent harness for AI, robotics, communications, optimization, a
 
 Research Pi keeps research goals, experiment records, decisions, and multi-agent collaboration at the project level. Sessions and models can change without restarting the explanation. Beyond code correctness, it asks: did the experiment test the intended hypothesis, what conclusions does the evidence support, and what would teach us the most next?
 
+## Quick start
+
+Requires Node.js `>=22.19` and Git. On Windows, install and run inside WSL2. Keep projects in its Linux filesystem, not Windows mounts such as `/mnt/c`.
+
+DeepSeek, OpenCode Go, and Z.AI follow the same setup: **install → add an API key to the credentials file → start Pi and choose a model**.
+
+### 1. Install and create configuration
+
+```sh
+npm install -g 'git+https://github.com/RosMarinas/Research-Pi.git#main'
+pi setup
+pi paths
+```
+
+`pi setup` creates configuration and an empty credentials file. **`credentialsPath` in the `pi paths` output is the file where your API keys belong**.
+
+### 2. Add your API key
+
+For the installed package, edit this file by default:
+
+```sh
+nano ~/.config/research-pi/credentials.env
+```
+
+All three providers share one file. Fill only the providers you use; leave the other values empty:
+
+```dotenv
+DEEPSEEK_API_KEY=
+OPENCODE_API_KEY=
+ZAI_API_KEY=
+```
+
+| Provider / where to get a key | Credential variable | Pi provider | Example model |
+|---|---|---|---|
+| [Official DeepSeek API](https://api-docs.deepseek.com/) | `DEEPSEEK_API_KEY` | `deepseek` | `deepseek/deepseek-flash` |
+| [OpenCode Console](https://opencode.ai/console/) (subscribe to Go) | `OPENCODE_API_KEY` | `opencode-go` | `opencode-go/deepseek-v4.1-flash` |
+| [Z.AI Coding Plan key setup](https://docs.z.ai/devpack/quick-start) | `ZAI_API_KEY` | `zai` | `zai/glm-5.3-flash` |
+
+For OpenCode Go alone, set the second line to `OPENCODE_API_KEY=your-actual-key`. Go uses `OPENCODE_API_KEY`; select models under `opencode-go`. The built-in `zai` provider uses Z.AI's Coding Plan endpoint.
+
+**Source checkouts use a different location**: when launching through `./run-pi.sh` or a `pi` command linked to it, put keys in **`.env` at the Research Pi repository root**, rather than the target research project's `.env`. Run `./run-pi.sh setup` and `./run-pi.sh paths` from the checkout to confirm. For package installs with XDG or Research Pi directory overrides, follow `credentialsPath` too.
+
+Use one `NAME=key` per line and put comments on separate lines. Keep API keys in this private credentials file, away from `config.json`, chats, and Git commits. Pi reads the file when its process starts; after editing it, restart the Pi Host that uses it. Reattaching a terminal or running `/reload` does not reload credentials.
+
+### 3. Start Pi and choose a model
+
+```sh
+cd /path/to/research-project
+pi
+```
+
+Inside Pi, enter `/model`, search for the provider from the table, and select a model. Press `Ctrl+S` in the picker to save a default for new sessions. These three API routes are ready once a key is configured. For subscription sign-in, use Pi's native `/login`. See [authentication alternatives, credential precedence, and troubleshooting](docs/configuration.md#api-keys-one-file-for-all-three-providers).
+
+If a configured provider is missing, check `credentialsPath` and the variable name, then check whether `/scoped-models` restricts the selection. Run `pi update --models` in a terminal to refresh model catalogs.
+
 ## One subagent layer, distinct backend capabilities
 
 The Leader delegates through one `subagent` tool. Runtime records actors, tasks, status, and messages. **Role describes the work; backend selects the integration; model and thinking configure execution.** Users set defaults, and the Leader can choose per task.
@@ -35,29 +90,17 @@ flowchart LR
 
 Subagent views display **backend · role · model · thinking**, with inherited settings labelled `inherit`. Users can inspect workers and send instructions without going through the Leader. Switching runners uses an ordinary task/context message, not another handoff file.
 
-## Quick start
-
-Requires Node.js `>=22.19` and Git. On Windows, install and run inside WSL2. Keep projects in its Linux filesystem, not Windows mounts such as `/mnt/c`.
-
-```sh
-npm install -g 'git+https://github.com/RosMarinas/Research-Pi.git#main'
-pi setup
-
-cd /path/to/research-project
-pi
-```
-
-Inside Pi, use `/login` to authenticate a provider and `/model` to select the Leader model. Pi owns model discovery, subscription authentication, and custom models; Research Pi does not maintain a second provider catalog.
+### Optional: connect other subagent backends
 
 Prepare only the subagent backends you want to use:
 
 | Backend | Setup | Authentication and model source |
 |---|---|---|
-| Pi | Complete `/login` inside Pi | Shares the Leader's Pi provider catalog and authentication |
+| Pi | Reuse the API keys above, or complete `/login` inside Pi | Shares the Leader's Pi provider catalog and authentication |
 | Codex | Install Codex CLI and run `codex login` | Independent Codex CLI login and model catalog |
 | Antigravity | Install the CLI providing `agy`; run `agy` interactively for initial sign-in | Local Antigravity login and model catalog |
 
-Pi's `/login` does not authenticate Codex CLI; do not copy OAuth tokens. Use `pi paths` to locate the optional API-key credentials file and effective directories. See [configuration](docs/configuration.md).
+Pi's `/login` does not authenticate Codex CLI. Run `codex login` separately for that backend.
 
 For an existing research project, start with:
 
@@ -170,6 +213,9 @@ For source development:
 git clone https://github.com/RosMarinas/Research-Pi.git
 cd Research-Pi
 npm ci --ignore-scripts
+./run-pi.sh setup
+./run-pi.sh paths
+# Fill .env at the checkout root as described in step 2, then start Pi
 ./run-pi.sh --workspace /path/to/research-project
 
 npm run check

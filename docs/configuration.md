@@ -6,7 +6,7 @@ Research Pi has one non-secret configuration for the research runtime. Leader mo
 
 | Runtime | Research Pi config | Optional environment credentials |
 |---|---|---|
-| Source checkout | `<harness>/.pi/config.json` | `<harness>/.env` |
+| Source checkout via `run-pi.sh` | `<harness>/.pi/config.json` | `<harness>/.env` |
 | Stable package | `~/.config/research-pi/config.json` | `~/.config/research-pi/credentials.env` |
 
 Source worktrees intentionally have separate config and state. `.pi/config.defaults.json` is the reviewed template. The local `config.json` is ignored by Git and written with mode `0600`.
@@ -20,6 +20,40 @@ pi config show
 ```
 
 API keys, passwords, private keys and other credentials do not belong in `config.json`; credential-like field names are rejected. Safety boundaries and recovery invariants are code policy rather than convenience toggles.
+
+## API keys: one file for all three providers
+
+For DeepSeek, OpenCode Go, and Z.AI, use the same sequence:
+
+1. Run `pi setup`, then `pi paths`.
+2. Edit the file shown as `credentialsPath`; fill the key for each provider you use.
+3. Start Pi in your research project and select the provider/model with `/model`.
+
+The installed package defaults to `~/.config/research-pi/credentials.env`. Source launches through `run-pi.sh` use `.env` at the **Research Pi checkout root**, even when `--workspace` points to another project. For source setup, run `./run-pi.sh setup` and `./run-pi.sh paths` from that checkout. XDG and Research Pi directory overrides can change package paths; `pi paths` is authoritative.
+
+```dotenv
+DEEPSEEK_API_KEY=
+OPENCODE_API_KEY=
+ZAI_API_KEY=
+```
+
+Replace the empty value with your actual key, such as `OPENCODE_API_KEY=your-actual-key`. Leave unused providers empty. Put comments on separate lines: the credential parser does **not** strip inline comments from values. The launcher loads this file at process start; restart the relevant Pi Host after edits. Terminal reattachment and `/reload` do not refresh its environment.
+
+| Provider | Environment variable | Example Pi model | Key setup |
+|---|---|---|---|
+| Official DeepSeek | `DEEPSEEK_API_KEY` | `deepseek/deepseek-flash` | [DeepSeek API guide](https://api-docs.deepseek.com/) |
+| OpenCode Go | `OPENCODE_API_KEY` | `opencode-go/deepseek-v4.1-flash` | [OpenCode Console](https://opencode.ai/console/) |
+| Z.AI Coding Plan | `ZAI_API_KEY` | `zai/glm-5.3-flash` | [Coding Plan key setup](https://docs.z.ai/devpack/quick-start) |
+
+OpenCode Go and OpenCode's other route share the variable name `OPENCODE_API_KEY`; Go subscribers should choose `opencode-go` models. Built-in `zai` uses `https://api.z.ai/api/coding/paas/v4`, the international Coding Plan endpoint. For a different Z.AI endpoint or account type, configure the matching endpoint through Pi's native `<agentDir>/models.json` rather than assuming the built-in route applies.
+
+### Alternative: store a key through native login
+
+Instead of a credential file, start Pi and run `/login deepseek`, `/login opencode-go`, or `/login zai`, then enter your key in the authentication prompt. Pi saves it in `<agentDir>/auth.json`; `agentDir` is also shown by `pi paths`. By default this is `~/.local/state/research-pi/agent/auth.json` for package installs and `<harness>/.pi/agent/auth.json` for source launches. This alternative uses the same built-in providers and model catalog.
+
+For these providers, a key stored through `/login` takes precedence over environment credentials. If changing the file appears to have no effect, use `/logout` to remove the provider's stored credential when you want to switch to the file. Shell environment variables also take precedence over values loaded from the credential file; clear an old exported variable before restarting. Custom `models.json` authentication and explicit CLI API-key overrides can add other credential sources.
+
+If a provider is missing from `/model`, check the file path and exact variable name, restart after edits, then inspect `/scoped-models` and refresh catalogs with `pi update --models`. Provider presence in the picker confirms local credential discovery; a successful response confirms the selected key/model works with that account. `DEEPSEEK_API_KEY` is also required when Research Pi's native DeepSeek search is enabled; a key stored only in Pi's `auth.json` does not supply that environment variable.
 
 ## Leader models and providers: use Pi directly
 
@@ -39,16 +73,6 @@ This has two practical consequences:
 - native `settings.json`, authentication state and `models.json` remain authoritative and are not reconstructed on every Research Pi launch.
 
 Run `pi paths` to find the effective `agentDir` that owns those Pi-native files. Research Pi merges only its runtime-owned `pi.settings` defaults into native settings and preserves native provider/model/thinking/model-scope choices. An existing v1 Research Pi profile config is migrated once: its selected model seeds missing Pi defaults, the old generated `enabledModels` scope is removed, and the v3 config no longer contains profiles. Existing v2 Codex advisor/executor settings are also migrated into the unified subagent roles.
-
-The optional credential file remains for API-key workflows and backward compatibility:
-
-```dotenv
-DEEPSEEK_API_KEY=...  # official DeepSeek API and/or bounded native Web Search
-ZAI_API_KEY=...       # optional API-key provider route
-OPENCODE_API_KEY=...  # optional OpenCode route
-```
-
-If native `/login` already manages authentication, the matching placeholder may remain empty. `DEEPSEEK_API_KEY` is still required when Research Pi's native DeepSeek search is explicitly enabled.
 
 Explicit Pi CLI model/provider/thinking flags remain native Pi options and flow through unchanged.
 
