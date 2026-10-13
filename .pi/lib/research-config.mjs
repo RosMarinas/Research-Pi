@@ -199,13 +199,13 @@ function migrateLegacyConfig(input = {}) {
 			};
 		};
 		migrated.subagents = plainObject(migrated.subagents) ? migrated.subagents : {};
-		migrated.subagents.advisor ??= toRunner("advisor", { model: "gpt-5.6-sol", thinking: "max", speed: "inherit" });
-		migrated.subagents.executor ??= toRunner("executor", { model: "gpt-5.6-sol", thinking: "max", speed: "inherit" });
+		migrated.subagents.advisor ??= toRunner("advisor", { model: "gpt-6.1-sol", thinking: "high", speed: "inherit" });
+		migrated.subagents.executor ??= toRunner("executor", { model: "gpt-6.1-sol", thinking: "high", speed: "inherit" });
 		migrated.subagents.environment ??= { backend: "antigravity", model: "gemini-3.1-pro-high", thinking: "high" };
 		migrated.subagents.general ??= { backend: "pi", model: "inherit", thinking: "inherit" };
 		legacyCodex.internalSubagent ??= plainObject(legacyCodex.subagent)
-			? { model: legacyCodex.subagent.model ?? "inherit", thinking: legacyCodex.subagent.reasoningEffort ?? "inherit" }
-			: { model: "inherit", thinking: "inherit" };
+			? { model: legacyCodex.subagent.model ?? "gpt-6.1-sol", thinking: legacyCodex.subagent.reasoningEffort ?? "high" }
+			: { model: "gpt-6.1-sol", thinking: "high" };
 		delete legacyCodex.advisor;
 		delete legacyCodex.executor;
 		delete legacyCodex.subagent;
@@ -313,8 +313,8 @@ export function researchPiEnvironment(config) {
 	const search = config.research.search;
 	const advisor = config.subagents.advisor;
 	const executor = config.subagents.executor;
-	const codexAdvisor = advisor.backend === "codex" ? advisor : { model: "gpt-5.6-sol", thinking: "max", speed: "inherit" };
-	const codexExecutor = executor.backend === "codex" ? executor : { model: "gpt-5.6-sol", thinking: "max", speed: "inherit" };
+	const codexAdvisor = advisor.backend === "codex" ? advisor : { model: "gpt-6.1-sol", thinking: "high", speed: "inherit" };
+	const codexExecutor = executor.backend === "codex" ? executor : { model: "gpt-6.1-sol", thinking: "high", speed: "inherit" };
 	const internalSubagent = config.codex.internalSubagent;
 	const runnerEnvironment = {};
 	for (const role of SUBAGENT_ROLES) {

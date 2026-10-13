@@ -233,7 +233,7 @@ export function resolveSubagentRunnerDefaults(role: typeof SUBAGENT_ROLES[number
 	const canonicalRole = backend === "codex" ? (role === "advisor" ? "advisor" : "executor") : backend === "antigravity" ? "environment" : "general";
 	const canonical = configuredRunner(canonicalRole);
 	if (canonical.backend === backend) return canonical;
-	if (backend === "codex") return { backend, model: "gpt-5.6-sol", thinking: "max", speed: "inherit" };
+	if (backend === "codex") return { backend, model: "gpt-6.1-sol", thinking: "high", speed: "inherit" };
 	if (backend === "antigravity") return { backend, model: "gemini-3.1-pro-high", thinking: "high", speed: "inherit" };
 	return { backend: "pi", model: "inherit", thinking: "inherit", speed: "inherit" };
 }

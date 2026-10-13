@@ -94,14 +94,14 @@ All delegated workers enter through one `subagent` tool and one Runtime Actor mo
 ```json
 {
   "subagents": {
-    "advisor": { "backend": "codex", "model": "gpt-5.6-sol", "thinking": "max", "speed": "inherit" },
-    "executor": { "backend": "codex", "model": "gpt-5.6-sol", "thinking": "max", "speed": "inherit" },
+    "advisor": { "backend": "codex", "model": "gpt-6.1-sol", "thinking": "high", "speed": "inherit" },
+    "executor": { "backend": "codex", "model": "gpt-6.1-sol", "thinking": "high", "speed": "inherit" },
     "environment": { "backend": "antigravity", "model": "gemini-3.1-pro-high", "thinking": "high" },
     "general": { "backend": "pi", "model": "inherit", "thinking": "inherit" }
   },
   "codex": {
     "maxExecutors": 4,
-    "internalSubagent": { "model": "inherit", "thinking": "inherit" },
+    "internalSubagent": { "model": "gpt-6.1-sol", "thinking": "high" },
     "retention": { "terminalDays": 30, "keepTerminalJobs": 200 }
   }
 }

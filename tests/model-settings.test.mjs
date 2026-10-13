@@ -84,7 +84,7 @@ test("model center persists native Leader defaults, updates live worker defaults
 		await handler("executor thinking high", ctx);
 		assert.equal(defaultCodexModel("executor"), "gpt-6-astra");
 		assert.equal(defaultCodexReasoningEffort("executor"), "high");
-		assert.equal(defaultCodexModel("advisor"), "gpt-5.6-sol");
+		assert.equal(defaultCodexModel("advisor"), "gpt-6.1-sol");
 		await handler("executor speed fast", ctx);
 		assert.equal(defaultCodexServiceTier("executor"), "inherit", "cancel must not enable Fast");
 		approve = true;

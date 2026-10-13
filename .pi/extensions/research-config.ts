@@ -196,9 +196,9 @@ export function registerModelSettings(pi: ExtensionAPI, {
 				if (value === "pi") { current.model = "inherit"; current.thinking = "inherit"; delete current.speed; }
 				else if (value === "antigravity") { current.model = "gemini-3.1-pro-high"; current.thinking = "high"; delete current.speed; }
 				else {
-					const codexDefault = [config.subagents.advisor, config.subagents.executor].find((runner) => runner.backend === "codex")?.model ?? "gpt-5.6-sol";
+					const codexDefault = [config.subagents.advisor, config.subagents.executor].find((runner) => runner.backend === "codex")?.model ?? "gpt-6.1-sol";
 					current.model = codexDefault;
-					current.thinking = "max";
+					current.thinking = "high";
 					current.speed = "inherit";
 				}
 			} else if (field === "speed") {

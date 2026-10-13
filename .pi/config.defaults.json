@@ -27,14 +27,14 @@
   "subagents": {
     "advisor": {
       "backend": "codex",
-      "model": "gpt-5.6-sol",
-      "thinking": "max",
+      "model": "gpt-6.1-sol",
+      "thinking": "high",
       "speed": "inherit"
     },
     "executor": {
       "backend": "codex",
-      "model": "gpt-5.6-sol",
-      "thinking": "max",
+      "model": "gpt-6.1-sol",
+      "thinking": "high",
       "speed": "inherit"
     },
     "environment": {
@@ -51,8 +51,8 @@
   "codex": {
     "maxExecutors": 4,
     "internalSubagent": {
-      "model": "inherit",
-      "thinking": "inherit"
+      "model": "gpt-6.1-sol",
+      "thinking": "high"
     },
     "retention": {
       "terminalDays": 30,

@@ -25,10 +25,10 @@ export const DEFAULT_CODEX_JOB_ROOT = join(RESEARCH_PI_STATE_ROOT, "codex", "job
 export const DEFAULT_CODEX_SCHEMA_PATH = join(HARNESS_ROOT, ".pi", "schemas", "codex-delegate-result.json");
 export const DEFAULT_CODEX_ADVISOR_SCHEMA_PATH = join(HARNESS_ROOT, ".pi", "schemas", "codex-advisor-result.json");
 export const CODEX_JOB_WORKER_PATH = join(LIB_DIR, "codex-job-worker.mjs");
-export const DEFAULT_CODEX_ADVISOR_MODEL = process.env.RESEARCH_PI_CODEX_ADVISOR_MODEL?.trim() || "gpt-5.6-sol";
-export const DEFAULT_CODEX_ADVISOR_REASONING_EFFORT = process.env.RESEARCH_PI_CODEX_ADVISOR_EFFORT?.trim() || "max";
-export const DEFAULT_CODEX_EXECUTOR_MODEL = process.env.RESEARCH_PI_CODEX_EXECUTOR_MODEL?.trim() || "gpt-5.6-sol";
-export const DEFAULT_CODEX_EXECUTOR_REASONING_EFFORT = process.env.RESEARCH_PI_CODEX_EXECUTOR_EFFORT?.trim() || "max";
+export const DEFAULT_CODEX_ADVISOR_MODEL = process.env.RESEARCH_PI_CODEX_ADVISOR_MODEL?.trim() || "gpt-6.1-sol";
+export const DEFAULT_CODEX_ADVISOR_REASONING_EFFORT = process.env.RESEARCH_PI_CODEX_ADVISOR_EFFORT?.trim() || "high";
+export const DEFAULT_CODEX_EXECUTOR_MODEL = process.env.RESEARCH_PI_CODEX_EXECUTOR_MODEL?.trim() || "gpt-6.1-sol";
+export const DEFAULT_CODEX_EXECUTOR_REASONING_EFFORT = process.env.RESEARCH_PI_CODEX_EXECUTOR_EFFORT?.trim() || "high";
 export const DEFAULT_CODEX_MODEL = DEFAULT_CODEX_EXECUTOR_MODEL;
 export const DEFAULT_CODEX_REASONING_EFFORT = DEFAULT_CODEX_EXECUTOR_REASONING_EFFORT;
 export const DEFAULT_CODEX_RETENTION_DAYS = Number.parseInt(process.env.RESEARCH_PI_CODEX_RETENTION_DAYS ?? "30", 10) || 30;
@@ -91,8 +91,8 @@ export function defaultCodexServiceTier(mode) {
 }
 
 function codexSubagentSettings(value = {}) {
-	const model = value.model ?? process.env.RESEARCH_PI_CODEX_SUBAGENT_MODEL ?? "inherit";
-	const reasoningEffort = value.reasoningEffort ?? process.env.RESEARCH_PI_CODEX_SUBAGENT_EFFORT ?? "inherit";
+	const model = value.model ?? process.env.RESEARCH_PI_CODEX_SUBAGENT_MODEL ?? "gpt-6.1-sol";
+	const reasoningEffort = value.reasoningEffort ?? process.env.RESEARCH_PI_CODEX_SUBAGENT_EFFORT ?? "high";
 	if (model !== "inherit") validateModel(model);
 	if (reasoningEffort !== "inherit") validateReasoningEffort(reasoningEffort);
 	return { model, reasoningEffort };

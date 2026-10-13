@@ -62,8 +62,8 @@ test("Research Pi config owns research runtime settings, not the Leader model ca
 	assert.equal(Object.hasOwn(config, "activeProfile"), false);
 	assert.equal(Object.hasOwn(config, "profiles"), false);
 	assert.equal(Object.hasOwn(config, "providerCompat"), false);
-	assert.deepEqual(config.subagents.advisor, { backend: "codex", model: "gpt-5.6-sol", thinking: "max", speed: "inherit" });
-	assert.deepEqual(config.subagents.executor, { backend: "codex", model: "gpt-5.6-sol", thinking: "max", speed: "inherit" });
+	assert.deepEqual(config.subagents.advisor, { backend: "codex", model: "gpt-6.1-sol", thinking: "high", speed: "inherit" });
+	assert.deepEqual(config.subagents.executor, { backend: "codex", model: "gpt-6.1-sol", thinking: "high", speed: "inherit" });
 	assert.deepEqual(config.subagents.environment, { backend: "antigravity", model: "gemini-3.1-pro-high", thinking: "high" });
 	assert.deepEqual(config.subagents.general, { backend: "pi", model: "inherit", thinking: "inherit" });
 	assert.equal(config.codex.maxExecutors, 4);
@@ -85,7 +85,7 @@ test("Research Pi config owns research runtime settings, not the Leader model ca
 test("partial runtime config merges over defaults and rejects ambiguous or secret fields", () => {
 	const config = resolveResearchPiConfig({ subagents: { executor: { model: "gpt-5.6-luna" } } });
 	assert.equal(config.subagents.executor.model, "gpt-5.6-luna");
-	assert.equal(config.subagents.executor.thinking, "max");
+	assert.equal(config.subagents.executor.thinking, "high");
 	assert.throws(() => resolveResearchPiConfig({ typoSetting: true }), /Unknown Research Pi config key/);
 	assert.throws(() => resolveResearchPiConfig({ research: { compaction: { softTokens: 500_000 } } }), /below hardTokens/);
 	assert.throws(
@@ -211,7 +211,9 @@ test("config persistence creates a private v3 file and schema", () => {
 test("config exports runtime environment without a second Leader model selection", () => {
 	const environment = researchPiEnvironment(defaultResearchPiConfig());
 	assert.equal(Object.hasOwn(environment, "RESEARCH_PI_ACTIVE_PROFILE"), false);
-	assert.equal(environment.RESEARCH_PI_CODEX_ADVISOR_MODEL, "gpt-5.6-sol");
+	assert.equal(environment.RESEARCH_PI_CODEX_ADVISOR_MODEL, "gpt-6.1-sol");
+	assert.equal(environment.RESEARCH_PI_CODEX_SUBAGENT_MODEL, "gpt-6.1-sol");
+	assert.equal(environment.RESEARCH_PI_CODEX_SUBAGENT_EFFORT, "high");
 	assert.equal(environment.RESEARCH_PI_SUBAGENT_ENVIRONMENT_BACKEND, "antigravity");
 	assert.equal(environment.RESEARCH_PI_SUBAGENT_GENERAL_MODEL, "inherit");
 	assert.equal(environment.RESEARCH_PI_CODEX_RETENTION_DAYS, "30");
@@ -227,8 +229,8 @@ test("config exports runtime environment without a second Leader model selection
 		},
 	}));
 	assert.equal(alternate.RESEARCH_PI_SUBAGENT_ADVISOR_MODEL, "opencode-go/deepseek-v4-flash");
-	assert.equal(alternate.RESEARCH_PI_CODEX_ADVISOR_MODEL, "gpt-5.6-sol");
-	assert.equal(alternate.RESEARCH_PI_CODEX_EXECUTOR_MODEL, "gpt-5.6-sol");
+	assert.equal(alternate.RESEARCH_PI_CODEX_ADVISOR_MODEL, "gpt-6.1-sol");
+	assert.equal(alternate.RESEARCH_PI_CODEX_EXECUTOR_MODEL, "gpt-6.1-sol");
 });
 
 test("legacy credential file support and native search are independent of Leader selection", () => {
