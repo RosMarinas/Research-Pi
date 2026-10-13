@@ -21,6 +21,9 @@ import {
 	readCodexAnalysisContext,
 } from "../.pi/lib/research-analysis-bridge.mjs";
 import { resolveResearchPiPaths } from "../.pi/lib/runtime-paths.mjs";
+import { assertWslFullAccess } from "../.pi/lib/project-boundary.mjs";
+import { parseWebOptions } from "../.pi/lib/web-launcher.mjs";
+import { researchPiExtensions } from "../.pi/lib/research-extensions.mjs";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const paths = resolveResearchPiPaths({ harnessRoot: packageRoot });
@@ -98,6 +101,9 @@ function setup() {
 	}
 	process.stdout.write(`State directory: ${paths.stateRoot}\n`);
 	process.stdout.write(`Config file: ${paths.configPath}\n`);
+	process.stdout.write("GPT subscription: start pi, then /login openai (Sign in with ChatGPT), or /login openai-codex for the existing Codex provider; select the model with /model.\n");
+	process.stdout.write("Codex subagents use the Codex CLI's separate login: codex login. No provider API key is required for either subscription path.\n");
+	process.stdout.write("Antigravity subagents use the local agy session; launch agy interactively once for first-time sign-in. Pi subagents reuse Pi's native provider authentication.\n");
 }
 
 function loadConfigurationEnvironment() {
@@ -110,6 +116,13 @@ function loadConfigurationEnvironment() {
 function takeResearchOptions(argv, config) {
 	const args = [...argv];
 	let sessionMode;
+	let fullAccess = process.env.RESEARCH_PI_FULL_ACCESS === "1";
+	const fullAccessIndex = args.indexOf("--full-access");
+	if (fullAccessIndex >= 0) {
+		fullAccess = true;
+		args.splice(fullAccessIndex, 1);
+	}
+	assertWslFullAccess(fullAccess);
 	const analysisIndex = args.indexOf("--analysis");
 	if (analysisIndex >= 0) {
 		sessionMode = "analysis";
@@ -122,7 +135,7 @@ function takeResearchOptions(argv, config) {
 		workspace = args[index + 1];
 		args.splice(index, 2);
 	}
-	return { workspace: resolve(workspace), args, config, sessionMode };
+	return { workspace: resolve(workspace), args, config, sessionMode, fullAccess };
 }
 
 function applyConfigurationEnvironment(config) {
@@ -138,7 +151,7 @@ function expandUserPath(path) {
 	return resolve(path);
 }
 
-function configCommand(argv) {
+async function configCommand(argv) {
 	const config = prepareConfig();
 	loadConfigurationEnvironment();
 	const action = argv[0] ?? "show";
@@ -157,6 +170,24 @@ function configCommand(argv) {
 		}
 		return;
 	}
+	if (action === "web") {
+		const mode = argv[1];
+		if (mode === undefined) { process.stdout.write(JSON.stringify(config.ui.web, null, 2) + "\n"); return; }
+		if (!["off", "local", "tailscale"].includes(mode)) throw new Error("Usage: pi config web [off|local|tailscale]");
+		writeResearchPiConfig(paths.configPath, { ...config, ui: { ...config.ui, web: { ...config.ui.web, mode } } });
+		process.stdout.write("Web default: " + mode + ". Applies when starting pi; --no-web disables it for one launch.\n");
+		return;
+	}
+	if (action === "context") {
+		const [id, value] = argv.slice(1);
+		const split = id?.indexOf("/") ?? -1;
+		if (split < 1 || split === id.length - 1 || value === undefined || argv.length !== 3) throw new Error("Usage: pi config context <provider/model> <tokens|872k|1m|inherit>");
+		const { parseContextWindow, setModelContextWindow } = await import("../.pi/lib/model-context.mjs");
+		const tokens = parseContextWindow(value);
+		await setModelContextWindow(paths.agentDir, id.slice(0, split), id.slice(split + 1), tokens);
+		process.stdout.write(`${id}: context ${tokens ?? "catalog default"}. Saved in native models.json; refresh /model or start a new Pi to apply.\n`);
+		return;
+	}
 	if (action === "theme") {
 		const name = argv[1];
 		if (!name || !RESEARCH_PI_THEME_CHOICES.some((theme) => theme.name === name)) {
@@ -170,7 +201,7 @@ function configCommand(argv) {
 		process.stdout.write(`${researchPiConfigSummary(next, paths.configPath)}\n`);
 		return;
 	}
-	throw new Error("Usage: pi config [show|path|themes|theme <name>]");
+	throw new Error("Usage: pi config [show|path|themes|theme <name>|web [off|local|tailscale]|context <provider/model> <tokens|inherit>]");
 }
 
 async function readStandardInput() {
@@ -199,9 +230,15 @@ async function analysisCommand(argv) {
 	throw new Error("Usage: pi analysis [context|send <message>]");
 }
 
-async function spawnCore(argv) {
+async function spawnCore(argv, { background = false } = {}) {
+	let nativeRuntime = argv.includes("--resident-runtime");
+	argv = argv.filter(arg => arg !== "--resident-runtime");
 	const baseConfig = prepareConfig();
-	const { workspace, args: userArgs, config, sessionMode } = takeResearchOptions(argv, baseConfig);
+	if (background && baseConfig.ui.web.mode === "off" && !argv.includes("--no-web") && !argv.includes("--web-tailscale") && !argv.includes("--web")) argv = [...argv, "--web"];
+	const web = parseWebOptions(argv, baseConfig.ui.web, { interactive: background || Boolean(process.stdin.isTTY && process.stdout.isTTY) });
+	const { workspace, args: userArgs, config, sessionMode, fullAccess } = takeResearchOptions(web.args, baseConfig);
+	if (web.enabled && userArgs.some((arg) => ["--mode", "--print", "-p"].includes(arg) || arg.startsWith("--mode="))) throw new Error("--web requires interactive TUI mode");
+	if (background && !web.enabled) throw new Error("pi web start requires Web mode");
 	writeResearchPiAgentConfig(paths.agentDir, config, { coreVersion });
 	if (!existsSync(workspace)) throw new Error(`Research workspace does not exist: ${workspace}`);
 	loadConfigurationEnvironment();
@@ -209,16 +246,22 @@ async function spawnCore(argv) {
 	writeResearchPiAgentConfig(paths.agentDir, config, { coreVersion, environment: process.env });
 	const informational = userArgs.some((arg) => ["--version", "--help", "-h"].includes(arg));
 	const deepSeekSearchEnabled = informational ? false : researchPiDeepSeekSearchEnabled(config, process.env);
+	const coreCli = join(packageRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
+	if (!existsSync(coreCli)) throw new Error(`Pinned Pi core is missing: ${coreCli}`);
 
 	process.env.PI_CODING_AGENT_DIR = paths.agentDir;
 	process.env.RESEARCH_PI_CONFIG_DIR = paths.configRoot;
 	process.env.RESEARCH_PI_STATE_DIR = paths.stateRoot;
+	process.env.RESEARCH_PI_SESSION_DIR = paths.sessionDir;
+	process.env.RESEARCH_PI_HARNESS_ROOT = packageRoot;
+	process.env.RESEARCH_PI_CORE_CLI = coreCli;
 	if (sessionMode === "analysis") process.env.RESEARCH_PI_INITIAL_SESSION_MODE = "analysis";
+	if (fullAccess) process.env.RESEARCH_PI_FULL_ACCESS = "1";
 	if (process.env.RESEARCH_PI_TRACE === "1") process.env.PI_TRACE_DIR = paths.traceDir;
 
-	const coreCli = join(packageRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
-	if (!existsSync(coreCli)) throw new Error(`Pinned Pi core is missing: ${coreCli}`);
 	const args = ["--no-skills", "--no-extensions", "--no-themes"];
+	// A shared, resizable terminal needs an application-owned scroll viewport.
+	if (web.enabled && !userArgs.includes("--tui-mode")) args.push("--tui-mode", "fullscreen");
 	const skillPaths = [
 		join(packageRoot, ".pi", "skills", "research-briefing"),
 		...config.resources.skills.map((configuredPath) => expandUserPath(configuredPath)),
@@ -231,30 +274,45 @@ async function spawnCore(argv) {
 		"--session-dir", paths.sessionDir,
 		"--append-system-prompt", join(packageRoot, ".pi", "APPEND_SYSTEM.md"),
 	);
-	const extensions = [
-		"project-boundary.ts",
-		"tool-activity.ts",
-		"research-config.ts",
-		"research-mode.ts",
-		"record-experiment.ts",
-		"research-transition.ts",
-		"amend-project-state.ts",
-		"research-checkpoint.ts",
-		"research-memory.ts",
-		"research-compaction.ts",
-		"research-runtime.ts",
-		"research-side.ts",
-		"deepseek-v4-pro-anchor.ts",
-		"codex-watch.ts",
-		"codex-delegate.ts",
-		"cache-audit.ts",
-	];
-	if (deepSeekSearchEnabled) extensions.splice(extensions.indexOf("deepseek-v4-pro-anchor.ts"), 0, "deepseek-web-search.ts");
-	for (const name of extensions) args.push("--extension", join(packageRoot, ".pi", "extensions", name));
-	if (process.env.RESEARCH_PI_TRACE === "1") {
-		args.push("--extension", join(packageRoot, ".pi", "vendor", "pi-trace-extension-0.1.14", "trace", "index.ts"));
-	}
+	for (const extension of researchPiExtensions(packageRoot, {
+		web: web.enabled || nativeRuntime,
+		search: deepSeekSearchEnabled,
+		anchor: process.env.RESEARCH_PI_DEEPSEEK_ANCHOR === "1" || userArgs.some((arg) => arg === "--v4-pro-anchor" || arg.startsWith("--v4-pro-anchor=")),
+		trace: process.env.RESEARCH_PI_TRACE === "1",
+	})) args.push("--extension", extension);
 	args.push(...userArgs);
+
+	if (!informational && !nativeRuntime) {
+		const { findNativeRuntime } = await import("../.pi/lib/native-runtime-launcher.mjs");
+		if (await findNativeRuntime(paths.stateRoot, workspace, sessionMode === "analysis")) nativeRuntime = true;
+	}
+	if (!informational && nativeRuntime) {
+		if (userArgs.some(arg => ["--mode", "--print", "-p"].includes(arg) || arg.startsWith("--mode="))) throw new Error("Resident native presentation supports interactive mode; print/RPC require a separate invocation without an active native Host");
+		const { launchNativeRuntime } = await import("../.pi/lib/native-runtime-launcher.mjs");
+		await launchNativeRuntime({ stateRoot: paths.stateRoot, agentDir: paths.agentDir, sessionDir: paths.sessionDir,
+			cwd: workspace, args, packageRoot, env: process.env, web, background,
+			analysis: sessionMode === "analysis", hasSessionOptions: userArgs.length > 0 || argv.includes("--full-access") });
+		return;
+	}
+	if (web.enabled && !informational) {
+		if (web.persistent || background) {
+			if (!background && (!process.stdin.isTTY || !process.stdout.isTTY)) throw new Error("Use pi web start to launch a resident Pi without an interactive terminal");
+			const { ensureResidentWeb } = await import("../.pi/lib/web-resident.mjs");
+			const record = await ensureResidentWeb({ stateRoot: paths.stateRoot, cwd: workspace, env: process.env, packageRoot,
+				executable: process.execPath, args: [coreCli, ...args], options: web,
+				hasSessionOptions: userArgs.length > 0 || argv.includes("--analysis") || argv.includes("--full-access") });
+			printWebRecord(record);
+			if (!background) {
+				process.stderr.write("Ctrl+] detaches this terminal; Pi and Web stay running. Use pi web stop to stop the service.\n");
+				const { attachResidentTerminal } = await import("../.pi/lib/web-terminal.mjs");
+				await attachResidentTerminal(record);
+			}
+			return;
+		}
+		const { launchResearchWeb } = await import("../.pi/lib/web-launcher.mjs");
+		process.exitCode = await launchResearchWeb({ executable: process.execPath, args: [coreCli, ...args], cwd: workspace, env: process.env, packageRoot, options: web });
+		return;
+	}
 
 	await new Promise((resolveRun, rejectRun) => {
 		const child = spawn(process.execPath, [coreCli, ...args], {
@@ -271,10 +329,57 @@ async function spawnCore(argv) {
 	});
 }
 
+function printWebRecord(record) {
+	process.stdout.write(`Research Pi Web: ${record.url}\nWorkspace: ${record.state?.cwd ?? record.cwd}\nProcess: ${record.pid}\nState: ${record.state?.ready ? record.state.idle ? "idle" : "running" : "starting"}\n`);
+}
+
+async function webCommand(argv) {
+	const action = argv[0] ?? "status";
+	if (action === "start") return await spawnCore(argv.slice(1), { background: true });
+	if (!["status", "stop"].includes(action)) throw new Error("Usage: pi web [start|status|stop] [--workspace <path>]");
+	const { workspace, args, sessionMode } = takeResearchOptions(argv.slice(1), {});
+	if (args.some((arg) => arg !== "--json")) throw new Error("Usage: pi web [status|stop] [--workspace <path>] [--json]");
+	const { findNativeRuntime, stopNativeGateway } = await import("../.pi/lib/native-runtime-launcher.mjs");
+	const native = await findNativeRuntime(paths.stateRoot, workspace, sessionMode === "analysis");
+	if (native) {
+		if (action === "stop") { await stopNativeGateway(native); process.stdout.write("Stopped Web gateway; Native Runtime continues running\n"); }
+		else if (args.includes("--json")) process.stdout.write(JSON.stringify(native, null, 2) + "\n");
+		else if (native.url) printWebRecord(native);
+		else process.stdout.write("Native Runtime is running without a Web gateway\n");
+		return;
+	}
+	const { findResidentWeb, stopResidentWeb } = await import("../.pi/lib/web-resident.mjs");
+	const record = await findResidentWeb(paths.stateRoot, workspace);
+	if (action === "stop" && record) { await stopResidentWeb(record); process.stdout.write("Stopped resident Pi for " + workspace + "\n"); return; }
+	if (args.includes("--json")) process.stdout.write(JSON.stringify(record, null, 2) + "\n");
+	else if (record) printWebRecord(record);
+	else process.stdout.write("No resident Pi for " + workspace + "\n");
+}
+
 async function main() {
 	const argv = process.argv.slice(2);
+	if (argv[0] === "web") return await webCommand(argv.slice(1));
+	if (argv[0] === "watch") {
+		const { runSubagentWatch } = await import("../.pi/lib/subagent-watch-ui.mjs");
+		return await runSubagentWatch(argv.slice(1), paths);
+	}
 	if (argv[0] === "setup") return setup();
 	if (argv[0] === "config") return configCommand(argv.slice(1));
+	if (argv[0] === "native-runtime") {
+		const action = argv[1] ?? "status";
+		if (action === "start") return spawnCore([...argv.slice(2), "--resident-runtime"], { background: true });
+		const { workspace, sessionMode } = takeResearchOptions(argv.slice(2), prepareConfig());
+		const { findNativeRuntime, stopNativeGateway } = await import("../.pi/lib/native-runtime-launcher.mjs");
+		const { residentRequest, attachResidentTerminal } = await import("../.pi/lib/web-terminal.mjs");
+		const record = await findNativeRuntime(paths.stateRoot, workspace, sessionMode === "analysis");
+		if (!record) { process.stdout.write("No native Runtime Host running\n"); return; }
+		if (action === "stop") { await stopNativeGateway(record); await residentRequest(record, "stop"); }
+		else if (action === "web-stop") await stopNativeGateway(record);
+		else if (action === "attach") await attachResidentTerminal(record);
+		else if (action === "status") process.stdout.write(JSON.stringify({ pid: record.pid, cwd: record.cwd, state: record.state, web: Boolean(record.url) }, null, 2) + "\n");
+		else throw new Error("Usage: pi native-runtime [start|attach|status|web-stop|stop]");
+		return;
+	}
 	if (argv[0] === "analysis") return analysisCommand(argv.slice(1));
 	if (argv[0] === "paths") {
 		process.stdout.write(`${JSON.stringify(paths, null, 2)}\n`);

@@ -1,5 +1,7 @@
 # Intermittent prompt-cache misses
 
+Pi 1.0 migration note (2026-10-02): the synthetic flat `cached_tokens` replay now reports `cacheRead=90`, matching the wire value. No parser patch is needed. The investigation below documents Pi 0.84.2 and its observed sessions; it does not establish current GPT cache behavior. Research identity now uses the native structured-transcript hook rather than provider-specific payload rewriting.
+
 ## 2026-09-06 systematic investigation after the identity fix
 
 ### Question and competing explanations

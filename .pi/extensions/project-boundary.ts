@@ -8,9 +8,11 @@ import { createBashTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
 	authorizeCapabilityRequest,
+	capabilityResultNeedsDetail,
 	capabilityGrantSummary,
 	createCapabilityGrant,
 	executeGrantedCapability,
+	formatCapabilityResultForModel,
 	findCapabilityGrant,
 	inspectCapabilityAuthorization,
 	isForbiddenCredentialRead,
@@ -26,21 +28,29 @@ import {
 	buildSandboxRuntimeConfig,
 	directToolPath,
 	assertWslSandboxDependencies,
+	ensureProjectLocalStateExcluded,
 	isProtectedProjectMutation,
 	likelySandboxDenial,
 	prepareBoundaryRuntime,
 	readGitIdentity,
+	researchPiFullAccessEnabled,
 	resolveBoundaryPath,
 	runCodexSandboxPreflight,
 	sanitizeBoundaryEnvironment,
 } from "../lib/project-boundary.mjs";
 import { runtimeSessionInheritancePolicy } from "../lib/research-runtime.mjs";
 import { resolveSystemRuntimePolicy } from "../lib/security-policy.mjs";
+import { mapProviderSystemPrompt } from "../lib/provider-system-prompt.mjs";
 
 type BoundaryRuntime = Awaited<ReturnType<typeof prepareBoundaryRuntime>>;
 type CapabilityContext = Awaited<ReturnType<typeof resolveCapabilityContext>>;
 type SystemRuntimePolicy = Awaited<ReturnType<typeof resolveSystemRuntimePolicy>>;
 const INITIAL_SESSION_POLICY = process.env.RESEARCH_PI_INITIAL_SESSION_MODE === "analysis" ? "analysis" : "project";
+const FULL_ACCESS_PROMPT_SUFFIX = "\n\n<research_pi_full_access>\nThe user explicitly launched Research Pi with full access. The project remains the task scope, but it is not an OS filesystem or command sandbox for this Leader Session. You may use host files, commands, network, Unix sockets, credentials, and external paths when they are genuinely required by the user's task, without requesting a Research Pi boundary grant. Do not broaden the task, expose secrets, or skip exact-target checks for destructive operations. Analysis Sessions and Codex advisor Actors remain read-only.\n</research_pi_full_access>";
+
+function appendFullAccessPrompt(prompt: string): string {
+	return prompt.includes(FULL_ACCESS_PROMPT_SUFFIX) ? prompt : prompt + FULL_ACCESS_PROMPT_SUFFIX;
+}
 
 function currentSessionPolicy(ctx: any) {
 	return runtimeSessionInheritancePolicy(ctx.sessionManager.getBranch(), null, null, INITIAL_SESSION_POLICY);
@@ -304,13 +314,26 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 	let initializationError: string | undefined;
 	let userOverrideNoticeShown = false;
 	let wslIsolation: Awaited<ReturnType<typeof verifyWslHostInteropBlocked>>;
-	let sandboxAccess: "read" | "write" | undefined;
+	let sandboxAccess: "read" | "write" | "full" | undefined;
 	let sandboxUpdate = Promise.resolve();
 	const inheritedSandboxTmp = process.env.CLAUDE_CODE_TMPDIR;
 	const baseBash = createBashTool(process.cwd());
+	const launchFullAccess = researchPiFullAccessEnabled();
+	const leaderHasFullAccess = (ctx: any) => launchFullAccess && currentSessionPolicy(ctx) !== "analysis";
 
 	const ensureProjectSandbox = async (ctx: any) => {
 		if (!runtime || !systemRuntime) throw new Error(initializationError ?? "Project boundary is not initialized");
+		if (leaderHasFullAccess(ctx)) {
+			if (sandboxAccess === "full") return;
+			const update = sandboxUpdate.catch(() => undefined).then(async () => {
+				if (sandboxAccess === "full") return;
+				await SandboxManager.reset();
+				sandboxAccess = "full";
+			});
+			sandboxUpdate = update;
+			await update;
+			return;
+		}
 		const access = currentSessionPolicy(ctx) === "analysis" ? "read" : "write";
 		if (sandboxAccess === access) return;
 		const update = sandboxUpdate.catch(() => undefined).then(async () => {
@@ -335,7 +358,11 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 	const refreshBoundaryStatus = async (ctx: any) => {
 		if (!ctx.hasUI) return;
 		const count = capabilityContext ? (await listCapabilityGrants(capabilityContext)).length : 0;
-		const label = runtime ? `🔒 project${count ? ` · ${count} grant${count === 1 ? "" : "s"}` : ""}` : "🔒 boundary failed closed";
+		const label = runtime
+			? leaderHasFullAccess(ctx)
+				? "🔓 full access"
+				: `🔒 project${count ? ` · ${count} grant${count === 1 ? "" : "s"}` : ""}`
+			: "🔒 boundary failed closed";
 		ctx.ui.setStatus("boundary", ctx.ui.theme.fg(runtime ? "accent" : "error", label));
 	};
 
@@ -426,6 +453,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			"SSH credentials remain opaque. Host commands must match approved authority; never request, read, print, copy, or transmit private keys, tokens, or credential stores.",
 			"A missing capability is a user authorization boundary. Do not route around it with bash, symlinks, proxy commands, copied credentials, or another agent.",
 			"Under WSL2, never access /mnt or launch Windows/PowerShell executables through host-command; those operations remain direct human authority.",
+			"Design each read or command to return only the evidence needed for the current decision. Filter large logs at the source. Save large raw output to an approved artifact and return its path. Do not dump a full log into model context.",
 		],
 		parameters: Type.Object({
 			action: Type.Union([Type.Literal("list"), Type.Literal("read"), Type.Literal("ssh"), Type.Literal("command"), Type.Literal("script")]),
@@ -460,23 +488,21 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 					const grant = await requestInteractiveGrant(request, ctx, input, context, true, !commandScopedSsh);
 					if (!grant) throw new Error("Host capability was not approved by the user");
 				}
-				let outputTail = "";
+				let outputBytes = 0;
 				const result = await executeGrantedCapability(context, input, {
 					signal,
 					env: process.env,
 					onData: (chunk: Buffer) => {
-						outputTail = `${outputTail}${chunk.toString()}`.slice(-12000);
-						onUpdate?.({ content: [{ type: "text", text: outputTail }] });
+						outputBytes += chunk.length;
+						onUpdate?.({ content: [{ type: "text", text: `Host capability is running. Received ${outputBytes.toLocaleString()} output bytes.` }] });
 					},
 				});
-				const text = [
-					`Capability ${result.grantId} executed (${result.kind}: ${result.target}).`,
-					`Exit: ${result.exitCode}${result.timedOut ? " · timed out" : ""}${result.outputTruncated ? " · output truncated" : ""}`,
-					result.stdout ? `stdout:\n${result.stdout}` : undefined,
-					result.stderr ? `stderr:\n${result.stderr}` : undefined,
-				].filter(Boolean).join("\n");
+				const needsDetail = capabilityResultNeedsDetail(result);
+				const text = formatCapabilityResultForModel(result, {
+					reference: needsDetail ? "the complete captured output is stored in this tool call's details" : undefined,
+				});
 				await refreshBoundaryStatus(ctx);
-				return { content: [{ type: "text", text }], isError: result.exitCode !== 0 };
+				return { content: [{ type: "text", text }], details: result, isError: result.exitCode !== 0 };
 			} catch (error) {
 				return { content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }], isError: true };
 			}
@@ -485,15 +511,21 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 
 	pi.registerTool({
 		...baseBash,
-		label: "bash (project boundary)",
-		promptSnippet: "Execute shell commands inside the current project boundary with role-scoped write and network authority",
-		promptGuidelines: [
-			"Leader shell may read/write the current project, including Git metadata. Analysis shell uses an OS-enforced read-only project profile with only project-local runtime temp writable. Neither role can access other user directories or write system temp paths.",
-			"Leader project shell has public network access. Analysis local shell has no network; use web_search for public evidence and host_capability for approved SSH inspection. Command syntax is not a policy boundary.",
-			"Unix sockets and host credential files remain outside the project sandbox. If a justified operation needs them, use host_capability command or a project-trusted SSH target instead of asking the user to copy a terminal command.",
-			"Under WSL2, Windows host mounts and Windows executable interop remain outside the agent boundary. Do not invoke powershell.exe, cmd.exe, wsl.exe, or paths below /mnt; Windows-native operations remain a direct human action, while Linux host commands for SSH-backed work require one-shot approval.",
-			"Do not attempt an indirect boundary bypass. Request the exact brokered target or argv and continue after approval; use ! only if the broker cannot express the operation.",
-		],
+		label: launchFullAccess ? "bash (full access for Leader)" : "bash (project boundary)",
+		promptSnippet: launchFullAccess
+			? "Execute host commands with explicit full access in the Leader Session; Analysis remains project-read-only"
+			: "Execute shell commands inside the current project boundary with role-scoped write and network authority",
+		promptGuidelines: launchFullAccess
+			? [
+					"This Leader Session has explicit host-user filesystem, command, network, and Unix-socket access. Keep operations within the user's task, protect credentials, and verify exact destructive targets.",
+					"Analysis Sessions still use an OS-enforced read-only project profile with no local shell network; full access does not widen the Analysis role.",
+				]
+			: [
+					"Leader shell may read/write the current project, including Git metadata. Analysis shell uses an OS-enforced read-only project profile with only project-local runtime temp writable. Neither role can access other user directories or write system temp paths.",
+					"Leader project shell has public network access. Analysis local shell has no network; use web_search for public evidence and host_capability for approved SSH inspection. Command syntax is not a policy boundary.",
+					"Unix sockets and host credential files remain outside the project sandbox. If a justified operation needs them, use host_capability command or a project-trusted SSH target instead of asking the user to copy a terminal command.",
+					"Under WSL2, Windows host mounts and Windows executable interop remain outside the agent boundary. Do not invoke powershell.exe, cmd.exe, wsl.exe, or paths below /mnt; Windows-native operations remain a direct human action, while Linux host commands for SSH-backed work require one-shot approval.",
+				],
 		async execute(id, params, signal, onUpdate, ctx) {
 			if (!runtime) {
 				return {
@@ -514,6 +546,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 					isError: true,
 				};
 			}
+			if (leaderHasFullAccess(ctx)) return await baseBash.execute(id, params, signal, onUpdate);
 			const sandboxed = createBashTool(ctx.cwd, {
 				operations: createProjectBashOperations(runtime, gitIdentity, systemRuntime ?? await resolveSystemRuntimePolicy()),
 				exposeSessionEnvironment: false,
@@ -523,6 +556,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
+		if (leaderHasFullAccess(ctx)) return undefined;
 		const requestedPath = directToolPath(event.toolName, event.input);
 		if (requestedPath === undefined) return undefined;
 		const info = await resolveBoundaryPath(runtime?.root ?? ctx.cwd, requestedPath);
@@ -580,6 +614,12 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		try {
 			runtime = await prepareBoundaryRuntime(ctx.cwd);
+			const localExclude = await ensureProjectLocalStateExcluded(runtime.root).catch((error) => ({
+				status: "failed",
+				changed: false,
+				path: null,
+				error: error instanceof Error ? error.message : String(error),
+			}));
 			// sandbox-runtime bakes TMPDIR into its wrapped command from this
 			// harness variable, so set it before initialization and wrapping.
 			process.env.CLAUDE_CODE_TMPDIR = runtime.runtimeTmp;
@@ -590,6 +630,8 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			wslIsolation = await verifyWslHostInteropBlocked(runtime, gitIdentity);
 			initializationError = undefined;
 			await refreshBoundaryStatus(ctx);
+			if (localExclude.changed) ctx.ui.notify("Research Pi local .pi state is now hidden through Git info/exclude; no project file was modified.", "info");
+			else if (localExclude.status === "failed") ctx.ui.notify(`Could not add the local .pi Git exclusion: ${localExclude.error}`, "warning");
 		} catch (error) {
 			await SandboxManager.reset().catch(() => undefined);
 			sandboxAccess = undefined;
@@ -601,6 +643,20 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			ctx.ui.setStatus("boundary", ctx.ui.theme.fg("error", "🔒 boundary failed closed"));
 			ctx.ui.notify(`Research Pi project boundary failed to initialize: ${initializationError}`, "error");
 		}
+	});
+
+	pi.on("before_agent_start", (event, ctx) => {
+		if (!leaderHasFullAccess(ctx)) return undefined;
+		return {
+			systemPrompt: appendFullAccessPrompt(event.systemPrompt),
+		};
+	});
+	pi.on("before_provider_request", (event, ctx) => {
+		// Custom-message wakes bypass before_agent_start. Keep this explanatory
+		// suffix stable too, using the current policy rather than a saved grant.
+		return leaderHasFullAccess(ctx)
+			? mapProviderSystemPrompt(event.payload, appendFullAccessPrompt, { lastTextOnly: true })
+			: mapProviderSystemPrompt(event.payload, (prompt: string) => prompt.replace(FULL_ACCESS_PROMPT_SUFFIX, ""));
 	});
 
 	pi.on("session_shutdown", async () => {
@@ -655,14 +711,15 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 							runtimeTmp: runtime.runtimeTmp,
 							gitIdentity,
 							runtimePolicy: systemRuntime,
+							fullAccess: leaderHasFullAccess(ctx),
 						}),
 					]);
 					ctx.ui.notify(
 						[
 							"Research Pi boundary doctor passed.",
-							"Pi shell: project/Git/runtime OK.",
+							leaderHasFullAccess(ctx) ? "Pi shell: explicit full host access active." : "Pi shell: project/Git/runtime OK.",
 							`Codex advisor: ${advisorProbe.codexVersion || "version unknown"} · ${advisorProbe.codexBin} · project/Git/runtime OK.`,
-							`Codex executor: ${executorProbe.codexVersion || "version unknown"} · ${executorProbe.codexBin} · project/Git/runtime OK.`,
+							`Codex executor: ${executorProbe.codexVersion || "version unknown"} · ${executorProbe.codexBin} · ${leaderHasFullAccess(ctx) ? "full host access/runtime OK" : "project/Git/runtime OK"}.`,
 							...systemRuntime.diagnostics,
 						].join("\n"),
 						"info",
@@ -776,7 +833,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			}
 			const lines = runtime
 				? [
-						"Research Pi project boundary is active.",
+						leaderHasFullAccess(ctx) ? "Research Pi full access is active for this Leader Session." : "Research Pi project boundary is active.",
 						`Project root: ${runtime.root}`,
 						currentSessionPolicy(ctx) === "analysis"
 							? "Agent shell: Analysis project read-only; project-local runtime temp writable; host authority remains brokered."

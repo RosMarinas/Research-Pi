@@ -116,18 +116,20 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "record_experiment",
 		label: "Record Experiment",
-		description: "Persist one lightweight research memo when an observation changes a research judgment. Do not use for ordinary probes, routine commands, or plans without results.",
+		description: "Persist one canonical lightweight research memo when an observation changes a research judgment. This ledger entry replaces routine duplicate Markdown; it does not create or copy artifacts.",
 		promptSnippet: "Record a decision-changing experiment result in the project research ledger",
 		promptGuidelines: [
 			"Use record_experiment only after a result materially changes a research judgment; choose evidenceMode honestly: confirmatory for an ex-ante prediction, exploratory for unplanned findings, diagnostic for a mechanism/failure-localization check, and validity_failure when the intended experiment cannot be interpreted.",
+			"Ordinary fixes, probes, and successful commands need no memo. For a decision-changing result, use 5–8 short statements across the fields plus exact evidence references. Do not repeat background or fill optional fields for completeness. This entry is the complete memo: no duplicate Markdown, report, activation note, or artifact bundle. Documents require a real document deliverable, not merely task completion.",
+			"artifacts are concise references to already-existing canonical evidence. Do not copy generated outputs into the repository or enumerate raw shards, checkpoints, rollouts, panels, or seed rows.",
 			"Never reconstruct a hypothesis, prediction, validity check, registration, or next step to satisfy the tool. Confirmatory evidence needs a real observation-before prediction; preregistered needs registrationRef; valid needs an actual validity check.",
 			"For an older route, provide its exact trackRef. Provide runGitCommit when known; recordedAtGit never substitutes for executed-code identity.",
 		],
 		parameters: Type.Object({
-			question: Type.String({ description: "Research question or concrete design uncertainty" }),
-			hypothesis: Type.Optional(Type.String({ description: "Hypothesis evaluated; required only for confirmatory evidence, otherwise omit rather than reconstructing one" })),
-			intervention: Type.String({ description: "What was changed, compared, or inspected" }),
-			prediction: Type.Optional(Type.String({ description: "Pre-observation distinguishing prediction, only if it was actually recorded; omit rather than reconstructing it post hoc" })),
+			question: Type.String({ maxLength: 600, description: "Research question or concrete design uncertainty, one sentence" }),
+			hypothesis: Type.Optional(Type.String({ maxLength: 800, description: "Hypothesis evaluated; required only for confirmatory evidence, otherwise omit rather than reconstructing one" })),
+			intervention: Type.String({ maxLength: 1200, description: "What was changed, compared, or inspected; refer to the existing configuration rather than copying it" }),
+			prediction: Type.Optional(Type.String({ maxLength: 800, description: "Pre-observation distinguishing prediction, only if it was actually recorded; omit rather than reconstructing it post hoc" })),
 			predictionStatus: Type.Optional(Type.Union([
 				Type.Literal("preregistered"),
 				Type.Literal("recorded_before_observation"),
@@ -143,13 +145,13 @@ export default function (pi: ExtensionAPI) {
 			], { description: "How this observation may update claims; inferred conservatively when omitted" })),
 			registrationRef: Type.Optional(Type.String({ description: "Frozen registration or exact prior source of an ex-ante prediction; required for preregistered" })),
 			validityChecks: Type.Optional(Type.Array(Type.String(), { description: "Checks actually performed to establish interpretability; required when validityJudgment=valid" })),
-			observation: Type.String({ description: "Observed evidence, separated from interpretation" }),
+			observation: Type.String({ maxLength: 1600, description: "Decision-carrying observations and numbers, separated from interpretation; link detailed evidence without truncating the original" }),
 			validityJudgment: Type.Union([Type.Literal("valid"), Type.Literal("invalid"), Type.Literal("inconclusive")], { description: "Whether the run can update the research hypothesis" }),
-			conclusion: Type.String({ description: "How the observation updates the hypothesis or decision" }),
-			nextStep: Type.Optional(Type.String({ description: "Next highest-information action, if one is actually known" })),
+			conclusion: Type.String({ maxLength: 1200, description: "How the observation updates the hypothesis or decision, including material limitations" }),
+			nextStep: Type.Optional(Type.String({ maxLength: 600, description: "Next highest-information action, if one is actually known" })),
 			runId: Type.Optional(Type.String({ description: "External training/evaluation run identifier, if any" })),
 			runGitCommit: Type.Optional(Type.String({ description: "Git commit of the code that actually produced the run; do not substitute the record-time HEAD" })),
-			artifacts: Type.Optional(Type.Array(Type.String(), { description: "Relevant artifact paths or URLs" })),
+			artifacts: Type.Optional(Type.Array(Type.String(), { maxItems: 12, description: "At most 12 concise paths or URLs to already-existing canonical evidence; never enumerate raw files" })),
 			trackRef: Type.Optional(Type.String({ description: "Exact Runtime research-track provenance when this result belongs to a non-current route" })),
 			idempotencyKey: Type.Optional(Type.String({ description: "Stable caller key for safe retries; runId plus question is used when available" })),
 		}),
@@ -274,7 +276,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			return {
-				content: [{ type: "text", text: `Recorded ${id} in ${join(CONFIG_DIR_NAME, "research", "experiments.jsonl")}.${runtimeWarning ? ` Project Runtime mirror warning: ${runtimeWarning}` : ""}` }],
+				content: [{ type: "text", text: `Recorded ${id} in the canonical lightweight ledger ${join(CONFIG_DIR_NAME, "research", "experiments.jsonl")}; no duplicate Markdown or artifact copy is needed.${runtimeWarning ? ` Project Runtime mirror warning: ${runtimeWarning}` : ""}` }],
 				details: { ...record, runtimeMirrored: !runtimeWarning, runtimeWarning, duplicateSkipped: false },
 			};
 		},

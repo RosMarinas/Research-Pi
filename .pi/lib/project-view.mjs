@@ -6,16 +6,15 @@ import { RESEARCH_LEADER_ACTOR_ID, runtimeResearchTrack, runtimeTrackStatus } fr
 
 export const PROJECT_VIEW_KIND = "research-project-view";
 export const PROJECT_VIEW_DELTA_KIND = "research-project-view-delta";
-export const PROJECT_VIEW_VERSION = 7;
+export const PROJECT_VIEW_VERSION = 8;
 export const PROJECT_ANCHOR_FILE = "RESEARCH.md";
 const MAX_SESSION_FILES = 24;
 const MAX_SESSION_BYTES = 64 * 1024 * 1024;
 const MAX_PROJECT_ANCHOR_BYTES = 64 * 1024;
 const MAX_PROJECT_ANCHOR_CHARS = 3_600;
 
-function compact(value, limit = 500) {
-	const text = String(value ?? "").replace(/\s+/g, " ").trim();
-	return text.length <= limit ? text : `${text.slice(0, Math.max(0, limit - 3))}...`;
+function compact(value) {
+	return String(value ?? "").replace(/\s+/g, " ").trim();
 }
 
 function list(value, limit) {
@@ -52,15 +51,15 @@ export async function readProjectAnchor(workspaceRoot) {
 		};
 	}
 	const raw = (await readFile(path, "utf8")).trim();
-	const truncated = raw.length > MAX_PROJECT_ANCHOR_CHARS;
-	const content = truncated ? raw.slice(0, MAX_PROJECT_ANCHOR_CHARS).trimEnd() : raw;
+	const oversized = raw.length > MAX_PROJECT_ANCHOR_CHARS;
+	const content = oversized ? "" : raw;
 	return {
 		path: PROJECT_ANCHOR_FILE,
 		content,
-		warning: truncated
-			? `Only the first ${MAX_PROJECT_ANCHOR_CHARS} characters are injected; shorten RESEARCH.md for a complete stable anchor.`
+		warning: oversized
+			? `Project Anchor was not injected because it exceeds ${MAX_PROJECT_ANCHOR_CHARS} characters. Shorten RESEARCH.md so the model receives one complete anchor.`
 			: null,
-		fingerprint: fingerprint({ path: PROJECT_ANCHOR_FILE, content, truncated }),
+		fingerprint: fingerprint({ path: PROJECT_ANCHOR_FILE, content, oversized }),
 	};
 }
 
@@ -231,9 +230,11 @@ export async function readRecentExperiments(path, maxRecords = 6) {
 export function buildProjectView({ runtime, snapshot, git = {}, experiments = [], anchor = null }) {
 	const currentTrack = runtimeResearchTrack(snapshot);
 	const briefState = snapshot.projectBrief?.state ?? snapshot.projectState?.state ?? null;
-	const actions = snapshot.actions.filter((action) =>
-		LIVE_ACTION_STATUSES.has(action.status),
-	).slice(-8).map((action) => ({ ...action, routeStatus: runtimeTrackStatus(snapshot, action.trackRef) }));
+	const liveActions = snapshot.actions.filter((action) => LIVE_ACTION_STATUSES.has(action.status));
+	const actions = liveActions.slice(-8).map((action) => ({ ...action, routeStatus: runtimeTrackStatus(snapshot, action.trackRef) }));
+	const externalRuns = snapshot.actions.flatMap((action) => (action.metadata?.externalRuns ?? [])
+		.filter((run) => !["completed", "failed", "cancelled"].includes(run.status))
+		.map((run) => ({ ...run, jobId: action.externalId, routeStatus: runtimeTrackStatus(snapshot, action.trackRef) })));
 	const handoffs = [...(snapshot.handoffs ?? [])]
 		.sort((left, right) => Date.parse(left.recordedAt ?? "") - Date.parse(right.recordedAt ?? ""))
 		.slice(-6)
@@ -327,12 +328,14 @@ export function buildProjectView({ runtime, snapshot, git = {}, experiments = []
 		latestCompletedTask: completedTasks.at(-1) ?? null,
 		pendingEvidenceCount,
 		pendingEvidence: evidenceAfterState.slice(-4),
+		externalRuns,
 		transitionSupersedesState: Boolean(
 			snapshot.projectState
 			&& stateRouteStatus === "retired",
 		),
 		experiments: recentEvidence,
 		actions,
+		actionCount: liveActions.length,
 		generatedFrom: {
 			actors: snapshot.actors.length,
 			actions: snapshot.actions.length,
@@ -356,11 +359,6 @@ function evidenceBrief(item) {
 		item.nextStep ? `  next: ${compact(item.nextStep, 300)}` : undefined,
 		item.runId ? `  run: ${compact(item.runId, 180)}${item.runGitCommit ? ` @ ${compact(item.runGitCommit, 100)}` : ""}` : undefined,
 	].filter(Boolean);
-}
-
-function truncateSection(text, limit, marker) {
-	if (text.length <= limit) return text;
-	return `${text.slice(0, Math.max(0, limit - marker.length - 1)).trimEnd()}\n${marker}`;
 }
 
 export function renderProjectBrief(view) {
@@ -414,7 +412,7 @@ export function renderProjectBrief(view) {
 		"The injected ProjectView stays fixed until /compact or an explicit context/role change. Consult later conversation, tools, and experiment records for updates.",
 		"</research_project_view>",
 	);
-	return truncateSection(lines.filter(Boolean).join("\n"), 8_800, "[Project Brief truncated; shorten RESEARCH.md or use /runtime view for the stored orientation.]\n</research_project_view>");
+	return lines.filter(Boolean).join("\n");
 }
 
 export function renderProjectView(view, options = {}) {
@@ -423,6 +421,7 @@ export function renderProjectView(view, options = {}) {
 
 export function renderProjectViewDelta(view, options = {}) {
 	const includeDirectedMessages = options.includeDirectedMessages !== false;
+	const lean = options.snapshot === true;
 	const tag = options.snapshot ? "research_project_frontier" : "research_project_delta";
 	const state = view.state;
 	const evidence = [...view.pendingEvidence].reverse().slice(0, 2);
@@ -449,24 +448,25 @@ export function renderProjectViewDelta(view, options = {}) {
 		);
 	}
 	if (view.stateAmendment) {
+		const authorityRefs = view.stateAmendment.authorityRefs ?? [];
+		const selectedAuthorityRefs = authorityRefs.slice(0, 6);
 		header.push(
 			`Latest structured-state amendment: ${compact(view.stateAmendment.reason, 700) || "reason not recorded"}`,
-			view.stateAmendment.authorityRefs?.length
-				? `Authority: ${view.stateAmendment.authorityRefs.slice(0, 6).map((item) => compact(item, 180)).join(", ")}`
+			selectedAuthorityRefs.length
+				? `Authority${selectedAuthorityRefs.length < authorityRefs.length ? ` (showing ${selectedAuthorityRefs.length} of ${authorityRefs.length}; use /runtime view for all)` : ""}: ${selectedAuthorityRefs.map((item) => compact(item, 180)).join(", ")}`
 				: undefined,
 		);
 	}
 
-	// Latest observations precede the compacted frontier deliberately. If the
-	// Delta reaches its bound, old/detail-heavy baseline fields are truncated
-	// before the evidence that made the Delta necessary.
+	// Latest observations precede the structured frontier. Each source field is
+	// already bounded by its schema. Do not cut a sentence during rendering.
 	const progress = ["=== LATEST MEANINGFUL PROGRESS ==="];
 	if (view.latestCompletedTask) {
 		const handoff = view.latestCompletedTask;
 		progress.push(
 			"Latest completed work handoff (context, not an automatic next task):",
-			`Task: ${compact(handoff.task, 700) || handoff.id}`,
-			`Reported result: ${compact(handoff.summary, 1_400)}`,
+			`Task: ${compact(handoff.task, lean ? 300 : 700) || handoff.id}`,
+			`Reported result: ${compact(handoff.summary, lean ? 500 : 1_400)}`,
 			`Route: ${handoff.routeStatus} · source=${handoff.id}`,
 		);
 	} else {
@@ -478,20 +478,35 @@ export function renderProjectViewDelta(view, options = {}) {
 			...evidence.flatMap(evidenceBrief),
 		);
 	}
+	const selectedActions = view.actions.slice(lean ? -2 : -4);
+	const actionCount = Number.isInteger(view.actionCount) ? view.actionCount : view.actions.length;
 	progress.push(
-		"Live Runtime actions:",
-		...bullets(view.actions.slice(-4), (item) => `${item.id} [${item.status}] [route=${item.routeStatus}] ${compact(item.label, 240)} external=${item.externalId ?? "none"}`, "none"),
+		`Live Runtime actions${selectedActions.length < actionCount ? ` (showing newest ${selectedActions.length} of ${actionCount}; use /runtime view for all)` : ""}:`,
+		...bullets(selectedActions, (item) => `${item.id} [${item.status}] [route=${item.routeStatus}] ${compact(item.label, lean ? 120 : 240)} external=${item.externalId ?? "none"}`, "none"),
+	);
+	if (view.externalRuns?.length) progress.push(
+		"Unsettled external runs (worker completion does not imply experiment completion):",
+		...view.externalRuns.slice(-4).map((run) => `- ${run.id} [${run.status}] [route=${run.routeStatus}] ${run.target} external=${run.externalId} job=${run.jobId}`),
+		view.externalRuns.length > 4 ? `${view.externalRuns.length} total; inspect job externalRuns for the rest.` : "",
 	);
 
 	const frontier = ["=== CURRENT RESEARCH FRONTIER ==="];
 	if (state && !view.transitionSupersedesState) {
+		const hypotheses = Array.isArray(state.hypotheses) ? state.hypotheses : [];
+		const selectedHypotheses = hypotheses.slice(0, 4);
+		const confounders = Array.isArray(state.unresolvedConfounders) ? state.unresolvedConfounders : [];
+		const questions = Array.isArray(state.openQuestions) ? state.openQuestions : [];
+		const selectedConfounders = confounders.slice(0, 2);
+		const selectedQuestions = questions.slice(0, 3);
+		const selectedOpenItems = [...selectedConfounders, ...selectedQuestions];
+		const openItemCount = confounders.length + questions.length;
 		frontier.push(
-			`Current question: ${compact(state.researchQuestion, 900) || "not established"}`,
-			`Evidence-bounded position: ${compact(state.currentClaim, 900) || "no supported claim recorded"}`,
-			"Competing hypotheses:",
-			...bullets(list(state.hypotheses, 4), (item) => `${item.id} [${item.status}] ${compact(item.statement, 460)}${item.evidenceRefs?.length ? ` | refs=${item.evidenceRefs.join(",")}` : ""}`, "none recorded"),
-			"Open questions and confounders:",
-			...bullets([...list(state.unresolvedConfounders, 2), ...list(state.openQuestions, 3)], (item) => compact(item, 460), "none recorded"),
+			`Current question: ${compact(state.researchQuestion, lean ? 400 : 900) || "not established"}`,
+			`Evidence-bounded position: ${compact(state.currentClaim, lean ? 500 : 900) || "no supported claim recorded"}`,
+			`Competing hypotheses${selectedHypotheses.length < hypotheses.length ? ` (showing ${selectedHypotheses.length} of ${hypotheses.length}; use /runtime view for all)` : ""}:`,
+			...bullets(selectedHypotheses, (item) => `${item.id} [${item.status}] ${compact(item.statement, lean ? 240 : 460)}${item.evidenceRefs?.length ? ` | refs=${item.evidenceRefs.join(",")}` : ""}`, "none recorded"),
+			`Open questions and confounders${selectedOpenItems.length < openItemCount ? ` (showing ${selectedOpenItems.length} of ${openItemCount}; use /runtime view for all)` : ""}:`,
+			...bullets(selectedOpenItems, (item) => compact(item, lean ? 240 : 460), "none recorded"),
 			`Candidate next experiment: ${compact(state.nextExperiment?.question, 560) || "not determined"}`,
 			state.nextExperiment?.intervention ? `  intervention: ${compact(state.nextExperiment.intervention, 680)}` : undefined,
 		);
@@ -501,21 +516,19 @@ export function renderProjectViewDelta(view, options = {}) {
 		frontier.push("No structured current frontier is available yet.");
 	}
 	const footer = [
+		lean ? "This is a compact index, not complete evidence. Retrieve exact records and validity judgments before consequential decisions; /runtime view shows more detail." : undefined,
 		includeDirectedMessages
 			? "Runtime mailbox bodies use the separate single-delivery channel; inspect /inbox only when routing needs attention."
 			: "Directed Runtime message contents belong only to the addressed Leader Session.",
 		"The current user request selects the immediate task. This view is context only: do not acknowledge it as a separate message or continue work merely because it is present.",
 		`</${tag}>`,
 	];
-	const fixed = [...header, ...progress].filter(Boolean).join("\n");
-	const ending = footer.filter(Boolean).join("\n");
-	const availableFrontier = Math.max(900, 6_400 - fixed.length - ending.length - 2);
-	const boundedFrontier = truncateSection(
-		frontier.filter(Boolean).join("\n"),
-		availableFrontier,
-		"[Current frontier truncated; latest progress above is preserved. Use /runtime view for the full bounded view.]",
-	);
-	return `${fixed}\n${boundedFrontier}\n${ending}`;
+	return [
+		...header,
+		...progress,
+		...frontier,
+		...footer,
+	].filter(Boolean).join("\n");
 }
 
 export function materializeProjectViewContext(messages, snapshotText) {

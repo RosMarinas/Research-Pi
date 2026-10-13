@@ -59,7 +59,7 @@ export async function queueCodexAnalysisHandoff(cwd, value, options = {}) {
 		type: "notify",
 		from: CODEX_ANALYSIS_ACTOR_ID,
 		to: RESEARCH_LEADER_ACTOR_ID,
-		body: `[Codex discussion handoff]\n${body}`,
+		body,
 		metadata: { kind: "analysis_handoff", source: "codex_discussion" },
 	});
 }

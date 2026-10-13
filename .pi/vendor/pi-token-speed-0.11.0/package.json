@@ -1,0 +1,44 @@
+{
+  "name": "pi-token-speed",
+  "version": "0.11.0",
+  "description": "Pi extension to measure tokens per second via sliding window.",
+  "keywords": [
+    "pi",
+    "pi-package",
+    "pi-extension"
+  ],
+  "author": "Gabriel Sanhueza",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gsanhueza/pi-token-speed.git"
+  },
+  "homepage": "https://github.com/gsanhueza/pi-token-speed#readme",
+  "bugs": {
+    "url": "https://github.com/gsanhueza/pi-token-speed/issues"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "prettier": {
+    "plugins": [
+      "prettier-plugin-organize-imports"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.85.1",
+    "@earendil-works/pi-tui": ">=0.85.1"
+  },
+  "type": "module",
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "prettier-plugin-organize-imports": "^4.3.0",
+    "vitest": "^5.0.3"
+  }
+}

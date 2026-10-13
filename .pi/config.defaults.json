@@ -1,10 +1,18 @@
 {
   "$schema": "./schemas/research-pi-config.schema.json",
-  "version": 2,
+  "version": 3,
   "pi": {
+    "modelServiceTiers": {},
     "settings": {
       "theme": "research-pi",
       "tuiMode": "regular",
+      "defaultTools": [
+        "+codemode"
+      ],
+      "tokenSpeed": {
+        "display": "ttft",
+        "useProviderTokens": true
+      },
       "retry": {
         "enabled": true,
         "maxRetries": 2,
@@ -20,26 +28,73 @@
       }
     }
   },
-  "codex": {
+  "subagents": {
     "advisor": {
-      "model": "gpt-5.6-sol",
-      "reasoningEffort": "max"
+      "backend": "codex",
+      "model": "gpt-6.1-sol",
+      "thinking": "high",
+      "speed": "inherit"
     },
     "executor": {
-      "model": "gpt-5.6-sol",
-      "reasoningEffort": "max"
+      "backend": "codex",
+      "model": "gpt-6.1-sol",
+      "thinking": "high",
+      "speed": "inherit"
+    },
+    "environment": {
+      "backend": "antigravity",
+      "model": "gemini-3.1-pro-high",
+      "thinking": "high"
+    },
+    "general": {
+      "backend": "pi",
+      "model": "inherit",
+      "thinking": "inherit"
+    }
+  },
+  "codex": {
+    "maxExecutors": 4,
+    "internalSubagent": {
+      "model": "gpt-6.1-sol",
+      "thinking": "high"
+    },
+    "retention": {
+      "terminalDays": 30,
+      "keepTerminalJobs": 200
     }
   },
   "research": {
     "compaction": {
-      "softTokens": 278528,
+      "softTokens": 368640,
       "hardTokens": 393216,
-      "recentTailTokens": [24576, 32768, 40960],
+      "recentTailTokens": [
+        24576,
+        32768,
+        40960
+      ],
       "summaryTargetTokens": 8192,
-      "summaryMaxTokens": 16384
+      "summaryMaxTokens": 16384,
+      "modelOverrides": {
+        "gpt-6-sol": {
+          "softTokens": 491520,
+          "hardTokens": 524288
+        },
+        "gpt-5.6-sol": {
+          "softTokens": 491520,
+          "hardTokens": 524288
+        },
+        "gpt-6.1-sol": {
+          "softTokens": 491520,
+          "hardTokens": 524288
+        },
+        "gpt-6-astra": {
+          "softTokens": 491520,
+          "hardTokens": 524288
+        }
+      }
     },
     "search": {
-      "enabled": "auto",
+      "enabled": "off",
       "model": "deepseek-v4-flash",
       "thinkingBudgetTokens": 1024,
       "maxSources": 12,
@@ -55,7 +110,13 @@
   "ui": {
     "density": "balanced",
     "runtimeStrip": "auto",
-    "configPanelRows": 8
+    "configPanelRows": 8,
+    "web": {
+      "mode": "off",
+      "persistent": true,
+      "port": 0,
+      "httpsPort": 8443
+    }
   },
   "diagnostics": {
     "trace": false,

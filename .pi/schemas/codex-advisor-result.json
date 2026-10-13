@@ -21,40 +21,48 @@
     },
     "shared_understanding": {
       "type": "string",
-      "maxLength": 12000
+      "maxLength": 1000,
+      "description": "Only the shared understanding needed for the next decision; omit established background."
     },
     "points_of_agreement": {
       "type": "array",
       "maxItems": 24,
-      "items": { "type": "string", "maxLength": 3000 }
+      "description": "One agreed point per item. Use short sentences and stable terms.",
+      "items": { "type": "string", "maxLength": 800 }
     },
     "candidate_explanations": {
       "type": "array",
       "maxItems": 24,
-      "items": { "type": "string", "maxLength": 4000 }
+      "description": "One explanation per item. State the distinguishing assumption or prediction.",
+      "items": { "type": "string", "maxLength": 800 }
     },
     "questions_to_resolve": {
       "type": "array",
       "maxItems": 24,
-      "items": { "type": "string", "maxLength": 3000 }
+      "description": "One decision-relevant question per item.",
+      "items": { "type": "string", "maxLength": 800 }
     },
     "evidence": {
       "type": "array",
       "maxItems": 32,
-      "items": { "type": "string", "maxLength": 4000 }
+      "description": "Order by decision value. State one observation and its exact reference per item. Do not copy logs.",
+      "items": { "type": "string", "maxLength": 800 }
     },
     "uncertainties": {
       "type": "array",
       "maxItems": 32,
-      "items": { "type": "string", "maxLength": 4000 }
+      "description": "One material uncertainty per item. Explain how it affects the synthesis.",
+      "items": { "type": "string", "maxLength": 800 }
     },
     "working_synthesis": {
       "type": "string",
-      "maxLength": 12000
+      "maxLength": 1200,
+      "description": "State the synthesis first. Use short sentences. Include material uncertainty. Refer to evidence instead of duplicating it."
     },
     "suggested_next_exchange": {
       "type": "string",
-      "maxLength": 8000
+      "maxLength": 600,
+      "description": "Give one next discussion action."
     }
   }
 }

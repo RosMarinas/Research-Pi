@@ -1,289 +1,369 @@
-> **2026-09-06 · 重要前缀缓存修复**：移除动态 Delta，改为初始化/compact 时建立固定快照并保留通信历史；进一步修复 Runtime 消息唤醒后工具续轮的 system prompt 回退，避免长上下文前缀被反复改写。
-
-# Research Pi
+# Research Pi（Windows / WSL2）
 
 简体中文 · [English](README_en.md)
 
 > Session is not enough for research. Project is.
 
-Coding Agent不一定是好用的Research Agent。
+面向 AI、机器人、通信、优化与仿真的科研 Agent Harness，基于 **Pi Core 1.0.0**。本页介绍 `windows-research-pi` 分支：同步主线功能，并保留 WSL2 与 Windows 宿主之间的严格隔离。
 
-Research Pi 面向 AI、机器人、通信、优化与仿真等计算实验科研。它最关心的不是“代码写的对不对”，而是：**代码能否支撑实验？这个实验告诉了我们什么？下一步高信息增益的实验是什么？**
-
-它不是一段更长的科研提示词，也不是一个号称能自动完成科研的 skill。它把项目进度、实验记录、讨论和 Agent 协作留在 Project 中，因此换一个 Session、换一个模型，也不用从头讲起。
-
-`Pi Core 0.84.2` ·  `macOS / Linux / WSL2`
-
-## 设计原则
-
-1. **项目比对话更长寿**：Session 可以结束，模型可以更换，但研究问题、实验结果和关键决定应该留下来。
-2. **科研必须要人参与**：Agent 可以查资料、写代码、跑实验和整理证据，但不会因为命令成功就擅自宣布“方向成立”。
-3. **记住真正有用的东西**：重点保留问题、假设、证据、失败路线和下一步，而不是把所有聊天都塞回模型上下文。
-4. **让不同模型做擅长的事**：Pi 把握研究主线，Codex 负责长程执行，Pi-analysis 陪用户理解、质疑和讨论。它们交换的是短消息，不是彼此整段复制上下文。
-5. **先找到对的方向，再把代码写漂亮**：探索阶段允许大胆替换、快速试错和整体回滚；方向值得保留后，再补工程质量与复现能力。
-
-## 设计特点
-
-🧠 **换对话，不丢研究主线。** Harness 把项目目标、关键决定、最新进展和交接记录保存在对话之外。新 Session 按角色载入项目快照；compact 后接续记忆，不必每次从头解释。日常交流沿用当前历史，不反复塞入动态摘要。
-
-🔎 **实验做过，就能找回来。** 实验账本记录问题、干预、观察和有效性判断，失败实验也有位置。默认检索当前项目，也支持跨项目搜索全局已索引的实验记录，让过去的证据成为下一次判断的起点。
-
-📬 **各自思考，短消息协作。** Leader 推进主线，Codex 执行任务，Analysis 独立讨论。通信经过持久 mailbox：进度更新不打断思考，需要决策或任务结束时再交给当前 Leader；换 Session 后，待处理消息仍能接续。
-
-下面的通信流程简化自 thesis 中的通信图：
-
-```mermaid
-sequenceDiagram
-    actor U as 用户
-    participant L as Pi Leader
-    participant R as Project Runtime
-    participant C as Codex 执行器
-    participant A as Pi-analysis
-    U->>L: 研究问题与决策
-    L->>R: 委派任务
-    R->>C: 任务与项目上下文
-    C-->>R: 进度记录（不唤醒 Leader）
-    opt 需要输入
-        C->>R: ASK 写入 mailbox
-        R->>L: 投递给当前 Leader
-        L->>R: 回答 / 调整方向
-        R->>C: 继续原任务
-    end
-    C->>R: 结构化结果
-    R->>L: 投递结果并记录回执
-    A->>R: 讨论后的短便签（建议，不是证据）
-    R->>L: 合适时机投递，轮换后跟随新 Leader
-    L->>U: 证据、边界与下一步
-    Note over L,A: 对话各自保留，不复制整段历史
-```
-
-## 我最喜欢的设计：双 Session 工作流
-
-得益于记忆、通信、权限机制的良好设计，Research Pi 可以同时开两个窗口：一边让 **Pi Leader** 推进实验，另一边在 **Pi-analysis** 里随时追问、质疑和展开想法。
-
-![Research Pi 双 Session 工作台：Pi Leader 推进实验，Pi-analysis 独立讨论，只向主线投递一张短便签](docs/assets/dual-session-workbench.png)
-
-Pi-analysis 的长对话留在自己的窗口里，不会挤进 Leader 的上下文。只有当讨论形成了值得主线知道的判断，才把它整理成一张短便签送过去。
-
-用户可以在一个终端让 Pi Leader 持续工作，在另一个终端随时进入 Pi-analysis：
-
-```sh
-# Terminal A：持续推进科研主线
-pi
-
-# Terminal B：跟进、理解和讨论，不干扰 Leader
-pi --analysis
-```
-
-Pi-analysis 看到的是同一个项目的最新工作视图，但它有自己的对话空间。讨论可以很长，真正发给 Leader 的只需要是一张简短“便签”：
-
-```text
-/analysis send 当前判断、关键依据、仍存不确定性与建议下一步
-```
-
-这张便签通过 mailbox 交给 Leader，只包含讨论后的判断、依据和建议，不会把整段聊天塞进主线。Leader 空闲时可以立即看到；如果它正在工作，便签会等到合适的时机再送达。
-
-于是主线可以安静地跑，用户也始终有一张可以放心提问和思考的桌子。独立 Codex 讨论 Session 也能通过 `pi analysis context` / `pi analysis send` 使用同一张“便签”。
+Research Pi 把研究目标、实验记录、关键决定和多 Agent 协作留在项目中。Session 可以轮换，模型可以更换，研究主线不必从头解释。它关注的不只是“代码是否正确”，还包括：实验是否检验了预期假设、证据允许什么结论、下一步做什么最有信息量。
 
 ## 快速开始
 
-要求 Node.js `>=22.19`。Research Pi 当前使用 Unix 风格的工具链；Windows 推荐通过 **WSL2** 使用，不建议直接在原生 PowerShell 中运行 Agent。
+要求 Node.js `>=22.19` 与 Git。Windows 请在 WSL2 内安装和运行，并将项目放在 WSL 文件系统中，而不是 `/mnt/c` 等 Windows 挂载盘。
 
-### macOS / Linux
+首次安装 WSL2、Linux 工具和边界检查见 [Windows / WSL2 指南](docs/windows-wsl-guide.md)。本分支要求 bubblewrap、socat 与可用的 seccomp；通用 host command/project script 只允许一次批准，SSH target 可按项目信任。WSL 下不支持 `--full-access`。
 
-```sh
-npm install -g 'git+https://github.com/RosMarinas/Research-Pi.git#main'
-pi setup
-pi paths
-```
+DeepSeek、OpenCode Go、Z.AI 都按同一流程接入：**安装 → 在凭据文件填 API key → 启动并选择模型**。
 
-### Windows（使用 WSL2）
+以下 `pi` 命令指 Research Pi。电脑上也装过原生 Pi 时，先按[启动入口检查](#区分原生-pi-和-research-pi-的启动入口)确认命令指向。
 
-先在管理员 PowerShell 中安装 Ubuntu：
-
-```powershell
-wsl --install -d Ubuntu
-```
-
-随后打开 Ubuntu，安装 Linux 版 Node.js `>=22.19` 和基础依赖：
-
-```sh
-sudo apt update
-sudo apt install -y git zsh ripgrep fd-find bubblewrap socat
-node --version
-npm --version
-```
-
-然后选择一个分支安装：
-
-| 分支 | 适合谁 | 与另一个分支的主要区别 |
-|---|---|---|
-| `main` | 已经把项目严格放在 WSL `/home/...`、希望与 macOS/Linux 保持完全一致 | 更新最快；宿主命令可按项目持久授权，不额外检查 Windows interop |
-| `windows-research-pi` | 希望 Agent 高自动执行，但必须更强地隔离 Windows 系统盘 | WSL2-only 预览；拒绝 `/mnt/*` workspace，阻断 `.exe`/PowerShell/cmd/WSL interop，host command/project script 只能一次批准，缺少 seccomp 时拒绝启动 |
-
-普通 WSL2 使用可以安装 `main`：
-
-```sh
-npm install -g 'git+https://github.com/RosMarinas/Research-Pi.git#main'
-pi setup
-```
-
-需要严格 Windows 宿主隔离时安装 Windows 分支：
+### 1. 安装并创建配置
 
 ```sh
 npm install -g 'git+https://github.com/RosMarinas/Research-Pi.git#windows-research-pi'
 pi setup
-mkdir -p "$HOME/research"
-pi doctor --workspace "$HOME/research"
 pi paths
 ```
 
-无论选择哪个分支，都应把 Research Pi 和科研项目放在 `~/research/...` 等 WSL 文件系统中，不要放在 `/mnt/c` 或 `/mnt/d`。`windows-research-pi` 不是功能更多的 Windows 版：它定期跟随 `main` 的 Runtime/ProjectView/模型能力，只额外收紧 WSL 与 Windows 宿主之间的执行和文件边界。详细安装、检查项与限制见 [Windows / WSL2 指南](docs/windows-wsl-guide.md)。
+`pi setup` 会创建配置和空的凭据文件。`pi paths` 输出中的 **`credentialsPath` 就是 API key 应该放的文件**。
 
-进入 TUI 后用 Pi 原生 `/login` 登录供应商，再用 `/model` 切换模型；Research Pi 不再维护第二套模型/profile 目录。若供应商使用 API key，或需要 DeepSeek 小型搜索，也可以在 `pi paths` 给出的 `credentialsPath` 中填写：
+### 2. 填入 API key
 
-```dotenv
-DEEPSEEK_API_KEY=...
-ZAI_API_KEY=...
-OPENCODE_API_KEY=...
+安装版默认编辑这个文件：
+
+```sh
+nano ~/.config/research-pi/credentials.env
 ```
 
-然后在科研项目中启动：
+三家供应商共用一个文件；只填你使用的供应商，其余行保持空白：
+
+```dotenv
+DEEPSEEK_API_KEY=
+OPENCODE_API_KEY=
+ZAI_API_KEY=
+```
+
+| 供应商 / 获取 key | 凭据变量 | Pi 中的 provider | 模型示例 |
+|---|---|---|---|
+| [DeepSeek 官方 API](https://api-docs.deepseek.com/) | `DEEPSEEK_API_KEY` | `deepseek` | `deepseek/deepseek-flash` |
+| [OpenCode Console](https://opencode.ai/console/)（开通 Go） | `OPENCODE_API_KEY` | `opencode-go` | `opencode-go/deepseek-v4.1-flash` |
+| [Z.AI Coding Plan 获取 key](https://docs.z.ai/devpack/quick-start) | `ZAI_API_KEY` | `zai` | `zai/glm-5.3-flash` |
+
+例如只使用 OpenCode Go，就把第二行改成 `OPENCODE_API_KEY=你的实际key`。Go 使用 `OPENCODE_API_KEY`，模型选择 `opencode-go`；内置 `zai` 使用 Z.AI 的 Coding Plan 接口。
+
+**源码版的位置不同**：通过 `./run-pi.sh` 或指向它的 `pi` 启动时，凭据文件是 **Research Pi 仓库根目录的 `.env`**，不是目标科研项目的 `.env`。在仓库内运行 `./run-pi.sh setup` 和 `./run-pi.sh paths` 确认路径。安装版若设置了 XDG 或 Research Pi 目录覆盖，也以 `credentialsPath` 为准。
+
+每行只写 `变量名=key`，注释单独占一行。API key 放在上述私有凭据文件中，避免写入 `config.json`、聊天或 Git 提交。文件在 Pi 进程启动时读取；修改后需重新启动使用它的 Pi Host，重连终端或 `/reload` 不会重新加载凭据。
+
+### 3. 启动并选择模型
 
 ```sh
 cd /path/to/research-project
 pi
 ```
 
-如果只想阅读结果、讨论和分析，而不允许当前 Session 改代码或启动实验：
+进入 Pi 后输入 `/model`，搜索上表的 provider 并选择模型；在选择器中按 `Ctrl+S` 可保存为后续新 Session 的默认模型。已有 key 的这三条 API 路径可以直接使用。需要订阅登录时，使用 Pi 原生 `/login`；[认证方式、凭据优先级与常见问题](docs/configuration.md#api-keys-one-file-for-all-three-providers)见配置说明。
+
+模型列表若缺少已接入的供应商，先核对 `credentialsPath` 和变量名，再检查 `/scoped-models` 是否限制了范围；更新模型目录可在终端运行 `pi update --models`。
+
+### 区分原生 Pi 和 Research Pi 的启动入口
+
+两者都可能使用命令名 `pi`。Shell 中的 alias、函数和 PATH 顺序决定实际启动谁；`pi --version` 显示 Core 版本，不能单凭它判断是否启动了 Research Pi。
 
 ```sh
-pi --analysis
+type -a pi
+npm list -g --depth=0
 ```
 
-首次接入现有项目时，可以直接说：
+| 启动方式 | 实际入口 | 默认配置与认证目录 |
+|---|---|---|
+| 原生 Pi | 原生安装器或 `@earendil-works/pi-coding-agent` 提供的 `pi` | `~/.pi/agent/` |
+| Research Pi npm 安装版 | `@rosmarinas/research-pi/bin/pi.mjs` | `~/.config/research-pi/` 与 `~/.local/state/research-pi/agent/` |
+| Research Pi 源码版 | 本仓库的 `run-pi.sh`，或指向它的开发链接 | 本仓库的 `.pi/` 与 `.env` |
+
+入口不明确时，npm 安装版可以直接调用自己的 launcher，绕过同名命令：
+
+```sh
+research_pi_cli="$(npm root -g)/@rosmarinas/research-pi/bin/pi.mjs"
+node "$research_pi_cli" setup
+node "$research_pi_cli" paths
+node "$research_pi_cli" --workspace /path/to/research-project
+```
+
+源码版则从 Research Pi 仓库启动：
+
+```sh
+cd /path/to/Research-Pi
+./run-pi.sh setup
+./run-pi.sh paths
+./run-pi.sh --workspace /path/to/research-project
+```
+
+`node bin/pi.mjs` 默认走用户级配置；`run-pi.sh` 会启用源码模式。初始化和启动应使用同一个入口，再按其 `credentialsPath` 填入 key。Research Pi launcher 会自动创建缺失的 `config.json`；`setup` 还会生成凭据文件。原生 Pi 即使发现了本仓库的 `.pi/extensions`，也只是加载扩展，不等于经过 Research Pi launcher 或启用了完整的 Harness 启动配置。
+
+## 统一 subagent，不统一掉各自的能力
+
+Leader 通过一个 `subagent` 入口调度工作；Runtime 统一记录 Actor、任务、状态和消息。**Role 是分工，backend 是接入方式，model 与 thinking 是执行配置。** 用户可以设置默认值，Leader 也可以按任务选择。
+
+| 角色 | 默认 backend | 主要工作 |
+|---|---|---|
+| Pi Leader | Pi 原生 provider | 把握研究主线、组织证据、委派与整合结果 |
+| advisor | Codex | 设计、架构、竞争解释、只读审查 |
+| executor | Codex | 开发、实验执行、测试与验证 |
+| environment | Antigravity | 依赖、SDK、工具链与环境配置 |
+| general | Pi | 使用任意已接入 Pi 的模型完成独立任务 |
+
+这些是注入 Leader 提示词的调用倾向，不是四套独立工具或强制路由。Pi runner 复用 Leader 的模型目录与认证，支持单独配置模型和思考强度，不局限于 OpenCode Go。Codex 保持原生 Web Search 默认开启；可选的 DeepSeek 搜索不是使用 Research Pi 的前提。
+
+```mermaid
+flowchart LR
+    U[用户] <--> L[Pi Leader]
+    L <--> R[Project Runtime / mailbox]
+    U <-->|查看 · 发消息 · steer| R
+    R <--> C[Codex runner]
+    R <--> A[Antigravity runner]
+    R <--> P[Pi runner]
+    D[独立 Analysis Session] -->|讨论后的短综合| R
+```
+
+每个 subagent 的界面都显示 **backend · role · model · thinking**；继承配置时会标示 `inherit`。用户不必经过 Leader，就能查看其行为和发送指令。切换 runner 时用普通任务与上下文消息接续，不额外生成 handoff 文件。
+
+### 可选：接入其他 subagent 后端
+
+按需准备 subagent backend，不必全部安装：
+
+| Backend | 准备方式 | 认证与模型来源 |
+|---|---|---|
+| Pi | 复用上面配置的 API key，或在 Pi 内完成 `/login` | 与 Leader 共用 Pi provider 目录和认证 |
+| Codex | 安装 Codex CLI，运行 `codex login` | 独立的 Codex CLI 登录与模型目录 |
+| Antigravity | 安装提供 `agy` 命令的 CLI，首次交互运行 `agy` 登录 | 本机 Antigravity 登录与模型目录 |
+
+Pi 的 `/login` 不会登录 Codex CLI，Codex 后端需单独运行 `codex login`。
+
+首次接入现有项目，可以先说：
 
 ```text
-先只读恢复当前研究状态：识别研究目标、竞争假设、已有证据、失效路线和关键未决问题。
-不要立即启动大实验；先说明 ProjectView 缺少什么，以及下一步最有信息量的动作。
+先只读恢复当前研究状态：识别目标、竞争假设、已有证据、失败路线和关键未决问题。
+不要立即启动大实验；先说明下一步最有信息量的动作。
 ```
 
-## 核心能力
+### 配置模型与思考强度
 
-| 能力 | 作用 |
-|---|---|
-| Research Contract | 让 Agent 默认采用探索、证伪、有效性检查和证据驱动收敛 |
-| Project Runtime | 维护 Project State、Actors、Actions、mailbox 与 Leader Session 所有权 |
-| Dual Session | Leader 持续推进主线，Pi-analysis 独立跟进与讨论，并只把最终短综合投递给 Leader |
-| ProjectView | 初始化与 compact 时载入固定项目快照：`RESEARCH.md`、Project Brief 与当前研究进展；日常轮次只追加对话和工具结果 |
-| Research Memory | 对历史 Session 和实验记录做本地全文检索，不依赖向量数据库 |
-| Research Compaction | 在模型 settled 后生成带 provenance 的结构化状态，而不只摘要聊天文本 |
-| Experiment Records | 用 `record_experiment` 区分观察、有效性和解释；支持换轨与窄幅状态修订 |
-| Codex Collaboration | 以可续接 mission 调用 advisor/executor，并通过 Runtime mailbox 与 Pi 通信 |
-| Project Boundary | 默认把模型命令限制在当前项目；SSH、外部文件和宿主命令通过显式 capability 授权 |
-| Research Briefing | 在重大结果或阶段交接时恢复工作脉络，并把内部术语翻译成用户可判断的报告 |
+从 `/config` 进入分级菜单：模型与角色 → Leader / Subagents / Codex 内部 agents → 角色 → backend、model、thinking。修改后留在当前菜单，`Esc` 返回上一级；`/models` 是模型菜单的快捷入口。候选来自各 backend 自身的目录，`/models show` 查看全部配置。
 
-ProjectView 在项目上下文初始化和成功 compact 后捕获一次：用户维护的 `RESEARCH.md` 保留项目意图，Project Brief 概括总体方向与已结束阶段，当前研究进展补齐交接位置。快照在普通轮次间保持不变，不再自动追加或移动 Delta；新进展通过用户消息、工具结果和一次投递的通信进入历史，已消费的消息也保留在历史中。实时视图和实验账本仍可按需查看；角色或上下文显式切换时会重新建立快照，使日常轮次保持已发送前缀稳定。
-
-建议每个长期科研项目维护一份短 `RESEARCH.md`，只写不容易频繁变化的内容：项目要解决什么、最终成功是什么、总体路线、明确不做什么，以及用户最在意的判断原则。不要把实验流水账、当前 run 或每日 TODO 放进去。Research Pi 在建立快照时链接并载入前 3600 个字符；文件修改不会自动重写当前 Session 的前缀，急需生效的变化请在对话中说明或让 Agent 读取文件，下次 compact 或新 Session 再统一更新快照。
-
-```md
-# Project North Star
-
-## Problem and final goal
-...
-
-## Overall approach
-...
-
-## Non-goals and decision principles
-...
+```text
+/models
+/models show
+/models advisor thinking high
+/models general backend pi
+/models general thinking high
 ```
 
-ProjectView 本身是派生视图，不提供会误删项目账本的“全局清空”按钮。需要不带项目记忆的独立环境时使用 `/runtime new clean`；Analysis Session 可用 `/runtime context off` 暂停注入。删除或修改 `RESEARCH.md` 只影响 Anchor，实验、Runtime 和历史 Session 都会保留。
+在面板中为任意角色选择 backend、model 和 thinking；Leader 也可在单次 `subagent` 调用中指定这些值。角色默认值的更改只影响新任务，不会偷偷改变正在运行的任务。Pi 原生 `/model`、`/settings`、`/scoped-models` 和 `/login` 仍可使用。
+
+Codex worker 内部继续派生的 agents 属于它自己的调用树，可通过 `/models internal` 配置；它们不是额外的顶层 Runtime Actor。Codex Fast 等设置见[统一模型配置](docs/configuration.md#unified-model-settings)。
+
+### 查看与直接控制 subagent
+
+```text
+/actors
+/subagents
+/watch @actor
+/message notify @actor 请先汇报环境检查结果，暂不安装新依赖。
+/steer @actor 优先验证 CPU 路径，暂缓 GPU 实验。
+```
+
+`/watch` 先选 Actor，再选「切换当前终端」或「新开终端」；也可以在另一 shell 执行 `pi watch --workspace /path/to/project`。界面复用 Pi 的对话渲染与输入框，顶部保留 **backend、角色、模型、思考强度和状态**，显示近期回复与工具活动，不把观察日志塞进 Leader 上下文。
+
+监看界面输入消息会以 **User** 身份直接发给当前 subagent；支持 `/ask`、`/reply`、`/steer`，`Tab` 切换 agent，`PgUp/PgDn` 翻阅，空输入时 `Esc` 返回 Leader。独立窗口只是同一 Actor 的观察与消息入口，不另开模型、不接管 Leader。新终端自动打开失败时会给出可复制的命令。
+
+Runtime 统一的是 **User、Leader、Analysis、Subagent 之间的消息与回执**；`start/status/wait/cancel/reconcile` 仍是工具调用，内部工具执行也不经过 mailbox。Codex 保留原生投递通道，Pi 在安全接收点处理消息，Antigravity 忙时消息留在 Runtime，当前轮结束后继续；投递不等于已执行。
+
+### 连贯任务如何复用
+
+Leader 判断上下文是否相关：同一 `mission` 默认继续，同一 Actor 可用 `jobId` 显式继续；独立工作换任务名或设 `reuse=never`。Runtime 为三个 backend 实施相同入口，不做语义分类或强制路由。继续时保留已有模型与思考强度，不受角色默认值后续修改影响；Pi/Antigravity 要换模型时新开上下文即可。
+
+Codex 保留持久任务、同工作区并发、写入范围协调及恢复机制。Pi／Antigravity runner 使用独立长驻进程承接后续消息，**目前只在所属 Pi 进程存活期间可继续操作，退出时会关闭，重启后不自动恢复**。统一入口不代表三个 backend 的恢复和授权能力完全相同。
+
+## 手机网页访问
+
+Native Runtime Host 唯一拥有模型、工具、权限和 Session。桌面 TUI 与手机 Web 都连接这个 Host，不会各自启动一个 Agent。Leader 使用 WSL 项目沙箱与 host capability；Analysis 使用同一项目视图，但始终保持只读，并使用独立 Host。
+
+先保存一次 Tailscale Web 偏好：
+
+```bash
+pi config web tailscale
+```
+
+### 场景一：开启 Analysis 与远程 Web
+
+在第一个终端从项目目录启动 Leader：
+
+```bash
+cd /path/to/project
+pi --resident-runtime --web-tailscale
+```
+
+终端会显示私有配对网址。手机加入当前登录的同一个 Tailscale 网络后打开该网址，即可操作这个 Leader Session。保存过 Web 偏好后，启动命令可简化为 `pi --resident-runtime`。Tailscale 使用 WSL 内的 Linux 客户端。
+
+在第二个终端启动独立 Analysis：
+
+```bash
+cd /path/to/project
+pi --resident-runtime --analysis --no-web
+```
+
+WSL 下拒绝 `--full-access`；项目外操作使用 `host_capability`，Analysis／advisor 仍只读。Analysis 可用 `/analysis send <综合>` 把当前判断、依据和建议投递给 Leader。当前远程 Web 主要连接 Leader，Analysis 建议继续使用独立 TUI。
+
+### 场景二：终端关闭后恢复 TUI 和 Web
+
+关闭桌面终端不会关闭 Native Host 或 Web Gateway。回到同一个项目运行 `pi` 会自动发现并重新连接已有 Leader：
+
+```bash
+cd /path/to/project
+pi
+```
+
+也可以显式连接 Leader 或 Analysis：
+
+```bash
+pi native-runtime attach --workspace /path/to/project
+pi native-runtime attach --analysis --workspace /path/to/project
+```
+
+建议用 `Ctrl+]` 主动断开 TUI；它不会中断 Runtime。如果 Host 仍在而 Web Gateway 已停止，只重开 Web：
+
+```bash
+pi web start --workspace /path/to/project --web-tailscale
+```
+
+Web token 保存在 Research Pi 状态目录中，手机浏览器配对后还会保存站点 cookie。使用同一个浏览器和 Tailscale 地址、不清理站点数据且不使用无痕模式时，Gateway 重启通常不需要重新认证。如果电脑重启或 Host 已被显式停止，可以重新启动并选择原会话：
+
+```bash
+cd /path/to/project
+pi --resident-runtime --web-tailscale --resume
+```
+
+### 场景三：忘记网址或检查运行状态
+
+在项目目录查看 Web 状态和私有网址：
+
+```bash
+pi web status
+```
+
+从其他目录检查时显式指定项目：
+
+```bash
+pi web status --workspace /path/to/project
+pi native-runtime status --workspace /path/to/project
+```
+
+如果状态显示 Native Runtime 正在运行但没有 Web Gateway，执行 `pi web start --workspace /path/to/project --web-tailscale` 即可恢复网页。以下两个停止操作的范围不同：
+
+```bash
+# 只关闭 Web，模型 Session 与 TUI Host 继续运行
+pi web stop --workspace /path/to/project
+
+# 显式停止整个 Leader Host
+pi native-runtime stop --workspace /path/to/project
+```
+
+配对网址包含私有认证信息，不要分享或提交。仅本机试用可用 `--web`；服务只监听 localhost，并要求令牌与同源请求。Tailscale 模式限定当前登录用户身份，不启用 Funnel。源码开发版使用 `run-pi.sh`，以保留本项目 `.pi` 中的登录与历史；直接运行 `node bin/pi.mjs` 可能读取另一套用户级目录。[Web 功能与安全说明](docs/mobile-web.md)，[Native Runtime 生命周期与边界](docs/native-ui-runtime-boundary.md)。
+
+## 项目记忆，而非无限增长的聊天
+
+- **ProjectView**：初始化与 compact 时建立固定项目快照。日常进展通过对话、工具结果和消息追加，不反复改写已发送的前缀。
+- **实验账本**：用一条轻量记录保存问题、干预、观察、有效性和下一步；普通探针与成功命令不强制写文档，不复制原始证据。
+- **本地检索与 compact**：按需找回历史 Session 和实验记录；压缩保留结构化研究状态与来源，而不只是聊天摘要。
+- **简明消息**：Runtime、subagent 和 Research Pi 自有工具默认返回可溯源的决策卡，不复制日志或长 JSON。详细结果按 section 或证据引用读取。用户反馈和 Agent 通信采用接近 ASD-STE100 / ISO 24495-1:2023 的简明技术语言，但不宣称正式认证。
+
+长期项目可以维护一份短 `RESEARCH.md`，写清研究问题、最终目标、总体路线、非目标与判断原则。当前 run、每日 TODO 和流水账留给 Runtime 与实验记录。Anchor 在建立快照时读取，修改文件不会自动重写当前 Session 的上下文；急需生效的变化请在对话中说明。
+
+`/runtime rotate` 新建 Leader Session，继承项目状态但不复制旧 transcript。`/runtime new clean` 创建不继承项目记忆的 Session，**不会删除项目记录**。
+
+## 双 Session：主线继续，讨论独立
+
+一个终端运行 `pi` 推进工作，另一个运行 `pi --analysis` 阅读结果、追问和讨论。
+
+![Research Pi 双 Session 工作台](docs/assets/dual-session-workbench.png)
+
+Analysis 读取同一项目的工作视图，但不抢占 Leader，不修改代码、启动实验或调度 subagent。长讨论保留在自己的 Session，只有值得主线知道的综合才投递：
+
+```text
+/analysis send 当前判断、关键依据、仍存不确定性与建议下一步
+```
+
+这是一条建议，不会自动成为科研证据。独立 Codex 讨论 Session 也可通过 `pi analysis context` / `pi analysis send` 使用同一通道。
 
 ## 常用入口
 
-| 命令 | 用途 |
+| 入口 | 用途 |
 |---|---|
-| `/runtime` | 查看 ProjectView、Actors、Actions、mailbox 和 Session 状态 |
-| `/runtime rotate` | 新建不复制旧 transcript、但继承 Project 状态的 Leader Session |
-| `pi --analysis` | 新开只读 Analysis Session；不抢占 Leader，不接收其 mailbox |
-| `/analysis send <摘要>` | 把有价值的讨论投递给 Leader；用 `/runtime promote <原因>` 转为 Leader |
-| `pi analysis context/send` | 让独立 Codex Session 读取 ProjectView 或向 Leader 投递不超过 1200 字符的综合 |
-| `/runtime context <on\|off>` | Analysis 保持只读角色，只切换后续轮次是否注入 ProjectView |
-| `/runtime new clean` | 新建不继承 ProjectView 的纯净 Session；用 `/runtime inherit` 恢复 |
-| `/memory <query>` | 搜索当前 Project 的历史 Session 与实验记录 |
-| `/side <问题>` | 隔离追问；有价值时用 `/side use <id>` 提升到主线 |
-| `/watch` | 观察 Codex 的命令、文件修改和 subagent 活动，不污染 Leader 上下文 |
-| `/actors`、`/inbox` | 查看活跃 Actor 和待处理 Runtime 消息 |
-| `/login`、`/model`、`/scoped-models` | 使用 Pi 原生认证、模型切换和模型范围；Research Pi 不再复制供应商目录 |
-| `/config` | 查看统一配置和切换主题 |
+| `/runtime` | 查看 ProjectView、Actors、Actions、mailbox 与 Session 状态 |
+| `/actors`、`/subagents`、`/watch` | 查看协作成员、任务与 backend 活动 |
+| `/message`、`/steer` | 直接向 Actor 发消息或调整任务方向 |
+| `/models`、`/config` | 配置模型分工与其他 Harness 设置 |
+| `/memory <query>` | 搜索项目历史与实验记录 |
+| `/side <问题>` | 隔离追问；用 `/side use <id>` 将有价值的结果引入主线 |
+| `/runtime rotate` | 轮换 Leader Session，保留项目状态 |
+| `pi --analysis`、`/analysis send` | 独立只读讨论，向 Leader 投递短综合 |
 | `/boundary doctor` | 检查项目、Git、Python、sandbox 与 Codex 环境 |
+| `pi paths` | 查看当前配置、认证目录和状态路径 |
 
-模型可直接调用的研究工具包括 `record_experiment`、`record_research_transition`、`amend_project_state`、`research_checkpoint`、`research_memory_search/read`、`codex_delegate` 和 `host_capability`。
+## 权限与本地数据
 
-## 安全与数据
+Leader、Pi runner 与 Codex worker 使用相应的项目边界和角色权限；宿主命令、SSH 与项目外读取通过显式授权处理。Antigravity 使用自身的 CLI sandbox；非 advisor 任务在该 sandbox 内自动批准工具，advisor 使用 plan 模式，不能把它视为与 Pi 权限协议完全等价。
 
-- 模型 shell 默认可读写当前项目和正常 Git 数据；其他项目、宿主凭据和 Unix socket 不自动开放。
-- SSH target、项目外只读文件和宿主命令需要一次、当前 Session 或当前 Project 范围的明确批准。
-- 私钥、`.env`、API key、keychain 和云凭据不能进入模型上下文。
-- 配置、Session、Runtime、Codex job、授权账本和 trace 位于用户状态目录，不进入科研仓库。
-- `pi-traced` 可能记录完整 prompt 与工具内容，只应短时诊断；默认 trace 和 Codex DEBUG SQLite 日志均关闭。
+WSL 下不支持 `pi --full-access` 或 `RESEARCH_PI_FULL_ACCESS=1`；Leader／Codex executor 保持项目沙箱，Analysis／advisor 仍只读。凭据不得进入模型上下文、日志或提交。仅加载受信扩展，因为扩展运行在宿主进程内。
 
-## 配置与目录
+默认安装路径如下；源码 checkout 使用独立的配置与状态，实际以 `pi paths` 为准：
 
 ```text
 ~/.config/research-pi/        config.json、schema、credentials.env
-~/.local/state/research-pi/   sessions、Runtime、memory、Codex、grants、trace
-<research-project>/.pi/       项目实验记录与 checkpoint
+~/.local/state/research-pi/   sessions、Runtime、memory、subagents、grants、trace
+<research-project>/.pi/       项目本地实验账本（自动从 Git 状态隐藏）
 ```
 
-实际路径以 `pi paths` 为准。Research Pi 的 `config.json` 只管理 Runtime、compact、Codex、搜索、资源与 UI；Leader 的供应商、模型、thinking 和自定义模型由 Pi 原生配置管理：
+配置与认证不提交到科研仓库。Trace 默认关闭；`pi-traced` 可能记录完整 prompt 和工具内容，只用于短时诊断。完整说明见[安全模型](docs/security-model.md)。
+
+## 升级与开发
+
+已有安装重新执行上面的安装命令，然后**退出并重启旧 Pi 进程**；`/reload` 不会替换已加载的 Core。v1／v2 配置会迁移到统一 subagent 配置，旧 Session、实验记录和 Codex 任务无需删除。升级后用 `/models show` 检查角色配置。
+
+从源码开发：
 
 ```sh
-pi config show
-# TUI 内：/login、/model、/scoped-models、/settings
-```
-
-Research Pi 关闭全局 skill/extension 自动发现，只显式加载审查过的 Harness 扩展、内置 `research-briefing` 和配置白名单。
-
-## 开发与验证
-
-```sh
-git clone git@github.com:RosMarinas/Research-Pi.git
+git clone --branch windows-research-pi https://github.com/RosMarinas/Research-Pi.git
 cd Research-Pi
-npm install --ignore-scripts
-cp .env.example .env
-./install-user.sh
+npm ci --ignore-scripts
+./run-pi.sh setup
+./run-pi.sh paths
+# 按上面的第二步填入仓库根目录的 .env，再启动
+./run-pi.sh --workspace /path/to/research-project
 
 npm run check
-npm test
-npm run test:package
+npm run check:package
 ```
 
-- `pi`：运行 Research Pi Harness。
-- `pi-raw`：运行锁定的原始 Pi Core，便于行为对照。
-- `pi-traced`：临时启用敏感 trace。
-- `./run-pi.sh --workspace /path/to/project`：从源码 checkout 直接运行。
-
-### Windows / WSL2
-
-Windows 上的最小迁移路线是 WSL2，而不是让现有 Bash harness 直接由 PowerShell 解释。`main` 可以作为普通 WSL2 Linux 环境运行；如果还要求强制阻断 Windows 系统盘和宿主 interop，则使用 `windows-research-pi`。两种情况下都应把科研项目放在 WSL 自身的 `/home/...` 文件系统中。
-
-Windows 分支在启动时额外要求 WSL2、bubblewrap、socat、ripgrep、`fd`/`fdfind` 和可用的 seccomp helper，并执行无副作用的 Windows host-interop 探针。缺少 seccomp、项目位于 `/mnt` 或 `cmd.exe` 能从沙箱中成功启动时，边界会 fail closed。项目认可的 SSH target 可以持久自动使用；通用 host command/project script 只能一次性批准。安装步骤、分支对照和边界说明见 [Windows / WSL2 指南](docs/windows-wsl-guide.md)。
+`pi-raw` 可运行锁定的原始 Pi Core 作行为对照。`tests/` 与本地测试夹具不提交到仓库，也不随 npm 包发布；过时测试应直接删除。发布检查只依赖仓库内的源码和打包清单，不依赖本地测试目录。通过这些检查不代表当前账号拥有全部模型权限，也不代表科研任务质量已验证。
 
 ## 文档
 
 - [基本使用指南](docs/pi-basic-guide.md)
-- [统一配置说明](docs/configuration.md)
-- [Project Runtime 测试与恢复](docs/research-runtime-test-guide.md)
-- [Windows / WSL2 安装与安全边界](docs/windows-wsl-guide.md)
+- [配置、模型与并发执行](docs/configuration.md)
+- [Windows / WSL2 安装、升级与边界](docs/windows-wsl-guide.md)
+- [Pi 1.0 迁移与验证边界](docs/pi-1-migration.md)
+- [Runtime 测试与恢复](docs/research-runtime-test-guide.md)
 - [安全模型与本地数据](docs/security-model.md)
+- [缓存诊断](docs/cache-diagnostics.md)
 - [设计思想](thesis/ResearchPi.pdf)
-
-
 
 ## License
 
-Research Pi 的原创代码与文档采用 [MIT License](LICENSE)。第三方组件保留各自许可证，详见 [Third-Party Notices](THIRD_PARTY_NOTICES.md)。
+原创代码与文档采用 [MIT License](LICENSE)。第三方组件保留各自许可证，见 [Third-Party Notices](THIRD_PARTY_NOTICES.md)。
+
+## 原生 TUI / Runtime 分离候选方案
+
+独立 Host 保留完整 Pi InteractiveMode，桌面终端与 Web Gateway 可以分离退出。当前需显式启用 `pi --resident-runtime --web`，默认启动行为保持不变。[边界、使用与验收](docs/native-ui-runtime-boundary.md)。

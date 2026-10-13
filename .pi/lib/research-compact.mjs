@@ -128,17 +128,8 @@ function configuredPositiveInteger(name, fallback) {
 	return Number.isInteger(value) && value > 0 ? value : fallback;
 }
 
-function configuredTailSchedule() {
-	const values = String(process.env.RESEARCH_PI_COMPACT_RECENT_TAIL_TOKENS ?? "")
-		.split(",")
-		.map((value) => Number(value.trim()))
-		.filter((value) => Number.isInteger(value) && value > 0);
-	return values.length ? values : [24 * 1024, 32 * 1024, 40 * 1024];
-}
-
-export const RESEARCH_SOFT_COMPACT_TOKENS = configuredPositiveInteger("RESEARCH_PI_COMPACT_SOFT_TOKENS", 272 * 1024);
+export const RESEARCH_SOFT_COMPACT_TOKENS = configuredPositiveInteger("RESEARCH_PI_COMPACT_SOFT_TOKENS", 360 * 1024);
 export const RESEARCH_HARD_COMPACT_TOKENS = configuredPositiveInteger("RESEARCH_PI_COMPACT_HARD_TOKENS", 384 * 1024);
-export const RESEARCH_RECENT_TAIL_SCHEDULE = Object.freeze(configuredTailSchedule());
 export const RESEARCH_SUMMARY_TARGET_TOKENS = configuredPositiveInteger("RESEARCH_PI_COMPACT_SUMMARY_TARGET_TOKENS", 8 * 1024);
 export const RESEARCH_SUMMARY_MAX_TOKENS = configuredPositiveInteger("RESEARCH_PI_COMPACT_SUMMARY_MAX_TOKENS", 16 * 1024);
 
@@ -175,7 +166,7 @@ const RESEARCH_STATE_KEYS = new Set([
 ]);
 const AMENDABLE_RESEARCH_STATE_KEYS = new Set([...RESEARCH_STATE_KEYS].filter((key) => key !== "projectBrief"));
 
-export function selectResearchCompactionPolicy(branchEntries) {
+export function selectResearchCompactionPolicy(branchEntries, keepRecentTokens) {
 	const previousResearchCompactions = branchEntries.filter(
 		(entry) =>
 			entry?.type === "compaction" &&
@@ -183,13 +174,12 @@ export function selectResearchCompactionPolicy(branchEntries) {
 			entry.details?.version === RESEARCH_COMPACTION_VERSION,
 	).length;
 	const ordinal = previousResearchCompactions + 1;
-	const scheduleIndex = Math.min(ordinal - 1, RESEARCH_RECENT_TAIL_SCHEDULE.length - 1);
 	return {
 		version: RESEARCH_COMPACTION_POLICY_VERSION,
 		ordinal,
 		softTriggerTokens: RESEARCH_SOFT_COMPACT_TOKENS,
 		hardTriggerTokens: RESEARCH_HARD_COMPACT_TOKENS,
-		keepRecentTokens: RESEARCH_RECENT_TAIL_SCHEDULE[scheduleIndex],
+		keepRecentTokens,
 	};
 }
 
@@ -200,7 +190,10 @@ function hash(value) {
 function text(value, maxChars = 2_000) {
 	if (typeof value !== "string") return "";
 	const normalized = value.replace(/\r\n/g, "\n").trim();
-	return normalized.length <= maxChars ? normalized : `${normalized.slice(0, maxChars)}…`;
+	if (normalized.length > maxChars) {
+		throw new Error(`Structured research text exceeds ${maxChars} characters. Regenerate the complete field in concise language; Research Pi will not cut it.`);
+	}
+	return normalized;
 }
 
 function list(value, maxItems = 20, maxChars = 1_000) {
@@ -333,15 +326,22 @@ export function collectResearchEvidence(branchEntries, sessionId, firstKeptEntry
 
 	const cutIndex = branchEntries.findIndex((entry) => entry.id === firstKeptEntryId);
 	const discardedEntries = cutIndex >= 0 ? branchEntries.slice(0, cutIndex) : branchEntries;
-	const catalogCandidates = discardedEntries
-		.filter((entry) => entry.type === "message" && ["user", "assistant"].includes(entry.message?.role))
+	const discardedIds = new Set(discardedEntries.map((entry) => entry.id));
+	// The catalog locates sources; full text is already in the conversation.
+	// Use its edited projection so removed history cannot become a valid source.
+	const catalogEntries = options.projectedEntries
+		? options.projectedEntries.flatMap(({ sourceEntry, messages }) => sourceEntry.type === "message" && discardedIds.has(sourceEntry.id)
+			? messages.map((message) => ({ ...sourceEntry, message })) : [])
+		: discardedEntries;
+	const contextEdits = new Map(branchEntries.filter((entry) => entry.type === "context_edit").map((entry) => [entry.targetId, entry.id]));
+	const catalogCandidates = catalogEntries
+		.filter((entry) => entry.type === "message" && ["user", "assistant"].includes(entry.message?.role) && messageText(entry).trim())
 		.map((entry) => ({
 			ref: refFor(sessionId, entry.id),
+			...(contextEdits.has(entry.id) ? { contextEditRef: refFor(sessionId, contextEdits.get(entry.id)) } : {}),
 			role: entry.message.role,
 			timestamp: entry.timestamp,
-			text: text(messageText(entry), 600),
-		}))
-		.filter((entry) => entry.text);
+		}));
 	const sourceCatalog = catalogCandidates.slice(-140);
 	const validRefs = new Set([
 		...experiments.map((entry) => entry.ref),
@@ -356,6 +356,7 @@ export function collectResearchEvidence(branchEntries, sessionId, firstKeptEntry
 		previousCompactionEntryId,
 		previousProjectRevision,
 		sourceCatalog,
+		sourceCatalogCount: catalogCandidates.length,
 		validRefs,
 	};
 }
@@ -908,7 +909,9 @@ export function buildResearchCompactionPrompt({
 	experiments,
 	checkpoints,
 	sourceCatalog,
+	sourceCatalogCount = sourceCatalog?.length ?? 0,
 	projectTransitions = [],
+	projectTransitionCount = projectTransitions.length,
 	customInstructions,
 }) {
 	return `Synthesize the following bounded evidence into the supplied research-state tool schema.
@@ -925,13 +928,13 @@ ${text(independentSessionSummary, 40_000) || "None"}
 Recorded experiments (authoritative for their exact fields, but interpret according to validityJudgment):
 ${JSON.stringify(experiments)}
 
-Recorded project research transitions (authoritative for active-route selection, not for experimental truth):
+Recorded project research transitions (newest ${projectTransitions.length} of ${projectTransitionCount}; authoritative for active-route selection, not for experimental truth):
 ${JSON.stringify(projectTransitions)}
 
 Research checkpoints:
 ${JSON.stringify(checkpoints)}
 
-Allowed conversational provenance catalog:
+Allowed conversational provenance catalog (newest ${sourceCatalog.length} of ${sourceCatalogCount}; references only, full text is in the conversation; retrieve omitted entries by exact Session reference):
 ${JSON.stringify(sourceCatalog)}
 
 User compaction focus, if any:
@@ -1012,7 +1015,11 @@ export function renderResearchSummary(state, evidence, fileOps = {}) {
 			`- ${item.ref} [${item.validityJudgment}; ${item.evidenceMode ?? "exploratory"}; prediction=${item.predictionStatus ?? "not_recorded"}] track=${item.trackRef ?? "unknown"}${item.runId ? ` run=${item.runId}` : ""}${item.runGitCommit ? ` runGit=${item.runGitCommit}` : ""}: ${item.conclusion || item.observation || item.hypothesis}`,
 		);
 	}
-	for (const item of evidence.checkpoints.slice(-12)) {
+	const recentCheckpoints = evidence.checkpoints.slice(-12);
+	if (recentCheckpoints.length < evidence.checkpoints.length) {
+		lines.push(`- Earlier ${evidence.checkpoints.length - recentCheckpoints.length} checkpoint record(s) remain in the Session and Runtime records.`);
+	}
+	for (const item of recentCheckpoints) {
 		lines.push(`- ${item.ref} [checkpoint] ${item.label}: ${item.refName || item.commit}`);
 	}
 
@@ -1020,8 +1027,8 @@ export function renderResearchSummary(state, evidence, fileOps = {}) {
 	const modifiedFiles = list(fileOps.modified, 30, 1_500);
 	if (readFiles.length || modifiedFiles.length) {
 		lines.push("", "## File continuity");
-		if (readFiles.length) lines.push(`- Read: ${readFiles.join(", ")}`);
-		if (modifiedFiles.length) lines.push(`- Modified: ${modifiedFiles.join(", ")}`);
+		if (readFiles.length) lines.push(`- Read${readFiles.length < fileOps.read.length ? ` (showing ${readFiles.length} of ${fileOps.read.length})` : ""}: ${readFiles.join(", ")}`);
+		if (modifiedFiles.length) lines.push(`- Modified${modifiedFiles.length < fileOps.modified.length ? ` (showing ${modifiedFiles.length} of ${fileOps.modified.length})` : ""}: ${modifiedFiles.join(", ")}`);
 	}
 	lines.push("", "关键历史结论应使用 research_memory_read 回到原 entry 校验；本摘要不是事实源。");
 	return lines.join("\n");
@@ -1059,7 +1066,7 @@ export function buildResearchCompactionDetails({
 			previousCompactionEntryId: evidence.previousCompactionEntryId,
 			previousProjectStateEntryId: evidence.previousProjectStateEntryId,
 			sourceRefs: [...evidence.validRefs],
-			sourceCatalogTruncated: evidence.sourceCatalog.length >= 140,
+			sourceCatalogTruncated: (evidence.sourceCatalogCount ?? evidence.sourceCatalog.length) > evidence.sourceCatalog.length,
 		},
 		validationWarnings: warnings,
 		fileOps: {

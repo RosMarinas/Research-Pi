@@ -1,5 +1,7 @@
 # Research Pi on Windows through WSL2
 
+更新：2026-10-13。Windows 分支已同步主线的 Pi Core 1.0.0、统一 subagent、原生 TUI／Web Host、TPS／TTFT、模型范围选择、结果卡片和 compaction 修复。
+
 Research Pi 在 Windows 上的推荐入口是 WSL2。Agent、项目文件、Node、Git、Codex 和实验工具都运行在 Linux 环境内；PowerShell 只负责安装或进入 WSL，不解释模型生成的命令。
 
 ## `main` 与 Windows 分支怎么选
@@ -23,6 +25,7 @@ Research Pi 在 Windows 上的推荐入口是 WSL2。Agent、项目文件、Node
 - agent shell 无权读取或写入 `/mnt`、`/run/WSL` 和常见 host mount bridge；
 - agent shell 与 Codex worker 不继承 `WSL_INTEROP` / `WSLENV`，并从 `PATH` 删除 `/mnt` 和 host-mount executable；
 - 必须启用 bubblewrap 和 seccomp；缺少 Unix socket restriction 时 fail closed；
+- WSL 下拒绝 `--full-access` 与 `RESEARCH_PI_FULL_ACCESS=1`，不会因为同步主线而放开 Windows 宿主边界；
 - 启动后在沙箱内运行一次无副作用的 `cmd.exe /d /c exit 0` 探针；如果 Windows host interop 成功，整个 agent shell 被禁用；
 - direct file tools 请求 `/mnt` 等项目外路径时仍需要一次明确人工批准，非交互模式拒绝；
 - 项目认可的精确 SSH target 可持久信任；通用 host command 与 project script 只能 one-shot 批准，旧 session/project command grant 不会生效；
@@ -61,7 +64,7 @@ wsl --list --verbose
 
 ```sh
 sudo apt update
-sudo apt install -y git zsh ripgrep fd-find bubblewrap socat
+sudo apt install -y git zsh ripgrep fd-find bubblewrap socat python3 build-essential
 ```
 
 安装 Linux 版 Node.js `>=22.19`，随后确认所有命令来自 WSL，而不是 `/mnt/c`：
@@ -90,7 +93,7 @@ pi setup
 pi paths
 ```
 
-进入 TUI 后使用 Pi 原生 `/login` 登录供应商、`/model` 切换模型、`/scoped-models` 管理轮换范围。Research Pi 不维护单独的模型 profile。若供应商使用 API key，或需要 DeepSeek 小型搜索，可在 `pi paths` 返回的 `credentialsPath` 中填写：
+**API key 填在 `pi paths` 返回的 `credentialsPath`**；安装版默认是 `~/.config/research-pi/credentials.env`。DeepSeek、OpenCode Go、Z.AI 共用一个文件，只填写实际使用的供应商：
 
 ```dotenv
 DEEPSEEK_API_KEY=...
@@ -100,24 +103,36 @@ OPENCODE_API_KEY=...
 
 凭据文件留在 WSL 文件系统中并禁止进入 Git；模型 shell 不继承这些 key。
 
+然后启动 `pi`，使用 `/model` 选择 `deepseek`、`opencode-go` 或 `zai` 的模型。订阅登录使用 `/login`。`/scoped-models` 决定 Leader 与 Pi subagent 选择器可见的模型范围。完整配置流程和原生 Pi／Research Pi 入口区别见 [README](../README.md#快速开始)。
+
 需要修改 Harness 源码时再使用开发 checkout：
 
 ```sh
 cd ~/research
-git clone --branch windows-research-pi git@github.com:RosMarinas/Research-Pi.git
+git clone --branch windows-research-pi https://github.com/RosMarinas/Research-Pi.git
 cd Research-Pi
-npm install --ignore-scripts
-cp .env.example .env
-./install-user.sh
+npm ci --ignore-scripts
+./run-pi.sh setup
+./run-pi.sh paths
+# 在仓库根目录的 .env 中填入 API key
+./run-pi.sh --workspace ~/research/project
 ```
 
-源码安装需要确认 `~/.local/bin` 在 `PATH`，随后重新打开 WSL shell，或执行：
+源码入口 `./run-pi.sh` 使用仓库 `.pi/config.json` 和根目录 `.env`；全局安装入口 `pi` 使用用户配置目录。两者的认证和 Session 目录独立，实际位置以对应入口的 `paths` 输出为准。
+
+### 更新已有安装
 
 ```sh
-export PATH="$HOME/.local/bin:$PATH"
+npm install -g 'git+https://github.com/RosMarinas/Research-Pi.git#windows-research-pi'
+pi setup
+pi paths
 ```
 
-Codex delegation 需要在 WSL 内单独安装 Linux Codex CLI 并完成登录。不要让 Research Pi 调用 Windows 侧的 `codex.exe`。
+随后退出并重新启动旧 Pi 进程和 Native Host；终端重连或 `/reload` 不会升级已经加载的 Core。旧配置会迁移到 v3，已有模型选择和 API key 保留。新配置的 Codex advisor、executor 以及 Codex 内部 subagent 默认为 `gpt-6.1-sol/high`；`general` 使用 Pi backend，默认继承 Leader 模型。用 `/models show` 查看实际配置，用 `/models` 调整角色。
+
+Codex delegation 需要在 WSL 内单独安装 Linux Codex CLI 并完成 `codex login`。不要调用 Windows 侧的 `codex.exe`。Pi `general` 复用 Pi 的供应商认证；Antigravity 也必须使用 WSL 内的 Linux `agy`，不会启动 Windows `.exe`。
+
+桌面与手机 Web 可连接同一个 Native Host，例如 `pi --resident-runtime --web`。Tailscale 模式使用 WSL 内的 Linux `tailscale`。启动时缺失的 `config.json` 会自动创建，无需先靠原生 Pi 初始化。
 
 ## 4. 放置科研项目
 
@@ -209,7 +224,7 @@ explorer.exe
 
 ```sh
 npm run check
-npm test
+npm run check:package
 ```
 
-当前 macOS/Linux 单元测试验证配置和 fail-closed 判断；真正的 WSL host-interop、bubblewrap、seccomp、长任务取消和 Codex delegate 仍应在 Windows 11 WSL2 实机上完成 smoke test 后，才能把该分支标为稳定 Windows 支持。
+`tests/` 与本地测试夹具不提交或打包，过时测试应删除。当前 macOS/Linux 的本地离线检查验证配置和 fail-closed 判断；真正的 WSL host-interop、bubblewrap、seccomp、长任务取消、Web 与各 subagent backend 仍需要 Windows 11 WSL2 实机验证。离线通过不能替代这些实机结果。

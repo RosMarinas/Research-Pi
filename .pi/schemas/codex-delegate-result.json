@@ -29,71 +29,78 @@
     },
     "completion_basis": {
       "type": "string",
-      "maxLength": 4000,
+      "maxLength": 400,
       "description": "Why this is a legitimate final handoff rather than an intermediate progress update."
     },
     "summary": {
       "type": "string",
-      "maxLength": 12000
+      "maxLength": 1200,
+      "description": "State the result first. Use short sentences. Include only the limits needed for the next decision. Reference evidence; do not repeat task background."
     },
     "evidence": {
       "type": "array",
       "maxItems": 32,
-      "items": { "type": "string", "maxLength": 4000 }
+      "description": "Order by decision value. Each item must state one observation and its exact file, run, command, or record reference. Do not copy logs.",
+      "items": { "type": "string", "maxLength": 800 }
     },
     "actions_taken": {
       "type": "array",
-      "maxItems": 64,
-      "items": { "type": "string", "maxLength": 2000 }
+      "maxItems": 12,
+      "description": "One completed action per item. Use the same term for the same operation.",
+      "items": { "type": "string", "maxLength": 400 }
     },
     "changed_files": {
       "type": "array",
       "maxItems": 256,
+      "description": "Exact workspace-relative paths only. Do not add prose.",
       "items": { "type": "string", "maxLength": 1024 }
     },
     "checks": {
       "type": "array",
       "maxItems": 64,
+      "description": "One check per item. Give the exact command and a concise result. Do not copy full command output.",
       "items": {
         "type": "object",
         "additionalProperties": false,
         "required": ["command", "result"],
         "properties": {
-          "command": { "type": "string", "maxLength": 2000 },
-          "result": { "type": "string", "maxLength": 4000 }
+          "command": { "type": "string", "maxLength": 1000 },
+          "result": { "type": "string", "maxLength": 800 }
         }
       }
     },
     "external_effects": {
       "type": "array",
       "maxItems": 64,
+      "description": "One external effect per item. Include a stable identifier and the state needed for recovery.",
       "items": {
         "type": "object",
         "additionalProperties": false,
         "required": ["kind", "target", "identifier", "detail"],
         "properties": {
           "kind": { "type": "string", "maxLength": 256 },
-          "target": { "type": "string", "maxLength": 2000 },
-          "identifier": { "type": "string", "maxLength": 1000 },
-          "detail": { "type": "string", "maxLength": 4000 }
+          "target": { "type": "string", "maxLength": 1000 },
+          "identifier": { "type": "string", "maxLength": 500 },
+          "detail": { "type": "string", "maxLength": 800 }
         }
       }
     },
     "uncertainties": {
       "type": "array",
       "maxItems": 32,
-      "items": { "type": "string", "maxLength": 4000 }
+      "description": "One material uncertainty per item. Explain how it limits the result.",
+      "items": { "type": "string", "maxLength": 800 }
     },
     "remaining_work": {
       "type": "array",
       "maxItems": 32,
-      "description": "Work still inside the delegated objective. Empty when goal_satisfied is true.",
-      "items": { "type": "string", "maxLength": 4000 }
+      "description": "One unfinished action per item. Empty when goal_satisfied is true.",
+      "items": { "type": "string", "maxLength": 800 }
     },
     "recommended_next_step": {
       "type": "string",
-      "maxLength": 8000,
-      "description": "The next decision or task after this delegation ends; do not use it for work that should still be completed in the current turn."
+      "maxLength": 600,
+      "description": "Give one next decision or task. Do not put unfinished current-turn work here."
     }
   }
 }

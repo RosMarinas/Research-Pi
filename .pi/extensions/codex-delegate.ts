@@ -1,12 +1,15 @@
 import { getMarkdownTheme, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { formatCodexPeerMessages, readCodexPeerMessages } from "../lib/codex-collaboration.mjs";
+import { releaseCodexResources, settleCodexExternalRun } from "../lib/codex-resources.mjs";
+import { DEFAULT_CODEX_JOB_ROOT } from "../lib/codex-jobs.mjs";
 import {
 	cancelCodexJob,
-	findReusableCodexJob,
 	isCodexJobOwnerError,
 	listCodexJobs,
 	listCodexMissions,
+	maintainCodexJobRetention,
 	publicJobView,
 	readCodexJob,
 	reconcileCodexJobOutcome,
@@ -17,10 +20,16 @@ import {
 	waitForCodexJob,
 } from "../lib/codex-jobs.mjs";
 import {
+	getSubagentRuntimeAdapter,
 	getHostCapabilityUiAdapter,
 	getRuntimeUiAdapter,
-	registerCodexRuntimeAdapter,
+	registerSubagentRuntimeAdapter,
 } from "../lib/research-runtime-adapters.mjs";
+import {
+	createRuntimeHeartbeatClock,
+	formatRuntimeHeartbeat,
+	runtimeHeartbeatNeeded,
+} from "../lib/runtime-dock-ui.mjs";
 import {
 	RESEARCH_LEADER_ACTOR_ID,
 	RUNTIME_MESSAGE_KIND,
@@ -38,6 +47,38 @@ import {
 	runtimeSessionInheritancePolicy,
 	settleRuntimeMessage,
 } from "../lib/research-runtime.mjs";
+import { formatSubagentSessionJob } from "../lib/subagent-sessions.mjs";
+import {
+	SUBAGENT_RESULT_SECTIONS,
+	subagentModelCard,
+	subagentResultSection,
+} from "../lib/subagent-message.mjs";
+import { dispatchRuntimeSubagent, queueSubagentMessage, deliverSubagentMessage } from "../lib/runtime-subagents.mjs";
+
+// A mailbox jobId identifies the turn observed by the sender, not necessarily
+// the current turn of a durable Actor. Only follow actual continuation links.
+export function selectCodexMailboxJob(jobs: any[], jobId?: string, requestId?: string) {
+	if (!jobId) return jobs.at(-1);
+	const target = jobs.find((job) => job.id === jobId);
+	if (!target || requestId) return target;
+	const byId = new Map(jobs.map((job) => [job.id, job]));
+	const descendsFrom = (candidate: any) => {
+		const seen = new Set();
+		while (candidate && !seen.has(candidate.id)) {
+			if (candidate.id === target.id) return true;
+			seen.add(candidate.id);
+			candidate = byId.get(candidate.continuationOf);
+		}
+		return false;
+	};
+	return [...jobs].reverse().find((job) =>
+		job.actorId === target.actorId
+		&& (job.researchTrackRef ?? "project:initial") === (target.researchTrackRef ?? "project:initial")
+		&& descendsFrom(job)) ?? target;
+}
+
+const SUBAGENT_ROLES = ["advisor", "executor", "environment", "general"] as const;
+const SUBAGENT_BACKENDS = ["codex", "antigravity", "pi"] as const;
 
 const ActionSchema = Type.Union(
 	[
@@ -50,16 +91,25 @@ const ActionSchema = Type.Union(
 		Type.Literal("steer"),
 		Type.Literal("reconcile"),
 		Type.Literal("missions"),
+		Type.Literal("messages"),
+		Type.Literal("settle_run"),
+		Type.Literal("release_resources"),
 	],
-	{ description: "Start or manage one Codex delegation job" },
+	{ description: "Start or manage one Runtime subagent Action" },
 );
 
-const ModeSchema = Type.Union([Type.Literal("advisor"), Type.Literal("executor")], {
-	description: "advisor is project-read-only; executor can fully modify the current project",
+const BackendSchema = Type.Union(SUBAGENT_BACKENDS.map((backend) => Type.Literal(backend)), {
+	description: "Runner integration. Omit to use the configured default for the selected role.",
+});
+
+const RoleSchema = Type.Union(SUBAGENT_ROLES.map((role) => Type.Literal(role)), {
+	description: "advisor and executor are Codex-first; environment is Antigravity-first; general is Pi-first",
 });
 
 const EffortSchema = Type.Union(
 	[
+		Type.Literal("none"),
+		Type.Literal("minimal"),
 		Type.Literal("low"),
 		Type.Literal("medium"),
 		Type.Literal("high"),
@@ -67,30 +117,55 @@ const EffortSchema = Type.Union(
 		Type.Literal("max"),
 		Type.Literal("ultra"),
 	],
-	{ description: "Codex reasoning effort; advisor and executor defaults are configured separately" },
+	{ description: "Runner thinking/reasoning effort; omit to use the selected role default" },
 );
 
 const ReuseSchema = Type.Union([Type.Literal("auto"), Type.Literal("never")], {
-	description: "auto resumes the latest Actor thread with the same explicit mission, mode, and research track in this exact project workspace; never always starts a fresh thread",
+	description: "auto continues a named mission in its current workspace, role and research route; never starts a fresh Actor/context. The Leader decides whether tasks belong together.",
 });
+
+const ResultSectionSchema = Type.Union(
+	SUBAGENT_RESULT_SECTIONS.map((section) => Type.Literal(section)),
+	{ description: "One result section to return. Omit it for the concise result card. Request only the section needed for the current decision." },
+);
 
 const ParamsSchema = Type.Object({
 	action: ActionSchema,
-	mode: Type.Optional(ModeSchema),
+	backend: Type.Optional(BackendSchema),
+	role: Type.Optional(RoleSchema),
 	task: Type.Optional(
 		Type.String({
-			description: "Bounded task for a new delegation. Required for action=start.",
+			description: "Bounded task for a new delegation. State the objective, scope, and decision criteria. Do not copy the main transcript. Required for action=start.",
 			minLength: 1,
+			maxLength: 6_000,
 		}),
 	),
 	successCriteria: Type.Optional(
-		Type.Array(Type.String(), {
+		Type.Array(Type.String({ maxLength: 600 }), {
 			description: "Observable conditions Codex should satisfy before returning",
+			maxItems: 12,
 		}),
 	),
+	writeScope: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 1_000 }), {
+		minItems: 1,
+		maxItems: 64,
+		description: "Executor-owned literal files/directories relative to the workspace root, e.g. ['src/model', 'tests/model.test.ts']. Disjoint scopes allow concurrent executors; omission owns the entire workspace exclusively. No globs. This coordinates ownership, not OS permissions. Resume inherits the previous scope unless supplied.",
+	})),
+	resourceClaims: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 240 }), {
+		maxItems: 16,
+		description: "Optional exclusive shared resource keys, e.g. ['gpu:server-a:0', 'run:server-a:/runs/ablation']. All dispatchers using this Research Pi state store must use the same exact keys. Conflicts return immediately. Resume inherits these; use [] for a monitoring-only continuation while an earlier external run still holds them. Not an OS or cluster lock.",
+	})),
+	experiment: Type.Optional(Type.Object({
+		question: Type.String({ maxLength: 600 }),
+		distinguishingOutcomes: Type.Array(Type.String({ maxLength: 600 }), { maxItems: 6 }),
+		validityChecks: Type.Array(Type.String({ maxLength: 600 }), { maxItems: 6 }),
+		budgetAndStop: Type.Optional(Type.String({ maxLength: 600 })),
+	}, { description: "Only for an actual research experiment: a concise question, discriminating observations, minimum checks, and optional budget/stop condition. Guidance for the worker, not automatic external process cancellation; omit for ordinary code tasks." })),
+	runId: Type.Optional(Type.String({ description: "Research Pi run ID from a job's externalRuns; required for settle_run" })),
 	context: Type.Optional(
 		Type.String({
 			description: "Only the research context needed for this task; do not copy the full Pi transcript",
+			maxLength: 4_000,
 		}),
 	),
 	mission: Type.Optional(
@@ -103,11 +178,14 @@ const ParamsSchema = Type.Object({
 	reuse: Type.Optional(ReuseSchema),
 	model: Type.Optional(
 		Type.String({
-			description: "Optional Codex model override; omit to use the configured default for the selected mode",
+			description: "Optional backend model override; omit to use the configured default for the selected role",
 			minLength: 1,
 		}),
 	),
-	reasoningEffort: Type.Optional(EffortSchema),
+	thinking: Type.Optional(EffortSchema),
+	serviceTier: Type.Optional(Type.Union([Type.Literal("inherit"), Type.Literal("standard"), Type.Literal("fast")], {
+		description: "Optional speed override. Fast uses extra quota; enable only at the user's request. Omit to preserve the configured or resumed job's tier.",
+	})),
 	background: Type.Optional(
 		Type.Boolean({
 			description: "Return a job id immediately. Defaults to true for executor and false for advisor.",
@@ -123,25 +201,27 @@ const ParamsSchema = Type.Object({
 			description: "Existing job id for status, result, cancel, resume, respond, steer, or reconcile",
 		}),
 	),
+	resultSection: Type.Optional(ResultSectionSchema),
 	followUp: Type.Optional(
 		Type.String({
-			description: "Follow-up instruction for action=resume; continues the exact captured Codex thread",
+			description: "One follow-up instruction for action=resume. State only changed facts and the required action; the backend already has its earlier context.",
 			minLength: 1,
+			maxLength: 3_000,
 		}),
 	),
 	requestId: Type.Optional(
 		Type.String({ description: "Pending request id for action=respond", minLength: 1 }),
 	),
 	response: Type.Optional(
-		Type.String({ description: "Plain-text answer for action=respond; never put credentials or secrets here", minLength: 1 }),
+		Type.String({ description: "Concise plain-text answer for action=respond. State the decision and necessary reason. Never put credentials or secrets here.", minLength: 1, maxLength: 2_000 }),
 	),
 	answers: Type.Optional(
-		Type.Record(Type.String(), Type.Array(Type.String()), {
+		Type.Record(Type.String(), Type.Array(Type.String({ maxLength: 1_000 }), { maxItems: 8 }), {
 			description: "Optional request_user_input answers keyed by question id",
 		}),
 	),
 	message: Type.Optional(
-		Type.String({ description: "Instruction to inject into the active Codex turn for action=steer", minLength: 1 }),
+		Type.String({ description: "One concise participant instruction for action=steer. State the changed fact or required action; do not copy context already owned by the job.", minLength: 1, maxLength: 2_000 }),
 	),
 	outcome: Type.Optional(
 		Type.Union([Type.Literal("completed"), Type.Literal("failed"), Type.Literal("cancelled")], {
@@ -158,6 +238,35 @@ function requireText(value: string | undefined, label: string): string {
 	return value.trim();
 }
 
+function configuredRunner(role: typeof SUBAGENT_ROLES[number]) {
+	const prefix = `RESEARCH_PI_SUBAGENT_${role.toUpperCase()}`;
+	return {
+		backend: String(process.env[`${prefix}_BACKEND`] ?? (role === "advisor" || role === "executor" ? "codex" : role === "environment" ? "antigravity" : "pi")),
+		model: String(process.env[`${prefix}_MODEL`] ?? "inherit"),
+		thinking: String(process.env[`${prefix}_THINKING`] ?? "inherit"),
+		speed: String(process.env[`${prefix}_SPEED`] ?? "inherit"),
+	};
+}
+
+export function resolveSubagentRunnerDefaults(role: typeof SUBAGENT_ROLES[number], backend: string) {
+	const configured = configuredRunner(role);
+	if (configured.backend === backend) return configured;
+	const canonicalRole = backend === "codex" ? (role === "advisor" ? "advisor" : "executor") : backend === "antigravity" ? "environment" : "general";
+	const canonical = configuredRunner(canonicalRole);
+	if (canonical.backend === backend) return canonical;
+	if (backend === "codex") return { backend, model: "gpt-6.1-sol", thinking: "high", speed: "inherit" };
+	if (backend === "antigravity") return { backend, model: "gemini-3.1-pro-high", thinking: "high", speed: "inherit" };
+	return { backend: "pi", model: "inherit", thinking: "inherit", speed: "inherit" };
+}
+
+function inferBackend(jobId: string | undefined, requested: string | undefined, role: typeof SUBAGENT_ROLES[number]): string {
+	if (requested) return requested;
+	if (jobId?.startsWith("antigravity-")) return "antigravity";
+	if (jobId?.startsWith("pi-")) return "pi";
+	if (jobId?.startsWith("codex-")) return "codex";
+	return configuredRunner(role).backend;
+}
+
 const ACTIVE_JOB_STATUSES = new Set(["starting", "running", "cancelling"]);
 
 function jobActivityText(job: any): string {
@@ -171,35 +280,14 @@ function jobActivityText(job: any): string {
 	return `${completedLeaf ? "last" : "phase"}: ${progress}`;
 }
 
-export function formatCodexJob(job: ReturnType<typeof publicJobView>): string {
-	if (job.status === "completed" && job.result) {
-		const outcome = job.result.outcome ? ` Delegation outcome=${job.result.outcome}; goal_satisfied=${job.result.goal_satisfied === true}.` : "";
-		return `Codex turn ${job.id} completed.${outcome}\n${JSON.stringify(job.result, null, 2)}`;
-	}
-	if (job.status === "failed" || job.status === "cancelled") {
-		return `Codex job ${job.id} ${job.status}: ${job.error ?? job.progress}`;
-	}
-	if (job.status === "outcome_unknown") {
-		return `Codex job ${job.id} has outcome_unknown: side effects may have occurred. Inspect Git and external run state, then use action=reconcile with outcome and an evidence note before starting another executor in this workspace.`;
-	}
-	if (job.status === "input_required" && job.pendingRequest) {
-		const pending = job.pendingRequest;
-		return [
-			`Codex job ${job.id} paused for input; its worker and current turn remain alive.`,
-			`Request id: ${pending.id}`,
-			`Question: ${pending.question}`,
-			pending.whyBlocking ? `${job.mode === "advisor" ? "Why this matters" : "Why it blocks progress"}: ${pending.whyBlocking}` : undefined,
-			pending.options?.length ? `Options: ${pending.options.join(" | ")}` : undefined,
-			pending.audience === "user"
-				? "This requires a user-owned choice. Ask the user, then answer this exact request; do not cancel or restart the Codex job."
-				: `Respond now with codex_delegate action=respond, jobId=${job.id}, requestId=${pending.id}. Do not cancel, restart, or replace this advisor turn.`,
-		].filter(Boolean).join("\n");
-	}
-	return [
-		`Codex job ${job.id} is ${job.status}; ${jobActivityText(job)}.`,
-		"The Runtime mailbox will deliver its next blocking or terminal event automatically.",
-		"Do not poll autonomously. A genuine user request may inspect progress directly; otherwise end the run and wait for the Runtime event.",
-	].join(" ");
+function externalRunSummary(job: ReturnType<typeof publicJobView>): string {
+	const runs = job.externalRuns ?? [];
+	if (!runs.length) return "";
+	return `External runs (independent of worker completion; not scientific validity):\n${runs.map((run) => `- ${run.id} [${run.status}] ${run.target} external=${run.externalId} resources=${JSON.stringify(run.resources)}`).join("\n")}`;
+}
+
+export function formatCodexJob(job: ReturnType<typeof publicJobView>, resultSection?: string): string {
+	return resultSection ? subagentResultSection(job, resultSection) : subagentModelCard(job);
 }
 
 export function codexRuntimeDeliveryDecision({ messageStatus, isIdle, editorHasDraft }: {
@@ -304,7 +392,7 @@ function formatMissions(missions: Awaited<ReturnType<typeof listCodexMissions>>)
 		"Codex Actor missions in the current project workspace:",
 		...missions.map((mission) => {
 			const label = mission.mission ?? "(unlabelled standalone jobs)";
-			return `- ${label} · ${mission.mode} · ${mission.status} · track=${mission.researchTrackRef} · ${mission.latestJobId} · ${mission.jobCount} job${mission.jobCount === 1 ? "" : "s"}${mission.reusable ? " · resumable" : ""}`;
+			return `- ${label} · ${(mission as any).role ?? mission.mode} · ${mission.status} · track=${mission.researchTrackRef} · ${mission.latestJobId} · ${mission.jobCount} job${mission.jobCount === 1 ? "" : "s"}${mission.reusable ? " · resumable" : ""}`;
 		}),
 	].join("\n");
 }
@@ -451,7 +539,7 @@ export function formatCodexStatus(job: CodexJobView, activeCount = 1): string {
 	const mission = job.mission ? ` · ${boundedProgress(job.mission).slice(0, 36)}` : "";
 	const parallel = Number(job.activeActivityCount ?? job.activeActivities?.length ?? 0);
 	const activity = parallel > 1 ? `${parallel} parallel activities · /watch` : jobActivityText(job);
-	return `${icon} Codex ${count}${job.mode} ${shortJobId(job.id)}${mission} · ${job.status}${outcome ? `/${outcome}` : ""} · ${activity}`;
+	return `${icon} Codex ${count}${(job as any).role ?? job.mode} ${shortJobId(job.id)}${mission} · ${job.model ?? "inherit"}/${(job as any).thinking ?? job.reasoningEffort ?? "inherit"} · ${job.status}${outcome ? `/${outcome}` : ""} · ${activity}`;
 }
 
 function stableCodexJobs(jobs: CodexJobView[]): CodexJobView[] {
@@ -465,19 +553,32 @@ function stableCodexJobs(jobs: CodexJobView[]): CodexJobView[] {
 export function formatCodexJobsStatus(jobs: CodexJobView[]): string | undefined {
 	const active = stableCodexJobs(jobs.filter((job) => !TERMINAL_JOB_STATUSES.has(job.status)));
 	if (!active.length) return undefined;
-	if (active.length === 1) return formatCodexStatus(active[0]);
 	const waiting = active.filter((job) => job.status === "input_required").length;
 	const cancelling = active.filter((job) => job.status === "cancelling").length;
 	const detail = [waiting ? `${waiting} waiting` : "", cancelling ? `${cancelling} cancelling` : ""].filter(Boolean).join(" · ");
-	return `${waiting ? "?" : "⚙"} Codex ${active.length} active${detail ? ` · ${detail}` : ""} · details above editor`;
+	return `workers ${active.length}${detail ? ` · ${detail}` : ""}`;
+}
+
+export function formatSubagentFooterStatus(jobs: CodexJobView[], latestTerminal?: CodexJobView): string {
+	const active = formatCodexJobsStatus(jobs);
+	if (active) return active;
+	const outcome = latestTerminal?.status === "completed" ? latestTerminal.result?.outcome : undefined;
+	const attention = latestTerminal?.status === "failed" ? "failed"
+		: latestTerminal?.status === "outcome_unknown" ? "unknown"
+		: outcome && outcome !== "succeeded" ? outcome : undefined;
+	return `workers 0${attention ? ` · last ${attention}` : ""}`;
 }
 
 function codexUiProjection(jobs: CodexJobView[]): string {
 	return JSON.stringify({
 		jobs: stableCodexJobs(jobs).map((job) => ({
 			id: job.id,
+			backend: (job as any).backend ?? "codex",
 			status: job.status,
+			role: (job as any).role ?? job.mode,
 			mode: job.mode,
+			model: job.model,
+			thinking: (job as any).thinking ?? job.reasoningEffort,
 			mission: job.mission,
 			progress: job.progress,
 			currentActivity: job.currentActivity,
@@ -492,18 +593,16 @@ function codexUiProjection(jobs: CodexJobView[]): string {
 export async function acknowledgeDirectCodexTerminalResult({
 	runtime,
 	job,
-	content,
 	sessionId,
 	attachmentEpoch,
 }: {
 	runtime: Awaited<ReturnType<typeof resolveResearchRuntime>>;
 	job: CodexJobView;
-	content: string;
 	sessionId: string;
 	attachmentEpoch: string;
 }) {
 	if (!TERMINAL_JOB_STATUSES.has(job.status)) return null;
-	const message = await recordCodexRuntimeEvent(runtime, job, content);
+	const message = await recordCodexRuntimeEvent(runtime, job);
 	if (!message) return null;
 	return (await consumeRuntimeMessagesForAttachment(runtime, [message.id], {
 		sessionId,
@@ -528,6 +627,15 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 	let genuineUserRunActive = false;
 	let lastFooterText: string | undefined;
 	let lastDockProjection: string | undefined;
+	let heartbeatFrame = 0;
+	let heartbeatNow = Date.now();
+	let heartbeatContext: ExtensionContext | undefined;
+	const heartbeatClock = createRuntimeHeartbeatClock(() => {
+		if (shuttingDown || !heartbeatContext) return;
+		heartbeatFrame += 1;
+		heartbeatNow = Date.now();
+		refreshFooter(heartbeatContext);
+	});
 
 	const releaseCodexReadFuse = (jobId?: string) => {
 		if (!jobId) {
@@ -545,10 +653,21 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		if (shuttingDown) return;
 		if (!ctx.hasUI) return;
 		const active = stableCodexJobs([...activeJobs.values()]);
-		const text = formatCodexJobsStatus(active) ?? (latestTerminal ? formatCodexStatus(latestTerminal) : undefined);
+		if (runtimeHeartbeatNeeded(active)) {
+			heartbeatContext = ctx;
+			heartbeatClock.setActive(true);
+		} else {
+			heartbeatClock.stop();
+			heartbeatContext = undefined;
+			heartbeatFrame = 0;
+			heartbeatNow = Date.now();
+		}
+		const status = formatSubagentFooterStatus(active, latestTerminal);
+		const heartbeat = formatRuntimeHeartbeat(active, { frame: heartbeatFrame, currentTime: heartbeatNow });
+		const text = [heartbeat, status].filter(Boolean).join(" · ") || undefined;
 		if (text === lastFooterText) return;
 		lastFooterText = text;
-		ctx.ui.setStatus("codex_delegate", text);
+		ctx.ui.setStatus("subagent", text);
 	};
 
 	const refreshDock = (ctx: ExtensionContext, force = false) => {
@@ -576,77 +695,6 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		if (job.status === "input_required" && job.pendingRequest?.id) return `${job.id}:request:${job.pendingRequest.id}`;
 		if (TERMINAL_JOB_STATUSES.has(job.status)) return `${job.id}:terminal:${job.status}`;
 		return undefined;
-	};
-
-	const boundedList = (values: unknown, limit = 8): string[] =>
-		Array.isArray(values) ? values.slice(0, limit).map((value) => boundedProgress(String(value))) : [];
-	const boundedDetailList = (values: unknown, limit: number, itemLimit: number): string[] =>
-		Array.isArray(values)
-			? values.slice(0, limit).map((value) => {
-				const text = String(value ?? "").replace(/\s+/g, " ").trim();
-				return text.length <= itemLimit ? text : `${text.slice(0, itemLimit - 3)}...`;
-			}).filter(Boolean)
-			: [];
-
-	const eventContent = (job: CodexJobView): string => {
-		if (job.status === "input_required" && job.pendingRequest) {
-			const pending = job.pendingRequest;
-			return [
-				`Codex delegation ${job.id} is waiting for ${pending.audience === "user" ? "the user" : "Research Pi"}.`,
-				`Request id: ${pending.id}`,
-				`Question: ${pending.question}`,
-				pending.whyBlocking ? `${job.mode === "advisor" ? "Why this matters" : "Why it blocks progress"}: ${pending.whyBlocking}` : undefined,
-				pending.options?.length ? `Options: ${pending.options.join(" | ")}` : undefined,
-				pending.kind === "host_capability"
-					? "Research Pi will open the exact host-capability approval dialog in the attached TUI and return the decision to this same Codex turn."
-					: undefined,
-				pending.secret
-					? "This request is marked secret. Do not ask for or transmit the secret through Pi, model context, codex_delegate, or job files. Ask the user to configure it directly, then continue without echoing it."
-					: pending.kind === "host_capability"
-						? undefined
-						: `Answer with codex_delegate action=respond, jobId=${job.id}, requestId=${pending.id}. Use action=steer only for unsolicited corrections to the active turn.`,
-			]
-				.filter(Boolean)
-				.join("\n");
-		}
-		if (job.status === "outcome_unknown") {
-			return [
-				`Codex delegation ${job.id} lost its worker after executor side effects may have started.`,
-				"Do not infer success or failure from the missing terminal record.",
-				"Inspect Git, files, remote jobs, and other external effects relevant to this delegation.",
-				`Then use codex_delegate action=reconcile, jobId=${job.id}, outcome=<completed|failed|cancelled>, note=<inspection evidence>.`,
-				"Another Codex executor in this workspace is blocked until reconciliation; advisor mode remains available.",
-			].join("\n");
-		}
-		const result = job.result ?? {};
-		const actionsTaken = boundedDetailList(result.actions_taken, 6, 360);
-		const changedFiles = boundedDetailList(result.changed_files, 12, 360);
-		const externalEffects = Array.isArray(result.external_effects)
-			? result.external_effects.slice(0, 6).map((effect: any) => {
-				const identity = [effect?.kind, effect?.target, effect?.identifier].filter(Boolean).join(" · ") || "effect";
-				const detail = String(effect?.detail ?? "").replace(/\s+/g, " ").trim();
-				return `${identity}${detail ? ` — ${detail.slice(0, 500)}` : ""}`;
-			})
-			: [];
-		return [
-			`Codex delegation ${job.id} ${job.status}. Pi must inspect this result and decide the next research action; completion alone is not scientific evidence.`,
-			`Mode/model: ${job.mode} · ${job.model} · ${job.reasoningEffort}`,
-			job.mission ? `Mission: ${job.mission}` : undefined,
-			result.outcome ? `Delegation outcome: ${result.outcome} · goal_satisfied=${result.goal_satisfied === true}` : undefined,
-			result.completion_basis ? `Completion basis: ${String(result.completion_basis).slice(0, 3000)}` : undefined,
-			result.summary ? `Summary: ${String(result.summary).slice(0, 5000)}` : undefined,
-			actionsTaken.length ? `Actions taken:\n- ${actionsTaken.join("\n- ")}` : undefined,
-			changedFiles.length ? `Changed files:\n- ${changedFiles.join("\n- ")}` : undefined,
-			externalEffects.length ? `External effects:\n- ${externalEffects.join("\n- ")}` : undefined,
-			boundedList(result.evidence).length ? `Evidence:\n- ${boundedList(result.evidence).join("\n- ")}` : undefined,
-			boundedList(result.uncertainties).length ? `Uncertainties:\n- ${boundedList(result.uncertainties).join("\n- ")}` : undefined,
-			boundedList(result.remaining_work).length ? `Remaining delegated work:\n- ${boundedList(result.remaining_work).join("\n- ")}` : undefined,
-			result.recommended_next_step ? `Recommended next step: ${String(result.recommended_next_step).slice(0, 3000)}` : undefined,
-			job.error ? `Error: ${String(job.error).slice(0, 3000)}` : undefined,
-			`Use codex_delegate action=result with jobId=${job.id} if the full structured result is needed.`,
-		]
-			.filter(Boolean)
-			.join("\n");
 	};
 
 	const consumeCodexRequestMessages = async (
@@ -751,7 +799,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			const runtime = await resolveResearchRuntime(ctx.cwd);
 			if (shuttingDown) return "handled";
 			await reconcileCodexRuntimeAsks(runtime, job);
-			const message = await recordCodexRuntimeEvent(runtime, job, eventContent(job));
+			const message = await recordCodexRuntimeEvent(runtime, job);
 			if (shuttingDown) return "handled";
 			if (!message) {
 				deliveredEvents.add(id);
@@ -882,6 +930,9 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 	};
 
 	const resetMonitors = (ctx: ExtensionContext, options: { refreshRuntime?: boolean } = {}) => {
+		heartbeatClock.stop();
+		heartbeatContext = undefined;
+		heartbeatFrame = 0;
 		for (const timer of monitorTimers.values()) clearTimeout(timer);
 		monitorTimers.clear();
 		activeJobs.clear();
@@ -889,7 +940,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		latestTerminal = undefined;
 		lastFooterText = undefined;
 		lastDockProjection = undefined;
-		if (ctx.hasUI) ctx.ui.setStatus("codex_delegate", undefined);
+		if (ctx.hasUI) ctx.ui.setStatus("subagent", undefined);
 		if (options.refreshRuntime !== false) {
 			void getRuntimeUiAdapter()?.refresh(ctx, { codexJobs: [] }).catch(() => undefined);
 		}
@@ -964,8 +1015,26 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		refreshDock(ctx, true);
 	};
 
-	registerCodexRuntimeAdapter({
-		dispatch: async ({ runtime, actor, message, preempt, ctx }) => {
+	registerSubagentRuntimeAdapter("codex", {
+		list: async ({ ctx }) => {
+			const owner = await leaderScope(ctx);
+			return await listCodexJobs({ cwd: ctx.cwd, projectKey: owner.projectKey, leaderActorId: owner.leaderActorId });
+		},
+		status: async ({ jobId, ctx }) => publicJobView(await readCodexJob(jobId, await jobManagementScope(ctx, jobId))),
+		start: async (input) => {
+			const owner = await leaderScope(input.ctx, { requireAttached: true });
+			return publicJobView(await withCurrentLeader(owner, () => startCodexJob({ ...input,
+				mode: input.role === "advisor" ? "advisor" : "executor", reasoningEffort: input.thinking,
+			})));
+		},
+		resume: async (input) => {
+			const owner = await leaderScope(input.ctx, { requireAttached: true });
+			const scope = await jobManagementScope(input.ctx, input.jobId);
+			return publicJobView(await withCurrentLeader(owner, () => resumeCodexJob(input.jobId, { ...input, ...scope,
+				reasoningEffort: input.thinking,
+			})));
+		},
+		dispatch: async ({ runtime, actor, message, preempt, ctx, jobId }) => {
 			const owner = await leaderScope(ctx, { requireAttached: true });
 			const jobs = await listCodexJobs({
 				cwd: ctx.cwd,
@@ -973,18 +1042,22 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 				leaderActorId: owner.leaderActorId,
 				actorId: actor.id,
 			});
-			const latest = jobs.at(-1);
+			const latest = selectCodexMailboxJob(jobs, jobId, message.metadata?.requestId);
 			if (!latest) return { status: "queued", detail: `${actor.label} has no resumable Codex thread yet` };
 			const ownerCheck = projectJobManagementScope(ctx, owner);
 			const live = !TERMINAL_JOB_STATUSES.has(latest.status);
 			const instruction = runtimeMessageText(message, (await readRuntimeSnapshot(runtime)).actors);
 			let nextJob = latest;
+			if (message.metadata?.requestId && (!live || message.metadata.requestId !== latest.pendingRequest?.id)) {
+				return { status: "superseded", detail: "The Codex question is no longer pending; the late reply was not injected into another turn" };
+			}
 
 			if (message.type === "reply" && live && latest.pendingRequest?.id) {
-				const requestId = latest.pendingRequest.id;
+				const requestId = message.metadata?.requestId ?? latest.pendingRequest.id;
 				const queued = await withCurrentLeader(owner, () => respondToCodexJob(latest.id, {
 					requestId,
 					response: message.body,
+					answers: message.metadata?.answers,
 					...ownerCheck,
 				}));
 				nextJob = queued.job;
@@ -993,22 +1066,27 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 				const queued = await withCurrentLeader(owner, () => steerCodexJob(latest.id, { message: instruction, ...ownerCheck }));
 				nextJob = queued.job;
 			} else {
-				nextJob = await withCurrentLeader(owner, async () => {
-					if (live) await cancelCodexJob(latest.id, ownerCheck);
-					if (!latest.threadId) return null;
-					return await resumeCodexJob(latest.id, {
-						followUp: instruction,
-						leaderSessionId: owner.leaderSessionId,
-						leaderBranchAnchorId: owner.leaderBranchAnchorId,
-						leaderActorId: owner.leaderActorId,
-						actorId: actor.id,
-						projectRevision: owner.projectRevision,
-						researchTrackRef: owner.researchTrackRef,
-						researchTrackLabel: owner.researchTrackLabel,
-						background: true,
-						...ownerCheck,
+				try {
+					nextJob = await withCurrentLeader(owner, async () => {
+						if (live) await cancelCodexJob(latest.id, ownerCheck);
+						if (!latest.threadId) return null;
+						return await resumeCodexJob(latest.id, {
+							followUp: instruction,
+							leaderSessionId: owner.leaderSessionId,
+							leaderBranchAnchorId: owner.leaderBranchAnchorId,
+							leaderActorId: owner.leaderActorId,
+							actorId: actor.id,
+							projectRevision: owner.projectRevision,
+							researchTrackRef: owner.researchTrackRef,
+							researchTrackLabel: owner.researchTrackLabel,
+							background: true,
+							...ownerCheck,
+						});
 					});
-				});
+				} catch (error) {
+					if (error?.code !== "CODEX_MISSION_BUSY") throw error;
+					return { status: "queued", detail: "A Codex continuation became active during delivery; retry against the current Actor turn" };
+				}
 				if (!nextJob) return { status: "queued", detail: `${actor.label} has no resumable Codex thread` };
 			}
 
@@ -1029,6 +1107,9 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		shuttingDown = false;
 		releaseCodexReadFuse();
+		const retention = await maintainCodexJobRetention().catch((error) => ({ error: error instanceof Error ? error.message : String(error) }));
+		if ("error" in retention) ctx.ui.notify(`Codex retention check failed without affecting active jobs: ${retention.error}`, "warning");
+		else if (retention.archived.length) ctx.ui.notify(`Archived ${retention.archived.length} old terminal Codex job(s) into ${retention.archivePath}.`, "info");
 		await reattachBranchJobs(ctx);
 	});
 
@@ -1039,11 +1120,13 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_call", (event) => {
-		if (event.toolName !== "codex_delegate") return;
+		if (event.toolName !== "subagent") return;
 		const action = String(event.input?.action ?? "");
-		if (action !== "status" && action !== "result") return;
+		if (!["status", "result", "messages"].includes(action)) return;
 		const jobId = String(event.input?.jobId ?? "");
 		if (!jobId) return;
+		const role = SUBAGENT_ROLES.includes(event.input?.role as any) ? event.input.role as typeof SUBAGENT_ROLES[number] : "executor";
+		if (inferBackend(jobId, event.input?.backend as string | undefined, role) !== "codex") return;
 		const userAuthorized = genuineUserRunActive;
 		if (!userAuthorized && (
 			codexReadsUntilExternalEvent.has(jobId)
@@ -1059,11 +1142,14 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_result", (event) => {
-		if (event.toolName !== "codex_delegate") return;
+		if (event.toolName !== "subagent") return;
+		const role = SUBAGENT_ROLES.includes(event.input?.role as any) ? event.input.role as typeof SUBAGENT_ROLES[number] : "executor";
+		if (inferBackend(event.input?.jobId as string | undefined, event.input?.backend as string | undefined, role) !== "codex") return;
 		codexReadToolCalls.delete(event.toolCallId);
 		if (event.isError) return;
 		const details = event.details as CodexJobView | undefined;
 		const action = String(event.input?.action ?? "");
+		if (action === "messages" && event.input?.jobId) codexReadsUntilExternalEvent.add(String(event.input.jobId));
 		if (
 			details?.id
 			&& (details.autoNotify !== false || action === "respond")
@@ -1086,49 +1172,71 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		resetMonitors(ctx, { refreshRuntime: false });
 	});
 
-	pi.registerCommand("codex", {
-		description: "Inspect project Codex Actor mission threads (/codex missions)",
+	pi.registerCommand("subagents", {
+		description: "Inspect configured subagent runners and project Actor missions",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
-			const action = args.trim() || "missions";
+			const action = args.trim() || "list";
 			if (action !== "missions" && action !== "list") {
-				ctx.ui.notify("Usage: /codex missions", "warning");
+				ctx.ui.notify("Usage: /subagents [list|missions]", "warning");
 				return;
 			}
 			try {
-				ctx.ui.notify(formatMissions(await listOwnedCodexMissions(ctx)), "info");
+				if (action === "missions") {
+					ctx.ui.notify(formatMissions(await listOwnedCodexMissions(ctx)), "info");
+					return;
+				}
+				const configured = SUBAGENT_ROLES.map((role) => {
+					const runner = configuredRunner(role);
+					return `- ${role}: ${runner.backend} · ${runner.model}/${runner.thinking}${runner.speed !== "inherit" ? ` · speed ${runner.speed}` : ""}`;
+				});
+				const processJobs = ["pi", "antigravity"].flatMap((backend) => getSubagentRuntimeAdapter(backend)?.list?.() ?? []);
+				const codexJobs = (await listOwnedCodexJobs(ctx)).map(publicJobView);
+				const allJobs = [...codexJobs, ...processJobs].sort((left: any, right: any) => String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? "")));
+				const live = allJobs.slice(0, 20);
+				ctx.ui.notify([
+					"Configured subagent runners:",
+					...configured,
+					"",
+					live.length ? `Known Actions${allJobs.length > live.length ? ` (newest ${live.length}/${allJobs.length})` : ""}:\n${live.map((job: any) => `- ${job.backend ?? "codex"}/${job.role ?? job.mode} · ${job.id} · ${job.status} · ${job.model ?? "inherit"}/${job.thinking ?? job.reasoningEffort ?? "inherit"}`).join("\n")}` : "No subagent Action is available. Use /actors all for durable Runtime history.",
+				].join("\n"), "info");
 			} catch (error) {
-				ctx.ui.notify(`Could not list Codex missions: ${error instanceof Error ? error.message : String(error)}`, "error");
+				ctx.ui.notify(`Could not list subagents: ${error instanceof Error ? error.message : String(error)}`, "error");
 			}
 		},
 	});
 
 	pi.registerTool({
-		name: "codex_delegate",
-		label: "Codex Delegate",
+		name: "subagent",
+		label: "Subagent",
 		description: [
-			"Delegate bounded execution to a context-isolated Codex executor or open a read-only collaborative advisor consultation.",
-			"Pi owns research framing and evidence judgment. Codex Actors remain bound to the exact project workspace; related work can reuse a stable mission across Pi sessions.",
-			"Executor has standing in-project authority. External access uses the opaque host broker, background events use the Leader Runtime mailbox, and ambiguous worker loss requires evidence-backed reconcile.",
+			"Start or manage a context-isolated Runtime subagent through the Codex, Antigravity, or Pi backend.",
+			"Choose a role and normally omit backend/model/thinking to use the user's configured runner; explicit values override only this Action.",
+			"All Actors expose backend, role, model and thinking in Runtime, and user messages can reach them directly without passing through the Leader.",
 		].join(" "),
-		promptSnippet: "Delegate long operational work or collaboratively clarify a research question with Codex",
+		promptSnippet: "Delegate isolated design, implementation, validation, environment, or alternate-model work to a Runtime subagent",
 		promptGuidelines: [
-			"Use codex_delegate when a bounded execution task would require many tools or produce enough intermediate output to pollute the research context; delegation is for context isolation, not automatic parallelism.",
-			"Use executor for an end-to-end objective with observable success criteria. Use advisor for read-only clarification and competing explanations; supply only relevant uncertainty, observations, and unknowns rather than the full transcript or a preferred verdict.",
-			"Use a stable mission label for consecutive work on one research subtask and reuse=auto. The mission is a project Codex Actor and survives Pi session rotation. Continue the same advisor mission while jointly refining one question; start a fresh mission for a different research route, a different workspace, or substantially stale assumptions.",
-			"Let executor finish in-project work without command-by-command approval. External access must use the structured host bridge; never manufacture a grant, transmit a secret, or start a replacement delegation to bypass a request.",
+			"Codex advisor and executor are the primary path: advisor for architecture, design, competing explanations and read-only review; executor for implementation, experiments, testing and validation. Prefer these roles whenever they fit.",
+			"Use Antigravity environment for dependency, SDK, toolchain, container, runtime, remote-execution and other environment configuration work. Use Pi general when a different authenticated Pi model or provider perspective is the reason for delegation.",
+			"Use the user's configured runner by default. Set backend, model, or thinking only when the task has a concrete reason to override it; never replace an explicit user choice.",
+			"Use subagent for context isolation and genuinely independent parallel work. Codex executors use distinct missions and disjoint writeScope paths; omitted writeScope reserves the workspace. Do not poll in a loop.",
+			"Default to concise Runtime results, not handoff files or new reports. A runner change is an ordinary new Action with a short context message, not a handoff artifact.",
+			"Continue an Actor or named mission when its context helps; choose a new mission or reuse=never for independent work. Runtime handles continuation for every backend. Lifecycle operations remain tools; questions, replies and steering are participant messages.",
+			"Let Codex executor finish in-project work without command-by-command approval. External access must use the structured host bridge; never manufacture a grant, transmit a secret, or replace a job to bypass a request.",
 			"Interpret completed as transport state. Judge semantic outcome, goal_satisfied, evidence, validity, and remaining work; reconcile outcome_unknown only after inspecting external state.",
+			"The default result is a concise decision card. Use resultSection to request one exact detail class. Do not request every section unless each section is necessary for the current decision.",
 			"Answer input_required on the exact jobId/requestId with respond when Pi can decide; ask the user only for a user-owned choice or direct credential setup.",
-			"After a background job or resumed advisor returns a nonterminal state, end an autonomous Leader run. Runtime delivers the next blocking or terminal event. A genuine user request may inspect one or more relevant jobs directly, but must not turn that exception into a wait loop.",
+			"Runtime delivers blocking and terminal events. The user may inspect with /watch and message an Actor directly; do not interpose or duplicate that instruction unless coordination actually requires it.",
 		],
 		parameters: ParamsSchema,
 		executionMode: "sequential",
 		renderCall(args, theme) {
-			const mode = args.mode ?? "executor";
-			const target = args.jobId ? shortJobId(args.jobId) : args.mission ?? mode;
+			const role = args.role ?? "executor";
+			const backend = args.backend ?? configuredRunner(role).backend;
+			const target = args.jobId ? shortJobId(args.jobId) : args.mission ?? role;
 			const task = args.task ?? args.followUp ?? args.message ?? "";
 			const preview = task ? codexResultPreview({ summary: task }, 100) : "";
 			return new Text([
-				`${theme.fg("toolTitle", theme.bold("Codex"))} ${theme.fg("accent", args.action)} ${theme.fg("muted", `· ${target}`)}`,
+				`${theme.fg("toolTitle", theme.bold("Subagent"))} ${theme.fg("accent", args.action)} ${theme.fg("muted", `· ${backend}/${role} · ${target}`)}`,
 				preview ? theme.fg("dim", `  ${preview}`) : "",
 			].filter(Boolean).join("\n"), 0, 0);
 		},
@@ -1136,7 +1244,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			const details = result.details as CodexJobView | { missions?: unknown[] } | undefined;
 			if (!details || !("id" in details)) {
 				const content = result.content.find((item) => item.type === "text");
-				return new Text(content?.type === "text" ? content.text : "Codex returned no result.", 0, 0);
+				return new Text(content?.type === "text" ? content.text : "Subagent returned no result.", 0, 0);
 			}
 
 			const job = details as CodexJobView;
@@ -1152,27 +1260,29 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 						? theme.fg("error", "✗")
 						: theme.fg("accent", "●");
 			container.addChild(new Text(
-				`${icon} ${theme.fg("toolTitle", theme.bold(`Codex ${job.mode}`))} ${theme.fg("accent", shortJobId(job.id))} ${theme.fg(terminal ? "muted" : "warning", `· ${job.status}${outcome ? `/${outcome}` : ""}`)}`,
+				`${icon} ${theme.fg("toolTitle", theme.bold(`${(job as any).backend ?? "codex"} ${(job as any).role ?? job.mode}`))} ${theme.fg("accent", shortJobId(job.id))} ${theme.fg(terminal ? "muted" : "warning", `· ${job.status}${outcome ? `/${outcome}` : ""}`)}`,
 				0,
 				0,
 			));
 			container.addChild(new Text(
-				theme.fg("dim", [job.mission, job.model, job.reasoningEffort].filter(Boolean).join(" · ")),
+				theme.fg("dim", [job.mission, job.model, (job as any).thinking ?? job.reasoningEffort].filter(Boolean).join(" · ")),
 				0,
 				0,
 			));
+			if (job.externalRuns?.length) container.addChild(new Text(externalRunSummary(job), 0, 0));
+			if (job.heldResources?.length) container.addChild(new Text(theme.fg("warning", `Held resources: ${job.heldResources.join(", ")}`), 0, 0));
 
 			if (job.result) {
 				container.addChild(new Spacer(1));
 				if (expanded) {
 					container.addChild(new Markdown(codexResultMarkdown(job.result), 0, 0, getMarkdownTheme()));
 					container.addChild(new Spacer(1));
-					container.addChild(new Text(theme.fg("dim", "Ctrl+O collapses · /watch for objective execution events"), 0, 0));
+					container.addChild(new Text(theme.fg("dim", "Ctrl+O collapses · /watch for objective subagent events"), 0, 0));
 				} else {
 					container.addChild(new Text(codexResultPreview(job.result), 0, 0));
 					const counts = codexResultCounts(job.result);
 					if (counts) container.addChild(new Text(theme.fg("muted", counts), 0, 0));
-					container.addChild(new Text(theme.fg("dim", "Ctrl+O expands the structured Codex response"), 0, 0));
+					container.addChild(new Text(theme.fg("dim", "Ctrl+O expands the subagent response"), 0, 0));
 				}
 				return container;
 			}
@@ -1185,103 +1295,81 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 						? job.pendingRequest.question
 						: jobActivityText(job);
 			container.addChild(new Text(theme.fg(job.status === "failed" ? "error" : "muted", String(message ?? "waiting")), 0, 0));
-			if (isPartial) container.addChild(new Text(theme.fg("dim", "Codex is still running..."), 0, 0));
+			if (isPartial) container.addChild(new Text(theme.fg("dim", "Subagent is still running..."), 0, 0));
 			return container;
 		},
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
-			const requestedMode = params.mode;
-			const startMode = requestedMode ?? "executor";
-			const mutatesCodex = !["status", "result", "missions"].includes(params.action);
-			const owner = await leaderScope(ctx, { requireAttached: mutatesCodex });
+			const startRole = (params.role ?? "executor") as typeof SUBAGENT_ROLES[number];
+			const backend = inferBackend(params.jobId, params.backend, startRole);
+			const configured = resolveSubagentRunnerDefaults(startRole, backend);
+			const mutatesSubagent = !["status", "result", "missions", "messages"].includes(params.action);
+			const owner = await leaderScope(ctx, { requireAttached: mutatesSubagent });
 			const projectOwnerCheck = projectJobManagementScope(ctx, owner);
 			let ownerCheck = projectOwnerCheck;
-			let effectiveBackground = params.background ?? (startMode === "executor");
+			let effectiveBackground = params.background ?? (["executor", "environment"].includes(startRole));
 			let job;
 			let commandReceipt: string | undefined;
+			const dispatchTask = async () => dispatchRuntimeSubagent({
+				...params, runtime: owner.runtime, backend, cwd: ctx.cwd, ctx, defaults: configured,
+				role: params.action === "start" ? startRole : params.role,
+				task: params.action === "start" ? requireText(params.task, "task") : undefined,
+				followUp: params.action === "resume" ? requireText(params.followUp, "followUp") : undefined,
+				jobId: params.action === "resume" ? requireText(params.jobId, "jobId") : undefined,
+				reuse: owner.inheritancePolicy === "clean" ? "never" : params.reuse,
+				projectKey: owner.projectKey, workspaceKey: owner.runtime.workspaceKey,
+				projectRevision: owner.projectRevision, researchTrackRef: owner.researchTrackRef, researchTrackLabel: owner.researchTrackLabel,
+				leaderSessionId: owner.leaderSessionId, leaderActorId: owner.leaderActorId, leaderBranchAnchorId: owner.leaderBranchAnchorId,
+				background: params.action === "start" ? effectiveBackground : params.background,
+			});
 			if (ctx.hasUI && (params.action === "start" || params.action === "resume")) {
-				ctx.ui.setWorkingMessage(params.action === "start" ? "Starting Codex delegation..." : "Resuming Codex delegation...");
-				ctx.ui.setStatus("codex_delegate", `⚙ Codex ${startMode} · ${params.action === "start" ? "starting" : "resuming"}`);
+				ctx.ui.setWorkingMessage(params.action === "start" ? `Starting ${backend} subagent...` : `Resuming ${backend} subagent...`);
+				ctx.ui.setStatus("subagent", `⚙ ${backend}/${startRole} · ${params.action === "start" ? "starting" : "resuming"}`);
 			}
 
 			try {
-				switch (params.action) {
-					case "start": {
-						const task = requireText(params.task, "task");
-						const requestedReuse = params.reuse ?? (params.mission ? "auto" : "never");
-						const reuse = owner.inheritancePolicy === "clean" && requestedReuse === "auto" ? "never" : requestedReuse;
-						const actorId = params.mission ? codexActorId({ mission: params.mission, mode: startMode }) : undefined;
-						const common = {
-							cwd: ctx.cwd,
-							mode: startMode,
-							successCriteria: params.successCriteria ?? [],
-							context: params.context ?? "",
-							mission: params.mission,
-							model: params.model,
-							reasoningEffort: params.reasoningEffort,
-							timeoutMinutes: params.timeoutMinutes ?? null,
-							leaderSessionId: owner.leaderSessionId,
-							leaderActorId: owner.leaderActorId,
-							leaderBranchAnchorId: owner.leaderBranchAnchorId,
-							actorId,
-							projectRevision: owner.projectRevision,
-							researchTrackRef: owner.researchTrackRef,
-							researchTrackLabel: owner.researchTrackLabel,
-							background: effectiveBackground,
-						};
-						const reusable = reuse === "auto"
-							? await findReusableCodexJob({
-								cwd: ctx.cwd,
-								mission: params.mission,
-								mode: startMode,
-								projectKey: owner.projectKey,
-								leaderActorId: owner.leaderActorId,
-								actorId,
-								researchTrackRef: owner.researchTrackRef,
-							})
-							: null;
-						if (reusable && !TERMINAL_JOB_STATUSES.has(reusable.status)) {
-							job = reusable;
-							commandReceipt = `Codex mission "${reusable.mission}" already has active job ${reusable.id}; attached to it instead of starting a duplicate.`;
-						} else if (reusable?.threadId) {
-							job = await withCurrentLeader(owner, () => resumeCodexJob(reusable.id, {
-								...common,
-								...ownerCheck,
-								followUp: task,
-							}));
-							commandReceipt = job.threadRefresh
-								? `Refreshed legacy Codex thread for mission "${reusable.mission}" as ${job.id}; the same Actor now has the current Research Pi tools.`
-								: `Resumed Codex mission "${reusable.mission}" from job ${reusable.id} as ${job.id}.`;
-						} else {
-							job = await withCurrentLeader(owner, () => startCodexJob({ ...common, task }));
-						}
-						break;
-					}
-					case "resume": {
+				if (backend !== "codex") {
+					const adapter = getSubagentRuntimeAdapter(backend);
+					if (!adapter) throw new Error(`${backend} subagent adapter is not loaded`);
+					if (params.action === "start" || params.action === "resume") {
+						const dispatched = await dispatchTask();
+						job = dispatched.job;
+						commandReceipt = dispatched.receipt;
+						if (!effectiveBackground) job = await adapter.wait({ jobId: job.id, signal });
+					} else if (params.action === "status" || params.action === "result") {
+						job = await adapter[params.action]({ jobId: requireText(params.jobId, "jobId") });
+					} else if (params.action === "cancel") {
+						job = await adapter.cancel({ jobId: requireText(params.jobId, "jobId") });
+					} else if (params.action === "steer") {
 						const jobId = requireText(params.jobId, "jobId");
-						ownerCheck = await jobManagementScope(ctx, jobId);
-						job = await withCurrentLeader(owner, () => resumeCodexJob(jobId, {
-							followUp: requireText(params.followUp, "followUp"),
-							mode: params.mode,
-							model: params.model,
-							reasoningEffort: params.reasoningEffort,
-							successCriteria: params.successCriteria ?? [],
-							context: params.context ?? "",
-							mission: params.mission,
-							timeoutMinutes: params.timeoutMinutes ?? null,
-							leaderSessionId: owner.leaderSessionId,
-							leaderActorId: owner.leaderActorId,
-							leaderBranchAnchorId: owner.leaderBranchAnchorId,
-							projectRevision: owner.projectRevision,
-							researchTrackRef: owner.researchTrackRef,
-							researchTrackLabel: owner.researchTrackLabel,
-							background: params.background,
-							...ownerCheck,
-						}));
-						if (job.threadRefresh) {
-							commandReceipt = `Refreshed legacy Codex thread from job ${jobId} as ${job.id}; the same mission Actor now has the current Research Pi tools.`;
-						}
-						ownerCheck = projectOwnerCheck;
+						job = await adapter.status({ jobId });
+						const message = await queueSubagentMessage(owner.runtime, { actorId: job.actorId, jobId,
+							from: RESEARCH_LEADER_ACTOR_ID, type: "steer", body: requireText(params.message, "message") });
+						const receipt = await deliverSubagentMessage(owner.runtime, message, ctx);
+						job = await adapter.status({ jobId });
+						commandReceipt = receipt.detail;
+					} else {
+						throw new Error(`${params.action} is specific to the Codex backend; ${backend} supports start, status, result, resume, steer, and cancel`);
+					}
+					return {
+						content: [{
+							type: "text",
+							text: [
+								commandReceipt,
+								params.action === "result" && params.resultSection
+									? subagentResultSection(job, params.resultSection)
+									: formatSubagentSessionJob(job),
+							].filter(Boolean).join("\n"),
+						}],
+						details: job,
+					};
+				}
+				switch (params.action) {
+					case "start":
+					case "resume": {
+						const dispatched = await dispatchTask();
+						job = dispatched.job;
+						commandReceipt = dispatched.receipt;
 						effectiveBackground = params.background ?? job.autoNotify ?? (job.mode === "executor");
 						break;
 					}
@@ -1289,26 +1377,27 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 						const jobId = requireText(params.jobId, "jobId");
 						const requestId = requireText(params.requestId, "requestId");
 						ownerCheck = await jobManagementScope(ctx, jobId);
-						const queued = await withCurrentLeader(owner, () => respondToCodexJob(jobId, {
-							requestId,
-							response: params.response,
-							answers: params.answers,
-							...ownerCheck,
-						}));
-						job = queued.job;
-						await consumeCodexRequestMessages(owner.runtime, requestId, ctx, owner.attachmentEpoch);
-						commandReceipt = `Response queued for Codex request ${requestId} in job ${job.id}.`;
+						job = await readCodexJob(jobId, ownerCheck);
+						if (job.pendingRequest?.id !== requestId) throw new Error("The Codex question is no longer pending; inspect the job before replying");
+						const actorId = await registerCodexRuntimeJob(owner.runtime, publicJobView(job));
+						const message = await queueSubagentMessage(owner.runtime, { actorId, jobId, requestId,
+							from: RESEARCH_LEADER_ACTOR_ID, type: "reply", answers: params.answers,
+							body: requireText(params.response ?? (params.answers ? JSON.stringify(params.answers) : null), "response or answers") });
+						const receipt = await deliverSubagentMessage(owner.runtime, message, ctx);
+						job = await readCodexJob(jobId, ownerCheck);
+						commandReceipt = receipt.detail;
 						break;
 					}
 					case "steer": {
 						const jobId = requireText(params.jobId, "jobId");
 						ownerCheck = await jobManagementScope(ctx, jobId);
-						const queued = await withCurrentLeader(owner, () => steerCodexJob(jobId, {
-							message: requireText(params.message, "message"),
-							...ownerCheck,
-						}));
-						job = queued.job;
-						commandReceipt = `Steering message queued for active Codex job ${job.id}.`;
+						job = await readCodexJob(jobId, ownerCheck);
+						const actorId = await registerCodexRuntimeJob(owner.runtime, publicJobView(job));
+						const message = await queueSubagentMessage(owner.runtime, { actorId, jobId,
+							from: RESEARCH_LEADER_ACTOR_ID, type: "steer", body: requireText(params.message, "message") });
+						const receipt = await deliverSubagentMessage(owner.runtime, message, ctx);
+						job = await readCodexJob(jobId, ownerCheck);
+						commandReceipt = receipt.detail;
 						break;
 					}
 					case "status":
@@ -1321,7 +1410,6 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 							await acknowledgeDirectCodexTerminalResult({
 								runtime: owner.runtime,
 								job: terminalView,
-								content: eventContent(terminalView),
 								sessionId: owner.leaderSessionId,
 								attachmentEpoch: owner.attachmentEpoch,
 							});
@@ -1347,6 +1435,29 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 						commandReceipt = `Reconciled Codex job ${job.id} as ${job.status}.`;
 						break;
 					}
+					case "messages": {
+						const jobId = requireText(params.jobId, "jobId");
+						ownerCheck = await jobManagementScope(ctx, jobId);
+						const messages = await readCodexPeerMessages(jobId, ownerCheck);
+						return { content: [{ type: "text", text: formatCodexPeerMessages(jobId, messages) }], details: { messages } };
+					}
+					case "settle_run": {
+						const jobId = requireText(params.jobId, "jobId");
+						ownerCheck = await jobManagementScope(ctx, jobId);
+						await readCodexJob(jobId, ownerCheck);
+						const run = await withCurrentLeader(owner, () => settleCodexExternalRun(DEFAULT_CODEX_JOB_ROOT, jobId, requireText(params.runId, "runId"), {
+							status: params.outcome, note: requireText(params.note, "note"),
+						}));
+						await registerCodexRuntimeJob(owner.runtime, publicJobView(await readCodexJob(jobId, ownerCheck)));
+						return { content: [{ type: "text", text: `External run ${run.id} recorded as ${run.status}; no process was stopped and no scientific validity judgment was inferred.` }], details: { run } };
+					}
+					case "release_resources": {
+						const jobId = requireText(params.jobId, "jobId");
+						ownerCheck = await jobManagementScope(ctx, jobId);
+						await readCodexJob(jobId, ownerCheck);
+						await withCurrentLeader(owner, () => releaseCodexResources(DEFAULT_CODEX_JOB_ROOT, jobId, { note: requireText(params.note, "note") }));
+						return { content: [{ type: "text", text: `Released settled job ${jobId}'s resources based on the supplied inspection evidence; no process was stopped.` }], details: {} };
+					}
 					case "missions": {
 						const missions = await listOwnedCodexMissions(ctx);
 						return {
@@ -1366,6 +1477,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 						signal,
 						...ownerCheck,
 						returnOnInputRequired: (current) => current.pendingRequest?.kind !== "host_capability" || !ctx.hasUI,
+						onObserved: (current) => rememberJob(publicJobView(current), ctx),
 						onUpdate: (current) => {
 							const currentView = publicJobView(current);
 							rememberJob(currentView, ctx);
@@ -1395,15 +1507,18 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 				return {
 					content: [{
 						type: "text",
-						text: commandReceipt && TERMINAL_JOB_STATUSES.has(view.status)
-							? `${commandReceipt}\n${formatCodexJob(view)}`
-							: commandReceipt ?? formatCodexJob(view),
+						text: [
+							commandReceipt,
+							params.action === "result" && params.resultSection
+								? subagentResultSection(view, params.resultSection)
+								: formatCodexJob(view),
+						].filter(Boolean).join("\n"),
 					}],
 					details: view,
 				};
 			} catch (error) {
 				if (ctx.hasUI) {
-					ctx.ui.setStatus("codex_delegate", `✗ Codex ${startMode} · call failed`);
+					ctx.ui.setStatus("subagent", `✗ ${backend}/${startRole} · call failed`);
 				}
 				throw error;
 			} finally {

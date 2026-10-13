@@ -1,10 +1,9 @@
 import { randomUUID } from "node:crypto";
-import type { ExtensionAPI, SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
+	buildSessionProjection,
 	convertToLlm,
-	findCutPoint,
 	serializeConversation,
-	sessionEntryToContextMessages,
 } from "@earendil-works/pi-coding-agent";
 import {
 	buildResearchCompactionDetails,
@@ -24,6 +23,12 @@ import {
 	selectResearchCompactionPolicy,
 } from "../lib/research-compact.mjs";
 import { readRuntimeSnapshot, resolveResearchRuntime, runtimeSessionInheritancePolicy } from "../lib/research-runtime.mjs";
+import { defaultResearchPiConfig, readResearchPiConfig } from "../lib/research-config.mjs";
+import { resolveResearchPiPaths } from "../lib/runtime-paths.mjs";
+
+import { reserveRuntimeCompaction } from "../lib/runtime-compaction-gate.mjs";
+
+const defaultCompaction = { ...defaultResearchPiConfig().research.compaction, softTokens: RESEARCH_SOFT_COMPACT_TOKENS, hardTokens: RESEARCH_HARD_COMPACT_TOKENS };
 
 function fileLists(fileOps: { read: Set<string>; written: Set<string>; edited: Set<string> }) {
 	const modified = new Set([...fileOps.written, ...fileOps.edited]);
@@ -33,91 +38,64 @@ function fileLists(fileOps: { read: Set<string>; written: Set<string>; edited: S
 	};
 }
 
-function prepareWithDynamicTail(event: SessionBeforeCompactEvent, keepRecentTokens: number) {
-	const { branchEntries, preparation } = event;
-	let previousCompactionIndex = -1;
-	for (let index = branchEntries.length - 1; index >= 0; index -= 1) {
-		if (branchEntries[index].type === "compaction") {
-			previousCompactionIndex = index;
-			break;
-		}
-	}
 
-	let boundaryStart = 0;
-	if (previousCompactionIndex >= 0) {
-		const previousCompaction = branchEntries[previousCompactionIndex];
-		if (previousCompaction.type === "compaction") {
-			const firstKeptIndex = branchEntries.findIndex((entry) => entry.id === previousCompaction.firstKeptEntryId);
-			boundaryStart = firstKeptIndex >= 0 ? firstKeptIndex : previousCompactionIndex + 1;
-		}
-	}
-
-	const cutPoint = findCutPoint(branchEntries, boundaryStart, branchEntries.length, keepRecentTokens);
-	const firstKeptEntry = branchEntries[cutPoint.firstKeptEntryIndex];
-	if (!firstKeptEntry?.id) return preparation;
-
-	const historyEnd = cutPoint.isSplitTurn ? cutPoint.turnStartIndex : cutPoint.firstKeptEntryIndex;
-	const messagesToSummarize = [];
-	for (let index = boundaryStart; index < historyEnd; index += 1) {
-		const entry = branchEntries[index];
-		if (entry.type === "compaction") continue;
-		const message = sessionEntryToContextMessages(entry)[0];
-		if (message) messagesToSummarize.push(message);
-	}
-
-	const turnPrefixMessages = [];
-	if (cutPoint.isSplitTurn) {
-		for (let index = cutPoint.turnStartIndex; index < cutPoint.firstKeptEntryIndex; index += 1) {
-			const entry = branchEntries[index];
-			if (entry.type === "compaction") continue;
-			const message = sessionEntryToContextMessages(entry)[0];
-			if (message) turnPrefixMessages.push(message);
-		}
-	}
-
-	if (!messagesToSummarize.length && !turnPrefixMessages.length) return preparation;
-	return {
-		...preparation,
-		firstKeptEntryId: firstKeptEntry.id,
-		messagesToSummarize,
-		turnPrefixMessages,
-		isSplitTurn: cutPoint.isSplitTurn,
-		settings: { ...preparation.settings, keepRecentTokens },
-	};
-}
-
-export function researchCompactionThresholds(model?: { contextWindow?: number } | null) {
+export function researchCompactionThresholds(model?: { contextWindow?: number; id?: string; provider?: string } | null, config = defaultCompaction) {
+	const override = ["openai", "openai-codex"].includes(model?.provider ?? "") && config.modelOverrides?.[model?.id ?? ""];
+	const soft = override?.softTokens ?? config.softTokens;
+	const hard = override?.hardTokens ?? config.hardTokens;
 	const contextWindow = Number(model?.contextWindow);
 	if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
-		return { softTokens: RESEARCH_SOFT_COMPACT_TOKENS, hardTokens: RESEARCH_HARD_COMPACT_TOKENS };
+		return { softTokens: soft, hardTokens: hard };
 	}
 	const reserved = Math.max(32 * 1024, Math.floor(contextWindow * 0.1));
 	const modelSafeHard = Math.max(64 * 1024, contextWindow - reserved);
-	const hardTokens = Math.min(RESEARCH_HARD_COMPACT_TOKENS, modelSafeHard);
-	const softTokens = Math.min(RESEARCH_SOFT_COMPACT_TOKENS, Math.floor(hardTokens * 0.75));
+	const hardTokens = Math.min(hard, modelSafeHard);
+	// Scale the configured ratio only for smaller models. A fixed 75% cap would
+	// silently turn the requested 360k/384k thresholds into 288k/384k.
+	const softTokens = Math.min(soft, Math.floor(hardTokens * soft / hard));
 	return { softTokens, hardTokens };
 }
 
 export default function (pi: ExtensionAPI) {
+	const compactConfig = process.env.RESEARCH_PI_HARNESS_ROOT
+		? readResearchPiConfig(resolveResearchPiPaths({ harnessRoot: process.env.RESEARCH_PI_HARNESS_ROOT }).configPath).research.compaction
+		: defaultCompaction;
 	let compactionRunning = false;
+	let releaseCompaction: (() => void) | undefined;
+	let compactTimer: ReturnType<typeof setTimeout> | undefined;
 	let scheduledCompaction: { trigger: "soft" | "hard"; tokens: number } | undefined;
 
 	pi.on("session_start", () => {
+		if (compactTimer) clearTimeout(compactTimer);
+		compactTimer = undefined;
+		releaseCompaction?.();
+		releaseCompaction = undefined;
 		compactionRunning = false;
 		scheduledCompaction = undefined;
 	});
 
 	pi.on("session_compact", () => {
+		// Native Pi emits this before it clears its compaction state.
+		// Release the automatic reservation only from onComplete/onError.
+		scheduledCompaction = undefined;
+	});
+
+	pi.on("session_shutdown", () => {
+		if (compactTimer) clearTimeout(compactTimer);
+		compactTimer = undefined;
+		releaseCompaction?.();
+		releaseCompaction = undefined;
 		compactionRunning = false;
 		scheduledCompaction = undefined;
 	});
 
 	pi.on("turn_end", (_event, ctx) => {
 		const usage = ctx.getContextUsage();
-		const thresholds = researchCompactionThresholds(ctx.model);
-		if (!usage || usage.tokens < thresholds.softTokens || compactionRunning || scheduledCompaction) return;
+		const thresholds = researchCompactionThresholds(ctx.model, compactConfig);
+		if (!usage || usage.tokens === null || usage.tokens < thresholds.softTokens || compactionRunning) return;
 
 		const trigger = usage.tokens >= thresholds.hardTokens ? "hard" : "soft";
+		if (scheduledCompaction && (scheduledCompaction.trigger === "hard" || trigger === "soft")) return;
 		scheduledCompaction = { trigger, tokens: usage.tokens };
 		if (ctx.hasUI) {
 			ctx.ui.notify(
@@ -130,18 +108,35 @@ export default function (pi: ExtensionAPI) {
 	pi.on("agent_settled", (_event, ctx) => {
 		const scheduled = scheduledCompaction;
 		if (!scheduled || compactionRunning) return;
-		scheduledCompaction = undefined;
 		compactionRunning = true;
-		ctx.compact({
-			customInstructions: `Automatic research ${scheduled.trigger} compaction at ${scheduled.tokens} context tokens.`,
-			onComplete: () => {
-				compactionRunning = false;
-			},
-			onError: (error) => {
-				compactionRunning = false;
-				if (ctx.hasUI) ctx.ui.notify(`Research compaction failed: ${error.message}`, "warning");
-			},
-		});
+		releaseCompaction = reserveRuntimeCompaction(ctx);
+		// Leave agent_settled before invoking the native manual interface. Other
+		// extensions may already have queued a continuation at this boundary.
+		compactTimer = setTimeout(() => {
+			compactTimer = undefined;
+			const release = releaseCompaction;
+			const finish = () => {
+				release?.();
+				if (releaseCompaction === release) {
+					releaseCompaction = undefined;
+					compactionRunning = false;
+				}
+			};
+			if (!ctx.isIdle() || ctx.hasPendingMessages()) {
+				// Keep the request for the next settle; never abort a new run.
+				finish();
+				return;
+			}
+			scheduledCompaction = undefined;
+			ctx.compact({
+				customInstructions: `Automatic research ${scheduled.trigger} compaction at ${scheduled.tokens} context tokens.`,
+				onComplete: finish,
+				onError: (error) => {
+					finish();
+					if (ctx.hasUI) ctx.ui.notify(`Research compaction failed: ${error.message}`, "warning");
+				},
+			});
+		}, 0);
 	});
 
 	pi.on("session_before_compact", async (event, ctx) => {
@@ -151,47 +146,59 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const { branchEntries, customInstructions, reason, signal } = event;
-		const runtimeSnapshot = await readRuntimeSnapshot(await resolveResearchRuntime(ctx.cwd));
-		const inheritancePolicy = runtimeSessionInheritancePolicy(branchEntries, runtimeSnapshot, ctx.sessionManager.getSessionId());
-		const projectRevision = runtimeSnapshot.revision;
-		const policy = selectResearchCompactionPolicy(branchEntries);
-		const preparation = prepareWithDynamicTail(event, policy.keepRecentTokens);
-		const sessionId = ctx.sessionManager.getSessionId();
-		const sessionEvidence = collectResearchEvidence(branchEntries, sessionId, preparation.firstKeptEntryId, { inheritancePolicy });
-		const evidence = inheritancePolicy === "clean"
-			? sessionEvidence
-			: mergeProjectRuntimeEvidence(sessionEvidence, runtimeSnapshot);
-		const latestResearchCompaction = [...branchEntries].reverse().find((entry) =>
-			entry.type === "compaction"
-			&& entry.details?.kind === RESEARCH_COMPACTION_KIND
-			&& entry.details?.version === RESEARCH_COMPACTION_VERSION,
-		);
-		const independentSessionSummary = inheritancePolicy === "project"
-			&& latestResearchCompaction?.type === "compaction"
-			&& ["clean", "analysis"].includes(latestResearchCompaction.details?.inheritancePolicy)
-				? preparation.previousSummary
-				: undefined;
-		const conversationText = serializeConversation(
-			convertToLlm([...preparation.messagesToSummarize, ...preparation.turnPrefixMessages]),
-		);
-		const prompt = buildResearchCompactionPrompt({
-			conversationText,
-			previousState: evidence.previousState,
-			legacyPreviousSummary: evidence.previousState ? undefined : preparation.previousSummary,
-			independentSessionSummary,
-			experiments: evidence.experiments,
-			checkpoints: evidence.checkpoints,
-			sourceCatalog: evidence.sourceCatalog,
-			projectTransitions: inheritancePolicy === "clean" ? [] : runtimeSnapshot.transitions?.slice(-4) ?? [],
-			customInstructions,
-		});
-
-		ctx.ui.notify(
-			`Research compaction #${policy.ordinal}${inheritancePolicy === "clean" ? " (clean Session, no Project inheritance)" : inheritancePolicy === "analysis" ? " (Analysis Session, Project read-only)" : ""}: ${preparation.tokensBefore.toLocaleString()} tokens, keeping ~${policy.keepRecentTokens.toLocaleString()} recent tokens, ${evidence.experiments.length} experiment record(s).`,
-			"info",
-		);
-
 		try {
+			const runtimeSnapshot = await readRuntimeSnapshot(await resolveResearchRuntime(ctx.cwd));
+			const inheritancePolicy = runtimeSessionInheritancePolicy(branchEntries, runtimeSnapshot, ctx.sessionManager.getSessionId());
+			const projectRevision = runtimeSnapshot.revision;
+			// Pi 1.0 prepares the canonical projection, including context edits,
+			// prior compaction boundaries, and nested tool file operations. Re-slicing
+			// raw entries here would reintroduce omitted/replaced messages.
+			const preparation = event.preparation;
+			const policy = selectResearchCompactionPolicy(branchEntries, preparation.settings.keepRecentTokens);
+			const thresholds = researchCompactionThresholds(ctx.model, compactConfig);
+			policy.softTriggerTokens = thresholds.softTokens;
+			policy.hardTriggerTokens = thresholds.hardTokens;
+			const sessionId = ctx.sessionManager.getSessionId();
+			const sessionEvidence = collectResearchEvidence(branchEntries, sessionId, preparation.firstKeptEntryId, {
+				inheritancePolicy,
+				projectedEntries: buildSessionProjection(branchEntries).entries,
+			});
+			const evidence = inheritancePolicy === "clean"
+				? sessionEvidence
+				: mergeProjectRuntimeEvidence(sessionEvidence, runtimeSnapshot);
+			const latestResearchCompaction = [...branchEntries].reverse().find((entry) =>
+				entry.type === "compaction"
+				&& entry.details?.kind === RESEARCH_COMPACTION_KIND
+				&& entry.details?.version === RESEARCH_COMPACTION_VERSION,
+			);
+			const independentSessionSummary = inheritancePolicy === "project"
+				&& latestResearchCompaction?.type === "compaction"
+				&& ["clean", "analysis"].includes(latestResearchCompaction.details?.inheritancePolicy)
+					? preparation.previousSummary
+					: undefined;
+			const conversationText = serializeConversation(
+				convertToLlm([...preparation.messagesToSummarize, ...preparation.turnPrefixMessages]),
+			);
+			const selectedTransitions = inheritancePolicy === "clean" ? [] : runtimeSnapshot.transitions?.slice(-4) ?? [];
+			const prompt = buildResearchCompactionPrompt({
+				conversationText,
+				previousState: evidence.previousState,
+				legacyPreviousSummary: evidence.previousState ? undefined : preparation.previousSummary,
+				independentSessionSummary,
+				experiments: evidence.experiments,
+				checkpoints: evidence.checkpoints,
+				sourceCatalog: evidence.sourceCatalog,
+				sourceCatalogCount: evidence.sourceCatalogCount,
+				projectTransitions: selectedTransitions,
+				projectTransitionCount: inheritancePolicy === "clean" ? 0 : runtimeSnapshot.transitions?.length ?? 0,
+				customInstructions,
+			});
+
+			ctx.ui.notify(
+				`Research compaction #${policy.ordinal}${inheritancePolicy === "clean" ? " (clean Session, no Project inheritance)" : inheritancePolicy === "analysis" ? " (Analysis Session, Project read-only)" : ""}: ${preparation.tokensBefore.toLocaleString()} tokens, keeping ~${policy.keepRecentTokens.toLocaleString()} recent tokens, ${evidence.experiments.length} experiment record(s).`,
+				"info",
+			);
+
 			const requestState = async (requestPrompt: string) => await ctx.modelRegistry.complete(
 				ctx.model,
 					{
@@ -276,7 +283,7 @@ export default function (pi: ExtensionAPI) {
 		} catch (error) {
 			if (!signal.aborted) {
 				ctx.ui.notify(
-					`Research compaction failed validation; falling back to Pi compaction: ${error instanceof Error ? error.message : String(error)}`,
+					`Research compaction failed; falling back to Pi compaction: ${error instanceof Error ? error.message : String(error)}`,
 					"warning",
 				);
 			}

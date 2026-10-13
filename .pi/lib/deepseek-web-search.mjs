@@ -1,10 +1,8 @@
-const MAX_ANSWER_CHARS = 16_000;
 const configuredMaxSources = Number(process.env.RESEARCH_PI_SEARCH_MAX_SOURCES);
 const MAX_SOURCES = Number.isInteger(configuredMaxSources) && configuredMaxSources > 0 ? configuredMaxSources : 12;
 
-function bounded(value, maxChars) {
-	const text = String(value ?? "").trim();
-	return text.length <= maxChars ? text : `${text.slice(0, maxChars).trimEnd()}…`;
+function clean(value) {
+	return String(value ?? "").trim();
 }
 
 export function parseDeepSeekWebSearchResponse(message) {
@@ -28,7 +26,7 @@ export function parseDeepSeekWebSearchResponse(message) {
 				if (result?.type !== "web_search_result" || typeof result.url !== "string") continue;
 				if (!sourceMap.has(result.url)) {
 					sourceMap.set(result.url, {
-						title: bounded(result.title || result.url, 300),
+						title: clean(result.title || result.url),
 						url: result.url,
 						pageAge: result.page_age || null,
 					});
@@ -40,9 +38,12 @@ export function parseDeepSeekWebSearchResponse(message) {
 	}
 
 	const usage = message?.usage ?? {};
+	const allSources = [...sourceMap.values()];
 	return {
-		answer: bounded(answers.join("\n").trim(), MAX_ANSWER_CHARS),
-		sources: [...sourceMap.values()].slice(0, MAX_SOURCES),
+		answer: clean(answers.join("\n")),
+		sources: allSources.slice(0, MAX_SOURCES),
+		sourceCount: allSources.length,
+		omittedSources: allSources.slice(MAX_SOURCES),
 		errors,
 		searches,
 		stopReason: message?.stop_reason ?? null,
@@ -61,8 +62,9 @@ export function formatDeepSeekWebSearchResult(result) {
 	const sections = [];
 	sections.push(result.answer || "DeepSeek returned no synthesized answer.");
 	if (result.sources.length) {
+		const sourceCount = Number.isInteger(result.sourceCount) ? result.sourceCount : result.sources.length;
 		sections.push(
-			`Sources returned by DeepSeek:\n${result.sources
+			`Sources returned by DeepSeek${result.sources.length < sourceCount ? ` (showing ${result.sources.length} of ${sourceCount}; remaining source records are in tool details)` : ""}:\n${result.sources
 				.map((source, index) => `[${index + 1}] ${source.title}\n${source.url}${source.pageAge ? ` · ${source.pageAge}` : ""}`)
 				.join("\n\n")}`,
 		);

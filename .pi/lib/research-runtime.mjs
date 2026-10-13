@@ -6,6 +6,7 @@ import { resolveCodexWorkspaceIdentity } from "./codex-jobs.mjs";
 import { withOwnerFileLock } from "./owner-file-lock.mjs";
 import { applyResearchStatePatch } from "./research-compact.mjs";
 import { researchPiStateRoot } from "./runtime-paths.mjs";
+import { runtimeDirectedMessageCard, subagentModelCard } from "./subagent-message.mjs";
 
 const LIB_DIR = dirname(fileURLToPath(import.meta.url));
 const HARNESS_ROOT = resolve(LIB_DIR, "../..");
@@ -129,17 +130,32 @@ async function repairRuntimeLedgerTail(runtime) {
 	}
 }
 
-export function codexActorId({ missionKey, mission, jobId, mode } = {}) {
-	const modeSuffix = mode ? `:${String(mode).toLowerCase()}` : "";
-	if (missionKey) return validateActorId(`codex:${String(missionKey).toLowerCase()}${modeSuffix}`);
+export function subagentActorId({ backend, missionKey, mission, jobId, role, mode } = {}) {
+	const normalizedBackend = String(backend ?? "").trim().toLowerCase();
+	if (!normalizedBackend) throw new Error("A subagent backend is required to derive an Actor id");
+	const roleSuffix = role ?? mode ? `:${String(role ?? mode).toLowerCase()}` : "";
+	if (missionKey) return validateActorId(`${normalizedBackend}:${String(missionKey).toLowerCase()}${roleSuffix}`);
 	const normalizedMission = String(mission ?? "").normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase();
-	if (normalizedMission) return `codex:mission-${shortHash(normalizedMission)}${modeSuffix}`;
-	if (jobId) return validateActorId(`codex:${String(jobId).toLowerCase()}`);
-	throw new Error("A Codex mission, mission key, or job id is required to derive an Actor id");
+	if (normalizedMission) return `${normalizedBackend}:mission-${shortHash(normalizedMission)}${roleSuffix}`;
+	if (jobId) return validateActorId(`${normalizedBackend}:${String(jobId).toLowerCase()}`);
+	throw new Error("A subagent mission, mission key, or job id is required to derive an Actor id");
+}
+
+export function codexActorId(input = {}) {
+	return subagentActorId({ ...input, backend: "codex", role: input.role ?? input.mode });
+}
+
+export function runtimeActorBackend(actor) {
+	if (actor?.backend) return String(actor.backend).toLowerCase();
+	if (actor?.metadata?.backend) return String(actor.metadata.backend).toLowerCase();
+	if (actor?.provider && actor.kind === "subagent") return String(actor.provider).toLowerCase();
+	if (actor?.kind === "codex") return "codex";
+	return null;
 }
 
 export function runtimeActorTarget(actor) {
-	if (actor?.kind === "codex") return `codex:${shortHash(actor.id, 8)}`;
+	const backend = runtimeActorBackend(actor);
+	if (backend) return `${backend}:${shortHash(actor.id, 8)}`;
 	return String(actor?.id ?? "");
 }
 
@@ -515,8 +531,12 @@ export async function ensureRuntimeActor(runtime, actor) {
 	const next = {
 		id: actor.id,
 		kind: actor.kind ?? "agent",
-		label: String(actor.label ?? actor.id).slice(0, 240),
+		label: boundedRuntimeText(actor.label ?? actor.id, 240),
 		provider: actor.provider ?? null,
+		backend: actor.backend ?? null,
+		role: actor.role ?? null,
+		model: actor.model ?? null,
+		thinking: actor.thinking ?? null,
 		metadata: actor.metadata ?? {},
 	};
 	if (
@@ -524,6 +544,10 @@ export async function ensureRuntimeActor(runtime, actor) {
 		&& current.kind === next.kind
 		&& current.label === next.label
 		&& current.provider === next.provider
+		&& current.backend === next.backend
+		&& current.role === next.role
+		&& current.model === next.model
+		&& current.thinking === next.thinking
 		&& JSON.stringify(current.metadata ?? {}) === JSON.stringify(next.metadata)
 	) return current;
 	await appendRuntimeEvent(runtime, "actor.registered", next, { id: `actor:${actor.id}:${shortHash(JSON.stringify(next), 16)}` });
@@ -675,7 +699,10 @@ export async function settleRuntimeActorActivation(runtime, activationId, detail
 
 function boundedRuntimeText(value, max) {
 	const text = String(value ?? "").replace(/\s+/g, " ").trim();
-	return text.length <= max ? text : `${text.slice(0, max - 3)}...`;
+	if (text.length > max) {
+		throw new Error(`Runtime field is ${text.length} characters. Rewrite the complete field in at most ${max} characters; Research Pi will not cut it.`);
+	}
+	return text;
 }
 
 function boundedRuntimeBlock(value, max) {
@@ -684,7 +711,15 @@ function boundedRuntimeBlock(value, max) {
 		.replace(/[\t ]+/g, " ")
 		.replace(/\n{3,}/g, "\n\n")
 		.trim();
-	return text.length <= max ? text : `${text.slice(0, max - 3)}...`;
+	if (text.length > max) {
+		throw new Error(`Runtime block is ${text.length} characters. Rewrite the complete block in at most ${max} characters; Research Pi will not cut it.`);
+	}
+	return text;
+}
+
+function conciseRuntimeField(value, max) {
+	const text = String(value ?? "").replace(/\s+/g, " ").trim();
+	return text && text.length <= max ? text : null;
 }
 
 export async function recordRuntimeEvidence(runtime, record) {
@@ -1104,7 +1139,7 @@ export async function upsertRuntimeAction(runtime, action) {
 		kind: action.kind ?? "delegation",
 		actorId: action.actorId ?? null,
 		status: action.status ?? "queued",
-		label: action.label ? String(action.label).slice(0, 240) : null,
+		label: action.label ? boundedRuntimeText(action.label, 240) : null,
 		externalId: action.externalId ?? null,
 		metadata: action.metadata ?? {},
 		projectRevision: Number.isInteger(action.projectRevision) ? action.projectRevision : snapshot.revision,
@@ -1127,7 +1162,8 @@ export function resolveRuntimeActor(snapshot, rawTarget) {
 		if (runtimeActorTarget(actor).toLowerCase() === target) return true;
 		if (String(actor.label ?? "").toLowerCase() === target) return true;
 		const jobId = String(actor.metadata?.latestJobId ?? "").toLowerCase();
-		return target.startsWith("codex:") && jobId.endsWith(target.slice("codex:".length));
+		const backend = runtimeActorBackend(actor);
+		return backend && target.startsWith(`${backend}:`) && jobId.endsWith(target.slice(backend.length + 1));
 	});
 	if (matches.length === 1) return matches[0];
 	if (matches.length > 1) throw new Error(`Actor target @${target} is ambiguous; use the full Actor id from /actors`);
@@ -1135,31 +1171,39 @@ export function resolveRuntimeActor(snapshot, rawTarget) {
 }
 
 export function runtimeMessageText(message, actors = []) {
-	const actor = actors.find((candidate) => candidate.id === message.from);
-	const source = actor?.label ?? message.from;
-	return [
-		`[Research Runtime ${message.type} ${message.id} from ${source}]`,
-		message.body,
-		message.payloadRef ? `Payload: ${message.payloadRef}` : undefined,
-	].filter(Boolean).join("\n");
+	return runtimeDirectedMessageCard(message, actors);
 }
 
-export async function registerCodexRuntimeJob(runtime, job) {
+export async function registerSubagentRuntimeJob(runtime, job) {
 	const snapshot = await readRuntimeSnapshot(runtime);
 	const currentTrack = runtimeResearchTrack(snapshot);
 	const trackRef = job.researchTrackRef ?? currentTrack.ref;
 	const trackLabel = job.researchTrackLabel ?? currentTrack.label;
-	const actorId = job.actorId ?? codexActorId(job);
+	const backend = String(job.backend ?? "codex").toLowerCase();
+	const role = String(job.role ?? job.mode ?? "general").toLowerCase();
+	const thinking = job.thinking ?? job.reasoningEffort ?? null;
+	const actorId = job.actorId ?? subagentActorId({ ...job, backend, role });
 	await ensureRuntimeActor(runtime, {
 		id: actorId,
-		kind: "codex",
-		label: job.mission ? `Codex · ${job.mission}` : `Codex · ${String(job.id).slice(-8)}`,
-		provider: "codex",
+		kind: "subagent",
+		label: job.mission ? `${backend} · ${job.mission}` : `${backend} · ${String(job.id).slice(-8)}`,
+		provider: backend,
+		backend,
+		role,
+		model: job.model ?? null,
+		thinking,
 		metadata: {
+			backend,
+			cwd: job.cwd ?? null,
+			workspaceKey: job.workspaceKey ?? null,
+			activityPath: job.activityPath ?? null,
 			mission: job.mission ?? null,
 			missionKey: job.missionKey ?? null,
-			mode: job.mode,
+			role,
+			mode: job.mode ?? role,
 			model: job.model,
+			thinking,
+			backendSessionId: job.backendSessionId ?? job.threadId ?? job.conversationId ?? job.sessionId ?? null,
 			threadId: job.threadId ?? null,
 			latestJobId: job.id,
 			researchTrackRef: trackRef,
@@ -1168,26 +1212,29 @@ export async function registerCodexRuntimeJob(runtime, job) {
 	});
 	await upsertRuntimeAction(runtime, {
 		id: job.actionId ?? `action:${job.id}`,
-		kind: "codex-delegation",
+		kind: "subagent",
 		actorId,
 		status: job.status,
-		label: job.mission ?? `${job.mode} ${String(job.id).slice(-8)}`,
+		label: boundedRuntimeText(job.mission ?? `${role} ${String(job.id).slice(-8)}`, 240),
 		externalId: job.id,
 		metadata: {
+			backend,
+			cwd: job.cwd ?? null,
+			workspaceKey: job.workspaceKey ?? null,
+			activityPath: job.activityPath ?? null,
+			turn: job.turn ?? null,
+			role,
 			threadId: job.threadId ?? null,
-			mode: job.mode,
+			backendSessionId: job.backendSessionId ?? job.threadId ?? job.conversationId ?? job.sessionId ?? null,
+			mode: job.mode ?? role,
 			model: job.model,
+			thinking,
+			progress: conciseRuntimeField(job.progress, 1_000),
 			outcome: job.result?.outcome ?? null,
 			goalSatisfied: job.result?.goal_satisfied ?? null,
-			summary: boundedRuntimeText(job.result?.summary ?? job.result?.working_synthesis, 4000) || null,
-			completionBasis: boundedRuntimeText(job.result?.completion_basis, 2400) || null,
-			changedFiles: Array.isArray(job.result?.changed_files)
-				? job.result.changed_files.map((item) => boundedRuntimeText(item, 600)).filter(Boolean).slice(0, 12)
-				: [],
-			remainingWork: Array.isArray(job.result?.remaining_work)
-				? job.result.remaining_work.map((item) => boundedRuntimeText(item, 700)).filter(Boolean).slice(0, 8)
-				: [],
-			recommendedNextStep: boundedRuntimeText(job.result?.recommended_next_step ?? job.result?.suggested_next_exchange, 1800) || null,
+			externalRuns: (job.externalRuns ?? []).map((run) => ({ id: run.id, status: run.status, target: run.target, externalId: run.externalId, resources: run.resources })),
+			summary: conciseRuntimeField(job.result?.summary ?? job.result?.working_synthesis ?? job.result?.shared_understanding, 1_200),
+			resultRef: `subagent:${job.id}`,
 		},
 		projectRevision: Number.isInteger(job.projectRevision) ? job.projectRevision : snapshot.revision,
 		trackRef,
@@ -1196,24 +1243,54 @@ export async function registerCodexRuntimeJob(runtime, job) {
 	return actorId;
 }
 
-export async function recordCodexRuntimeEvent(runtime, job, content) {
-	const actorId = await registerCodexRuntimeJob(runtime, job);
-	const eventKey = job.status === "input_required" && job.pendingRequest?.id
-		? `request:${job.pendingRequest.id}`
+export async function registerCodexRuntimeJob(runtime, job) {
+	return await registerSubagentRuntimeJob(runtime, {
+		...job,
+		backend: "codex",
+		role: job.role ?? job.mode,
+		thinking: job.thinking ?? job.reasoningEffort,
+	});
+}
+
+export async function recordSubagentRuntimeEvent(runtime, job) {
+	const actorId = await registerSubagentRuntimeJob(runtime, job);
+	const turnSuffix = Number.isInteger(job.turn) ? `:turn-${job.turn}` : "";
+	const eventKey = job.status === "input_required"
+		? `request:${job.pendingRequest?.id ?? `turn-${job.turn ?? "current"}`}`
 		: ["completed", "failed", "cancelled", "outcome_unknown"].includes(job.status)
-			? `terminal:${job.status}`
+			? `terminal:${job.status}${turnSuffix}`
 			: null;
 	if (!eventKey) return null;
-	const messageId = `msg-codex-${shortHash(`${job.id}:${eventKey}`, 24)}`;
+	const backend = String(job.backend ?? "codex").toLowerCase();
+	const messageId = `msg-${backend}-${shortHash(`${job.id}:${eventKey}`, 24)}`;
+	const modelCard = subagentModelCard(job, { messageId });
 	return await createRuntimeMessage(runtime, {
 		id: messageId,
 		type: job.status === "input_required" ? "ask" : "result",
 		from: actorId,
 		to: RESEARCH_LEADER_ACTOR_ID,
-		body: content,
+		body: modelCard,
 		relatesTo: job.pendingRequest?.id ?? job.actionId ?? `action:${job.id}`,
-		metadata: { jobId: job.id, status: job.status, requestId: job.pendingRequest?.id ?? null },
+		metadata: {
+			backend,
+			jobId: job.id,
+			status: job.status,
+			requestId: job.pendingRequest?.id ?? null,
+			requestKind: job.pendingRequest?.kind ?? null,
+			secret: job.pendingRequest?.secret === true,
+			modelCardVersion: 1,
+			resultRef: `subagent:${job.id}`,
+		},
 		projectRevision: job.projectRevision,
 		trackRef: job.researchTrackRef,
+	});
+}
+
+export async function recordCodexRuntimeEvent(runtime, job) {
+	return await recordSubagentRuntimeEvent(runtime, {
+		...job,
+		backend: "codex",
+		role: job.role ?? job.mode,
+		thinking: job.thinking ?? job.reasoningEffort,
 	});
 }

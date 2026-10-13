@@ -15,8 +15,11 @@ node_modules
 .pi/research/*.jsonl
 .pi/memory/
 .pi/codex/
+.pi/subagents/
 .pi/runtime/
+.pi/web/
 .pi/capabilities/
+.pi/context-artifacts/
 .pi/agent/*
 .pi/config.json
 
@@ -24,3 +27,20 @@ node_modules
 /Codex科研场景反馈与改进.md
 /docs/research/
 /docs/testing/
+
+# Local validation code and fixtures
+/tests/
+/scripts/web-demo.mjs
+/scripts/native-runtime-demo.mjs
+/scripts/native-runtime-review.mjs
+
+# Local browser acceptance artifacts and pairing pointers
+/output/playwright/
+/.playwright/
+/.playwright-cli/
+
+# Local experimental owner registries and private review artifacts
+.pi/native-hosts/
+.pi/hosts/
+.pi/harness/
+/output/runtime-review/

@@ -1,12 +1,14 @@
 # Research Pi Configuration
 
+On the `windows-research-pi` branch, WSL2 retains strict Windows-host isolation. Host commands and project scripts require one-shot approval; opaque SSH targets may be trusted per project. `--full-access` and `RESEARCH_PI_FULL_ACCESS=1` are rejected under WSL. See the [Windows / WSL2 guide](windows-wsl-guide.md) for installation and upgrade steps.
+
 Research Pi has one non-secret configuration for the research runtime. Leader model discovery, provider authentication, model scope and thinking controls belong to Pi Core rather than a second Research Pi profile system.
 
 ## Locations
 
 | Runtime | Research Pi config | Optional environment credentials |
 |---|---|---|
-| Source checkout | `<harness>/.pi/config.json` | `<harness>/.env` |
+| Source checkout via `run-pi.sh` | `<harness>/.pi/config.json` | `<harness>/.env` |
 | Stable package | `~/.config/research-pi/config.json` | `~/.config/research-pi/credentials.env` |
 
 Source worktrees intentionally have separate config and state. `.pi/config.defaults.json` is the reviewed template. The local `config.json` is ignored by Git and written with mode `0600`.
@@ -20,6 +22,40 @@ pi config show
 ```
 
 API keys, passwords, private keys and other credentials do not belong in `config.json`; credential-like field names are rejected. Safety boundaries and recovery invariants are code policy rather than convenience toggles.
+
+## API keys: one file for all three providers
+
+For DeepSeek, OpenCode Go, and Z.AI, use the same sequence:
+
+1. Run `pi setup`, then `pi paths`.
+2. Edit the file shown as `credentialsPath`; fill the key for each provider you use.
+3. Start Pi in your research project and select the provider/model with `/model`.
+
+The installed package defaults to `~/.config/research-pi/credentials.env`. Source launches through `run-pi.sh` use `.env` at the **Research Pi checkout root**, even when `--workspace` points to another project. For source setup, run `./run-pi.sh setup` and `./run-pi.sh paths` from that checkout. XDG and Research Pi directory overrides can change package paths; `pi paths` is authoritative.
+
+```dotenv
+DEEPSEEK_API_KEY=
+OPENCODE_API_KEY=
+ZAI_API_KEY=
+```
+
+Replace the empty value with your actual key, such as `OPENCODE_API_KEY=your-actual-key`. Leave unused providers empty. Put comments on separate lines: the credential parser does **not** strip inline comments from values. The launcher loads this file at process start; restart the relevant Pi Host after edits. Terminal reattachment and `/reload` do not refresh its environment.
+
+| Provider | Environment variable | Example Pi model | Key setup |
+|---|---|---|---|
+| Official DeepSeek | `DEEPSEEK_API_KEY` | `deepseek/deepseek-flash` | [DeepSeek API guide](https://api-docs.deepseek.com/) |
+| OpenCode Go | `OPENCODE_API_KEY` | `opencode-go/deepseek-v4.1-flash` | [OpenCode Console](https://opencode.ai/console/) |
+| Z.AI Coding Plan | `ZAI_API_KEY` | `zai/glm-5.3-flash` | [Coding Plan key setup](https://docs.z.ai/devpack/quick-start) |
+
+OpenCode Go and OpenCode's other route share the variable name `OPENCODE_API_KEY`; Go subscribers should choose `opencode-go` models. Built-in `zai` uses `https://api.z.ai/api/coding/paas/v4`, the international Coding Plan endpoint. For a different Z.AI endpoint or account type, configure the matching endpoint through Pi's native `<agentDir>/models.json` rather than assuming the built-in route applies.
+
+### Alternative: store a key through native login
+
+Instead of a credential file, start Pi and run `/login deepseek`, `/login opencode-go`, or `/login zai`, then enter your key in the authentication prompt. Pi saves it in `<agentDir>/auth.json`; `agentDir` is also shown by `pi paths`. By default this is `~/.local/state/research-pi/agent/auth.json` for package installs and `<harness>/.pi/agent/auth.json` for source launches. This alternative uses the same built-in providers and model catalog.
+
+For these providers, a key stored through `/login` takes precedence over environment credentials. If changing the file appears to have no effect, use `/logout` to remove the provider's stored credential when you want to switch to the file. Shell environment variables also take precedence over values loaded from the credential file; clear an old exported variable before restarting. Custom `models.json` authentication and explicit CLI API-key overrides can add other credential sources.
+
+If a provider is missing from `/model`, check the file path and exact variable name, restart after edits, then inspect `/scoped-models` and refresh catalogs with `pi update --models`. Provider presence in the picker confirms local credential discovery; a successful response confirms the selected key/model works with that account. `DEEPSEEK_API_KEY` is also required when Research Pi's native DeepSeek search is enabled; a key stored only in Pi's `auth.json` does not supply that environment variable.
 
 ## Leader models and providers: use Pi directly
 
@@ -38,19 +74,11 @@ This has two practical consequences:
 - a newly available subscription model can be selected as soon as Pi Core/provider metadata exposes it; Research Pi need not add another profile;
 - native `settings.json`, authentication state and `models.json` remain authoritative and are not reconstructed on every Research Pi launch.
 
-Run `pi paths` to find the effective `agentDir` that owns those Pi-native files. Research Pi merges only its runtime-owned `pi.settings` defaults into native settings and preserves native provider/model/thinking/model-scope choices. An existing v1 Research Pi profile config is migrated once: its selected model seeds missing Pi defaults, the old generated `enabledModels` scope is removed, and the v2 config no longer contains profiles.
-
-The optional credential file remains for API-key workflows and backward compatibility:
-
-```dotenv
-DEEPSEEK_API_KEY=...  # official DeepSeek API and/or bounded native Web Search
-ZAI_API_KEY=...       # optional API-key provider route
-OPENCODE_API_KEY=...  # optional OpenCode route
-```
-
-If native `/login` already manages authentication, the matching placeholder may remain empty. `DEEPSEEK_API_KEY` is still required when Research Pi's native DeepSeek search is explicitly enabled.
+Run `pi paths` to find the effective `agentDir` that owns those Pi-native files. Research Pi merges only its runtime-owned `pi.settings` defaults into native settings and preserves native provider/model/thinking/model-scope choices. An existing v1 Research Pi profile config is migrated once: its selected model seeds missing Pi defaults, the old generated `enabledModels` scope is removed, and the v3 config no longer contains profiles. Existing v2 Codex advisor/executor settings are also migrated into the unified subagent roles.
 
 Explicit Pi CLI model/provider/thinking flags remain native Pi options and flow through unchanged.
+
+For GPT subscription use, `/login openai-codex` keeps the existing Codex route. Pi 1.0's newer `/login openai` offers Sign in with ChatGPT; the Codex provider is now labelled legacy upstream. Choose the matching provider in `/model`. Delegated workers still use the independently authenticated Codex CLI (`codex login`), not Pi's `auth.json`. Never copy OAuth tokens between stores. See [Pi 1.0 migration](pi-1-migration.md).
 
 ## Pi Core defaults owned by Research Pi
 
@@ -62,6 +90,11 @@ Explicit Pi CLI model/provider/thinking flags remain native Pi options and flow 
     "settings": {
       "theme": "research-pi",
       "tuiMode": "regular",
+      "defaultTools": ["+codemode"],
+      "tokenSpeed": {
+        "display": "ttft",
+        "useProviderTokens": true
+      },
       "retry": {
         "enabled": true,
         "maxRetries": 2,
@@ -80,32 +113,121 @@ Explicit Pi CLI model/provider/thinking flags remain native Pi options and flow 
 }
 ```
 
-These values do not define or filter models. Research Pi never creates or overwrites native `models.json`.
+These values do not define or filter models. Research Pi preserves native `models.json`; explicit context edits merge only the selected model's `contextWindow` override.
 
-## Codex defaults
+Research Pi bundles and explicitly loads `pi-token-speed` 0.11.0 by default. The footer shows TPS and time to first token (TTFT); `/tps` opens its settings menu. Provider token counting is enabled: live counts use increasing provider-reported output usage when available, otherwise the upstream counter is used; the final total is reconciled with reported usage. The extension uses Research Pi's effective `agentDir`, not the separate native Pi profile. These defaults take effect on the next Host/process start. Updating the checkout does not add the extension to an already-running Host; reconnecting or `/reload` cannot add a path absent from its original explicit loadout.
 
-Advisor and executor defaults remain Research Pi settings because they configure delegated Codex Actors rather than the Leader model:
+In the terminal UI, TPS and TTFT occupy a separate performance row below the editor. Narrow terminals wrap the measurements instead of clipping TTFT. This row does not share the native extension-status line with task descriptions. Runtime status omits the project ID, and worker status shows counts, waiting/cancelling state, heartbeat and the latest failure or incomplete outcome. Job IDs, task names, models and activity details remain in the Runtime Dock and `/watch`. Local tool status keeps the tool name, count, duration and failure state; the tool card retains its arguments and result.
+
+Research Pi explicitly loads `builtin:codemode` and `builtin:tool-search` because Pi 1.0's `--no-extensions` disables built-ins too. Codemode is enabled by default; the `on` mode retains direct tool calls as well. MCP and llama.cpp remain opt-in (`-e builtin:mcp` or `-e builtin:llama.cpp`). Analysis Sessions keep their read-only tool allowlist and do not expose codemode's model operations.
+
+## Subagent runners
+
+All delegated workers enter through one `subagent` tool and one Runtime Actor model. A role provides the default routing policy; each Action still records the concrete backend, model, and thinking level so the user can supervise what actually ran.
 
 ```json
 {
+  "subagents": {
+    "advisor": { "backend": "codex", "model": "gpt-6.1-sol", "thinking": "high", "speed": "inherit" },
+    "executor": { "backend": "codex", "model": "gpt-6.1-sol", "thinking": "high", "speed": "inherit" },
+    "environment": { "backend": "antigravity", "model": "gemini-3.1-pro-high", "thinking": "high" },
+    "general": { "backend": "pi", "model": "inherit", "thinking": "inherit" }
+  },
   "codex": {
-    "advisor": { "model": "gpt-5.6-sol", "reasoningEffort": "max" },
-    "executor": { "model": "gpt-5.6-sol", "reasoningEffort": "max" }
+    "maxExecutors": 4,
+    "internalSubagent": { "model": "gpt-6.1-sol", "thinking": "high" },
+    "retention": { "terminalDays": 30, "keepTerminalJobs": 200 }
   }
 }
 ```
 
-An individual `codex_delegate` call can override model or effort. Existing Codex Actors/threads retain the model recorded for their Action; config changes affect newly started Actions.
+The defaults deliberately make Codex advisor/executor the main design, implementation, and verification routes; Antigravity is the environment/toolchain specialist; Pi is the general alternate runner. These are defaults, not separate tool types. The Leader may select another backend for an Action by supplying `role`, `backend`, `model`, and `thinking`, and the user can change each role's defaults with `/models`.
+
+The Pi runner launches Pi Core in a separate RPC Session. It reuses the same Pi provider catalog and authentication directory as the Leader, while retaining an independent model, thinking level, conversation, and Runtime Actor. It loads the project boundary; any approval dialog that cannot be represented in the isolated RPC channel is declined and reported rather than hanging or silently widening authority. The Antigravity runner uses its documented [bidirectional streaming JSON protocol](https://antigravity.google/docs/cli/headless/) and keeps the same process for follow-up messages; launch `agy` interactively once for [first-time authentication](https://antigravity.google/docs/cli/install/). Because headless mode cannot display permission prompts, non-advisor Antigravity Actions auto-approve tools inside the CLI's explicit `--sandbox`; advisor remains plan mode without that override. Neither runner creates a handoff file; task context and later steering travel through their live message stream and the Runtime mailbox.
+
+### Unified model settings
+
+Model choices use a searchable, scrolling list, including the full Pi provider catalog. Type a model name or provider to filter; use arrows and Enter to select, and Esc to return. The same picker works in the shared mobile terminal.
+
+Pi Core takes each model's context length from provider/catalog metadata. Users can override it in `<agentDir>/models.json` through `providers.<provider>.modelOverrides.<model>.contextWindow`. Research Pi exposes this native field in the Leader and Pi-runner settings menus:
+
+```text
+/models leader context 872k
+/models general context 1m
+/models leader context inherit
+```
+
+The field belongs to the selected **provider/model**, so every Pi role using that model shares the override. `inherit` removes this field and restores catalog metadata. An idle Leader applies its edit immediately; new Pi runners load it at startup. Existing running Actions keep their captured settings. Codex CLI and Antigravity runners use their own context configuration.
+
+Outside a session, use `pi config context openai-codex/gpt-6.1-sol 872k`, then refresh model selection or start Pi again. Values accept positive token counts, decimal `k`/`m`, or `inherit`. Existing provider authentication and other overrides are preserved.
+
+This changes Pi's context accounting, not the provider's server limit. OpenAI's public API documents [GPT-6.1 Sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol) and [GPT-6 Sol](https://developers.openai.com/api/docs/models/gpt-6-sol) with 1,050,000 context tokens and 128,000 maximum output tokens; this does not establish the corresponding Codex subscription route's accepted request length. Research Pi's separate soft/hard compaction thresholds still apply; increasing the model window does not increase those thresholds.
+
+Codex jobs are durable and may recover across Leader Sessions. Pi and Antigravity runners currently belong to the Pi process that started them: follow-up messages reuse their live backend Session, shutdown closes them, and a new Pi process does not automatically restore them. Runtime records remain inspectable. The shared interface does not extend Codex's scoped concurrency, resource scheduler, or host broker to the other backends.
+
+`/config` is the main menu: Models and roles / Appearance / Current configuration / Configuration path. Models and roles contains Leader / Subagents / Codex internal subagents; under Subagents, choose a role and then a setting. Edits leave the current menu open, and Esc goes back one level. `/models` (also `/config models`) is a shortcut into this hierarchy; `/models show` displays current settings. Leader and Pi-runner choices use Pi's authenticated catalog, Codex choices use `model/list`, and Antigravity choices use `agy models`; catalog reads do not create a model turn. Native `/model`, `/thinking`, `/scoped-models` and `/login` remain available.
+
+```text
+/models leader model openai-codex/gpt-6-astra
+/models executor model gpt-6-astra
+/models advisor thinking high
+/models environment model gemini-3.1-pro-high
+/models general model opencode-go/kimi-k2.5
+/models general thinking high
+/models internal model gpt-6-luna
+/models executor speed fast
+/fast on
+/fast off
+```
+
+Leader model/thinking choices apply immediately and persist in native Pi `settings.json`; no duplicate model profile is created. Native Pi menus reload their saved-default indicators after `/reload` or restart. Runner defaults apply to new contexts immediately and persist in Research Pi config. An individual `subagent` call can override backend, model, thinking, or Codex speed. Continuations retain captured settings; a completed Codex thread accepts explicit model/thinking overrides, while live Pi/Antigravity processes require a fresh context for such changes. Running Actions are never changed by the settings panel.
+
+`inherit` leaves native Codex/Pi configuration untouched; `standard` explicitly requests normal speed, and `fast` requests `priority`. Enabling Fast asks for confirmation because it consumes extra quota; it does not lower reasoning effort. `/fast` without arguments toggles the current GPT Leader; `status` inspects and `inherit` removes its override. Leader speed is stored per `provider/model` under `pi.modelServiceTiers`, and applies only to native GPT Responses/Codex requests, not unrelated providers. Account/model eligibility still applies; this is a request, not a guarantee of latency. See [Codex speed and current quota rates](https://learn.chatgpt.com/docs/agent-configuration/speed).
+
+The `/models internal` role is intentionally separate: it configures agents spawned **inside a Codex worker**, not a top-level Research Pi subagent. The worker passes native `agents.default_subagent_model` and `agents.default_subagent_reasoning_effort` overrides to its own Codex process, never edits global `~/.codex/config.toml`, and leaves permissions unchanged. Internal-agent speed inherits its parent; explicit spawn settings and custom agent files retain native precedence. See [Codex subagent configuration](https://learn.chatgpt.com/docs/agent-configuration/subagents).
+
+Every top-level subagent appears in `/actors`, the Runtime Dock, and `/watch` with `backend · role · model · thinking`. The user may bypass the Leader for operational control with `/message notify @actor ...`, `/message reply @actor ...`, or `/steer @actor ...`; the same Runtime message protocol routes the input to the owning backend.
+
+### Reuse, participant messages, and terminal views
+
+Runtime owns continuation for every backend. For `start`, the same mission, backend, role, workspace, and research track selects an existing context; an active context receives the new task text, a settled context continues. `reuse=never` or a distinct mission starts a separate Actor. `resume` with an exact `jobId` expresses an explicit continuation. The Leader judges whether tasks are related; these are simple selection rules, not a semantic router. A backend change starts a new context and needs no handoff file.
+
+Only participant communication is unified: User ↔ Leader / Analysis / Subagent, Leader ↔ Subagent, and supported peer messages. Questions, replies, results, and steering use Runtime envelopes. Lifecycle calls, status inspection, tools, resource bookkeeping, and host-capability execution remain their own APIs. Backend protocols carry the messages; they are not replaced by mailbox-driven tool execution. Analysis retains its read-only restrictions and cannot use a message to acquire operational authority.
+
+`/watch` offers a full-terminal view in the current terminal or a new terminal (tmux window, macOS Terminal, or a Linux terminal launcher). The manual entry point is `pi watch [@actor] --workspace /path/to/project`. It uses Pi's message renderer/editor and queues input as User. Enter sends a message; `/ask`, `/reply`, `/steer`, Tab agent switching, PgUp/PgDn scrolling, and Esc/Ctrl+D return are supported. It shows bounded recent public events, not every native transcript detail. The viewer does not start models, take over the Leader, or write heartbeats. The owning Leader process drains messages without requiring a Leader model turn; if disconnected, messages remain queued. Antigravity also leaves messages queued while its current turn runs.
+
+The display journal is distinct from the canonical mailbox: Pi/Antigravity display fragments are batched, and only lifecycle/configuration changes update the Runtime Actor/Action projection. The viewer caches unchanged projections and tails new journal bytes. This avoids per-token ledger writes and repeated full-log reads.
+
+### Codex-specific execution controls
+
+`maxExecutors` caps concurrent executors in each exact workspace, including jobs paused for input. Start independent background jobs with different missions and literal workspace-relative `writeScope` paths. Disjoint paths may run together; identical or ancestor/descendant paths conflict. Omitted scope means `["."]`, an exclusive whole-workspace writer. Resume inherits the prior scope unless the caller explicitly supplies a new one. A capacity error returns immediately: dispatch remaining work after a result instead of polling.
+
+Executors have `research_pi_collaborate`: `peers` discovers active same-workspace/same-track collaborators, `send` queues a directed message (at most 2,000 characters), and `inbox` reads recent messages/receipts. A send records a Runtime participant envelope while the native worker command queue performs delivery and records the receipt; discovery and inspection remain tool calls. Delivery uses the recipient's existing active turn; it does not restart a finished worker. `queued` is not delivered; `applied` means submitted to the turn, not acknowledged or acted upon. Peer input cannot change task authority or write ownership. The Leader can inspect receipts with `subagent action=messages, jobId=...`; conversations are not broadcast into Leader context. Advisors cannot send executor messages. Old dynamic-tool threads refresh once on their next explicit resume; running jobs are not interrupted by this upgrade.
+
+For shared compute or run directories, optionally supply `resourceClaims`, such as `["gpu:server-a:0", "run:server-a:/runs/ablation"]`. Keys must match exactly across dispatchers using the same Research Pi state store, including different workspaces. Conflicts return immediately; this is coordination, not an OS/cluster lock. An optional `experiment` brief contains `question`, `distinguishingOutcomes`, `validityChecks`, and `budgetAndStop`; omit it for ordinary code tasks. The budget is worker guidance, not automatic remote cancellation.
+
+`research_pi_run` registers a real external run ID, target, and existing log/manifest references. Its state is independent of worker completion and scientific validity. Registered live runs keep their resource claims after the worker ends. Workers can settle their own runs after inspecting terminal evidence; the Leader uses `subagent action=settle_run` with `jobId`, `runId`, `outcome`, and `note`. Failed/cancelled workers that entered execution conservatively retain resources; after inspecting external state and settling registered runs, use `action=release_resources` with an evidence `note`. Neither operation kills processes. To resume only to inspect an earlier still-running experiment, pass `resourceClaims: []`; the same Actor can use `ownerJobId` to inspect/settle its earlier same-track run. Active runs and held resources are exempt from terminal-job retention.
+
+Scopes coordinate the declared ownership of writes; the OS sandbox still covers the whole project. Workers must not write outside their assigned paths. The Leader coordinates shared GPU/run resources and integration; scoped workers must not commit or modify shared Git state. `outcome_unknown` blocks overlapping scopes until explicit reconciliation; legacy jobs with no scope conservatively block the whole workspace. Restart old Research Pi Leaders before using the new scheduler: older schedulers cannot see the new per-job claims.
+
+Once per day at launch, Research Pi archives a terminal job only when it is both older than `terminalDays` and outside the newest `keepTerminalJobs`. Active, input-required and `outcome_unknown` jobs are never archived. The structured job/result remains readable by exact job ID from one `codex/archive/jobs.jsonl`; per-job token events, stderr and worker files are removed. Codex thread/context SQLite is not changed.
+
+## Project-local experiment records
+
+`record_experiment` appends one canonical memo to `<project>/.pi/research/experiments.jsonl`; it does not create Markdown or copy artifacts. On first Git-backed launch Research Pi adds `/.pi/` to the repository's local `.git/info/exclude` when no existing ignore rule covers it. This leaves shared `.gitignore` and the working tree unchanged, including in linked worktrees.
+
+Ordinary questions, fixes, probes, and successful commands need no permanent memo or new document. Decision-changing results use one short ledger record (normally 5–8 statements plus evidence references), not duplicate Markdown. Workers return concise structured results; the Leader decides whether to record them. Documents are created only for an actual document deliverable, preferably updating its existing canonical path. A protocol/settlement pair is not mandatory for each batch. Existing documents and raw evidence are preserved; summary length limits never truncate the original artifacts.
 
 ## Research compact and ProjectView
+
+GPT-6 Sol, GPT-5.6 Sol, GPT-6.1 Sol and GPT-6 Astra on Pi's OpenAI providers use soft/hard thresholds of **480k/512k** (491,520/524,288 tokens, following the existing 1024-token unit). These are `research.compaction.modelOverrides` entries keyed by model ID; other models retain the global defaults below. A smaller model window still caps both thresholds before the window is exhausted. `/reload` loads edited threshold settings for an idle Leader. This Research Pi scheduling policy does not change the independently managed Codex CLI compaction policy or Pi RPC runners that load only the boundary extension.
 
 ```json
 {
   "research": {
     "compaction": {
-      "softTokens": 278528,
+      "softTokens": 368640,
       "hardTokens": 393216,
-      "recentTailTokens": [24576, 32768, 40960],
       "summaryTargetTokens": 8192,
       "summaryMaxTokens": 16384
     }
@@ -117,27 +239,55 @@ Research compaction now produces two deliberately different forms of project mem
 
 ProjectView adds a user-owned layer before those compact-generated forms:
 
-1. **Project Anchor** is the optional regular file `<project>/RESEARCH.md`. Research Pi links its relative path and captures at most the first 3600 characters. It is never generated or rewritten by compaction. Edits appear in the next snapshot, not by rewriting the current Session prefix; explicitly read the file or communicate urgent changes in conversation.
+1. **Project Anchor** is the optional regular file `<project>/RESEARCH.md`. Research Pi injects it only when the complete file is at most 3600 characters. It does not inject a partial prefix. It never generates or rewrites the file. Edits appear in the next snapshot, not by rewriting the current Session prefix; explicitly read the file or communicate urgent changes in conversation.
 2. **Project Brief** is captured only at a successful compact boundary. It contains a short project overview, final goal, overall approach, durable user priorities, and concise closed phases in `goal -> approach -> result` form. It excludes the active run, current claim, newest route, Git state and next experiment. Its compact-generated portion remains stable until the next successful compact.
-3. **Project frontier** contains current route/freshness, latest handoff, newest evidence, Actions, structured current frontier and candidate next experiment. Together with Anchor and Brief it forms one persisted snapshot at project-context initialization and after successful local compaction. Explicit role/context changes establish a new snapshot. Ordinary user turns, tool continuations, UI refreshes, and Session resume retain the exact snapshot; there is no automatic request-tail Delta. Later progress travels through ordinary conversation, tool results, and directed messages. Consuming a delivered mailbox message prevents redelivery, not retention in conversation history.
+3. **Project frontier** contains current route/freshness, latest handoff, newest evidence, Actions, structured current frontier and candidate next experiment. Together with Anchor and Brief it forms one persisted snapshot at project-context initialization and after successful local compaction. Explicit role/context changes establish a new snapshot. Ordinary user turns, tool continuations, UI refreshes, and Session resume retain the exact snapshot; there is no automatic request-tail Delta. Later progress travels through ordinary conversation, tool results, and directed messages.
+
+The append-only Session and project Runtime remain the audit record, but they are not a transcript dump. Runtime messages are concise source cards with a message ID, job or request ID, state, decision evidence, required action, and detail reference. Consumption stops redelivery; it does not remove a card that the model has already seen. Model-visible history stays byte-stable until an explicit compaction. Later cards record request resolution, supersession, or reconciliation.
+
+Research Pi does not shorten generic tool results with character cuts or head/tail excerpts. A tool or plugin must control its default output before the output first enters context. It can keep full detail in Session or an artifact and expose a concise, traceable receipt to the model. Once a tool result, Runtime card, or thinking block has entered model context, later turns do not rewrite or delete it. Explicit compaction is the only normal history-rewrite boundary. The default result states the outcome, important evidence, uncertainty, next action, and stable references. Detailed subagent data is read one section at a time with `subagent action=result ... resultSection=<section>`. Available sections include `summary`, `request`, `scope`, `evidence`, `checks`, `effects`, `changes`, `analysis`, `uncertainties`, `remaining`, and `runs`.
+
+Raw logs and large command output belong in an artifact or an explicit detail request. `host_capability` returns complete output only when it meets the model-output limit. Otherwise it omits the complete output from model text and returns the byte or character count, the reason, and a detail reference. It never inserts a cut prefix or tail as evidence. When Pi Core reports a partial `bash`, `PowerShell`, `read`, `grep`, `find`, or `ls` result, Research Pi also removes the partial text. Shell output is copied to a state artifact. File and search tools return the exact target and a range or narrowing action. Process capture limits remain resource-safety limits; when one is reached, no partial capture enters model context. `details`, Runtime records, `/runtime`, `/inbox`, `/watch`, and Session history remain inspection surfaces.
+
+Model-facing and user-facing Research Pi messages use a practical plain-technical-language profile based on [ASD-STE100](https://www.asd-ste100.org/STE_faq.html) and [ISO 24495-1:2023](https://www.iso.org/standard/78907.html). Messages state the result first, use short sentences, put one topic or action in each sentence, prefer active voice, use one term for one concept, and keep exact provenance. This is a project writing policy, not a claim of certified standards compliance.
+
+Model-visible channels follow one contract:
+
+| Channel | Default model content | Exact detail path |
+|---|---|---|
+| ProjectView | Complete selected fields and record IDs; no cut sentences | `/runtime view`, evidence refs, memory read |
+| Runtime mailbox | Message/job/request ID, state, evidence, required action | Runtime ledger and exact job ID |
+| `subagent` | Concise result card | One explicit `resultSection` per call |
+| Agent-to-agent message | Source job, authority, scope, concise content | Message ID and peer inbox |
+| Research memory | Search snippets with exact refs; whole entries on read | Exact project/session/entry ref |
+| Web search | Concise synthesis and source URLs | Open the cited source |
+| `codemode` | Decision-relevant fields emitted by the script | Oversized complete output is stored under the Research Pi state root and replaced by an artifact receipt |
+| Shell or host capability | Command output requested by the caller | Filter at the command source or save a raw artifact |
+| Side analysis | No main-context injection by default | Explicit `/side use` promotion |
+
+Research Pi does not use a generic post-processing truncator for these channels. Count-based record selection is allowed when the message states the count and provides a stable retrieval path. A UI-only collapsed preview can be shorter than its expandable record; that preview is never the model-context representation.
 
 `amend_project_state`, research transitions, evidence records and completed work update the stored records and inspectable live view, not the injected snapshot. Retrieve current records when needed. The next successful compact may update the Brief and move a genuinely closed phase into its short history. The compaction schema requires the complete `projectBrief`; live state-amendment tooling cannot edit it. Analysis compaction refreshes its local snapshot without writing shared Project State. Prefix stability is client-side behavior, not a guarantee of provider cache retention or routing.
 
 There is deliberately no global ProjectView-clear command. `/runtime new clean` creates a clean Session without deleting Project data; `/runtime context off` pauses injection for an Analysis Session. Removing `RESEARCH.md` removes only the Anchor. Canonical Project State changes remain explicit amendments, transitions, or compaction rather than hidden context deletion.
 
-The configured token values are caps. For a short-context Leader model, Research Pi derives earlier thresholds from the active model window. `pi.settings.compaction` remains the Pi Core fallback policy; it is not the structured research-state schema or ProjectView policy.
+Defaults are 360k soft / 384k hard (368,640 / 393,216 tokens, using 1k = 1,024). Automatic research compaction runs when the current agent run settles, without interrupting tool calls; crossing the hard threshold upgrades a pending soft request. For a short-context Leader, both thresholds scale down with the same configured ratio to stay within its window. `pi.settings.compaction` remains the Pi Core fallback policy; it is not the structured research-state schema or ProjectView policy.
+
+On Pi 1.0, Core also owns the retained history boundary through `pi.settings.compaction.keepRecentTokens`. Research Pi uses the native preparation so context edits and nested tool operations survive correctly. The unused v2 `research.compaction.recentTailTokens` schedule is removed from resolved and persisted configuration during migration. Historical compaction records remain readable; no raw history is re-sliced.
+
+The bundled defaults retain that retired field solely for already-running pre-cleanup processes, whose loaded validator still requires it when reading the file. Current readers strip it and capture bundled defaults once with the loaded module, preventing later requests from mixing old code with freshly updated default data. User configuration remains live-read. Restart Pi at a safe point after an upgrade to load the new code; this compatibility data does not upgrade a running process.
 
 ## Prompt-cache diagnostics
 
 For intermittent cache warnings, enable `/cache-audit on` or launch with `pi --cache-audit`. This opt-in observer records redacted request-prefix comparisons and reported usage in local Session metadata; it does not rewrite the request. See [cache diagnostics](cache-diagnostics.md) for interpretation and synthetic probes.
 
-## Bounded search
+## Optional DeepSeek search
 
 ```json
 {
   "research": {
     "search": {
-      "enabled": "auto",
+      "enabled": "off",
       "model": "deepseek-v4-flash",
       "thinkingBudgetTokens": 1024,
       "maxSources": 12,
@@ -147,7 +297,9 @@ For intermittent cache warnings, enable `/cache-audit on` or launch with `pi --c
 }
 ```
 
-Search is independent of the Leader provider/model. `auto` loads the tool only when `DEEPSEEK_API_KEY` exists, `on` fails early when that key is absent, and `off` never loads it. Heavy research can still be delegated to Codex; this tool is intended for bounded direct lookup.
+This setting controls only Research Pi's optional DeepSeek-backed `web_search` tool. It is independent of the Leader provider/model and defaults to `off`: `auto` loads it only when `DEEPSEEK_API_KEY` exists, `on` fails early when that key is absent, and `off` never loads it. Codex subagents are separate and always receive [native live web search](https://learn.chatgpt.com/docs/config-file/config-basic); there is no Research Pi search router or per-task search policy to configure. Pi and Antigravity retain their own backend-native capabilities, and an explicitly configured MCP search server remains available.
+
+The DeepSeek V4 Pro anchor is no longer in the default extension loadout. Its existing opt-in experiment remains available with `pi --v4-pro-anchor`, or load its command with `RESEARCH_PI_DEEPSEEK_ANCHOR=1 pi`. It still requires the exact supported provider/model and a fresh Session; it does not modify GPT requests.
 
 ## Skills, UI and diagnostics
 
@@ -166,7 +318,8 @@ Pi Core's `dark` and `light` remain available. Persist a Research Pi theme with 
   "ui": {
     "density": "balanced",
     "runtimeStrip": "auto",
-    "configPanelRows": 8
+    "configPanelRows": 8,
+    "web": { "mode": "off", "persistent": true, "port": 0, "httpsPort": 8443 }
   },
   "diagnostics": {
     "trace": false,
@@ -176,6 +329,10 @@ Pi Core's `dark` and `light` remain available. Persist a Research Pi theme with 
 ```
 
 `runtimeStrip=auto` shows the Project/Actor dock only while work is active or Runtime state needs attention; `always` keeps an idle view and `off` removes it. `density` is `compact` or `balanced`.
+
+The Runtime Dock updates only when its semantic state changes. A separate one-line footer pulse updates once per second while a worker can run. The pulse uses the worker lease, not elapsed wall time. `live` means the lease is fresh; `stale` means no fresh heartbeat was observed. An `input_required` job stops the pulse and shows a waiting state. Heartbeat samples are UI-only. They are not written to the Runtime ledger or model context.
+
+`pi config web tailscale` opts into automatic private Web access on interactive launches; `local` limits it to this computer and `off` disables automatic access. With `persistent=true`, each workspace has one background Pi and desktop terminals attach to it. Closing a terminal leaves it running; `pi web status` prints the private pairing URL and `pi web stop` stops it. Port 0 lets the OS choose a local port; HTTPS starts at `httpsPort` and skips occupied Serve/Funnel ports unless explicitly pinned on the command line. See [mobile access](mobile-web.md).
 
 `diagnostics.trace` enables sensitive prompt/tool tracing. `diagnostics.codexSqliteLogs` restores Codex App Server TRACE/DEBUG SQLite logging. Both default to false because they can cause substantial disk writes and should only be enabled briefly for diagnosis.
 
@@ -189,7 +346,7 @@ For Research Pi-owned fields:
 
 For Leader model/auth/thinking, Pi Core's native precedence applies; Research Pi adds no profile layer and no forced startup model arguments.
 
-Manual Research Pi edits are re-read on launch and whenever `/config` opens. Invalid JSON, unknown top-level keys, impossible compact thresholds or credential-like fields fail clearly. A v1 config is rewritten to v2 on first launch; removed keys are not retained as compatibility behavior.
+Manual Research Pi edits are re-read on launch and whenever `/config` opens. Invalid JSON, unknown top-level keys, impossible compact thresholds or credential-like fields fail clearly. A v1 or v2 config is rewritten to v3 on first launch; removed keys are not retained as compatibility behavior.
 
 ## Minimal smoke test
 

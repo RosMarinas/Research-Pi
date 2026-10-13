@@ -20,6 +20,7 @@ const LEDGER_VERSION = 2;
 const SESSION_GRANT_MS = 24 * 60 * 60 * 1000;
 const MAX_READ_BYTES = 128 * 1024;
 const MAX_PROCESS_OUTPUT_BYTES = 128 * 1024;
+const MAX_INLINE_MODEL_OUTPUT_CHARS = 16_000;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const FORBIDDEN_SECRET_EXTENSIONS = new Set([".key", ".pem", ".p12", ".pfx"]);
 
@@ -89,6 +90,46 @@ function recommendedCommandPrefix(argv) {
 
 function displayArgv(argv) {
 	return argv.map((value) => (/^[A-Za-z0-9_./:@%+=,-]+$/.test(value) ? value : JSON.stringify(value))).join(" ");
+}
+
+export function capabilityResultNeedsDetail(result, maxChars = MAX_INLINE_MODEL_OUTPUT_CHARS) {
+	const stdout = String(result?.stdout ?? "");
+	const stderr = String(result?.stderr ?? "");
+	return result?.outputTruncated === true || stdout.length + stderr.length > maxChars;
+}
+
+export function formatCapabilityResultForModel(result, options = {}) {
+	const stdout = String(result?.stdout ?? "");
+	const stderr = String(result?.stderr ?? "");
+	const maxChars = options.maxChars ?? MAX_INLINE_MODEL_OUTPUT_CHARS;
+	const outputChars = stdout.length + stderr.length;
+	const omitOutput = capabilityResultNeedsDetail(result, maxChars);
+	const target = String(result?.target ?? "");
+	const operation = result?.kind || target
+		? target.length <= 1_000
+			? `Operation: ${result?.kind ?? "host"} on ${target || "unknown target"}.`
+			: `Operation: ${result?.kind ?? "host"}. The ${target.length}-character target is in the tool details.`
+		: undefined;
+	const lines = [
+		"HOST CAPABILITY RESULT",
+		result?.grantId ? `Grant: ${result.grantId}.` : undefined,
+		operation,
+		`Exit: ${result?.exitCode ?? "unknown"}${result?.timedOut ? ". Timed out." : "."}`,
+	];
+	if (!omitOutput) {
+		if (stdout) lines.push("Standard output:", stdout);
+		if (stderr) lines.push("Standard error:", stderr);
+		if (!stdout && !stderr) lines.push("Output: none.");
+		return lines.filter(Boolean).join("\n");
+	}
+	lines.push(
+		result?.outputTruncated
+			? `Output: not inserted. The operation exceeded its capture limit. No partial output was added to model context.`
+			: `Output: not inserted. The complete ${outputChars}-character result exceeds the ${maxChars}-character model-output limit.`,
+		options.reference ? `Reference: ${options.reference}.` : undefined,
+		"Next action: Rerun the command with a source filter, or write the raw output to an approved artifact and return its path.",
+	);
+	return lines.filter(Boolean).join("\n");
 }
 
 function stateRootForProject(projectRoot, explicitStateRoot) {

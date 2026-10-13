@@ -59,7 +59,8 @@ export default function (pi: ExtensionAPI) {
 							text: [
 								"Answer one bounded lookup using the native web_search tool.",
 								"Prefer primary and authoritative sources. Distinguish sourced facts from inference.",
-								"Keep the synthesis concise; the caller will receive the structured source URLs separately.",
+								"State the answer first. Use short sentences. Put one topic in each sentence.",
+								"Do not copy source text. The caller will receive the structured source URLs separately.",
 							].join(" "),
 						},
 					],

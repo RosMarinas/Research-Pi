@@ -74,7 +74,7 @@ export default function (pi: ExtensionAPI) {
 			"Absence of a search hit is not evidence that an experiment was never run; report the searched scope and query when absence matters.",
 		],
 		parameters: Type.Object({
-			query: Type.String({ description: "Literal words, phrase, run ID, method, observation, or decision to retrieve" }),
+			query: Type.String({ maxLength: 500, description: "Literal words, phrase, run ID, method, observation, or decision to retrieve" }),
 			scope: Type.Optional(
 				Type.Union([Type.Literal("current_project"), Type.Literal("all_projects")], {
 					description: "Default current_project; all_projects must be intentional",
@@ -134,7 +134,7 @@ export default function (pi: ExtensionAPI) {
 		name: "research_memory_read",
 		label: "Read Research Memory",
 		description:
-			"Read an exact indexed historical entry and a small surrounding window after research_memory_search. Content is local, bounded, redacted for common credential patterns, and accompanied by hashes and provenance.",
+			"Read an exact indexed historical entry and a small surrounding window after research_memory_search. Content is local, redacted for common credential patterns, and accompanied by hashes and provenance. The tool returns complete entries only. It reports an oversized entry instead of cutting its text.",
 		promptSnippet: "Verify a historical memory hit against its exact entry and nearby context",
 		promptGuidelines: [
 			"Call research_memory_read only for a concrete hit returned by research_memory_search, unless the user supplied an exact session and entry ID.",
@@ -146,7 +146,7 @@ export default function (pi: ExtensionAPI) {
 			entryId: Type.String({ description: "Entry identifier from a search result" }),
 			radius: Type.Optional(Type.Integer({ minimum: 0, maximum: 10, description: "Indexed entries before/after; default 1" })),
 			maxChars: Type.Optional(
-				Type.Integer({ minimum: 500, maximum: 40000, description: "Maximum returned characters; default 12000" }),
+				Type.Integer({ minimum: 500, maximum: 40000, description: "Whole-entry context budget; default 12000. An entry that does not fit is reported but not cut." }),
 			),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -169,7 +169,7 @@ export default function (pi: ExtensionAPI) {
 			const text = payload.result.entries
 				.map(
 					(entry) =>
-						`${entry.ref} | ${entry.kind}/${entry.reliability} | hash=${entry.contentHash}\n${entry.text}`,
+						`${entry.ref} | ${entry.kind}/${entry.reliability} | hash=${entry.contentHash}\n${entry.text || `[Content not returned: ${entry.omittedChars} characters. ${entry.omission}]`}`,
 				)
 				.join("\n\n");
 			return { content: [{ type: "text", text }], details: payload };

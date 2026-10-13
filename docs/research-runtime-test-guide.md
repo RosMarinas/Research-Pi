@@ -1,8 +1,8 @@
-# Research Runtime：Codex 职责、状态与真实项目测试指南
+# Research Runtime：subagent 状态与恢复测试指南
 
-状态：Milestone 2 已实测；下一阶段的多 Session 所有权、路线 provenance 与 ledger 恢复已实现，等待真实项目验证
-更新：2026-08-20
-适用版本：包含 `research-runtime.ts` 的 Research Pi 开发版
+更新：2026-10-02，适用于 Pi Core 1.0.0 与统一 subagent 层。
+
+所有 backend 共用 `subagent`、`/actors`、`/subagents`、`/watch` 和 Runtime 消息入口，界面展示 backend、role、model、thinking。下面的持久任务、跨 Session 恢复、写入范围与副作用协议主要描述 Codex backend；Pi／Antigravity runner 目前只在所属 Pi 进程内保持 live Session，退出后不自动恢复。离线测试验证协议与状态机，文末的真实项目测试需要另行执行，不能从离线通过推断已经实测。
 
 ## 1. 先把几个对象分开
 
@@ -11,8 +11,8 @@ Codex 不属于某个 Pi 对话。它在 Project 中承担一个有界、可续�
 | 对象 | 含义 | 生命周期 |
 |---|---|---|
 | Project | 长期科研边界与 Runtime 状态所有者 | 跨 Session、跨模型长期存在 |
-| Leader Actor | 项目中稳定的研究领导身份，当前由 Pi/DeepSeek 承载 | 身份稳定，可更换 Leader Session |
-| Leader Session | 当前拥有执行、Project State 写入、Codex 调度和 Leader mailbox 的 Pi Session | 同一 Project 同时只有一个 |
+| Leader Actor | 项目中稳定的研究领导身份，由 Pi 当前选择的模型承载 | 身份稳定，可更换 Leader Session |
+| Leader Session | 当前拥有执行、Project State 写入、subagent 调度和 Leader mailbox 的 Pi Session | 同一 Project 同时只有一个 |
 | Analysis Session | 继承 ProjectView 的只读讨论入口；可查本地/远端证据，但不执行 | 可与 Leader Session 并存 |
 | Codex Actor | 一个稳定的 Codex 子职责，当前由 `mission + mode` 定义 | 跨 Pi Session 存在，可反复激活 |
 | Action/job | Codex Actor 接受的一次具体委派或续接 | 有明确开始与终态 |
@@ -94,7 +94,7 @@ queued -> delivered -> consumed
 
 - `queued`：已耐久写入 Project mailbox，Provider 尚未接受；
 - `delivered`：已交给目标 Adapter 或 attached Leader Session；
-- `consumed`：已进入一次 Leader 模型运行并完全 settled；之后从模型上下文过滤；
+- `consumed`：已进入一次 Leader 模型运行并完全 settled；不再投递到其他模型运行，但已经进入当前 Session 的卡片保持原样，直到显式 compaction；
 - `superseded`：请求已被更新请求替代，或所属 Codex job 已进入终态；终态 ASK 会在投递前自动结算，避免跨 Session 反复出现。
 
 投递采用 at-least-once 的恢复思路：如果进程在模型看到消息后、`agent_settled` 前崩溃，消息可能在恢复时再出现一次；不会为了追求 exactly-once 而增加高频事务写入。
@@ -103,9 +103,11 @@ queued -> delivered -> consumed
 
 ### 3.4 副作用恢复边界
 
-executor 的 job 先记录 `intent_recorded`，在 App Server `turn/start` 前把 `started` 耐久落盘。若 worker 在 started 后消失或被强杀，恢复只能知道“副作用可能发生”，因此标为 `outcome_unknown`。Runtime 会阻止同一精确 workspace 的新 executor，避免重复提交、重复远程运行或在未知状态上继续写；advisor 不写项目，仍可用于检查。只有在检查 Git、文件、远程 run/job 等实际状态后，才可用 `codex_delegate action=reconcile` 提交 terminal outcome 与证据 note。Harness 不自动猜测。
+executor 的 job 先记录 `intent_recorded`，在 App Server `turn/start` 前把 `started` 耐久落盘。若 worker 在 started 后消失或被强杀，恢复只能知道“副作用可能发生”，因此标为 `outcome_unknown`。Runtime 会阻止同一精确 workspace 的新 executor，避免重复提交、重复远程运行或在未知状态上继续写；advisor 不写项目，仍可用于检查。只有在检查 Git、文件、远程 run/job 等实际状态后，才可用 `subagent action=reconcile` 提交 terminal outcome 与证据 note。Harness 不自动猜测。
 
 ## 4. 通信如何发生
+
+这里的通信仅指 User、Leader、Analysis、Subagent 之间的消息；启动、查询、等待、取消、reconcile、内部工具与 host capability 执行仍是工具/API，不需要包成消息。Runtime 负责上下文选择和消息回执，各 backend 保留原生投递通道。连贯性由 Leader 判断：同一 mission 默认继续，独立任务用另一 mission 或 `reuse=never`，显式 `jobId` 可指定既有 Actor。
 
 ### 4.1 正常委派和结果
 
@@ -133,7 +135,7 @@ sequenceDiagram
 2. job 进入 `input_required`；
 3. Runtime 创建 `ask` message，目标是 `research-leader`；
 4. 当前 attached Pi Session 收到一次消息；
-5. Leader 可用原 `codex_delegate respond`，用户可用 `/message reply @codex:<Actor短码> ...`；
+5. Leader 可用原 `subagent respond`，用户可用 `/message reply @codex:<Actor短码> ...`；
 6. Adapter 把 reply 映射到原 request ID；同一 Codex turn 继续执行。
 
 回复不是启动另一只 Codex，也不需要把完整问题复制进新 Session。
@@ -171,7 +173,7 @@ Host capability 不走上述自由文本咨询路径。Codex 调用 `research_pi
 3. Pi 创建空白 Session B，只记录 parent Session provenance，不复制 A 的 transcript；
 4. B attach 到同一个 Research Leader Actor，重新生成最新 ProjectView；
 5. Runtime 写入 `session.rotation.completed` 和 B 的 ProjectView receipt；
-6. queued 或已经 delivered 但尚未 consumed 的消息重投到 B；已 consumed 的消息不会重复注入；
+6. queued 或已经 delivered 但尚未 consumed 的消息重投到 B；已 consumed 的消息不会投递到 B，但它在原 Session 的历史卡片保持不变；
 7. B 可以继续管理原 Actor-owned job 或恢复 Codex thread。
 
 用户仍可使用原生 `/new`。它同样会生成 ProjectView，但绕过 readiness 与 rotation request/completion 审计，因此不用于验证“Project 是否足以接管 Session”这一 Runtime 性质。Research Pi 永远不会自动执行轮换。
@@ -211,7 +213,7 @@ exact workspaceKey/root               文件与副作用边界，不可跨 workt
 /message notify @codex:<Actor短码> <新信息>
 /steer @codex:<Actor短码> <纠偏>
 /steer --preempt @codex:<Actor短码> <紧急纠偏>
-/codex missions
+/subagents missions
 /watch [job后缀|mission|@codex:<Actor短码>]
 /runtime
 /runtime health
@@ -225,17 +227,17 @@ exact workspaceKey/root               文件与副作用边界，不可跨 workt
 
 Runtime mailbox 会保存消息正文，因此不要在这些命令中输入 API key、私钥或其他凭据。
 
+`/watch` 现在统一提供当前终端切换和新终端选项；独立 shell 使用 `pi watch --workspace /path/to/project`。顶部必须包含 backend、role、model、thinking；输入以 User 身份直达选中 Actor。测试时分别检查：普通消息、待答问题的 `/reply`、Tab 切换 Actor、Esc 返回 Leader，以及关闭观察窗口不会停止任务。Pi/Antigravity 只复用仍存活的 runner；Antigravity 忙时消息留在 Runtime，结果到达后再投递，不维护第二份待发队列。
+
 `/runtime` 默认打开只读 Project Board。四个分页分别显示研究/记忆概览、稳定 Actor 与最新 Action、未消费 mailbox、当前 Leader attachment 与显式 handoff。面板只在打开和按 `r` 时读取既有投影，不写 heartbeat、不把展示内容加入模型上下文，也不把 Research Leader 从另一 Session attach 回当前窗口；持续执行细节仍由 `/watch` 展示。
 
-## 7. 自动测试
+## 7. 本地验证
+
+`tests/` 与测试夹具仅保存在本地，不提交到仓库，也不随 npm 包发布；过时测试应直接删除。下面列出验证要点，便于功能变更时选择相关检查。
 
 ### Layer 1：无模型 Runtime 测试
 
-```sh
-node --test tests/research-runtime.test.mjs tests/runtime-board.test.mjs
-```
-
-覆盖：
+验证要点：
 
 - Project 内稳定 user/Research Leader Actor；
 - Session B attachment 替代 A，A 随后 detach（包括同 sessionId 的旧 epoch）不会误删 B；
@@ -246,22 +248,19 @@ node --test tests/research-runtime.test.mjs tests/runtime-board.test.mjs
 - Codex ask/result 的幂等投影；
 - default steer 不 abort；
 - `--preempt` 才 abort；
-- consumed 消息不再重复投递，但已进入 Session 的消息在后续 context 中保持原样。
+- consumed 消息不再重复投递，但已经进入模型的卡片保持原样，直到显式 compaction。ASK 绑定精确 request ID；后续卡片记录解决或替代状态。`outcome_unknown` 绑定精确 Action，并保留可溯源的 reconciliation card。
 - rotation readiness 会阻止缺失/陈旧 Project State、`outcome_unknown` 和无外部身份的 active Action；
 - rotation request/completion 可从 Project ledger 重建；
 - clean Session request/receipt 可重建；启动、context、compact 与 Codex 自动复用都保持隔离，显式 inherit 后才投递 mailbox/ProjectView；
 - delivered 但尚未 consumed 的 Leader 消息可在新 Session 重投，旧 epoch 的 settled run 不能抢先 consume。
-- 另一 Session 的 transition、Action 和界面刷新不重写已注入的 ProjectView 快照；新 Session 或 compact 才重新捕获，日常按需检索记录。定向 mailbox 仍按原投递/唤醒规则工作，消费后保留已投递历史、不重复投递。
+- 另一 Session 的 transition、Action 和界面刷新不重写已注入的 ProjectView 快照；新 Session 或 compact 才重新捕获，日常按需检索记录。定向 mailbox 仍按原投递/唤醒规则工作；消费停止重投，但已经进入当前 Session 的卡片继续保留在模型历史中。
+- context 投影不得按字符数裁剪、替换或删除已经进入模型的普通工具结果、图片、结构化结果或 thinking block。Research Pi 自有工具必须在首次进入上下文前返回简洁默认结果，并为详细数据提供明确的 section/reference。测试应确认 subagent 默认卡片不含长 JSON，显式 `resultSection` 返回完整语义项。`codemode` 脚本应只输出决策所需字段；若完整输出不适合直接进入上下文，完整文本写入 Research Pi state artifact，模型从第一次暴露起只收到带调用 ID、规模和路径的稳定 receipt，不得先接收全文再被追溯性替换。
 - Runtime Board 不重新激活 superseded claim，只展示为 prior claim；active Actor 优先、settled mailbox 被过滤，四个分页都适配 24 行终端的 92% overlay；没有按 `r` 时不会轮询。
 - 从旧 Session 打开 Board 不会抢占当前 attached Research Leader，即使 cwd 经过 macOS `/var` 等规范路径别名。
 
 ### Layer 2：Fake Codex App Server
 
-```sh
-node --test tests/codex-jobs.test.mjs
-```
-
-覆盖：
+验证要点：
 
 - Session B 以同一 Project/Leader Actor 读取并续接 A 的 job；
 - 只有同 workspace/mission/mode/track 自动复用；显式跨 track resume 带 route-change 警告；
@@ -279,7 +278,7 @@ node --test tests/codex-jobs.test.mjs
 - 较新的 Runtime Action 在没有明确 transition 时只触发 unconfirmed 警告；
 - lifecycle health 只观察/建议，不自动 compact、rotate 或 reconcile；只有显式 `/runtime rotate` 才创建新 Session。
 
-当前自动测试使用 Fake App Server 和本地 ledger，不调用真实模型/API；实际科研判断质量仍需要在真实 Project 中持续测试。
+本地离线验证可使用 Fake App Server 和临时 ledger，不调用真实模型/API；实际科研判断质量仍需要在真实 Project 中持续测试。
 
 ## 8. Layer 3：真实科研项目手动测试
 
@@ -324,7 +323,7 @@ node --test tests/codex-jobs.test.mjs
 
 ```text
 /actors
-/codex missions
+/subagents missions
 ```
 
 预期出现稳定的 `@codex:<Actor短码>`，状态为 active 或 waiting。该短码由 Actor ID 派生，后续新建 Action/job 时不变化；底部 Codex 状态栏显示的仍是当前 job 后八位，不要混淆两者。
@@ -488,7 +487,7 @@ Action 完成后，在当前 attached Session 输入：
 | Clean Session | 无 transcript/ProjectView/mailbox 自动注入；inherit 后恢复且旧 transcript 仍为空 | clean 启动即出现项目记忆、compact 改写 Project State 或自动续接旧 Codex mission |
 | State amendment | revision/lease/authority 均校验，局部字段改变且旧事件保留 | stale revision 覆盖、retired route 被重写、未提供字段丢失 |
 | 单次投递 | result 只由当前 attached Leader 消费 | A/B 同时触发相同 result turn |
-| Context 清理 | consumed message 后续不再注入 | 每轮重复出现旧 steer/result |
+| Context 稳定 | consumed message 不再重投，原 Session 历史不变 | 每轮重复投递，或追溯性删除旧 steer/result |
 | 科研边界 | completion 不自动宣称假设成立 | job success 被当成科学结论 |
 
 ## 10. 反馈模板

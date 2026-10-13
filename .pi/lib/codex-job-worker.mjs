@@ -1,13 +1,20 @@
 import { spawn } from "node:child_process";
+import { codexModelConfigArgs, codexServiceTierParams } from "./model-settings.mjs";
 import { createHash } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import { appendFile, mkdir, readdir, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import { executeGrantedCapability, inspectCapabilityAuthorization } from "./host-capabilities.mjs";
+import {
+	capabilityResultNeedsDetail,
+	executeGrantedCapability,
+	formatCapabilityResultForModel,
+	inspectCapabilityAuthorization,
+} from "./host-capabilities.mjs";
 import { compactCodexAuditEvent, describeCodexNotification, projectCodexActivityUpdate } from "./codex-activity.mjs";
 import { configureCodexSqliteLogs } from "./codex-sqlite-logs.mjs";
 import {
 	getGitSnapshot,
+	readCodexJob,
 	readJson,
 	releaseWriterLock,
 	sanitizeCodexEnvironment,
@@ -17,6 +24,9 @@ import {
 } from "./codex-jobs.mjs";
 import { codexPermissionConfigArguments, resolveExecutablePath, runCodexSandboxPreflight } from "./project-boundary.mjs";
 import { resolveSystemRuntimePolicy } from "./security-policy.mjs";
+import { CODEX_COLLABORATION_TOOL, collaborateWithCodexPeers, formatPeerMessage } from "./codex-collaboration.mjs";
+import { CODEX_RUN_TOOL, listCodexExternalRuns, registerCodexExternalRun, releaseCodexResources, settleCodexExternalRun } from "./codex-resources.mjs";
+import { resolveResearchRuntime, settleRuntimeMessage } from "./research-runtime.mjs";
 
 function now() {
 	return new Date().toISOString();
@@ -32,16 +42,29 @@ function parseArguments(argv) {
 	return argv[index + 1];
 }
 
-function truncate(text, max = 12000) {
-	if (!text) return "";
-	return text.length <= max ? text : `${text.slice(0, max)}\n[truncated]`;
+function sourceField(value, max, name) {
+	const text = String(value ?? "").trim();
+	if (text.length > max) throw new Error(`${name} exceeds ${max} characters. Rewrite the complete field in concise language.`);
+	return text;
+}
+
+function diagnosticReceipt(value, max, reference) {
+	const text = String(value ?? "").trim();
+	if (!text || text.length <= max) return text;
+	return `Diagnostic omitted from the job message because it is ${text.length} characters. Inspect ${reference}.`;
+}
+
+function diagnosticTail(value, max = 12_000) {
+	const text = String(value ?? "");
+	return text.length <= max ? text : text.slice(-max);
 }
 
 function fallbackStructuredResult(text, error, mode) {
+	const sourceText = text || error || "Codex returned no structured final message.";
 	if (mode === "advisor") {
 		return {
 			status: error ? "blocked" : "needs_clarification",
-			shared_understanding: truncate(text || error || "Codex returned no structured final message."),
+			shared_understanding: sourceText,
 			points_of_agreement: [],
 			candidate_explanations: [],
 			questions_to_resolve: [],
@@ -55,7 +78,7 @@ function fallbackStructuredResult(text, error, mode) {
 		outcome: error ? "blocked" : "partial",
 		goal_satisfied: false,
 		completion_basis: error ? "The Codex turn encountered a blocking protocol or execution error." : "No valid structured final handoff was returned.",
-		summary: truncate(text || error || "Codex returned no structured final message."),
+		summary: sourceText,
 		evidence: [],
 		actions_taken: [],
 		changed_files: [],
@@ -149,15 +172,14 @@ function hostCapabilityQuestion(request, input = {}) {
 	if (request.kind === "host-command") {
 		return [
 			`Authorize host command in cwd=${request.cwd}.`,
-			`Exact argv: ${request.argv.map((part) => JSON.stringify(part)).join(" ")}`,
-			`Suggested project prefix: ${(request.suggestedPrefix ?? request.argv).map((part) => JSON.stringify(part)).join(" ")}`,
+			"The approval dialog shows the exact argv and suggested project prefix.",
 		].join("\n");
 	}
 	if (request.kind === "ssh-target") {
-		return `Authorize project SSH target: ${request.target}\nCurrent remote command: ${String(input.remoteCommand ?? "[missing]")}`;
+		return `Authorize an SSH command on ${request.target}. The approval dialog shows the exact remote command.`;
 	}
 	if (request.kind === "external-read") return `Authorize external ${request.directory ? "directory" : "file"} read: ${request.target}`;
-	return `Authorize project host script: ${request.target}\nExact args: ${(request.args ?? []).map((part) => JSON.stringify(part)).join(" ") || "[none]"}`;
+	return `Authorize project host script: ${request.target}. The approval dialog shows the exact arguments.`;
 }
 
 async function main() {
@@ -381,6 +403,30 @@ async function main() {
 		const params = message.params ?? {};
 		const id = requestId(request.jobId, message.id, method);
 		try {
+			if (method === "item/tool/call" && params.tool === "research_pi_run") {
+				if (request.mode !== "executor" || submittedResult) throw new Error("External-run tools require an active executor before final handoff");
+				const args = params.arguments ?? {};
+				const ownerJobId = args.ownerJobId ?? request.jobId;
+				if (ownerJobId !== request.jobId) {
+					const owner = await readCodexJob(ownerJobId, { jobRoot: dirname(jobDir), expectedCwd: request.cwd });
+					if (args.action === "register" || owner.actorId !== request.actorId || owner.leaderActorId !== request.leaderActorId || owner.researchTrackRef !== request.researchTrackRef) {
+						throw new Error("Only this Actor's earlier same-track runs may be inspected or settled after resume");
+					}
+				}
+				let result;
+				if (args.action === "list") result = await listCodexExternalRuns(dirname(jobDir), ownerJobId);
+				else if (args.action === "register") result = await registerCodexExternalRun(dirname(jobDir), request.jobId, args);
+				else if (args.action === "settle") result = await settleCodexExternalRun(dirname(jobDir), ownerJobId, args.runId, args);
+				else throw new Error("Unknown external-run action");
+				send({ id: message.id, result: { success: true, contentItems: [{ type: "inputText", text: JSON.stringify(result) }] } });
+				return;
+			}
+			if (method === "item/tool/call" && params.tool === "research_pi_collaborate") {
+				if (submittedResult) throw new Error("A final handoff was already submitted");
+				const result = await collaborateWithCodexPeers(request.jobId, params.arguments ?? {}, { jobRoot: dirname(jobDir) });
+				send({ id: message.id, result: { success: true, contentItems: [{ type: "inputText", text: JSON.stringify(result) }] } });
+				return;
+			}
 			if (method === "item/tool/call" && params.tool === "submit_research_pi_result") {
 				const candidate = request.mode === "advisor"
 					? params.arguments
@@ -441,7 +487,7 @@ async function main() {
 						turnId: params.turnId ?? activeTurnId,
 						kind: "host_capability",
 						audience: "user",
-						question: truncate(hostCapabilityQuestion(inspected.request, input), 4000),
+						question: sourceField(hostCapabilityQuestion(inspected.request, input), 4000, "Host capability question"),
 						whyBlocking: "Codex requested host-user authority that is not covered by an active project or Pi-session grant.",
 						options: ["Approve once", "Approve this Pi session (24h)", "Trust for this project", "Deny"],
 						capability: {
@@ -470,12 +516,13 @@ async function main() {
 					signal: hostCapabilityAbort.signal,
 					env: process.env,
 				});
-				const content = truncate([
-					`Grant ${result.grantId} executed (${result.kind}: ${result.target}).`,
-					`Exit: ${result.exitCode}${result.timedOut ? " · timed out" : ""}${result.outputTruncated ? " · output truncated" : ""}`,
-					result.stdout ? `stdout:\n${result.stdout}` : undefined,
-					result.stderr ? `stderr:\n${result.stderr}` : undefined,
-				].filter(Boolean).join("\n"), 64000);
+				let outputReference;
+				if (capabilityResultNeedsDetail(result)) {
+					const outputPath = join(jobDir, "host-capability-results.jsonl");
+					await appendFile(outputPath, `${JSON.stringify({ requestId: id, recordedAt: now(), ...result })}\n`, { mode: 0o600 });
+					outputReference = `${outputPath} requestId=${id}`;
+				}
+				const content = formatCapabilityResultForModel(result, { reference: outputReference });
 				send({
 					id: message.id,
 					result: { success: result.exitCode === 0, contentItems: [{ type: "inputText", text: content }] },
@@ -492,8 +539,8 @@ async function main() {
 					turnId: params.turnId ?? activeTurnId,
 					kind: "leader_consultation",
 					audience: args.audience === "user" ? "user" : "leader",
-					question: truncate(String(args.question ?? "Codex needs guidance."), 4000),
-					whyBlocking: truncate(String(args.why_it_matters ?? args.why_blocking ?? ""), 4000),
+					question: sourceField(args.question ?? "Codex needs guidance.", 4000, "Consultation question"),
+					whyBlocking: sourceField(args.why_it_matters ?? args.why_blocking ?? "", 4000, "Consultation reason"),
 					options: Array.isArray(args.options) ? args.options.slice(0, 8).map(String) : [],
 					secret: false,
 					status: "pending",
@@ -537,7 +584,7 @@ async function main() {
 			send({ id: message.id, result: { decision: "decline", action: "decline", content: null } });
 			await appendFile(join(jobDir, "worker-errors.log"), `${now()} denied unsupported server request ${method}\n`, { mode: 0o600 });
 		} catch (error) {
-			lastError = truncate(error?.stack ?? String(error), 4000);
+			lastError = diagnosticReceipt(error?.stack ?? String(error), 4000, "events.jsonl and stderr.log");
 			try {
 				send({ id: message.id, error: { code: -32000, message: error instanceof Error ? error.message : String(error) } });
 			} catch {
@@ -618,9 +665,9 @@ async function main() {
 			const phase = String(params.item.phase ?? "").trim();
 			if (phase === "final_answer") finalAgentText = params.item.text;
 			else if (!phase) unphasedAgentText = params.item.text;
-			else if (phase === "commentary") lastCommentaryText = truncate(params.item.text, 2000);
+			else if (phase === "commentary") lastCommentaryText = diagnosticReceipt(params.item.text, 2000, "events.jsonl");
 		}
-		if (method === "error") lastError = truncate(params.error?.message ?? params.message ?? JSON.stringify(params), 4000);
+		if (method === "error") lastError = diagnosticReceipt(params.error?.message ?? params.message ?? JSON.stringify(params), 4000, "events.jsonl");
 		const activityUpdate = projectCodexActivityUpdate(message);
 		if (activityUpdate?.phase === "started") {
 			const key = activityUpdate.activity.id ?? `${activityUpdate.activity.category}:${activityUpdate.activity.summary}`;
@@ -671,12 +718,13 @@ async function main() {
 					if (!pending) throw new Error(`No pending Codex request ${command.requestId}`);
 					pendingHumanResponses.delete(command.requestId);
 					pending.resolve({ response: commandResponse ?? "", answers: commandAnswers ?? null });
-				} else if (command.type === "steer") {
+				} else if (command.type === "steer" || command.type === "peer_message") {
 					if (!threadId || !activeTurnId) throw new Error("Codex job has no active turn to steer");
+					if (submittedResult && command.type === "peer_message") throw new Error("Peer handoff already submitted; message was not delivered");
 					await rpcRequest("turn/steer", {
 						threadId,
 						expectedTurnId: activeTurnId,
-						input: [{ type: "text", text: command.message }],
+						input: [{ type: "text", text: command.type === "peer_message" ? formatPeerMessage(command) : command.message }],
 					});
 				} else if (command.type === "cancel") {
 					requestCancellation();
@@ -694,9 +742,17 @@ async function main() {
 						}
 						: {}),
 				});
+				if (command.runtimeMessageId) {
+					const runtime = await resolveResearchRuntime(request.cwd, { runtimeRoot: command.runtimeRoot });
+					await settleRuntimeMessage(runtime, command.runtimeMessageId, "delivered", { actorId: command.runtimeActorId });
+				}
 			} catch (error) {
 				const { response: _response, answers: _answers, ...safeCommand } = command ?? {};
 				await writeJsonAtomic(path, { ...safeCommand, status: "failed", failedAt: now(), error: error instanceof Error ? error.message : String(error) });
+				if (command?.runtimeMessageId) {
+					const runtime = await resolveResearchRuntime(request.cwd, { runtimeRoot: command.runtimeRoot });
+					await settleRuntimeMessage(runtime, command.runtimeMessageId, "superseded", { actorId: command.runtimeActorId, reason: "native_delivery_failed" });
+				}
 				enqueueJobUpdate({ progress: `command failed: ${error instanceof Error ? error.message : String(error)}` });
 			}
 		}
@@ -775,6 +831,7 @@ async function main() {
 			request.runtimeTmp,
 			request.gitIdentity,
 			systemRuntime,
+			{ fullAccess: request.fullAccess === true },
 		);
 		if (!request.skipSandboxPreflight) {
 			await writeJobUpdate((current) => ({
@@ -790,10 +847,12 @@ async function main() {
 				gitIdentity: request.gitIdentity,
 				runtimePolicy: systemRuntime,
 				environment: process.env,
+				fullAccess: request.fullAccess === true,
 			});
 		}
 		const appServerArgs = [
 			...permissionArgs,
+			...codexModelConfigArgs(request),
 			"app-server",
 			"--stdio",
 		];
@@ -812,7 +871,7 @@ async function main() {
 		});
 		await writeJobUpdate((current) => ({ ...current, codexPid: child.pid ?? null, lastActivityAt: now() }));
 		child.stderr.on("data", (chunk) => {
-			stderrTail = truncate(`${stderrTail}${chunk.toString()}`, 12000);
+			stderrTail = diagnosticTail(`${stderrTail}${chunk.toString()}`, 12000);
 			writeBounded(stderrStream, chunk, "stderr");
 		});
 		child.stdout.on("data", (chunk) => {
@@ -824,7 +883,12 @@ async function main() {
 				try {
 					handleMessage(JSON.parse(line));
 				} catch {
-					writeBounded(eventsStream, `${JSON.stringify({ timestamp: now(), malformed: truncate(line, 4000) })}\n`, "event");
+					writeBounded(eventsStream, `${JSON.stringify({
+						timestamp: now(),
+						malformed: line.length <= 4000 ? line : undefined,
+						malformedLength: line.length,
+						malformedHash: createHash("sha256").update(line).digest("hex"),
+					})}\n`, "event");
 				}
 			}
 		});
@@ -867,11 +931,12 @@ async function main() {
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			await appendFile(join(jobDir, "worker-errors.log"), `${now()} could not configure Codex SQLite logs: ${message}\n`, { mode: 0o600 });
-			await enqueueJobUpdate({ codexSqliteLogs: { mode: "unavailable", database: null, error: truncate(message, 1000) } });
+			await enqueueJobUpdate({ codexSqliteLogs: { mode: "unavailable", database: null, error: diagnosticReceipt(message, 1000, "stderr.log") } });
 		}
 
 		const consultationWhyField = request.mode === "advisor" ? "why_it_matters" : "why_blocking";
 		const dynamicTools = [
+			...(request.mode === "executor" ? [CODEX_COLLABORATION_TOOL, CODEX_RUN_TOOL] : []),
 			{
 				type: "function",
 				name: "submit_research_pi_result",
@@ -928,6 +993,7 @@ async function main() {
 		const threadParams = {
 			cwd: request.cwd,
 			model: request.model,
+			...codexServiceTierParams(request.serviceTier),
 			approvalPolicy: "never",
 			permissions: request.sandbox,
 		};
@@ -957,6 +1023,7 @@ async function main() {
 				cwd: request.cwd,
 				model: request.model,
 				effort: request.reasoningEffort,
+				...codexServiceTierParams(request.serviceTier),
 				approvalPolicy: "never",
 				permissions: request.sandbox,
 			},
@@ -985,7 +1052,7 @@ async function main() {
 		await flushNotificationUpdate();
 		await updateQueue;
 		const turnFailed = turn?.status === "failed";
-		if (turnFailed) lastError = truncate(turn.error?.message ?? (lastError || "Codex turn failed"), 4000);
+		if (turnFailed) lastError = diagnosticReceipt(turn.error?.message ?? (lastError || "Codex turn failed"), 4000, "events.jsonl and stderr.log");
 		const resultText = finalAgentText || unphasedAgentText;
 		const missingFinalError = !resultText && !submittedResult
 			? `Codex turn completed without a final_answer item.${lastCommentaryText ? ` Last commentary: ${lastCommentaryText}` : ""}`
@@ -1025,7 +1092,7 @@ async function main() {
 	} catch (error) {
 		await flushNotificationUpdate();
 		await updateQueue;
-		lastError = truncate(error?.stack ?? String(error), 12000);
+		lastError = diagnosticReceipt(error?.stack ?? String(error), 12000, "events.jsonl and stderr.log");
 		const resultPath = join(jobDir, "result.json");
 		await writeJsonAtomic(resultPath, submittedResult ?? parseStructuredResult(finalAgentText || unphasedAgentText, lastError, request.mode)).catch(() => undefined);
 		const unknownOutcome = request.mode === "executor" && sideEffectStarted;
@@ -1076,6 +1143,7 @@ async function main() {
 			await appendFile(join(jobDir, "stderr-tail.log"), stderrTail, { mode: 0o600 }).catch(() => undefined);
 		}
 		await releaseWriterLock(request.lockPath, request.jobId).catch(() => undefined);
+		await releaseCodexResources(dirname(jobDir), request.jobId).catch(() => undefined);
 		await unlink(join(jobDir, "worker-lease.json")).catch(() => undefined);
 	}
 }

@@ -1,59 +1,70 @@
 import { unwatchFile, watchFile } from "node:fs";
 
-export function createRuntimeMailboxWatcher({ intervalMs = 250, drain, onDelivered, onWarning }) {
-	let generation = 0;
+export function createRuntimeMailboxWatcher({ intervalMs = 250, drain, onDelivered, onWarning, retryWhen }) {
 	let watch = null;
-	let scan = { status: "idle", rescanRequested: false };
-	let lastWarning = "";
 
 	const stop = () => {
-		generation += 1;
-		if (watch) unwatchFile(watch.path, watch.listener);
+		if (!watch) return;
+		unwatchFile(watch.path, watch.listener);
+		clearTimeout(watch.retryTimer);
 		watch = null;
-		scan = { status: "idle", rescanRequested: false };
-		lastWarning = "";
 	};
 
-	const scanNow = async (activeRuntime, ctx, expectedGeneration) => {
-		if (!watch || expectedGeneration !== generation) return;
-		if (scan.status === "running") {
-			scan.rescanRequested = true;
+	const schedule = (owner) => {
+		if (watch !== owner || owner.retryTimer) return;
+		owner.retryTimer = setTimeout(() => {
+			owner.retryTimer = null;
+			void scanNow(owner);
+		}, intervalMs);
+		owner.retryTimer.unref?.();
+	};
+
+	const scanNow = async (owner) => {
+		if (watch !== owner) return;
+		if (owner.running) {
+			owner.rescanRequested = true;
 			return;
 		}
-		scan = { status: "running", rescanRequested: false };
+		owner.running = true;
+		owner.rescanRequested = false;
 		try {
-			const delivered = await drain(activeRuntime, ctx);
+			const delivered = await drain(owner.runtime, owner.ctx);
+			if (watch !== owner) return;
 			if (delivered === null) {
 				stop();
 				return;
 			}
-			if (delivered) await onDelivered?.(ctx, delivered);
-			lastWarning = "";
+			if (delivered) await onDelivered?.(owner.ctx, delivered);
+			owner.lastWarning = "";
 		} catch (error) {
+			if (watch !== owner) return;
 			const message = `Runtime mailbox wake failed: ${error instanceof Error ? error.message : String(error)}`;
-			if (message !== lastWarning) await onWarning?.(ctx, message);
-			lastWarning = message;
+			if (message !== owner.lastWarning) await onWarning?.(owner.ctx, message);
+			owner.lastWarning = message;
 		} finally {
-			const rescanRequested = scan.rescanRequested;
-			scan = { status: "idle", rescanRequested: false };
-			if (rescanRequested && watch && expectedGeneration === generation) {
-				queueMicrotask(() => void scanNow(activeRuntime, ctx, expectedGeneration));
+			owner.running = false;
+			if (watch === owner) {
+				if (owner.rescanRequested) queueMicrotask(() => void scanNow(owner));
+				else if (retryWhen?.(owner.ctx)) schedule(owner);
 			}
 		}
 	};
 
 	const start = (activeRuntime, ctx) => {
 		stop();
-		const expectedGeneration = generation;
-		const path = activeRuntime.ledgerPath;
-		const listener = (current, previous) => {
-			if (expectedGeneration !== generation) return;
+		const owner = { path: activeRuntime.ledgerPath, runtime: activeRuntime, ctx,
+			running: false, rescanRequested: false, retryTimer: null, lastWarning: "", listener: null };
+		owner.listener = (current, previous) => {
 			if (current.mtimeMs === previous.mtimeMs && current.size === previous.size) return;
-			void scanNow(activeRuntime, ctx, expectedGeneration);
+			void scanNow(owner);
 		};
-		watch = { path, listener };
-		watchFile(path, { persistent: false, interval: intervalMs }, listener);
+		watch = owner;
+		watchFile(owner.path, { persistent: false, interval: intervalMs }, owner.listener);
+		// Cover writes between subscription and fs.watchFile's first stat sample.
+		schedule(owner);
 	};
 
-	return { start, stop };
+	// Compact events occur before native Pi becomes idle. Scan on a later tick.
+	const wake = () => { if (watch) schedule(watch); };
+	return { start, stop, wake };
 }
