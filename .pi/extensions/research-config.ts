@@ -71,6 +71,8 @@ export function registerModelSettings(pi: ExtensionAPI, {
 	listModels = listCodexModels,
 	listAntigravity = listAntigravityModels,
 } = {}) {
+	// Native Pi can load this extension without the Research Pi launcher.
+	ensureResearchPiConfig(configPath);
 	const load = () => readResearchPiConfig(configPath);
 	const save = (config: ResearchConfig) => {
 		const saved = writeResearchPiConfig(configPath, config);

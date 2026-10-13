@@ -14,6 +14,8 @@ Research Pi 把研究目标、实验记录、关键决定和多 Agent 协作留�
 
 DeepSeek、OpenCode Go、Z.AI 都按同一流程接入：**安装 → 在凭据文件填 API key → 启动并选择模型**。
 
+以下 `pi` 命令指 Research Pi。电脑上也装过原生 Pi 时，先按[启动入口检查](#区分原生-pi-和-research-pi-的启动入口)确认命令指向。
+
 ### 1. 安装并创建配置
 
 ```sh
@@ -62,6 +64,41 @@ pi
 进入 Pi 后输入 `/model`，搜索上表的 provider 并选择模型；在选择器中按 `Ctrl+S` 可保存为后续新 Session 的默认模型。已有 key 的这三条 API 路径可以直接使用。需要订阅登录时，使用 Pi 原生 `/login`；[认证方式、凭据优先级与常见问题](docs/configuration.md#api-keys-one-file-for-all-three-providers)见配置说明。
 
 模型列表若缺少已接入的供应商，先核对 `credentialsPath` 和变量名，再检查 `/scoped-models` 是否限制了范围；更新模型目录可在终端运行 `pi update --models`。
+
+### 区分原生 Pi 和 Research Pi 的启动入口
+
+两者都可能使用命令名 `pi`。Shell 中的 alias、函数和 PATH 顺序决定实际启动谁；`pi --version` 显示 Core 版本，不能单凭它判断是否启动了 Research Pi。
+
+```sh
+type -a pi
+npm list -g --depth=0
+```
+
+| 启动方式 | 实际入口 | 默认配置与认证目录 |
+|---|---|---|
+| 原生 Pi | 原生安装器或 `@earendil-works/pi-coding-agent` 提供的 `pi` | `~/.pi/agent/` |
+| Research Pi npm 安装版 | `@rosmarinas/research-pi/bin/pi.mjs` | `~/.config/research-pi/` 与 `~/.local/state/research-pi/agent/` |
+| Research Pi 源码版 | 本仓库的 `run-pi.sh`，或指向它的开发链接 | 本仓库的 `.pi/` 与 `.env` |
+
+入口不明确时，npm 安装版可以直接调用自己的 launcher，绕过同名命令：
+
+```sh
+research_pi_cli="$(npm root -g)/@rosmarinas/research-pi/bin/pi.mjs"
+node "$research_pi_cli" setup
+node "$research_pi_cli" paths
+node "$research_pi_cli" --workspace /path/to/research-project
+```
+
+源码版则从 Research Pi 仓库启动：
+
+```sh
+cd /path/to/Research-Pi
+./run-pi.sh setup
+./run-pi.sh paths
+./run-pi.sh --workspace /path/to/research-project
+```
+
+`node bin/pi.mjs` 默认走用户级配置；`run-pi.sh` 会启用源码模式。初始化和启动应使用同一个入口，再按其 `credentialsPath` 填入 key。Research Pi launcher 会自动创建缺失的 `config.json`；`setup` 还会生成凭据文件。原生 Pi 即使发现了本仓库的 `.pi/extensions`，也只是加载扩展，不等于经过 Research Pi launcher 或启用了完整的 Harness 启动配置。
 
 ## 统一 subagent，不统一掉各自的能力
 

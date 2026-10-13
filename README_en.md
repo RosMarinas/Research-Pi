@@ -14,6 +14,8 @@ Requires Node.js `>=22.19` and Git. On Windows, install and run inside WSL2. Kee
 
 DeepSeek, OpenCode Go, and Z.AI follow the same setup: **install → add an API key to the credentials file → start Pi and choose a model**.
 
+The `pi` commands below refer to Research Pi. If native Pi is also installed, first [check which launcher your shell selects](#distinguish-native-pi-from-research-pi-launchers).
+
 ### 1. Install and create configuration
 
 ```sh
@@ -62,6 +64,41 @@ pi
 Inside Pi, enter `/model`, search for the provider from the table, and select a model. Press `Ctrl+S` in the picker to save a default for new sessions. These three API routes are ready once a key is configured. For subscription sign-in, use Pi's native `/login`. See [authentication alternatives, credential precedence, and troubleshooting](docs/configuration.md#api-keys-one-file-for-all-three-providers).
 
 If a configured provider is missing, check `credentialsPath` and the variable name, then check whether `/scoped-models` restricts the selection. Run `pi update --models` in a terminal to refresh model catalogs.
+
+### Distinguish native Pi from Research Pi launchers
+
+Both can use the command name `pi`. Shell aliases, functions, and PATH order determine which one runs. `pi --version` reports the Core version; it does not identify the Research Pi launcher by itself.
+
+```sh
+type -a pi
+npm list -g --depth=0
+```
+
+| Launch route | Actual entry point | Default configuration and authentication directories |
+|---|---|---|
+| Native Pi | `pi` from its installer or `@earendil-works/pi-coding-agent` | `~/.pi/agent/` |
+| Research Pi npm package | `@rosmarinas/research-pi/bin/pi.mjs` | `~/.config/research-pi/` and `~/.local/state/research-pi/agent/` |
+| Research Pi source checkout | This repository's `run-pi.sh`, or a development link to it | This checkout's `.pi/` and `.env` |
+
+When the command is ambiguous, call the npm package's own launcher directly:
+
+```sh
+research_pi_cli="$(npm root -g)/@rosmarinas/research-pi/bin/pi.mjs"
+node "$research_pi_cli" setup
+node "$research_pi_cli" paths
+node "$research_pi_cli" --workspace /path/to/research-project
+```
+
+For a source checkout, launch from the Research Pi repository:
+
+```sh
+cd /path/to/Research-Pi
+./run-pi.sh setup
+./run-pi.sh paths
+./run-pi.sh --workspace /path/to/research-project
+```
+
+`node bin/pi.mjs` uses user-level configuration by default; `run-pi.sh` enables source mode. Use the same entry point for setup and launch, then fill the file shown as `credentialsPath`. The Research Pi launcher automatically creates a missing `config.json`; `setup` also creates the credentials file. Native Pi discovering this checkout's `.pi/extensions` loads those extensions, but does not run the Research Pi launcher or apply its full Harness startup configuration.
 
 ## One subagent layer, distinct backend capabilities
 

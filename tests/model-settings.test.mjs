@@ -57,6 +57,34 @@ test("Antigravity model catalog ignores progress text and keeps model labels", (
 	]);
 });
 
+test("model settings initialize config before the first provider request and preserve live settings on reload", () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-first-config-"));
+	try {
+		const configPath = join(root, "config", "config.json");
+		const handlers = new Map();
+		const pi = { registerCommand() {}, on(name, handler) { handlers.set(name, handler); } };
+		const register = () => registerModelSettings(pi, { configPath, agentDir: join(root, "agent") });
+		register();
+		const event = { payload: { model: "deepseek-flash" } };
+		const ctx = { model: { provider: "deepseek", id: "deepseek-flash" } };
+		assert.equal(handlers.get("before_provider_request")(event, ctx), undefined);
+		const config = readResearchPiConfig(configPath);
+		assert.equal(config.version, 3);
+		assert.equal(config.subagents.executor.thinking, "high");
+		writeResearchPiConfig(configPath, {
+			...config,
+			pi: { ...config.pi, modelServiceTiers: { [`${leader.provider}/${leader.id}`]: "fast" } },
+			subagents: { ...config.subagents, executor: { ...config.subagents.executor, thinking: "max" } },
+		});
+		assert.equal(handlers.get("before_provider_request")({ payload: { model: leader.id } }, { model: leader }).service_tier, "priority");
+		register();
+		assert.equal(readResearchPiConfig(configPath).subagents.executor.thinking, "max");
+		assert.equal(handlers.get("before_provider_request")({ payload: { model: leader.id } }, { model: leader }).service_tier, "priority");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("model center persists native Leader defaults, updates live worker defaults, and confirms extra quota", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-model-settings-"));
 	const previousEnvironment = Object.fromEntries(Object.entries(process.env).filter(([key]) => /^RESEARCH_PI_(?:CODEX|SUBAGENT)_/.test(key)));
