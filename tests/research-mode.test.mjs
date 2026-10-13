@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
-import researchMode, { applyResearchIdentity } from "../.pi/extensions/research-mode.ts";
+import researchMode, {
+	applyResearchIdentity,
+	codemodeOutputNeedsArtifact,
+	codemodeOutputReceipt,
+	partialToolResultNeedsReceipt,
+	partialToolResultReceipt,
+} from "../.pi/extensions/research-mode.ts";
 import { mapProviderSystemPrompt } from "../.pi/lib/provider-system-prompt.mjs";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall } from "../node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/providers/faux.js";
 import { getCurrentSystemPrompt } from "../node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.js";
@@ -62,6 +68,63 @@ test("Pi 1.0 research identity stays stable through a real Session mailbox wake 
 const native = buildSystemPrompt({ cwd: "/synthetic-project", selectedTools: [], appendSystemPrompt: "Keep current guardrails." });
 const research = applyResearchIdentity(native);
 const cacheControl = { type: "ephemeral" };
+test("research identity requires plain and traceable technical messages", () => {
+	assert.match(research, /State the result first/);
+	assert.match(research, /Put one topic or action in each sentence/);
+	assert.match(research, /Keep exact evidence references/);
+	assert.match(research, /Do not copy logs, long JSON, or task background/);
+	assert.match(research, /Never print or return an unfiltered nested tool result/);
+});
+
+test("oversized codemode output becomes a trace receipt without a cut excerpt", () => {
+	const event = {
+		toolCallId: "codemode-1",
+		isError: false,
+		content: [{ type: "text", text: `BEGIN ${"raw ".repeat(3_000)} END` }],
+		details: { calls: [{ status: "ok" }, { status: "error" }] },
+	};
+	assert.equal(codemodeOutputNeedsArtifact(event), true);
+	const receipt = codemodeOutputReceipt(event, "/state/context-artifacts/codemode-1.txt", 18_000);
+	assert.match(receipt, /Nested calls: 2 \(ok=1, error=1\)/);
+	assert.match(receipt, /Reference: \/state\/context-artifacts\/codemode-1\.txt/);
+	assert.doesNotMatch(receipt, /BEGIN|END/);
+});
+
+test("Core tool truncation becomes a no-excerpt receipt with an exact recovery action", () => {
+	const event = {
+		toolCallId: "bash-1",
+		toolName: "bash",
+		input: { command: "produce-large-output" },
+		content: [{ type: "text", text: "tail fragment that must not survive" }],
+		details: {
+			truncation: { truncated: true, totalLines: 20_000, totalBytes: 400_000 },
+			fullOutputPath: "/tmp/full-output.txt",
+		},
+		isError: false,
+	};
+	assert.equal(partialToolResultNeedsReceipt(event), true);
+	const receipt = partialToolResultReceipt(event, "/state/context-artifacts/bash-1.txt");
+	assert.match(receipt, /Reported size: 20000 lines, 400,000 bytes/);
+	assert.match(receipt, /Reference: \/state\/context-artifacts\/bash-1\.txt/);
+	assert.match(receipt, /Do not treat a partial prefix, tail, or result set as complete evidence/);
+	assert.doesNotMatch(receipt, /tail fragment/);
+});
+
+test("research mode replaces a partial read result before it reaches model context", async () => {
+	const handlers = new Map();
+	researchMode({ on: (event, handler) => handlers.set(event, handler) });
+	const projected = await handlers.get("tool_result")({
+		toolCallId: "read-1",
+		toolName: "read",
+		input: { path: "large.log", offset: 1 },
+		content: [{ type: "text", text: "partial file prefix" }],
+		details: { truncation: { truncated: true, totalLines: 8_000, totalBytes: 200_000 } },
+		isError: false,
+	}, { sessionManager: { getSessionId: () => "session-test" } });
+	assert.match(projected.content[0].text, /^PARTIAL TOOL RESULT/);
+	assert.match(projected.content[0].text, /Target: large\.log/);
+	assert.doesNotMatch(projected.content[0].text, /partial file prefix/);
+});
 test("research identity preserves structured sections and full-access prompt overrides", () => {
 	const handlers = new Map();
 	researchMode({ on: (event, handler) => handlers.set(event, handler) });

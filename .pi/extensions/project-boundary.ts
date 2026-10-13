@@ -8,9 +8,11 @@ import { createBashTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
 	authorizeCapabilityRequest,
+	capabilityResultNeedsDetail,
 	capabilityGrantSummary,
 	createCapabilityGrant,
 	executeGrantedCapability,
+	formatCapabilityResultForModel,
 	findCapabilityGrant,
 	inspectCapabilityAuthorization,
 	isForbiddenCredentialRead,
@@ -416,6 +418,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			"For justified host authority, send the exact target or argv. Reuse a listed grantId so its approved cwd is restored; on cwd mismatch retry the same capability rather than switching kind or adding a shell wrapper.",
 			"SSH credentials remain opaque. Host commands must match approved authority; never request, read, print, copy, or transmit private keys, tokens, or credential stores.",
 			"A missing capability is a user authorization boundary. Do not route around it with bash, symlinks, proxy commands, copied credentials, or another agent.",
+			"Design each read or command to return only the evidence needed for the current decision. Filter large logs at the source. Save large raw output to an approved artifact and return its path. Do not dump a full log into model context.",
 		],
 		parameters: Type.Object({
 			action: Type.Union([Type.Literal("list"), Type.Literal("read"), Type.Literal("ssh"), Type.Literal("command"), Type.Literal("script")]),
@@ -450,23 +453,21 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 					const grant = await requestInteractiveGrant(request, ctx, input, context, true, !commandScopedSsh);
 					if (!grant) throw new Error("Host capability was not approved by the user");
 				}
-				let outputTail = "";
+				let outputBytes = 0;
 				const result = await executeGrantedCapability(context, input, {
 					signal,
 					env: process.env,
 					onData: (chunk: Buffer) => {
-						outputTail = `${outputTail}${chunk.toString()}`.slice(-12000);
-						onUpdate?.({ content: [{ type: "text", text: outputTail }] });
+						outputBytes += chunk.length;
+						onUpdate?.({ content: [{ type: "text", text: `Host capability is running. Received ${outputBytes.toLocaleString()} output bytes.` }] });
 					},
 				});
-				const text = [
-					`Capability ${result.grantId} executed (${result.kind}: ${result.target}).`,
-					`Exit: ${result.exitCode}${result.timedOut ? " · timed out" : ""}${result.outputTruncated ? " · output truncated" : ""}`,
-					result.stdout ? `stdout:\n${result.stdout}` : undefined,
-					result.stderr ? `stderr:\n${result.stderr}` : undefined,
-				].filter(Boolean).join("\n");
+				const needsDetail = capabilityResultNeedsDetail(result);
+				const text = formatCapabilityResultForModel(result, {
+					reference: needsDetail ? "the complete captured output is stored in this tool call's details" : undefined,
+				});
 				await refreshBoundaryStatus(ctx);
-				return { content: [{ type: "text", text }], isError: result.exitCode !== 0 };
+				return { content: [{ type: "text", text }], details: result, isError: result.exitCode !== 0 };
 			} catch (error) {
 				return { content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }], isError: true };
 			}

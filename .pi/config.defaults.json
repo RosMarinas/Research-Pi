@@ -9,6 +9,10 @@
       "defaultTools": [
         "+codemode"
       ],
+      "tokenSpeed": {
+        "display": "ttft",
+        "useProviderTokens": true
+      },
       "retry": {
         "enabled": true,
         "maxRetries": 2,

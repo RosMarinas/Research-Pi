@@ -2,11 +2,13 @@ import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { redactSensitiveText } from "./sensitive-text.mjs";
+
+export { redactSensitiveText } from "./sensitive-text.mjs";
 
 export const MEMORY_SCHEMA_VERSION = 1;
 export const MEMORY_EXTRACTOR_VERSION = "research-pi-memory-v3";
 
-const MAX_INDEXED_CHARS = 64_000;
 const DEFAULT_RESULT_LIMIT = 6;
 
 function sha256(value) {
@@ -21,27 +23,17 @@ function memoryRef(projectCwd, sessionId, entryId) {
 	return `P:${memoryProjectKey(projectCwd)}/S:${sessionId}/E:${entryId}`;
 }
 
-function scalar(value, maxChars = 2_000) {
+function scalar(value, maxChars = null) {
 	if (typeof value !== "string") return "";
-	const normalized = value.replace(/\r\n/g, "\n").trim();
-	return normalized.length <= maxChars ? normalized : `${normalized.slice(0, maxChars)}…`;
-}
-
-export function redactSensitiveText(value) {
-	let text = String(value ?? "");
-	text = text.replace(/\b(Bearer)\s+[A-Za-z0-9._~+/=-]{12,}/gi, "$1 [REDACTED]");
-	text = text.replace(/\b(sk-[A-Za-z0-9_-]{8,})\b/g, "[REDACTED_API_KEY]");
-	text = text.replace(
-		/(\b[A-Z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD)\b\s*[:=]\s*)[^\s,;]+/gi,
-		"$1[REDACTED]",
-	);
+	const text = value.replace(/\r\n/g, "\n").trim();
+	if (maxChars !== null && text.length > maxChars) {
+		throw new Error(`Memory field is ${text.length} characters. Rewrite the complete field in at most ${maxChars} characters; Research Pi will not cut it.`);
+	}
 	return text;
 }
 
-function boundedIndexText(value) {
-	const redacted = redactSensitiveText(value);
-	if (redacted.length <= MAX_INDEXED_CHARS) return redacted;
-	return `${redacted.slice(0, MAX_INDEXED_CHARS)}\n[INDEX_TRUNCATED]`;
+function indexText(value) {
+	return redactSensitiveText(value);
 }
 
 function messageText(message) {
@@ -157,7 +149,7 @@ function makeUnit({ sourcePath, sourceKind, sessionId, projectCwd, sessionName, 
 		kind,
 		role: role || null,
 		activeBranch: active ? 1 : 0,
-		text: boundedIndexText(original),
+		text: indexText(original),
 		contentHash: sha256(original),
 	};
 }
@@ -519,17 +511,30 @@ function candidateKey(row) {
 }
 
 function snippetFor(text, query, tokens, maxChars = 420) {
-	const lower = text.toLocaleLowerCase();
 	const needles = [query, ...tokens].map((value) => value.toLocaleLowerCase()).filter(Boolean);
-	let at = -1;
-	for (const needle of needles) {
-		const found = lower.indexOf(needle);
-		if (found >= 0 && (at < 0 || found < at)) at = found;
+	const segments = (String(text).match(/[^.!?。！？\n]+[.!?。！？]?/g) ?? [])
+		.map((segment) => segment.replace(/\s+/g, " ").trim())
+		.filter(Boolean);
+	if (!segments.length) return "No readable text segment is available. Read the exact entry for details.";
+	let index = segments.findIndex((segment) => needles.some((needle) => segment.toLocaleLowerCase().includes(needle)));
+	if (index < 0) index = 0;
+	const match = segments[index];
+	if (match.length > maxChars) {
+		return `The matching complete text segment is ${match.length} characters. Read the exact entry; no partial segment was returned.`;
 	}
-	if (at < 0) at = 0;
-	const start = Math.max(0, at - Math.floor(maxChars / 3));
-	const end = Math.min(text.length, start + maxChars);
-	return `${start > 0 ? "…" : ""}${text.slice(start, end).replace(/\s+/g, " ").trim()}${end < text.length ? "…" : ""}`;
+	const selected = [match];
+	let used = match.length;
+	for (let distance = 1; distance < segments.length; distance++) {
+		for (const candidateIndex of [index - distance, index + distance]) {
+			if (candidateIndex < 0 || candidateIndex >= segments.length) continue;
+			const candidate = segments[candidateIndex];
+			if (used + 1 + candidate.length > maxChars) continue;
+			if (candidateIndex < index) selected.unshift(candidate);
+			else selected.push(candidate);
+			used += 1 + candidate.length;
+		}
+	}
+	return selected.join(" ");
 }
 
 function reliability(kind) {
@@ -661,12 +666,11 @@ export function readMemory(db, { projectKey, sessionId, entryId, radius = 1, max
 			ORDER BY id
 		`)
 		.all(center.source_path, center.id - boundedRadius, center.id + boundedRadius);
-	let remaining = boundedChars;
+	let used = 0;
 	const entries = [];
 	for (const row of rows) {
-		if (remaining <= 0) break;
-		const text = row.text.length <= remaining ? row.text : `${row.text.slice(0, remaining)}\n[READ_TRUNCATED]`;
-		remaining -= text.length;
+		const fits = used + row.text.length <= boundedChars;
+		if (fits) used += row.text.length;
 		entries.push({
 			ref: memoryRef(row.project_cwd, row.session_id, row.entry_id),
 			entryId: row.entry_id,
@@ -676,7 +680,9 @@ export function readMemory(db, { projectKey, sessionId, entryId, radius = 1, max
 			reliability: reliability(row.kind),
 			activeBranch: Boolean(row.active_branch),
 			contentHash: row.content_hash,
-			text,
+			text: fits ? row.text : "",
+			omittedChars: fits ? 0 : row.text.length,
+			omission: fits ? null : "The complete entry exceeds the requested context budget. No partial text was returned.",
 		});
 	}
 	return {
@@ -686,5 +692,7 @@ export function readMemory(db, { projectKey, sessionId, entryId, radius = 1, max
 		sessionName: center.session_name ?? undefined,
 		sourcePath: center.source_path,
 		entries,
+		usedChars: used,
+		maxChars: boundedChars,
 	};
 }

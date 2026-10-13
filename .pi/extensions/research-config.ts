@@ -112,9 +112,12 @@ export function registerModelSettings(pi: ExtensionAPI, {
 		if (!ctx.hasUI) throw new Error("Enabling Fast requires confirmation in /models; it uses extra quota.");
 		return await ctx.ui.confirm("Enable Fast?", "Fast uses additional quota (currently 2.5× included subscription usage; credits/PAYG 2×). Account/model eligibility still applies. It changes speed, not reasoning effort.");
 	};
-	const nativeModels = async (ctx: ExtensionContext) => {
+	const nativeModels = async (ctx: ExtensionContext, scoped = false) => {
 		await ctx.modelRegistry.refresh({ allowNetwork: false });
-		return ctx.modelRegistry.getAvailable();
+		const available = ctx.modelRegistry.getAvailable();
+		if (!scoped || !ctx.scopedModels?.length) return available;
+		const selected = new Set(ctx.scopedModels.map(({ model }) => `${model.provider}/${model.id}`));
+		return available.filter((model) => selected.has(`${model.provider}/${model.id}`));
 	};
 	const contextModel = async (role: Role, ctx: ExtensionContext) => {
 		const runner = role === "leader" ? null : load().subagents[role];
@@ -123,7 +126,7 @@ export function registerModelSettings(pi: ExtensionAPI, {
 		return (await nativeModels(ctx)).find((model) => `${model.provider}/${model.id}` === id);
 	};
 	const modelChoices = async (backend: string, ctx: ExtensionContext) => {
-		if (backend === "pi") return (await nativeModels(ctx)).map((model) => ({ model: `${model.provider}/${model.id}`, native: model }));
+		if (backend === "pi") return (await nativeModels(ctx, true)).map((model) => ({ model: `${model.provider}/${model.id}`, native: model }));
 		if (backend === "antigravity") return await listAntigravity({ cwd: ctx.cwd });
 		return await listModels({ cwd: ctx.cwd });
 	};
@@ -260,7 +263,7 @@ export function registerModelSettings(pi: ExtensionAPI, {
 				if (field === "backend") choices = ["codex", "antigravity", "pi"];
 				else if (field === "speed") choices = ["inherit", "standard", "fast"];
 				else if (role === "leader") {
-					const models = await nativeModels(ctx);
+					const models = await nativeModels(ctx, true);
 					choices = field === "model" ? models.map((model) => `${model.provider}/${model.id}`)
 						: ctx.model ? getSupportedThinkingLevels(ctx.model) : [];
 				} else {

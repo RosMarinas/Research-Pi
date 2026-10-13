@@ -85,6 +85,49 @@ test("model settings initialize config before the first provider request and pre
 	}
 });
 
+test("Pi model pickers respect scope while context controls retain access to the current model", async () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-model-scope-"));
+	try {
+		const hidden = { provider: "opencode", id: "deepseek-v4.1-flash", contextWindow: 1_000_000 };
+		const go = { ...hidden, provider: "opencode-go" };
+		const deepseek = { provider: "deepseek", id: "deepseek-flash", contextWindow: 1_000_000 };
+		const available = [hidden, go, deepseek];
+		const screens = [], errors = [], inputs = [];
+		const ctx = {
+			cwd: root, model: go, hasUI: true,
+			scopedModels: [go, deepseek].map((model) => ({ model })),
+			modelRegistry: { refresh: async (options) => assert.deepEqual(options, { allowNetwork: false }), getAvailable: () => available },
+			ui: {
+				notify(message, type) { if (type === "error") errors.push(message); },
+				async custom(factory) {
+					const view = factory({ terminal: { rows: 30 }, requestRender() {} }, { fg: (_style, text) => text }, { matches: () => false }, () => {});
+					screens.push(view.render(120).join("\n"));
+					return undefined;
+				},
+				async input(...args) { inputs.push(args); return undefined; },
+			},
+		};
+		const handler = registerModelSettings({ registerCommand() {}, on() {} }, { configPath: join(root, "config.json"), agentDir: join(root, "agent") });
+		await handler("leader model", ctx);
+		await handler("general model", ctx);
+		assert.equal(screens.length, 2);
+		for (const screen of screens) {
+			assert.match(screen, /opencode-go\/deepseek-v4\.1-flash/);
+			assert.match(screen, /deepseek\/deepseek-flash/);
+			assert.doesNotMatch(screen, /opencode\/deepseek-v4\.1-flash/);
+		}
+		ctx.model = hidden;
+		await handler("leader context", ctx);
+		assert.match(inputs[0][0], /opencode\/deepseek-v4\.1-flash/);
+		ctx.scopedModels = [];
+		await handler("leader model", ctx);
+		assert.match(screens.at(-1), /opencode\/deepseek-v4\.1-flash/);
+		assert.deepEqual(errors, []);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("model center persists native Leader defaults, updates live worker defaults, and confirms extra quota", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-model-settings-"));
 	const previousEnvironment = Object.fromEntries(Object.entries(process.env).filter(([key]) => /^RESEARCH_PI_(?:CODEX|SUBAGENT)_/.test(key)));

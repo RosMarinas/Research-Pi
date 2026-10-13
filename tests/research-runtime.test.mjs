@@ -93,7 +93,7 @@ test("Codex Runtime result cards preserve Markdown structure when expanded", () 
 		"Recommended next step: run probe D",
 		"Use subagent action=result with jobId=codex-demo if the full structured result is needed.",
 	].join("\n");
-	assert.equal(codexRuntimeMessagePreview(content), "总判断暂不冻结。 1. 第一条论证。 2. 第二条论证。");
+	assert.equal(codexRuntimeMessagePreview(content), "总判断暂不冻结。");
 	const markdown = codexRuntimeMessageMarkdown(content);
 	assert.match(markdown, /^## Summary/m);
 	assert.match(markdown, /\n1\. 第一条论证。\n2\. 第二条论证。/);
@@ -101,6 +101,25 @@ test("Codex Runtime result cards preserve Markdown structure when expanded", () 
 	assert.match(markdown, /^## Uncertainties/m);
 	assert.match(markdown, /^## Recommended next step/m);
 	assert.match(markdown, /^> Use subagent/m);
+});
+
+test("new Runtime cards preview the result and keep trace fields in the expanded view", () => {
+	const content = [
+		"RUNTIME RESULT",
+		"Message: msg-2.",
+		"Job: codex-demo.",
+		"State: completed.",
+		"Outcome: succeeded.",
+		"Result: The focused check passed.",
+		"Decision evidence:",
+		"- tests/probe.test.mjs passed.",
+		"Next action: Merge the validated change.",
+	].join("\n");
+	assert.equal(codexRuntimeMessagePreview(content), "The focused check passed.");
+	const markdown = codexRuntimeMessageMarkdown(content);
+	assert.match(markdown, /^## RUNTIME RESULT/m);
+	assert.match(markdown, /^### Decision evidence/m);
+	assert.match(markdown, /^> Next action:/m);
 });
 
 test("Runtime status reports live activation instead of historical Actor count", () => {
@@ -127,7 +146,7 @@ test("Runtime status reports live activation instead of historical Actor count",
 	};
 
 	assert.deepEqual(runtimeActorSummary(snapshot), { active: 1, waiting: 0, registered: 18 });
-	assert.equal(formatRuntimeStatus(snapshot.projectKey, snapshot), "Runtime 42beebda · 1 active");
+	assert.equal(formatRuntimeStatus(snapshot.projectKey, snapshot), "Runtime · 1 active");
 	assert.doesNotMatch(formatRuntimeStatus(snapshot.projectKey, snapshot), /18 actors/);
 	assert.match(actorLines(snapshot), /mission-0 · codex · general · inherit · thinking inherit · active \(running\)/);
 	assert.doesNotMatch(actorLines(snapshot), /mission-1/);
@@ -605,8 +624,8 @@ test("Codex mission and mode define stable Actors while job events remain idempo
 			pendingRequest: { id: "request-fixture" },
 		};
 		const [first, second] = await Promise.all([
-			recordCodexRuntimeEvent(runtime, job, "Choose the validity check."),
-			recordCodexRuntimeEvent(runtime, job, "Choose the validity check."),
+			recordCodexRuntimeEvent(runtime, job),
+			recordCodexRuntimeEvent(runtime, job),
 		]);
 		assert.equal(first.id, second.id);
 		const persistedEvents = readFileSync(runtime.ledgerPath, "utf8").trim().split(/\r?\n/).map((line) => JSON.parse(line));
@@ -641,10 +660,10 @@ test("a directly-read Codex terminal result consumes its durable mailbox event",
 			result: { working_synthesis: "terminal result was read directly" },
 		};
 		const first = await acknowledgeDirectCodexTerminalResult({
-			runtime, job, content: "terminal result was read directly", sessionId: "session-a", attachmentEpoch: attachment.epoch,
+			runtime, job, sessionId: "session-a", attachmentEpoch: attachment.epoch,
 		});
 		const second = await acknowledgeDirectCodexTerminalResult({
-			runtime, job, content: "terminal result was read directly", sessionId: "session-a", attachmentEpoch: attachment.epoch,
+			runtime, job, sessionId: "session-a", attachmentEpoch: attachment.epoch,
 		});
 		assert.equal(first.status, "consumed");
 		assert.equal(second.status, "consumed");
@@ -957,7 +976,7 @@ test("Analysis handoff wakes only the attached Leader at a safe boundary", async
 	}
 });
 
-test("Runtime steer is non-preemptive and remains immutable history after consumption", async () => {
+test("Runtime steer is non-preemptive and remains in history after consumption", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-runtime-extension-"));
 	const previousRoot = process.env.RESEARCH_PI_RUNTIME_DIR;
 	process.env.RESEARCH_PI_RUNTIME_DIR = join(root, "runtime");
@@ -1013,46 +1032,48 @@ test("Runtime steer is non-preemptive and remains immutable history after consum
 		const agentMessage = { role: "custom", ...sent[0].message, timestamp: Date.now() };
 		const firstContext = await handlers.get("context")({ type: "context", messages: [agentMessage] }, ctx);
 		assert.equal(firstContext.messages.filter((message) => message.customType === RUNTIME_MESSAGE_KIND).length, 1);
-			await handlers.get("agent_settled")({ type: "agent_settled" }, ctx);
-			const laterContext = await handlers.get("context")({ type: "context", messages: [agentMessage] }, ctx);
-			assert.deepEqual(laterContext.messages, firstContext.messages);
-			assert.equal(sent.length, 1, "consumption preserves history without redelivery");
+		await handlers.get("agent_settled")({ type: "agent_settled" }, ctx);
+		const laterContext = await handlers.get("context")({ type: "context", messages: [agentMessage] }, ctx);
+		assert.equal(laterContext.messages.filter((message) => message.customType === RUNTIME_MESSAGE_KIND).length, 1);
+		assert.deepEqual(laterContext.messages[0], firstContext.messages[0], "consumption must not rewrite model-visible history");
+		assert.equal(sent.length, 1, "consumption stops redelivery without deleting history");
 
-			const runtime = await resolveResearchRuntime(workspace);
-			const pendingRuntimeAsk = await createRuntimeMessage(runtime, {
-				id: "msg-codex-pending-request",
+		const runtime = await resolveResearchRuntime(workspace);
+		const pendingRuntimeAsk = await createRuntimeMessage(runtime, {
+			id: "msg-codex-pending-request",
+			type: "ask",
+			from: "codex:request-test:executor",
+			to: RESEARCH_LEADER_ACTOR_ID,
+			body: "Codex needs an explicit response.",
+			relatesTo: "request-pending",
+			metadata: { requestId: "request-pending", jobId: "codex-request-test" },
+		});
+		const pendingAsk = {
+			role: "custom",
+			customType: RUNTIME_MESSAGE_KIND,
+			content: "Codex needs an explicit response.",
+			display: true,
+			details: {
+				messageId: pendingRuntimeAsk.id,
 				type: "ask",
-				from: "codex:request-test:executor",
-				to: RESEARCH_LEADER_ACTOR_ID,
-				body: "Codex needs an explicit response.",
-				relatesTo: "request-pending",
-				metadata: { requestId: "request-pending", jobId: "codex-request-test" },
-			});
-			const pendingAsk = {
-				role: "custom",
-				customType: RUNTIME_MESSAGE_KIND,
-				content: "Codex needs an explicit response.",
-				display: true,
-				details: {
-					messageId: pendingRuntimeAsk.id,
-					type: "ask",
-					requestId: "request-pending",
-					attachmentEpoch: null,
-				},
-				timestamp: Date.now(),
-			};
-			await handlers.get("context")({ type: "context", messages: [pendingAsk] }, ctx);
-			await handlers.get("agent_settled")({ type: "agent_settled" }, ctx);
-			const waitingContext = await handlers.get("context")({ type: "context", messages: [pendingAsk] }, ctx);
-			assert.equal(waitingContext.messages.filter((message) => message.details?.requestId === "request-pending").length, 1);
-			await consumeRuntimeMessagesForAttachment(runtime, [pendingRuntimeAsk.id], {
-				sessionId: "session-extension",
-				actorId: RESEARCH_LEADER_ACTOR_ID,
-			});
-			const resolvedContext = await handlers.get("context")({ type: "context", messages: [pendingAsk] }, ctx);
-			assert.deepEqual(resolvedContext.messages, waitingContext.messages, "resolved ASK remains unchanged history");
+				requestId: "request-pending",
+				attachmentEpoch: null,
+			},
+			timestamp: Date.now(),
+		};
+		await handlers.get("context")({ type: "context", messages: [pendingAsk] }, ctx);
+		await handlers.get("agent_settled")({ type: "agent_settled" }, ctx);
+		const waitingContext = await handlers.get("context")({ type: "context", messages: [pendingAsk] }, ctx);
+		assert.equal(waitingContext.messages.filter((message) => message.details?.requestId === "request-pending").length, 1);
+		await consumeRuntimeMessagesForAttachment(runtime, [pendingRuntimeAsk.id], {
+			sessionId: "session-extension",
+			actorId: RESEARCH_LEADER_ACTOR_ID,
+		});
+		const resolvedContext = await handlers.get("context")({ type: "context", messages: [pendingAsk] }, ctx);
+		assert.equal(resolvedContext.messages.filter((message) => message.details?.requestId === "request-pending").length, 1);
+		assert.deepEqual(resolvedContext.messages[0], waitingContext.messages[0], "request settlement must not rewrite its historical card");
 
-			await commands.get("steer").handler("--preempt @research-leader urgent correction", ctx);
+		await commands.get("steer").handler("--preempt @research-leader urgent correction", ctx);
 		assert.equal(aborts, 1);
 		assert.equal(sent.at(-1).options.deliverAs, "followUp");
 	} finally {

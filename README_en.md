@@ -190,6 +190,7 @@ Codex retains durable jobs, same-workspace concurrency, write-scope coordination
 - **ProjectView:** a fixed snapshot at initialization and compaction. Later progress enters through conversation, tool results, and messages instead of repeatedly rewriting the sent prefix.
 - **Experiment ledger:** one lightweight record for the question, intervention, observations, validity, and next step. Ordinary probes and successful commands do not require documentation or copies of raw evidence.
 - **Local search and compaction:** retrieve earlier sessions and experiments when needed; preserve structured research state and provenance rather than just a chat summary.
+- **Plain messages:** Runtime, subagent, and Research Pi tools return traceable decision cards by default. They do not copy logs or long JSON. Read detail by section or evidence reference. User feedback and agent messages use a practical plain-technical-language profile based on ASD-STE100 and ISO 24495-1:2023; this is not a claim of certified compliance.
 
 Long-running projects can maintain a short `RESEARCH.md` covering the research problem, final goal, overall approach, non-goals, and decision principles. Keep active runs, daily TODOs, and activity logs in Runtime and experiment records. The anchor is read when a snapshot is created; file edits do not rewrite an active Session's context. Communicate urgent changes in conversation.
 

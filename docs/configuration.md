@@ -89,6 +89,10 @@ For GPT subscription use, `/login openai-codex` keeps the existing Codex route. 
       "theme": "research-pi",
       "tuiMode": "regular",
       "defaultTools": ["+codemode"],
+      "tokenSpeed": {
+        "display": "ttft",
+        "useProviderTokens": true
+      },
       "retry": {
         "enabled": true,
         "maxRetries": 2,
@@ -108,6 +112,10 @@ For GPT subscription use, `/login openai-codex` keeps the existing Codex route. 
 ```
 
 These values do not define or filter models. Research Pi preserves native `models.json`; explicit context edits merge only the selected model's `contextWindow` override.
+
+Research Pi bundles and explicitly loads `pi-token-speed` 0.11.0 by default. The footer shows TPS and time to first token (TTFT); `/tps` opens its settings menu. Provider token counting is enabled: live counts use increasing provider-reported output usage when available, otherwise the upstream counter is used; the final total is reconciled with reported usage. The extension uses Research Pi's effective `agentDir`, not the separate native Pi profile. These defaults take effect on the next Host/process start. Updating the checkout does not add the extension to an already-running Host; reconnecting or `/reload` cannot add a path absent from its original explicit loadout.
+
+In the terminal UI, TPS and TTFT occupy a separate performance row below the editor. Narrow terminals wrap the measurements instead of clipping TTFT. This row does not share the native extension-status line with task descriptions. Runtime status omits the project ID, and worker status shows counts, waiting/cancelling state, heartbeat and the latest failure or incomplete outcome. Job IDs, task names, models and activity details remain in the Runtime Dock and `/watch`. Local tool status keeps the tool name, count, duration and failure state; the tool card retains its arguments and result.
 
 Research Pi explicitly loads `builtin:codemode` and `builtin:tool-search` because Pi 1.0's `--no-extensions` disables built-ins too. Codemode is enabled by default; the `on` mode retains direct tool calls as well. MCP and llama.cpp remain opt-in (`-e builtin:mcp` or `-e builtin:llama.cpp`). Analysis Sessions keep their read-only tool allowlist and do not expose codemode's model operations.
 
@@ -229,9 +237,33 @@ Research compaction now produces two deliberately different forms of project mem
 
 ProjectView adds a user-owned layer before those compact-generated forms:
 
-1. **Project Anchor** is the optional regular file `<project>/RESEARCH.md`. Research Pi links its relative path and captures at most the first 3600 characters. It is never generated or rewritten by compaction. Edits appear in the next snapshot, not by rewriting the current Session prefix; explicitly read the file or communicate urgent changes in conversation.
+1. **Project Anchor** is the optional regular file `<project>/RESEARCH.md`. Research Pi injects it only when the complete file is at most 3600 characters. It does not inject a partial prefix. It never generates or rewrites the file. Edits appear in the next snapshot, not by rewriting the current Session prefix; explicitly read the file or communicate urgent changes in conversation.
 2. **Project Brief** is captured only at a successful compact boundary. It contains a short project overview, final goal, overall approach, durable user priorities, and concise closed phases in `goal -> approach -> result` form. It excludes the active run, current claim, newest route, Git state and next experiment. Its compact-generated portion remains stable until the next successful compact.
-3. **Project frontier** contains current route/freshness, latest handoff, newest evidence, Actions, structured current frontier and candidate next experiment. Together with Anchor and Brief it forms one persisted snapshot at project-context initialization and after successful local compaction. Explicit role/context changes establish a new snapshot. Ordinary user turns, tool continuations, UI refreshes, and Session resume retain the exact snapshot; there is no automatic request-tail Delta. Later progress travels through ordinary conversation, tool results, and directed messages. Consuming a delivered mailbox message prevents redelivery, not retention in conversation history.
+3. **Project frontier** contains current route/freshness, latest handoff, newest evidence, Actions, structured current frontier and candidate next experiment. Together with Anchor and Brief it forms one persisted snapshot at project-context initialization and after successful local compaction. Explicit role/context changes establish a new snapshot. Ordinary user turns, tool continuations, UI refreshes, and Session resume retain the exact snapshot; there is no automatic request-tail Delta. Later progress travels through ordinary conversation, tool results, and directed messages.
+
+The append-only Session and project Runtime remain the audit record, but they are not a transcript dump. Runtime messages are concise source cards with a message ID, job or request ID, state, decision evidence, required action, and detail reference. Consumption stops redelivery; it does not remove a card that the model has already seen. Model-visible history stays byte-stable until an explicit compaction. Later cards record request resolution, supersession, or reconciliation.
+
+Research Pi does not shorten generic tool results with character cuts or head/tail excerpts. A tool or plugin must control its default output before the output first enters context. It can keep full detail in Session or an artifact and expose a concise, traceable receipt to the model. Once a tool result, Runtime card, or thinking block has entered model context, later turns do not rewrite or delete it. Explicit compaction is the only normal history-rewrite boundary. The default result states the outcome, important evidence, uncertainty, next action, and stable references. Detailed subagent data is read one section at a time with `subagent action=result ... resultSection=<section>`. Available sections include `summary`, `request`, `scope`, `evidence`, `checks`, `effects`, `changes`, `analysis`, `uncertainties`, `remaining`, and `runs`.
+
+Raw logs and large command output belong in an artifact or an explicit detail request. `host_capability` returns complete output only when it meets the model-output limit. Otherwise it omits the complete output from model text and returns the byte or character count, the reason, and a detail reference. It never inserts a cut prefix or tail as evidence. When Pi Core reports a partial `bash`, `PowerShell`, `read`, `grep`, `find`, or `ls` result, Research Pi also removes the partial text. Shell output is copied to a state artifact. File and search tools return the exact target and a range or narrowing action. Process capture limits remain resource-safety limits; when one is reached, no partial capture enters model context. `details`, Runtime records, `/runtime`, `/inbox`, `/watch`, and Session history remain inspection surfaces.
+
+Model-facing and user-facing Research Pi messages use a practical plain-technical-language profile based on [ASD-STE100](https://www.asd-ste100.org/STE_faq.html) and [ISO 24495-1:2023](https://www.iso.org/standard/78907.html). Messages state the result first, use short sentences, put one topic or action in each sentence, prefer active voice, use one term for one concept, and keep exact provenance. This is a project writing policy, not a claim of certified standards compliance.
+
+Model-visible channels follow one contract:
+
+| Channel | Default model content | Exact detail path |
+|---|---|---|
+| ProjectView | Complete selected fields and record IDs; no cut sentences | `/runtime view`, evidence refs, memory read |
+| Runtime mailbox | Message/job/request ID, state, evidence, required action | Runtime ledger and exact job ID |
+| `subagent` | Concise result card | One explicit `resultSection` per call |
+| Agent-to-agent message | Source job, authority, scope, concise content | Message ID and peer inbox |
+| Research memory | Search snippets with exact refs; whole entries on read | Exact project/session/entry ref |
+| Web search | Concise synthesis and source URLs | Open the cited source |
+| `codemode` | Decision-relevant fields emitted by the script | Oversized complete output is stored under the Research Pi state root and replaced by an artifact receipt |
+| Shell or host capability | Command output requested by the caller | Filter at the command source or save a raw artifact |
+| Side analysis | No main-context injection by default | Explicit `/side use` promotion |
+
+Research Pi does not use a generic post-processing truncator for these channels. Count-based record selection is allowed when the message states the count and provides a stable retrieval path. A UI-only collapsed preview can be shorter than its expandable record; that preview is never the model-context representation.
 
 `amend_project_state`, research transitions, evidence records and completed work update the stored records and inspectable live view, not the injected snapshot. Retrieve current records when needed. The next successful compact may update the Brief and move a genuinely closed phase into its short history. The compaction schema requires the complete `projectBrief`; live state-amendment tooling cannot edit it. Analysis compaction refreshes its local snapshot without writing shared Project State. Prefix stability is client-side behavior, not a guarantee of provider cache retention or routing.
 
@@ -295,6 +327,8 @@ Pi Core's `dark` and `light` remain available. Persist a Research Pi theme with 
 ```
 
 `runtimeStrip=auto` shows the Project/Actor dock only while work is active or Runtime state needs attention; `always` keeps an idle view and `off` removes it. `density` is `compact` or `balanced`.
+
+The Runtime Dock updates only when its semantic state changes. A separate one-line footer pulse updates once per second while a worker can run. The pulse uses the worker lease, not elapsed wall time. `live` means the lease is fresh; `stale` means no fresh heartbeat was observed. An `input_required` job stops the pulse and shows a waiting state. Heartbeat samples are UI-only. They are not written to the Runtime ledger or model context.
 
 `pi config web tailscale` opts into automatic private Web access on interactive launches; `local` limits it to this computer and `off` disables automatic access. With `persistent=true`, each workspace has one background Pi and desktop terminals attach to it. Closing a terminal leaves it running; `pi web status` prints the private pairing URL and `pi web stop` stops it. Port 0 lets the OS choose a local port; HTTPS starts at `httpsPort` and skips occupied Serve/Funnel ports unless explicitly pinned on the command line. See [mobile access](mobile-web.md).
 

@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import {
-	createRuntimeDockClock,
-	RUNTIME_DOCK_CLOCK_MS,
+	createRuntimeHeartbeatClock,
+	formatRuntimeHeartbeat,
+	RUNTIME_HEARTBEAT_MS,
 	RuntimeDockComponent,
-	runtimeDockNeedsClock,
+	runtimeHeartbeatNeeded,
 	runtimeDockVisible,
 } from "../.pi/lib/runtime-dock-ui.mjs";
 
@@ -32,17 +33,17 @@ test("Runtime Dock auto-hides healthy idle state and surfaces actionable state",
 	assert.equal(runtimeDockVisible(model({ counts: { active: 1 } }), "off"), false);
 });
 
-test("Runtime Dock clock redraws once per second only while a live Codex job exists", () => {
+test("Runtime heartbeat ticks once per second only while a worker can be active", () => {
 	let callback;
 	let scheduled = 0;
 	let cancelled = 0;
-	let renders = 0;
+	let ticks = 0;
 	const handle = { unrefCalled: false, unref() { this.unrefCalled = true; } };
-	const clock = createRuntimeDockClock(() => { renders += 1; }, {
+	const clock = createRuntimeHeartbeatClock(() => { ticks += 1; }, {
 		setInterval(next, intervalMs) {
 			callback = next;
 			scheduled += 1;
-			assert.equal(intervalMs, RUNTIME_DOCK_CLOCK_MS);
+			assert.equal(intervalMs, RUNTIME_HEARTBEAT_MS);
 			return handle;
 		},
 		clearInterval(value) {
@@ -51,19 +52,56 @@ test("Runtime Dock clock redraws once per second only while a live Codex job exi
 		},
 	});
 
-	assert.equal(runtimeDockNeedsClock([]), false);
-	assert.equal(runtimeDockNeedsClock([{ status: "completed" }]), false);
-	assert.equal(runtimeDockNeedsClock([{ status: "running" }]), true);
-	assert.equal(runtimeDockNeedsClock([{ status: "input_required" }]), true);
+	assert.equal(runtimeHeartbeatNeeded([]), false);
+	assert.equal(runtimeHeartbeatNeeded([{ status: "completed" }]), false);
+	assert.equal(runtimeHeartbeatNeeded([{ status: "running" }]), true);
+	assert.equal(runtimeHeartbeatNeeded([{ status: "input_required" }]), false);
 	clock.setActive(true);
 	clock.setActive(true);
 	assert.equal(scheduled, 1, "repeated state refreshes must not create timer storms");
 	assert.equal(handle.unrefCalled, true);
 	callback();
-	assert.equal(renders, 1);
+	assert.equal(ticks, 1);
 	clock.setActive(false);
 	assert.equal(cancelled, 1);
 	assert.equal(clock.isActive(), false);
+});
+
+test("Runtime heartbeat reports worker liveness instead of elapsed wall time", () => {
+	const now = Date.parse("2026-10-08T08:00:20.000Z");
+	const live = [{
+		status: "running",
+		workerAlive: true,
+		workerHeartbeatAt: "2026-10-08T08:00:19.000Z",
+		lastActivityAt: "2026-10-08T08:00:12.000Z",
+	}];
+	assert.equal(formatRuntimeHeartbeat(live, { currentTime: now, frame: 0 }), "◐ live · event 8s");
+	assert.equal(formatRuntimeHeartbeat([{ status: "input_required" }], { currentTime: now }), "");
+	assert.equal(formatRuntimeHeartbeat([{
+		status: "running",
+		workerHeartbeatAt: "2026-10-08T08:00:03.000Z",
+	}], { currentTime: now }), "! heartbeat 17s stale");
+});
+
+test("Runtime Dock remains byte-stable across footer heartbeat frames", () => {
+	const now = Date.parse("2026-10-08T08:00:20.000Z");
+	const active = model({ counts: { active: 1 } });
+	const jobs = [{
+		id: "codex-demo-12345678",
+		backend: "codex",
+		status: "running",
+		role: "advisor",
+		model: "gpt-6-astra",
+		thinking: "high",
+		progress: "reading evidence",
+		startedAt: "2026-10-08T07:53:00.000Z",
+	}];
+	const dock = new RuntimeDockComponent(active, jobs, theme(), { currentTime: now });
+	const first = dock.render(120);
+	assert.equal(dock.update(active, jobs, { currentTime: now + 30_000 }), false);
+	assert.deepEqual(dock.render(120), first);
+	assert.equal(dock.update(active, [{ ...jobs[0], progress: "checking result" }], { currentTime: now + 30_000 }), true);
+	assert.notDeepEqual(dock.render(120), first);
 });
 
 test("Runtime Dock is responsive and renders objective Codex progress", () => {

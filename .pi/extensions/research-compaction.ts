@@ -146,56 +146,59 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const { branchEntries, customInstructions, reason, signal } = event;
-		const runtimeSnapshot = await readRuntimeSnapshot(await resolveResearchRuntime(ctx.cwd));
-		const inheritancePolicy = runtimeSessionInheritancePolicy(branchEntries, runtimeSnapshot, ctx.sessionManager.getSessionId());
-		const projectRevision = runtimeSnapshot.revision;
-		// Pi 1.0 prepares the canonical projection, including context edits,
-		// prior compaction boundaries, and nested tool file operations. Re-slicing
-		// raw entries here would reintroduce omitted/replaced messages.
-		const preparation = event.preparation;
-		const policy = selectResearchCompactionPolicy(branchEntries, preparation.settings.keepRecentTokens);
-		const thresholds = researchCompactionThresholds(ctx.model, compactConfig);
-		policy.softTriggerTokens = thresholds.softTokens;
-		policy.hardTriggerTokens = thresholds.hardTokens;
-		const sessionId = ctx.sessionManager.getSessionId();
-		const sessionEvidence = collectResearchEvidence(branchEntries, sessionId, preparation.firstKeptEntryId, {
-			inheritancePolicy,
-			projectedEntries: buildSessionProjection(branchEntries).entries,
-		});
-		const evidence = inheritancePolicy === "clean"
-			? sessionEvidence
-			: mergeProjectRuntimeEvidence(sessionEvidence, runtimeSnapshot);
-		const latestResearchCompaction = [...branchEntries].reverse().find((entry) =>
-			entry.type === "compaction"
-			&& entry.details?.kind === RESEARCH_COMPACTION_KIND
-			&& entry.details?.version === RESEARCH_COMPACTION_VERSION,
-		);
-		const independentSessionSummary = inheritancePolicy === "project"
-			&& latestResearchCompaction?.type === "compaction"
-			&& ["clean", "analysis"].includes(latestResearchCompaction.details?.inheritancePolicy)
-				? preparation.previousSummary
-				: undefined;
-		const conversationText = serializeConversation(
-			convertToLlm([...preparation.messagesToSummarize, ...preparation.turnPrefixMessages]),
-		);
-		const prompt = buildResearchCompactionPrompt({
-			conversationText,
-			previousState: evidence.previousState,
-			legacyPreviousSummary: evidence.previousState ? undefined : preparation.previousSummary,
-			independentSessionSummary,
-			experiments: evidence.experiments,
-			checkpoints: evidence.checkpoints,
-			sourceCatalog: evidence.sourceCatalog,
-			projectTransitions: inheritancePolicy === "clean" ? [] : runtimeSnapshot.transitions?.slice(-4) ?? [],
-			customInstructions,
-		});
-
-		ctx.ui.notify(
-			`Research compaction #${policy.ordinal}${inheritancePolicy === "clean" ? " (clean Session, no Project inheritance)" : inheritancePolicy === "analysis" ? " (Analysis Session, Project read-only)" : ""}: ${preparation.tokensBefore.toLocaleString()} tokens, keeping ~${policy.keepRecentTokens.toLocaleString()} recent tokens, ${evidence.experiments.length} experiment record(s).`,
-			"info",
-		);
-
 		try {
+			const runtimeSnapshot = await readRuntimeSnapshot(await resolveResearchRuntime(ctx.cwd));
+			const inheritancePolicy = runtimeSessionInheritancePolicy(branchEntries, runtimeSnapshot, ctx.sessionManager.getSessionId());
+			const projectRevision = runtimeSnapshot.revision;
+			// Pi 1.0 prepares the canonical projection, including context edits,
+			// prior compaction boundaries, and nested tool file operations. Re-slicing
+			// raw entries here would reintroduce omitted/replaced messages.
+			const preparation = event.preparation;
+			const policy = selectResearchCompactionPolicy(branchEntries, preparation.settings.keepRecentTokens);
+			const thresholds = researchCompactionThresholds(ctx.model, compactConfig);
+			policy.softTriggerTokens = thresholds.softTokens;
+			policy.hardTriggerTokens = thresholds.hardTokens;
+			const sessionId = ctx.sessionManager.getSessionId();
+			const sessionEvidence = collectResearchEvidence(branchEntries, sessionId, preparation.firstKeptEntryId, {
+				inheritancePolicy,
+				projectedEntries: buildSessionProjection(branchEntries).entries,
+			});
+			const evidence = inheritancePolicy === "clean"
+				? sessionEvidence
+				: mergeProjectRuntimeEvidence(sessionEvidence, runtimeSnapshot);
+			const latestResearchCompaction = [...branchEntries].reverse().find((entry) =>
+				entry.type === "compaction"
+				&& entry.details?.kind === RESEARCH_COMPACTION_KIND
+				&& entry.details?.version === RESEARCH_COMPACTION_VERSION,
+			);
+			const independentSessionSummary = inheritancePolicy === "project"
+				&& latestResearchCompaction?.type === "compaction"
+				&& ["clean", "analysis"].includes(latestResearchCompaction.details?.inheritancePolicy)
+					? preparation.previousSummary
+					: undefined;
+			const conversationText = serializeConversation(
+				convertToLlm([...preparation.messagesToSummarize, ...preparation.turnPrefixMessages]),
+			);
+			const selectedTransitions = inheritancePolicy === "clean" ? [] : runtimeSnapshot.transitions?.slice(-4) ?? [];
+			const prompt = buildResearchCompactionPrompt({
+				conversationText,
+				previousState: evidence.previousState,
+				legacyPreviousSummary: evidence.previousState ? undefined : preparation.previousSummary,
+				independentSessionSummary,
+				experiments: evidence.experiments,
+				checkpoints: evidence.checkpoints,
+				sourceCatalog: evidence.sourceCatalog,
+				sourceCatalogCount: evidence.sourceCatalogCount,
+				projectTransitions: selectedTransitions,
+				projectTransitionCount: inheritancePolicy === "clean" ? 0 : runtimeSnapshot.transitions?.length ?? 0,
+				customInstructions,
+			});
+
+			ctx.ui.notify(
+				`Research compaction #${policy.ordinal}${inheritancePolicy === "clean" ? " (clean Session, no Project inheritance)" : inheritancePolicy === "analysis" ? " (Analysis Session, Project read-only)" : ""}: ${preparation.tokensBefore.toLocaleString()} tokens, keeping ~${policy.keepRecentTokens.toLocaleString()} recent tokens, ${evidence.experiments.length} experiment record(s).`,
+				"info",
+			);
+
 			const requestState = async (requestPrompt: string) => await ctx.modelRegistry.complete(
 				ctx.model,
 					{
@@ -280,7 +283,7 @@ export default function (pi: ExtensionAPI) {
 		} catch (error) {
 			if (!signal.aborted) {
 				ctx.ui.notify(
-					`Research compaction failed validation; falling back to Pi compaction: ${error instanceof Error ? error.message : String(error)}`,
+					`Research compaction failed; falling back to Pi compaction: ${error instanceof Error ? error.message : String(error)}`,
 					"warning",
 				);
 			}

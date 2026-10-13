@@ -69,14 +69,12 @@ function duration(milliseconds: number): string {
 export function formatToolActivity(tools: ActiveTool[], now = Date.now()): string | undefined {
 	const latest = tools.at(-1);
 	if (!latest) return undefined;
-	const count = tools.length > 1 ? `${tools.length} tools · latest ` : "";
-	const target = latest.summary ? ` · ${latest.summary}` : "";
-	return `⚙ ${count}${latest.name}${target} · ${duration(now - latest.startedAt)}`;
+	const count = tools.length > 1 ? `tools ${tools.length} · ` : "";
+	return `⚙ ${count}${latest.name} · ${duration(now - latest.startedAt)}`;
 }
 
 export function formatToolTerminal(tool: ActiveTool, isError: boolean, finishedAt = Date.now()): string {
-	const target = tool.summary ? ` · ${tool.summary}` : "";
-	return `${isError ? "✗" : "✓"} ${tool.name}${target} · ${isError ? "failed · " : ""}${duration(finishedAt - tool.startedAt)}`;
+	return `${isError ? "✗" : "✓"} ${tool.name} · ${isError ? "failed · " : ""}${duration(finishedAt - tool.startedAt)}`;
 }
 
 export default function toolActivityExtension(pi: ExtensionAPI) {

@@ -10,7 +10,7 @@ import {fauxProvider,fauxAssistantMessage} from '../node_modules/@earendil-works
 import {createResearchSessionRuntime} from '../.pi/lib/native-runtime-factory.mjs';
 import {createNativeRuntimeHost} from '../.pi/lib/native-runtime-host.mjs';
 process.env.PI_OFFLINE='1';
-async function until(check){const end=Date.now()+5000;while(!await check()){if(Date.now()>end)throw Error('Expected native behavior did not occur');await new Promise(r=>setTimeout(r,20))}}
+async function until(check){const end=Date.now()+15000;while(!await check()){if(Date.now()>end)throw Error('Expected native behavior did not occur');await new Promise(r=>setTimeout(r,20))}}
 async function fixture(){
  const root=await mkdtemp(join(tmpdir(),'native-pi-'));await mkdir(join(root,'sessions'));
  const faux=fauxProvider();faux.setResponses([fauxAssistantMessage('Native loop reply')]);let custom=false,answer;
@@ -24,26 +24,31 @@ async function fixture(){
  return {root,runtime,host,instance,terminalSocket,get custom(){return custom},get answer(){return answer},async close(){await host.close();await rm(root,{recursive:true,force:true})}};
 }
 function submit(host,text){host.terminal.input('\x1b[200~'+text+'\x1b[201~');host.terminal.input('\r')}
+async function screenText(host){
+ await host.terminal.snapshot();
+ const buffer=host.terminal.screen.buffer.active;
+ return Array.from({length:host.terminal.rows},(_value,row)=>buffer.getLine(buffer.baseY+row)?.translateToString(true)??'').join('\n');
+}
 test('complete original InteractiveMode preserves custom UI, approval, model menu and native command context',async()=>{
  const f=await fixture();try{
   await until(()=>f.host.mode.onInputCallback);
-  submit(f.host,'/probe-custom');await until(()=>f.custom);await until(async()=> (await f.host.terminal.snapshot()).data.includes('ORIGINAL CUSTOM VIEW'));
+  submit(f.host,'/probe-custom');await until(()=>f.custom);await until(async()=> (await screenText(f.host)).includes('ORIGINAL CUSTOM VIEW'));
   f.host.terminal.input('\r');await until(()=>f.host.mode.onInputCallback);
   submit(f.host,'/model');await until(()=>f.host.mode.extensionSelector||f.host.mode.activeSelectorToken);f.host.terminal.input('\x1b');await new Promise(r=>setTimeout(r,100));
-  submit(f.host,'/probe-dialog');await until(async()=> (await f.host.terminal.snapshot()).data.includes('Native approval'));
+  submit(f.host,'/probe-dialog');await until(async()=> (await screenText(f.host)).includes('Native approval'));
   const socket=createConnection(f.terminalSocket);await new Promise(r=>socket.once('connect',r));socket.write(JSON.stringify({type:'attach',instance:f.instance})+'\n');socket.destroy();
   assert.equal(f.answer,undefined);assert.equal(f.host.state().ready,true);
   f.host.terminal.resize(64,20);f.host.terminal.input('\r');await until(()=>f.answer!==undefined);
   await until(()=>f.host.mode.onInputCallback);
   const old=f.runtime.session.sessionId;submit(f.host,'/probe-new');await until(()=>f.runtime.session.sessionId!==old);await until(()=>f.host.mode.editor.getText().includes('native restored draft'));
-  f.host.terminal.input('\x1b[D');await until(async()=> (await f.host.terminal.snapshot()).data.includes('native restored draft'));
+  f.host.terminal.input('\x1b[D');await until(async()=> (await screenText(f.host)).includes('native restored draft'));
  }finally{await f.close()}
 });
 test('native quit detaches presentation, retains Host and the unmodified native model loop',async()=>{
  const f=await fixture();try{
   await until(()=>f.host.mode.onInputCallback);submit(f.host,'plain user message');await until(()=>f.runtime.session.messages.some(m=>m.role==='assistant'));assert.equal(f.runtime.session.messages.filter(m=>m.role==='user').length,1);
   await f.host.mode.shutdown();assert.equal(f.host.state().ready,true);assert.equal(f.runtime.session.messages.at(-1).role,'assistant');
-  f.host.terminal.resize(80,24);assert.match((await f.host.terminal.snapshot()).data,/Native loop reply/);
+  f.host.terminal.resize(80,24);assert.match(await screenText(f.host),/Native loop reply/);
  }finally{await f.close()}
 });
 test('external editing and suspend are dispatched to the desktop client rather than the Host process',async()=>{

@@ -309,8 +309,8 @@ App Server 的动态工具在 thread 创建时固定。Research Pi 为这组工�
 - 新会话需要恢复旧证据：使用 memory search/read，不必先恢复整个旧 session。
 - 普通新 Session 自动载入固定 ProjectView 快照：可选的 `RESEARCH.md` Project Anchor、最近成功 compact 生成的 Project Brief，以及当前路线、最新 handoff、实验记录、Git 和 Runtime 状态。Project Brief 保留项目介绍、最终目标、总体思路、用户优先级和已结束阶段的“目标—思路—结果”。完成过项目工具工作的 Leader turn 仍会保存本地 handoff，不推进科学 Project revision。用 `/runtime view` 检查实时视图，`/runtime recommend` 查看 compact 或轮换建议；交接用 `/runtime rotate`，排除项目记忆用 `/runtime new clean`，之后显式 `/runtime inherit` 恢复。
 - 快照只在项目上下文初始化、成功 compact 或显式角色/上下文切换时建立。普通输入、工具续跑、实时视图刷新和 Session 恢复均不重写快照。`amend_project_state`、实验记录、任务完成和路线变化继续更新持久记录；会话通过用户消息、工具结果和 mailbox 接收新信息，必要时主动检索当前记录。修改 `RESEARCH.md` 也不会自动改写前缀，急需生效的变化请直接说明或读取文件。
-- 不再自动注入或移动请求尾部 Delta。已经投递的通信保留在历史中，消费回执只阻止重复投递，不删除旧消息。实时视图仍显示 `current/unconfirmed/stale/transitioning/missing` freshness；旧 claim 和 next experiment 必须结合更新后的证据判断。Analysis compact 只更新自己的快照，不写共享 Project State。前缀稳定不等于服务端必然命中，实际命中率仍看 provider 返回的 cache usage。
-- `RESEARCH.md` 是独立于 compact 的用户权威锚点。Research Pi 只自动读取项目根目录中的普通文件，不跟随符号链接；最多注入前 3600 个字符，过长时会提示缩短。适合写项目问题、最终目标、总体路线、non-goals、术语和长期判断原则，不适合写最新实验、临时结论或 TODO。文件变化会随下一次真正的用户请求生成新的 Brief receipt，并过滤旧 Anchor 版本；compact 不会修改此文件。
+- 不再自动注入或移动请求尾部 Delta。Runtime 消息在产生时就写成简洁、明确、可溯源的决策卡，包含 message/job/request ID、状态、关键依据、所需动作和详细结果入口。消费回执只停止重投，已经进入模型上下文的消息保持不变，直到显式 compact。后续卡片记录 ASK 的解决或替代状态，以及 `outcome_unknown` 对应 Action 的结算依据。Research Pi 不再对普通工具结果做字符截断或 head/tail 摘录；工具默认只返回当前决定需要的信息，详细 subagent 结果用 `resultSection` 按类别读取，原始日志保存在文件、Runtime 或工具详情中。超量 `host_capability` 输出整项不进入模型，只返回规模、原因和详情引用；进程捕获上限触发时也不把部分前缀或尾部当作证据。消息和用户反馈采用接近 ASD-STE100 / ISO 24495-1:2023 的简明技术语言，但不宣称正式认证。实时视图仍显示 `current/unconfirmed/stale/transitioning/missing` freshness；旧 claim 和 next experiment 必须结合更新后的证据判断。
+- `RESEARCH.md` 是独立于 compact 的用户权威锚点。Research Pi 只自动读取项目根目录中的普通文件，不跟随符号链接；完整文件不超过 3600 个字符时才注入。过长文件会整体拒绝注入并提示缩短，不会只取前半段。适合写项目问题、最终目标、总体路线、non-goals、术语和长期判断原则，不适合写最新实验、临时结论或 TODO。文件变化会随下一次真正的用户请求生成新的 Brief receipt，并过滤旧 Anchor 版本；compact 不会修改此文件。
 
 推荐模板：
 

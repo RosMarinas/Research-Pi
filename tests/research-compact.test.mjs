@@ -21,14 +21,16 @@ import {
 	renderResearchSummary,
 } from "../.pi/lib/research-compact.mjs";
 
-test("research compaction follows Pi's retained boundary and edited context without resurrecting raw history", async () => {
+test("research compaction preserves long edited history and falls back on preparation errors", async () => {
 	const root = mkdtempSync(join(tmpdir(), "research-pi-compact-projection-"));
 	try {
 		const session = SessionManager.inMemory(root);
 		const omitted = session.appendMessage({ role: "user", content: "OMITTED_RAW_HISTORY", timestamp: 0 });
 		const replaced = session.appendMessage({ role: "user", content: "REPLACED_RAW_HISTORY", timestamp: 1 });
 		session.appendContextEdit(omitted, null);
-		session.appendContextEdit(replaced, { content: "VISIBLE_REPLACEMENT" });
+		const replacement = "VISIBLE_REPLACEMENT ".repeat(200);
+		session.appendContextEdit(replaced, { content: replacement });
+		session.appendMessage({ role: "assistant", content: [{ type: "text", text: "Long historical answer. ".repeat(200) }], timestamp: 1 });
 		session.appendMessage({ role: "user", content: "Recent context. ".repeat(100), timestamp: 2 });
 		const branchEntries = session.getBranch();
 		const preparation = prepareCompaction(branchEntries, { enabled: true, reserveTokens: 100, keepRecentTokens: 32 });
@@ -37,16 +39,30 @@ test("research compaction follows Pi's retained boundary and edited context with
 		researchCompactionExtension({ on: (name, handler) => handlers.set(name, handler), registerCommand() {} });
 		let captured;
 		const notices = [];
-		await handlers.get("session_before_compact")({ branchEntries, preparation, reason: "manual", signal: new AbortController().signal }, {
+		const ctx = {
 			cwd: root, hasUI: false, sessionManager: session,
 			model: { api: "openai-codex-responses", maxTokens: 16384 },
 			ui: { notify: (text) => notices.push(text) },
-			modelRegistry: { complete: async (_model, context) => { captured = JSON.stringify(context); throw new Error("Synthetic request captured; no model invoked"); } },
-		});
+			modelRegistry: { complete: async (_model, context) => {
+				captured = context.messages[0].content[0].text;
+				return { content: [{ type: "toolCall", name: RESEARCH_STATE_TOOL.name, arguments: { researchQuestion: "Preserve the edited research context." } }], usage: {} };
+			} },
+		};
+		const event = { branchEntries, preparation, reason: "manual", signal: new AbortController().signal };
+		const result = await handlers.get("session_before_compact")(event, ctx);
 		assert.equal(typeof captured, "string");
-		assert.match(captured, /VISIBLE_REPLACEMENT/);
+		assert.ok(captured.includes(replacement.trim()));
+		assert.ok(captured.includes("Long historical answer. ".repeat(200).trim()));
 		assert.doesNotMatch(captured, /OMITTED_RAW_HISTORY|REPLACED_RAW_HISTORY/);
+		const catalog = captured.split("Allowed conversational provenance catalog")[1].split("User compaction focus")[0];
+		assert.match(catalog, new RegExp(`S:${session.getSessionId()}/E:${replaced}`));
+		assert.match(catalog, /contextEditRef/);
+		assert.doesNotMatch(catalog, /VISIBLE_REPLACEMENT|Long historical answer|"text":/);
+		assert.equal(result.compaction.details.kind, "research-pi-compaction");
+		assert.equal(result.compaction.firstKeptEntryId, preparation.firstKeptEntryId);
 		assert.ok(notices.some((text) => text.includes("keeping ~32 recent tokens")));
+		assert.equal(await handlers.get("session_before_compact")({ ...event, customInstructions: "x".repeat(4001) }, ctx), undefined);
+		assert.ok(notices.at(-1).includes("falling back to Pi compaction"));
 	} finally { rmSync(root, { recursive: true, force: true }); }
 });
 

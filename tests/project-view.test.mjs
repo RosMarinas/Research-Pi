@@ -440,7 +440,7 @@ test("research transitions use Project revision compare-and-append", async () =>
 	}
 });
 
-test("compact snapshots shorten handoffs while preserving invalid evidence and still-running external experiments", () => {
+test("compact snapshots select records without cutting handoffs, invalid evidence, or live-run identity", () => {
 	const state = compaction().details.researchState;
 	const view = buildProjectView({
 		runtime: { projectKey: "project-fixture", workspaceRoot: "/workspace" },
@@ -454,7 +454,8 @@ test("compact snapshots shorten handoffs while preserving invalid evidence and s
 	});
 	const lean = renderProjectViewDelta(view, { snapshot: true });
 	const detailed = renderProjectViewDelta(view);
-	assert.ok(lean.length < detailed.length);
+	assert.match(lean, new RegExp("large work history ".repeat(100).trim()));
+	assert.match(detailed, new RegExp("large work history ".repeat(100).trim()));
 	assert.match(lean, /exp-1 \[invalid\]/);
 	assert.match(lean, /run-1 \[running\]/);
 	assert.match(lean, /worker completion does not imply experiment completion/);
@@ -552,6 +553,10 @@ test("RESEARCH.md is a user-maintained Project Anchor independent of compaction 
 		const changedView = buildProjectView({ ...input, anchor: changedAnchor });
 		assert.notEqual(projectViewFingerprint(changedView), projectViewFingerprint(view));
 		assert.match(renderProjectBrief(changedView), /causal and transferable mechanism/);
+		writeFileSync(join(root, "RESEARCH.md"), "A".repeat(3_601));
+		const oversized = await readProjectAnchor(root);
+		assert.equal(oversized.content, "");
+		assert.match(oversized.warning, /was not injected/);
 		assert.equal((await readProjectAnchor(join(root, "missing"))), null);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
@@ -755,7 +760,7 @@ test("Project Brief bytes survive live evidence and route changes, then change o
 	}
 });
 
-test("ProjectView keeps the newest live evidence when a large baseline must be truncated", () => {
+test("ProjectView selects high-value records without cutting their text", () => {
 	const repeated = "decision-critical detail ".repeat(80);
 	const state = {
 		...compaction().details.researchState,
@@ -789,10 +794,10 @@ test("ProjectView keeps the newest live evidence when a large baseline must be t
 		experiments: [],
 	});
 	const text = renderProjectView(view);
-	assert.ok(text.length <= 12_000);
-	assert.match(text, /Current frontier truncated; latest progress above is preserved/);
+	assert.doesNotMatch(text, /Current frontier truncated|Project Brief truncated/);
 	assert.match(text, /=== LATEST MEANINGFUL PROGRESS ===/);
 	assert.match(text, /NEWEST_OBSERVATION_MUST_SURVIVE/);
+	assert.match(text, new RegExp(repeated.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
 test("ProjectView compresses earlier work but expands the latest handoff under project direction", async () => {

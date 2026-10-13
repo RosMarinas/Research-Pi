@@ -178,3 +178,33 @@ test("exact memory reads are project-qualified when Session identifiers collide"
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("memory reads return whole entries or an explicit omission", () => {
+	const root = mkdtempSync(join(tmpdir(), "research-pi-memory-whole-entry-"));
+	try {
+		const sessions = join(root, "sessions");
+		mkdirSync(sessions, { recursive: true });
+		const project = join(root, "project");
+		const complete = `BEGIN ${"evidence ".repeat(200)} END`;
+		writeJsonl(join(sessions, "long.jsonl"), [
+			{ type: "session", id: "long-session", cwd: project },
+			{ type: "message", id: "long-entry", parentId: null, message: { role: "user", content: complete } },
+		]);
+		const db = openMemoryIndex(join(root, "memory.sqlite"));
+		try {
+			syncMemoryIndex(db, { sessionDir: sessions });
+			const omitted = readMemory(db, { sessionId: "long-session", entryId: "long-entry", radius: 0, maxChars: 500 });
+			assert.equal(omitted.entries[0].text, "");
+			assert.ok(omitted.entries[0].omittedChars >= complete.length);
+			assert.match(omitted.entries[0].omission, /No partial text was returned/);
+			const full = readMemory(db, { sessionId: "long-session", entryId: "long-entry", radius: 0, maxChars: 40_000 });
+			assert.match(full.entries[0].text, /BEGIN/);
+			assert.match(full.entries[0].text, /END/);
+			assert.doesNotMatch(full.entries[0].text, /READ_TRUNCATED/);
+		} finally {
+			db.close();
+		}
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});

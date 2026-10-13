@@ -39,7 +39,7 @@ export const DEFAULT_CODEX_MAX_EXECUTORS = Number(process.env.RESEARCH_PI_CODEX_
 // or its required schemas change so pre-existing threads refresh once.
 export const CODEX_DYNAMIC_TOOL_PROTOCOL_VERSION = 2;
 
-export const CODEX_OUTPUT_POLICY = "Default: zero new reports, plans, summaries, or handoff Markdown. Documents need an explicit deliverable; update the canonical path. Return concise structured results with evidence refs, not logs/background; empty arrays are fine. Pi records research evidence. Preserve existing documents and raw evidence.";
+export const CODEX_OUTPUT_POLICY = "Create no report, plan, summary, or handoff file unless required. Update the canonical file. Return a concise structured result with exact evidence references. Do not copy logs or background. State the result first. Use short active sentences with one topic or action. Use one term per concept. Empty arrays are valid. Pi records evidence. Preserve existing documents and raw evidence.";
 
 const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled", "outcome_unknown"]);
 const RECONCILABLE_OUTCOMES = new Set(["completed", "failed", "cancelled"]);
@@ -212,7 +212,7 @@ export function buildDelegationPrompt({
 	const resultInstruction = mode === "advisor"
 			? `Brief commentary only. Call submit_research_pi_result once when ready, then acknowledge in phase=final_answer. This is a continuation surface, not a verdict or review score; retain competing explanations and uncertainty.`
 			: `Brief phase=commentary; continue until success, blocker, or failure. No plan or checkpoint is a result. Call submit_research_pi_result once, then acknowledge in phase=final_answer. succeeded requires goal_satisfied=true and no remaining delegated work; distinguish observations and validity limits.`;
-	const ownership = mode === "advisor" ? "" : `\n<write_ownership>\nWrite only these workspace-relative paths: ${JSON.stringify(writeScope)}. You are not alone: preserve other agents' edits and adapt to them. Ask Research Pi before expanding scope. ${writeScope.includes(".") ? "This job has exclusive workspace write ownership." : "Do not stage/commit/reset, switch branches, install shared dependencies, or change shared run state outside this scope; Pi integrates after workers finish."} Scope coordinates ownership, not OS permissions.\n</write_ownership>\n`;
+	const ownership = mode === "advisor" ? "" : `\n<write_ownership>\nWrite only: ${JSON.stringify(writeScope)}. Preserve others' edits. Ask Pi before expanding scope. ${writeScope.includes(".") ? "This job owns the workspace." : "Outside this scope, do not stage, commit, reset, switch branches, install shared dependencies, or change shared run state. Pi integrates."} This is coordination, not OS permission.\n</write_ownership>\n`;
 	const experimentContext = [
 		resourceClaims.length ? `Reserved resource keys: ${JSON.stringify(resourceClaims)}. Register external runs with research_pi_run; worker completion cannot release a live run.` : "",
 		experiment ? `Experiment brief: ${JSON.stringify(experiment)}. Perform only the minimum validity checks needed to interpret the intervention. Stop expanding work at the agreed budget/stop condition; cancelling an external run requires task authority.` : "",
@@ -554,16 +554,25 @@ async function updateWriterLock(lockPath, jobId, pid, workerInstanceId) {
 	await writeJsonAtomic(lockPath, { ...current, pid, workerInstanceId, updatedAt: now() });
 }
 
-export async function workerLeaseIsFresh(jobRoot, jobId, workerInstanceId, maxAgeMs = 15_000) {
-	if (!jobId || !workerInstanceId) return false;
+export async function readCodexWorkerLease(jobRoot, jobId, workerInstanceId) {
+	if (!jobId || !workerInstanceId) return null;
+	validateJobId(jobId);
 	try {
 		const lease = await readJson(join(jobRoot, jobId, "worker-lease.json"));
-		return lease.workerInstanceId === workerInstanceId
-			&& Number.isFinite(Date.parse(lease.heartbeatAt))
-			&& Date.now() - Date.parse(lease.heartbeatAt) <= maxAgeMs;
+		if (lease.workerInstanceId !== workerInstanceId || !Number.isFinite(Date.parse(lease.heartbeatAt))) return null;
+		return {
+			jobId: lease.jobId ?? jobId,
+			workerInstanceId: lease.workerInstanceId,
+			heartbeatAt: lease.heartbeatAt,
+		};
 	} catch {
-		return false;
+		return null;
 	}
+}
+
+export async function workerLeaseIsFresh(jobRoot, jobId, workerInstanceId, maxAgeMs = 15_000) {
+	const lease = await readCodexWorkerLease(jobRoot, jobId, workerInstanceId);
+	return Boolean(lease && Date.now() - Date.parse(lease.heartbeatAt) <= maxAgeMs);
 }
 
 export async function getGitSnapshot(cwd) {
@@ -628,12 +637,15 @@ export function buildCodexThreadRefreshNotice(previousJob, currentGit, currentRe
 		?? previousJob.result?.working_synthesis
 		?? previousJob.result?.shared_understanding
 		?? "",
-	).trim().slice(0, 1600);
+	).trim();
+	const handoffText = handoff.length <= 1_600
+		? handoff
+		: `The previous handoff is not copied because it is ${handoff.length} characters. Read job ${previousJob.id} with resultSection=summary if it is needed.`;
 	return [
 		`LEGACY THREAD REFRESH: job ${previousJob.id} used Codex thread ${previousJob.threadId}, which predates Research Pi dynamic-tool protocol v${CODEX_DYNAMIC_TOOL_PROTOCOL_VERSION}. A fresh Codex thread is being created so submit_research_pi_result, consult_research_pi, and research_pi_host are all available.`,
 		"The mission and Actor identity are unchanged, but conversational history is not being resumed. Reconstruct current state from the task and authoritative workspace; treat the previous handoff below as orientation rather than evidence.",
 		buildCodexFreshnessNotice(previousJob, currentGit, currentResearch),
-		handoff ? `<previous_handoff>\n${handoff}\n</previous_handoff>` : "No previous handoff summary is available.",
+		handoffText ? `<previous_handoff>\n${handoffText}\n</previous_handoff>` : "No previous handoff summary is available.",
 	].join(" ");
 }
 
@@ -1082,11 +1094,20 @@ export async function readCodexJob(jobId, options = {}) {
 	}
 	await assertCodexJobWorkspace(job, options.expectedCwd);
 	assertCodexJobLeader(job, options);
+	let observedWorkerAlive = null;
+	let observedWorkerHeartbeatAt = null;
 	if (!archived && options.reconcile !== false && !isTerminalStatus(job.status)) {
 		const createdAge = Date.now() - Date.parse(job.createdAt);
-		const identifiedWorkerAlive = job.workerInstanceId
-			? await workerLeaseIsFresh(jobRoot, job.id, job.workerInstanceId)
-			: processIsAlive(job.workerPid);
+		const workerLease = job.workerInstanceId
+			? await readCodexWorkerLease(jobRoot, job.id, job.workerInstanceId)
+			: null;
+		observedWorkerHeartbeatAt = workerLease?.heartbeatAt ?? null;
+		const identifiedWorkerAlive = workerLease
+			? Date.now() - Date.parse(workerLease.heartbeatAt) <= 15_000
+			: job.workerInstanceId
+				? false
+				: processIsAlive(job.workerPid);
+		observedWorkerAlive = identifiedWorkerAlive;
 		if (job.workerPid && !identifiedWorkerAlive && createdAge > 15_000) {
 			const unknownOutcome = job.mode === "executor" && job.sideEffect?.state === "started";
 			job = await updateJobFile(jobDir, (current) => ({
@@ -1114,6 +1135,10 @@ export async function readCodexJob(jobId, options = {}) {
 				error: current.error ?? "Codex job worker did not publish its PID",
 			}));
 		}
+	}
+	if (!isTerminalStatus(job.status) && observedWorkerAlive !== null) {
+		job.workerAlive = observedWorkerAlive;
+		job.workerHeartbeatAt = observedWorkerHeartbeatAt;
 	}
 	if (!archived && job.resultPath) {
 		try {
@@ -1180,6 +1205,7 @@ export async function waitForCodexJob(jobId, options = {}) {
 			return await readCodexJob(jobId, { jobRoot: options.jobRoot, ...ownerOptions });
 		}
 		const job = await readCodexJob(jobId, { jobRoot: options.jobRoot, ...ownerOptions });
+		options.onObserved?.(job);
 		const projection = JSON.stringify([
 			job.status,
 			job.progress,
@@ -1390,6 +1416,8 @@ export function publicJobView(job) {
 				: 0,
 		lastActivity: job.lastActivity ?? null,
 		lastActivityAt: job.lastActivityAt ?? null,
+		workerAlive: job.workerAlive ?? null,
+		workerHeartbeatAt: job.workerHeartbeatAt ?? null,
 		exitCode: job.exitCode,
 		gitBefore: summarizeGit(job.gitBefore),
 		gitAfter: summarizeGit(job.gitAfter),

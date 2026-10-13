@@ -48,6 +48,9 @@ test("bounds a small research pass to twelve structured sources", () => {
 		],
 	});
 	assert.equal(parsed.sources.length, 12);
+	assert.equal(parsed.sourceCount, 15);
+	assert.equal(parsed.omittedSources.length, 3);
+	assert.match(formatDeepSeekWebSearchResult(parsed), /showing 12 of 15/);
 });
 
 test("marks synthesis without structured sources as unverified", () => {

@@ -190,7 +190,10 @@ function hash(value) {
 function text(value, maxChars = 2_000) {
 	if (typeof value !== "string") return "";
 	const normalized = value.replace(/\r\n/g, "\n").trim();
-	return normalized.length <= maxChars ? normalized : `${normalized.slice(0, maxChars)}…`;
+	if (normalized.length > maxChars) {
+		throw new Error(`Structured research text exceeds ${maxChars} characters. Regenerate the complete field in concise language; Research Pi will not cut it.`);
+	}
+	return normalized;
 }
 
 function list(value, maxItems = 20, maxChars = 1_000) {
@@ -324,23 +327,21 @@ export function collectResearchEvidence(branchEntries, sessionId, firstKeptEntry
 	const cutIndex = branchEntries.findIndex((entry) => entry.id === firstKeptEntryId);
 	const discardedEntries = cutIndex >= 0 ? branchEntries.slice(0, cutIndex) : branchEntries;
 	const discardedIds = new Set(discardedEntries.map((entry) => entry.id));
-	// Records above remain authoritative raw artifacts. Conversational snippets
-	// must use the same edited projection as the summary input.
+	// The catalog locates sources; full text is already in the conversation.
+	// Use its edited projection so removed history cannot become a valid source.
 	const catalogEntries = options.projectedEntries
 		? options.projectedEntries.flatMap(({ sourceEntry, messages }) => sourceEntry.type === "message" && discardedIds.has(sourceEntry.id)
 			? messages.map((message) => ({ ...sourceEntry, message })) : [])
 		: discardedEntries;
 	const contextEdits = new Map(branchEntries.filter((entry) => entry.type === "context_edit").map((entry) => [entry.targetId, entry.id]));
 	const catalogCandidates = catalogEntries
-		.filter((entry) => entry.type === "message" && ["user", "assistant"].includes(entry.message?.role))
+		.filter((entry) => entry.type === "message" && ["user", "assistant"].includes(entry.message?.role) && messageText(entry).trim())
 		.map((entry) => ({
 			ref: refFor(sessionId, entry.id),
 			...(contextEdits.has(entry.id) ? { contextEditRef: refFor(sessionId, contextEdits.get(entry.id)) } : {}),
 			role: entry.message.role,
 			timestamp: entry.timestamp,
-			text: text(messageText(entry), 600),
-		}))
-		.filter((entry) => entry.text);
+		}));
 	const sourceCatalog = catalogCandidates.slice(-140);
 	const validRefs = new Set([
 		...experiments.map((entry) => entry.ref),
@@ -355,6 +356,7 @@ export function collectResearchEvidence(branchEntries, sessionId, firstKeptEntry
 		previousCompactionEntryId,
 		previousProjectRevision,
 		sourceCatalog,
+		sourceCatalogCount: catalogCandidates.length,
 		validRefs,
 	};
 }
@@ -907,7 +909,9 @@ export function buildResearchCompactionPrompt({
 	experiments,
 	checkpoints,
 	sourceCatalog,
+	sourceCatalogCount = sourceCatalog?.length ?? 0,
 	projectTransitions = [],
+	projectTransitionCount = projectTransitions.length,
 	customInstructions,
 }) {
 	return `Synthesize the following bounded evidence into the supplied research-state tool schema.
@@ -924,13 +928,13 @@ ${text(independentSessionSummary, 40_000) || "None"}
 Recorded experiments (authoritative for their exact fields, but interpret according to validityJudgment):
 ${JSON.stringify(experiments)}
 
-Recorded project research transitions (authoritative for active-route selection, not for experimental truth):
+Recorded project research transitions (newest ${projectTransitions.length} of ${projectTransitionCount}; authoritative for active-route selection, not for experimental truth):
 ${JSON.stringify(projectTransitions)}
 
 Research checkpoints:
 ${JSON.stringify(checkpoints)}
 
-Allowed conversational provenance catalog:
+Allowed conversational provenance catalog (newest ${sourceCatalog.length} of ${sourceCatalogCount}; references only, full text is in the conversation; retrieve omitted entries by exact Session reference):
 ${JSON.stringify(sourceCatalog)}
 
 User compaction focus, if any:
@@ -1011,7 +1015,11 @@ export function renderResearchSummary(state, evidence, fileOps = {}) {
 			`- ${item.ref} [${item.validityJudgment}; ${item.evidenceMode ?? "exploratory"}; prediction=${item.predictionStatus ?? "not_recorded"}] track=${item.trackRef ?? "unknown"}${item.runId ? ` run=${item.runId}` : ""}${item.runGitCommit ? ` runGit=${item.runGitCommit}` : ""}: ${item.conclusion || item.observation || item.hypothesis}`,
 		);
 	}
-	for (const item of evidence.checkpoints.slice(-12)) {
+	const recentCheckpoints = evidence.checkpoints.slice(-12);
+	if (recentCheckpoints.length < evidence.checkpoints.length) {
+		lines.push(`- Earlier ${evidence.checkpoints.length - recentCheckpoints.length} checkpoint record(s) remain in the Session and Runtime records.`);
+	}
+	for (const item of recentCheckpoints) {
 		lines.push(`- ${item.ref} [checkpoint] ${item.label}: ${item.refName || item.commit}`);
 	}
 
@@ -1019,8 +1027,8 @@ export function renderResearchSummary(state, evidence, fileOps = {}) {
 	const modifiedFiles = list(fileOps.modified, 30, 1_500);
 	if (readFiles.length || modifiedFiles.length) {
 		lines.push("", "## File continuity");
-		if (readFiles.length) lines.push(`- Read: ${readFiles.join(", ")}`);
-		if (modifiedFiles.length) lines.push(`- Modified: ${modifiedFiles.join(", ")}`);
+		if (readFiles.length) lines.push(`- Read${readFiles.length < fileOps.read.length ? ` (showing ${readFiles.length} of ${fileOps.read.length})` : ""}: ${readFiles.join(", ")}`);
+		if (modifiedFiles.length) lines.push(`- Modified${modifiedFiles.length < fileOps.modified.length ? ` (showing ${modifiedFiles.length} of ${fileOps.modified.length})` : ""}: ${modifiedFiles.join(", ")}`);
 	}
 	lines.push("", "关键历史结论应使用 research_memory_read 回到原 entry 校验；本摘要不是事实源。");
 	return lines.join("\n");
@@ -1058,7 +1066,7 @@ export function buildResearchCompactionDetails({
 			previousCompactionEntryId: evidence.previousCompactionEntryId,
 			previousProjectStateEntryId: evidence.previousProjectStateEntryId,
 			sourceRefs: [...evidence.validRefs],
-			sourceCatalogTruncated: evidence.sourceCatalog.length >= 140,
+			sourceCatalogTruncated: (evidence.sourceCatalogCount ?? evidence.sourceCatalog.length) > evidence.sourceCatalog.length,
 		},
 		validationWarnings: warnings,
 		fileOps: {

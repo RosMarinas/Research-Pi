@@ -5,9 +5,11 @@ import { join } from "node:path";
 import test from "node:test";
 import {
 	capabilityGrantSummary,
+	capabilityResultNeedsDetail,
 	createCapabilityGrant,
 	executeGrantedCapability,
 	findCapabilityGrant,
+	formatCapabilityResultForModel,
 	hostBridgeEnvironment,
 	isForbiddenCredentialRead,
 	listCapabilityGrants,
@@ -15,6 +17,23 @@ import {
 	resolveCapabilityContext,
 	revokeCapabilityGrant,
 } from "../.pi/lib/host-capabilities.mjs";
+
+test("large host output is omitted whole from model text and remains traceable", () => {
+	const result = {
+		grantId: "grant-12345678",
+		kind: "host-command",
+		target: "diagnostic",
+		exitCode: 0,
+		stdout: `BEGIN-${"x".repeat(20_000)}-END`,
+		stderr: "",
+		outputTruncated: false,
+	};
+	assert.equal(capabilityResultNeedsDetail(result), true);
+	const text = formatCapabilityResultForModel(result, { reference: "tool details" });
+	assert.match(text, /not inserted/);
+	assert.match(text, /Reference: tool details/);
+	assert.doesNotMatch(text, /BEGIN-|END/);
+});
 
 function fixture(prefix) {
 	const root = mkdtempSync(join(tmpdir(), prefix));

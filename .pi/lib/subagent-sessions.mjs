@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { sanitizeBoundaryEnvironment } from "./project-boundary.mjs";
+import { subagentModelCard } from "./subagent-message.mjs";
 
 const FINAL_STATUSES = new Set(["completed", "failed", "cancelled", "input_required"]);
 const BACKENDS = new Set(["pi", "antigravity"]);
@@ -63,25 +64,22 @@ function publicJob(job) {
 }
 
 export function formatSubagentSessionJob(job) {
-	return [
-		`${job.backend}/${job.role ?? job.mode ?? "general"} ${job.id} is ${job.status}.`,
-		`Model/thinking: ${job.model ?? "inherit"}/${job.thinking ?? job.reasoningEffort ?? "inherit"}`,
-		job.mission ? `Mission: ${job.mission}` : undefined,
-		job.progress ? `Progress: ${job.progress}` : undefined,
-		job.result?.summary ? `Summary: ${job.result.summary}` : undefined,
-		job.error ? `Error: ${job.error}` : undefined,
-	].filter(Boolean).join("\n");
+	return subagentModelCard(job);
 }
 
+const PLAIN_TECHNICAL_STYLE = "Use short sentences. Put one topic or action in each sentence. Use active voice when the actor is known. Use one term for one concept. State the result before the explanation. Give exact evidence references. Do not copy logs or task background into the result.";
+
 function piRolePrompt(role) {
-	if (role === "advisor") return "Act as a read-only research advisor. Clarify design, compare explanations, and return a concise synthesis. Do not modify files.";
-	if (role === "environment") return "Act as an environment and tooling specialist. Diagnose and configure the project environment end to end, staying inside the current workspace and reporting exact checks.";
-	if (role === "executor") return "Act as an execution subagent. Complete the bounded task end to end, modify the project when needed, run focused checks, and return the result rather than a plan.";
-	return "Act as a context-isolated research subagent. Complete the bounded task and return concise observations, actions, checks, and remaining uncertainty.";
+	let instruction;
+	if (role === "advisor") instruction = "Act as a read-only research advisor. Clarify the design. Compare explanations. Return a concise synthesis. Do not modify files.";
+	else if (role === "environment") instruction = "Act as an environment and tooling specialist. Diagnose and configure the project environment. Stay inside the current workspace. Report exact checks.";
+	else if (role === "executor") instruction = "Act as an execution subagent. Complete the bounded task. Modify the project when needed. Run focused checks. Return the result, not a plan.";
+	else instruction = "Act as a context-isolated research subagent. Complete the bounded task. Return concise observations, actions, checks, and remaining uncertainty.";
+	return `${instruction} ${PLAIN_TECHNICAL_STYLE}`;
 }
 
 function antigravityRolePrompt(role) {
-	if (role === "environment") return "You are the environment specialist for Research Pi. Configure and diagnose toolchains, dependencies, SDKs, runtimes, containers, remote execution, and system integration needed by the task. Complete the work and report exact checks.";
+	if (role === "environment") return `You are the environment specialist for Research Pi. Configure and diagnose the toolchain, dependencies, SDKs, runtime, containers, remote execution, and system integration needed by the task. Complete the work. Report exact checks. ${PLAIN_TECHNICAL_STYLE}`;
 	return piRolePrompt(role);
 }
 

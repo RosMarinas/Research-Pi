@@ -241,6 +241,7 @@ export default function (pi: ExtensionAPI) {
 								"This is an isolated side question. Answer using the visible research context, but do not continue or alter the main task.",
 								"No tools are available in this call. Be self-contained and distinguish facts from inference.",
 								"The answer will be persisted outside the main model context unless the user explicitly promotes it.",
+								"State the answer first. Use short sentences. Put one topic in each sentence. Use stable technical terms. Keep exact evidence references. Do not repeat the transcript.",
 								"",
 								input,
 							].join("\n"),

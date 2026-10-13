@@ -38,7 +38,7 @@ export default function subagentRunnersExtension(pi: ExtensionAPI) {
 			const turnKey = `${job.id}:${job.turn}:${job.status}`;
 			if (deliveredTurns.has(turnKey)) return;
 			deliveredTurns.add(turnKey);
-			const message = await recordSubagentRuntimeEvent(runtimes.get(job.id), job, formatSubagentSessionJob(job));
+			const message = await recordSubagentRuntimeEvent(runtimes.get(job.id), job);
 			if (message) await getRuntimeUiAdapter()?.deliver(ctx, { messageId: message.id });
 		},
 	});

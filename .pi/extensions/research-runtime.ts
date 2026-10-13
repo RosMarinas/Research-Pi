@@ -29,14 +29,14 @@ import {
 import { buildRuntimeBoardModel } from "../lib/runtime-board.mjs";
 import { RuntimeBoardOverlay } from "../lib/runtime-board-ui.mjs";
 import {
-	createRuntimeDockClock,
 	RuntimeDockComponent,
-	runtimeDockNeedsClock,
 	runtimeDockVisible,
 } from "../lib/runtime-dock-ui.mjs";
 import { resolveResearchPiPaths } from "../lib/runtime-paths.mjs";
+import { normalizeCodexAnalysisHandoff } from "../lib/research-analysis-bridge.mjs";
 import { runtimeCompactionReserved } from "../lib/runtime-compaction-gate.mjs";
 import { createRuntimeMailboxWatcher } from "../lib/runtime-mailbox-watch.mjs";
+import { projectResearchContextMessages, runtimeMessageContextText } from "../lib/research-context.mjs";
 import { deliverSubagentMessage, drainSubagentMailbox } from "../lib/runtime-subagents.mjs";
 import { openSubagentWatch } from "../lib/subagent-watch-ui.mjs";
 import {
@@ -66,7 +66,6 @@ import {
 	runtimeActorBackend,
 	runtimeActorAttachment,
 	runtimeActorTarget,
-	runtimeMessageText,
 	runtimeSessionInheritancePolicy,
 	runtimeSessionProjectContext,
 	settleRuntimeActorActivation,
@@ -233,12 +232,22 @@ function runtimeDisplayBody(content: string): string {
 
 export function codexRuntimeMessagePreview(content: string, limit = 360): string {
 	const body = runtimeDisplayBody(content);
-	const summary = body.match(/(?:^|\n)Summary:\s*([\s\S]*?)(?=\n(?:Evidence|Actions taken|Changed files|Checks|External effects|Uncertainties|Recommended next step|Error):|\nUse subagent|$)/)?.[1] ?? body;
+	const summary = body.match(/(?:^|\n)(?:Result|Summary|Question):\s*([^\n]+)/)?.[1]
+		?? body.match(/(?:^|\n)Outcome:\s*([^\n]+)/)?.[1]
+		?? body;
 	return compact(summary, limit);
 }
 
 export function codexRuntimeMessageMarkdown(content: string): string {
 	const body = runtimeDisplayBody(content);
+	if (/^RUNTIME (?:RESULT|REQUEST|RECONCILIATION|STATUS|MESSAGE)/.test(body)) {
+		return body
+			.replace(/^(RUNTIME (?:RESULT|REQUEST|RECONCILIATION|STATUS|MESSAGE))$/m, "## $1")
+			.replace(/^(Decision evidence|Material uncertainty|Remaining work|Options|Write scope|Known external runs|Content):\s*$/gm, "### $1")
+			.replace(/^((?:Required|Next) action: .+)$/gm, "> $1")
+			.replace(/^(To read (?:one|the complete)[^\n]+)$/gm, "> $1")
+			.trim();
+	}
 	const summaryIndex = body.search(/(?:^|\n)Summary:/);
 	const relevant = summaryIndex >= 0 ? body.slice(summaryIndex + (body[summaryIndex] === "\n" ? 1 : 0)) : body;
 	return relevant
@@ -309,7 +318,7 @@ export function formatRuntimeStatus(projectKey: string, snapshot: RuntimeSnapsho
 	if (open) states.push(`${open} open`);
 	if (inheritancePolicy === "clean") states.push("clean context");
 	if (inheritancePolicy === "analysis") states.push("analysis only");
-	return `Runtime ${projectKey.slice(-8)} · ${states.join(" · ")}`;
+	return `Runtime · ${states.join(" · ")}`;
 }
 
 export function runtimeHealth(
@@ -456,7 +465,6 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	let localSessionId: string | undefined;
 	let localAttachmentEpoch: string | undefined;
 	let activeActivationId: string | undefined;
-	const consumedMessageIds = new Set<string>();
 	const supersededMessageIds = new Set<string>();
 	const deliveringMessageIds = new Set<string>();
 	const materializedMessages = new Map<string, {
@@ -472,7 +480,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	let latestProjectView: Awaited<ReturnType<typeof buildProjectView>> | undefined;
 	const latestSubagentJobs = new Map<string, any[]>();
 	let runtimeDockTui: { requestRender?: () => void } | undefined;
-	const runtimeDockClock = createRuntimeDockClock(() => runtimeDockTui?.requestRender?.());
+	let runtimeDockComponent: RuntimeDockComponent | undefined;
 	let attachmentLossNotified = false;
 	let sessionInheritancePolicy: SessionInheritancePolicy = "project";
 	let projectContextMode: ProjectContextMode = "project";
@@ -615,29 +623,33 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		if (options.backend && options.jobs) latestSubagentJobs.set(options.backend, options.jobs);
 		const jobs = [...latestSubagentJobs.values()].flat();
 		if (UI_RUNTIME_STRIP === "off") {
-			runtimeDockClock.stop();
+			if (runtimeDockComponent) ctx.ui.setWidget(RUNTIME_DOCK_KEY, undefined);
 			runtimeDockTui = undefined;
-			ctx.ui.setWidget(RUNTIME_DOCK_KEY, undefined);
+			runtimeDockComponent = undefined;
 			return;
 		}
 		const activeRuntime = await getRuntime(ctx);
 		const snapshot = options.snapshot ?? await readRuntimeSnapshot(activeRuntime);
 		const model = await runtimeModelFromSnapshot(ctx, activeRuntime, snapshot);
 		if (!runtimeDockVisible(model, UI_RUNTIME_STRIP)) {
-			runtimeDockClock.stop();
+			if (runtimeDockComponent) ctx.ui.setWidget(RUNTIME_DOCK_KEY, undefined);
 			runtimeDockTui = undefined;
-			ctx.ui.setWidget(RUNTIME_DOCK_KEY, undefined);
+			runtimeDockComponent = undefined;
+			return;
+		}
+		if (runtimeDockComponent) {
+			if (runtimeDockComponent.update(model, jobs, { density: UI_DENSITY })) runtimeDockTui?.requestRender?.();
 			return;
 		}
 		ctx.ui.setWidget(
 			RUNTIME_DOCK_KEY,
 			(tui, theme) => {
 				runtimeDockTui = tui;
-				return new RuntimeDockComponent(model, jobs, theme, { density: UI_DENSITY });
+				runtimeDockComponent = new RuntimeDockComponent(model, jobs, theme, { density: UI_DENSITY });
+				return runtimeDockComponent;
 			},
 			{ placement: "aboveEditor" },
 		);
-		runtimeDockClock.setActive(runtimeDockNeedsClock(jobs));
 	};
 
 	const refreshStatus = async (ctx: ExtensionContext) => {
@@ -728,7 +740,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		pi.sendMessage(
 			{
 				customType: RUNTIME_MESSAGE_KIND,
-				content: runtimeMessageText(message),
+				content: runtimeMessageContextText(message),
 				display: true,
 				details: {
 					messageId: message.id,
@@ -738,6 +750,9 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 					requestId: message.metadata?.requestId ?? null,
 					jobId: message.metadata?.jobId ?? null,
 					backend: message.metadata?.backend ?? null,
+					status: message.metadata?.status ?? message.status ?? null,
+					requestKind: message.metadata?.requestKind ?? null,
+					secret: message.metadata?.secret === true,
 					transient: true,
 					attachmentEpoch: attachment.epoch ?? null,
 				},
@@ -1009,7 +1024,6 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			? latestProjectViewReceipt(ctx.sessionManager.getBranch())
 			: undefined;
 		let view: Awaited<ReturnType<typeof refreshProjectView>>["view"] | null = null;
-		consumedMessageIds.clear();
 		supersededMessageIds.clear();
 		materializedMessages.clear();
 		if (event.reason === "new") {
@@ -1067,7 +1081,6 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			projectViewDirty = false;
 		}
 		for (const message of snapshot.messages) {
-			if (message.status === "consumed") consumedMessageIds.add(message.id);
 			if (message.status === "superseded") supersededMessageIds.add(message.id);
 		}
 		if (sessionInheritancePolicy === "analysis") {
@@ -1089,8 +1102,8 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		stopRuntimeMailboxWatch();
-		runtimeDockClock.stop();
 		runtimeDockTui = undefined;
+		runtimeDockComponent = undefined;
 		if (!runtime || !localSessionId) return;
 		if (activeActivationId) {
 			await settleRuntimeActorActivation(runtime, activeActivationId, { reason: "session shutdown" });
@@ -1105,7 +1118,6 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		runtimeInputCwd = undefined;
 		localSessionId = undefined;
 		localAttachmentEpoch = undefined;
-		consumedMessageIds.clear();
 		supersededMessageIds.clear();
 		projectViewSnapshotHash = "";
 		projectViewDirty = true;
@@ -1278,13 +1290,12 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			return { messages: event.messages };
 		}
 		if (!isProjectAwareSession()) {
-			return {
-				messages: event.messages.filter((message) =>
-					message.customType !== PROJECT_VIEW_KIND
-					&& message.customType !== PROJECT_VIEW_DELTA_KIND
-					&& message.customType !== RUNTIME_MESSAGE_KIND,
-				),
-			};
+			const cleanMessages = event.messages.filter((message) =>
+				message.customType !== PROJECT_VIEW_KIND
+				&& message.customType !== PROJECT_VIEW_DELTA_KIND
+				&& message.customType !== RUNTIME_MESSAGE_KIND,
+			);
+			return { messages: projectResearchContextMessages(cleanMessages) };
 		}
 		const runtimeMessagesById = new Map(snapshot.messages.map((message) => [message.id, message]));
 		const messages = event.messages.filter((message) => {
@@ -1292,22 +1303,21 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			if (message.role !== "custom" || message.customType !== RUNTIME_MESSAGE_KIND) return true;
 			const messageId = String(message.details?.messageId ?? "");
 			if (!messageId) return true;
-			// Consumption prevents redelivery, not retention of already delivered history.
-			if (consumedMessageIds.has(messageId)) return true;
 			const runtimeMessage = runtimeMessagesById.get(messageId);
-			if (runtimeMessage?.status === "consumed" || runtimeMessage?.status === "superseded") {
-				consumedMessageIds.add(messageId);
-				return true;
+			if (runtimeMessage?.status === "queued" || runtimeMessage?.status === "delivered") {
+				materializedMessages.set(messageId, {
+					attachmentEpoch: String(message.details?.attachmentEpoch ?? "") || null,
+					requestId: String(message.details?.requestId ?? "") || null,
+					type: String(message.details?.type ?? "") || null,
+				});
 			}
-			materializedMessages.set(messageId, {
-				attachmentEpoch: String(message.details?.attachmentEpoch ?? "") || null,
-				requestId: String(message.details?.requestId ?? "") || null,
-				type: String(message.details?.type ?? "") || null,
-			});
 			return true;
 		});
 		return {
-			messages: materializeProjectViewContext(messages, (await ensureProjectSnapshot(ctx)).content),
+			messages: materializeProjectViewContext(
+				projectResearchContextMessages(messages),
+				(await ensureProjectSnapshot(ctx)).content,
+			),
 		};
 	});
 
@@ -1375,13 +1385,10 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 				return materialized.type === "ask" && materialized.requestId ? [] : [messageId];
 			});
 			if (consumableIds.length) {
-				const results = await consumeRuntimeMessagesForAttachment(activeRuntime, consumableIds, {
+				await consumeRuntimeMessagesForAttachment(activeRuntime, consumableIds, {
 					sessionId,
 					actorId: RESEARCH_LEADER_ACTOR_ID,
 				});
-				for (const result of results) {
-					if (result.status === "consumed") consumedMessageIds.add(result.messageId);
-				}
 			}
 			materializedMessages.clear();
 			runtimeChanged = true;
@@ -1405,11 +1412,12 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		const activeRuntime = await getRuntime(ctx);
 		const actorId = await ensureAnalysisSessionActor(activeRuntime, ctx);
 		const sessionId = ctx.sessionManager.getSessionId();
+		const handoff = normalizeCodexAnalysisHandoff(body);
 		const message = await createRuntimeMessage(activeRuntime, {
 			type: "notify",
 			from: actorId,
 			to: RESEARCH_LEADER_ACTOR_ID,
-			body: `[Analysis Session handoff ${String(sessionId).slice(-8)}]\n${body.trim()}`,
+			body: handoff,
 			metadata: { kind: "analysis_handoff", sourceSessionId: sessionId },
 		});
 		await refreshStatus(ctx);
@@ -1426,7 +1434,11 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			"Separate observations already present in ProjectView from your new interpretation. The message is a proposal, not experimental evidence.",
 		],
 		parameters: Type.Object({
-			message: Type.String({ minLength: 1, maxLength: 12_000, description: "Concise analysis to queue for the Leader Session" }),
+			message: Type.String({
+				minLength: 1,
+				maxLength: 1_200,
+				description: "Decision-ready analysis. State the judgment, strongest basis, material uncertainty, and next action. Do not copy the discussion transcript.",
+			}),
 		}),
 		executionMode: "sequential",
 		async execute(_id, params, _signal, _onUpdate, ctx) {

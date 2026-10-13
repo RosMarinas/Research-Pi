@@ -13,6 +13,7 @@ import codexDelegateExtension, {
 	formatCodexJob,
 	formatCodexJobsStatus,
 	formatCodexStatus,
+	formatSubagentFooterStatus,
 	planCodexJobRecovery,
 	resolveSubagentRunnerDefaults,
 } from "../.pi/extensions/codex-delegate.ts";
@@ -31,6 +32,7 @@ import {
 	normalizeCodexWriteScope,
 	publicJobView,
 	readCodexJob,
+	readCodexWorkerLease,
 	reconcileCodexJobOutcome,
 	respondToCodexJob,
 	resumeCodexJob,
@@ -416,9 +418,9 @@ test("a nonterminal Codex result tells the Leader to yield to Runtime delivery",
 		status: "running",
 		progress: "web search",
 	});
-	assert.match(text, /Runtime mailbox will deliver/);
-	assert.match(text, /Do not poll autonomously/);
-	assert.match(text, /genuine user request may inspect progress directly/);
+	assert.match(text, /RUNTIME STATUS/);
+	assert.match(text, /Runtime will deliver/);
+	assert.match(text, /Do not poll the job/);
 	assert.doesNotMatch(text, /Use action=result later/);
 });
 
@@ -474,7 +476,22 @@ test("Codex delegation exposes bounded running and terminal footer states", () =
 		{ id: "codex-b", mode: "executor", status: "running", createdAt: "2026-08-11T00:00:02Z" },
 		{ id: "codex-a", mode: "advisor", status: "input_required", createdAt: "2026-08-11T00:00:01Z" },
 	]);
-	assert.equal(aggregate, "? Codex 2 active · 1 waiting · details above editor");
+	assert.equal(aggregate, "workers 2 · 1 waiting");
+});
+
+test("subagent footer keeps counts and attention state while task details remain in the detailed view", () => {
+	const job = {
+		id: "codex-long-abcdef12", mode: "executor", status: "running",
+		mission: "long task ".repeat(30), model: "gpt-6-astra", reasoningEffort: "high",
+		lastActivity: { summary: "detailed evidence ".repeat(30) },
+	};
+	assert.equal(formatSubagentFooterStatus([job]), "workers 1");
+	assert.equal(formatSubagentFooterStatus([{ ...job, status: "input_required" }]), "workers 1 · 1 waiting");
+	assert.equal(formatSubagentFooterStatus([], { ...job, status: "completed", result: { outcome: "succeeded" } }), "workers 0");
+	assert.equal(formatSubagentFooterStatus([], { ...job, status: "completed", result: { outcome: "partial" } }), "workers 0 · last partial");
+	assert.equal(formatSubagentFooterStatus([], { ...job, status: "failed" }), "workers 0 · last failed");
+	assert.equal(formatSubagentFooterStatus([], { ...job, status: "outcome_unknown" }), "workers 0 · last unknown");
+	assert.match(formatCodexStatus(job), /Codex executor abcdef12/);
 });
 
 test("a synchronous advisor ASK tells the Leader to resume the exact paused turn", () => {
@@ -490,11 +507,39 @@ test("a synchronous advisor ASK tells the Leader to resume the exact paused turn
 			options: ["H1", "H2"],
 		},
 	});
-	assert.match(text, /paused for input; its worker and current turn remain alive/);
+	assert.match(text, /RUNTIME REQUEST/);
+	assert.match(text, /Which interpretation should remain live/);
 	assert.match(text, /action=respond/);
 	assert.match(text, /jobId=codex-2026-08-24T10-27-17-695Z-a19e1bec/);
 	assert.match(text, /requestId=request-a19e1bec-b1b04fb465a5/);
-	assert.match(text, /Do not cancel, restart, or replace/);
+});
+
+test("Codex result text is a concise card with explicit detail sections", () => {
+	const job = {
+		id: "codex-result-card",
+		status: "completed",
+		mission: "inspect the boundary",
+		result: {
+			outcome: "succeeded",
+			goal_satisfied: true,
+			completion_basis: "The focused tests passed.",
+			summary: "The boundary now preserves the required behavior.",
+			evidence: ["tests/boundary.test.mjs passed", "docs/contract.md:42"],
+			checks: [{ command: "npm test", result: "12 tests passed" }],
+			remaining_work: [],
+		},
+	};
+	const summary = formatCodexJob(job);
+	assert.match(summary, /RUNTIME RESULT/);
+	assert.match(summary, /Result: The boundary now preserves/);
+	assert.match(summary, /Available detail: evidence, checks/);
+	assert.doesNotMatch(summary, /"goal_satisfied"/);
+	assert.doesNotMatch(summary, /12 tests passed/);
+
+	const checks = formatCodexJob(job, "checks");
+	assert.match(checks, /SUBAGENT CHECKS/);
+	assert.match(checks, /Command: npm test/);
+	assert.match(checks, /Result: 12 tests passed/);
 });
 
 test("Codex structured results render as readable sections instead of raw JSON", () => {
@@ -819,9 +864,12 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   } else if (message.method === "turn/steer") {
     send({ id: message.id, result: { turnId: activeTurn } });
     const text = message.params.input[0].text;
-    if (text.startsWith("[Research Pi peer message")) {
+    if (text.startsWith("RESEARCH PI PEER MESSAGE")) {
       clearTimeout(completionTimer);
-      const peer = JSON.parse(text.split("\\n").at(-1));
+      const peer = {
+        fromJobId: text.match(/^Source job: (.+)\\.$/m)?.[1],
+        message: text.match(/^Content: ([\\s\\S]+)$/m)?.[1],
+      };
       if (currentPrompt.includes("PEER_RECEIVER")) {
         send({ id: "peer-reply", method: "item/tool/call", params: { threadId: "thread-fake-123", turnId: activeTurn, tool: "research_pi_collaborate", arguments: { action: "send", targetJobId: peer.fromJobId, message: "Tests will cover empty input and score range." } } });
       } else {
@@ -927,8 +975,13 @@ test("worker liveness is bound to an instance nonce rather than PID alone", asyn
 			pid: process.pid,
 			heartbeatAt: new Date().toISOString(),
 		})}\n`);
-		assert.equal(await workerLeaseIsFresh(root, jobId, "worker-instance-a"), true);
-		assert.equal(await workerLeaseIsFresh(root, jobId, "worker-instance-b"), false);
+			assert.equal(await workerLeaseIsFresh(root, jobId, "worker-instance-a"), true);
+			assert.equal(await workerLeaseIsFresh(root, jobId, "worker-instance-b"), false);
+			assert.deepEqual(await readCodexWorkerLease(root, jobId, "worker-instance-a"), {
+				jobId,
+				workerInstanceId: "worker-instance-a",
+				heartbeatAt: JSON.parse(readFileSync(join(jobDir, "worker-lease.json"), "utf8")).heartbeatAt,
+			});
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -1918,9 +1971,9 @@ test("disjoint executors run concurrently, enforce capacity, settle independentl
 		await assert.rejects(startCodexJob({ ...common, task: "overlap", writeScope: ["src/model/layer.ts"] }), /already writing an overlapping scope/);
 		await assert.rejects(startCodexJob({ ...common, task: "third", writeScope: ["docs"] }), /limit reached \(2\)/);
 		const firstRequest = JSON.parse(readFileSync(join(jobRoot, jobs[0].id, "request.json"), "utf8"));
-		assert.match(firstRequest.prompt, /Write only these workspace-relative paths: \["src\/model"\]/);
-		assert.match(firstRequest.prompt, /not alone/);
-		assert.match(firstRequest.prompt, /Do not stage\/commit\/reset/);
+		assert.match(firstRequest.prompt, /Write only: \["src\/model"\]/);
+		assert.match(firstRequest.prompt, /Preserve others' edits/);
+		assert.match(firstRequest.prompt, /do not stage, commit, reset/);
 		const completed = await Promise.all(jobs.map((job) => waitForCodexJob(job.id, { jobRoot, pollMs: 20 })));
 		assert.ok(completed.every((job) => job.status === "completed"), JSON.stringify(completed));
 		assert.deepEqual(publicJobView(completed[0]).writeScope, ["src/model"]);

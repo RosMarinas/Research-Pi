@@ -39,7 +39,7 @@ test("peer messages are directed, bounded, attributed by the host, and distingui
 		assert.equal(message.metadata.transport, "codex_peer");
 		assert.equal(snapshot.actors.find((actor) => actor.id === message.from).metadata.latestJobId, source.id);
 		assert.equal(snapshot.actors.find((actor) => actor.id === message.to).metadata.latestJobId, target.id);
-		await assert.rejects(collaborateWithCodexPeers(source.id, { action: "send", targetJobId: target.id, message: "x".repeat(2001) }, { jobRoot }), /1–2000/);
+		await assert.rejects(collaborateWithCodexPeers(source.id, { action: "send", targetJobId: target.id, message: "x".repeat(1201) }, { jobRoot }), /1–1200/);
 		await assert.rejects(collaborateWithCodexPeers(source.id, { action: "send", targetJobId: source.id, message: "self" }, { jobRoot }), /another executor/);
 		save(jobRoot, { ...target, status: "completed" });
 		assert.equal((await readCodexPeerMessages(source.id, { jobRoot })).outgoing[0].status, "undelivered");

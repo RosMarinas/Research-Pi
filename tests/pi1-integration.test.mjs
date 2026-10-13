@@ -34,7 +34,7 @@ test("the exact Research Pi loadout loads on Pi 1.0 and excludes optional provid
 		assert.ok(!tools.includes("codex_delegate"));
 		assert.ok(!tools.includes("web_search"));
 		const commands = loaded.extensions.flatMap((extension) => [...extension.commands.keys()]);
-		for (const name of ["subagents", "watch", "models", "message", "steer"]) {
+		for (const name of ["subagents", "watch", "models", "message", "steer", "tps"]) {
 			assert.equal(commands.filter((command) => command === name).length, 1, `${name} has one shared entry point`);
 		}
 	} finally { rmSync(root, { recursive: true, force: true }); }
