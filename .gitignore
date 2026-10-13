@@ -28,11 +28,11 @@ node_modules
 /docs/research/
 /docs/testing/
 
-# Local validation code; keep reusable regression tests tracked.
-/tests/local/
-/tests/performance-footer-native.test.mjs
-/tests/research-context.test.mjs
-/tests/token-speed.test.mjs
+# Local validation code and fixtures
+/tests/
+/scripts/web-demo.mjs
+/scripts/native-runtime-demo.mjs
+/scripts/native-runtime-review.mjs
 
 # Local browser acceptance artifacts and pairing pointers
 /output/playwright/

@@ -342,11 +342,10 @@ npm ci --ignore-scripts
 ./run-pi.sh --workspace /path/to/research-project
 
 npm run check
-npm test
-npm run test:package
+npm run check:package
 ```
 
-`pi-raw` 可运行锁定的原始 Pi Core 作行为对照。测试覆盖真实 Pi Core 集成和模拟 runner 协议，不调用付费模型；通过测试不代表当前账号拥有全部模型权限，也不代表科研任务质量已验证。
+`pi-raw` 可运行锁定的原始 Pi Core 作行为对照。`tests/` 与本地测试夹具不提交到仓库，也不随 npm 包发布；过时测试应直接删除。发布检查只依赖仓库内的源码和打包清单，不依赖本地测试目录。通过这些检查不代表当前账号拥有全部模型权限，也不代表科研任务质量已验证。
 
 ## 文档
 

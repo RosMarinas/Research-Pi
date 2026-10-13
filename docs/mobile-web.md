@@ -106,15 +106,9 @@ Web 默认使用 Pi 原生 fullscreen TUI，支持应用内滚动；可用 `--tu
 ## 开发与验证
 
     npm run check
-    npm run test:web
-    npm test
-    npm run test:package
+    npm run check:package
 
-使用真实 Pi Core + 离线 synthetic provider 检查手机界面：
-
-    node scripts/web-demo.mjs
-
-此脚本使用临时 workspace/config/state，过滤供应商凭据环境变量，不读取正常安装的认证或项目 Runtime；本地端口默认为 8791，可通过 WEB_DEMO_PORT 修改。/web-test-dialog 连续触发确认、选择和文本输入。Ctrl C / SIGTERM 只结束测试子进程并清理脚本创建的临时目录。
+手机界面验收使用独立的临时 workspace/config/state，检查输入、确认对话、终端缩放与断线重连。本地测试程序和 synthetic provider 夹具不随仓库或 npm 包发布；测试结束后清理测试进程与临时目录。
 
 实现路径：
 

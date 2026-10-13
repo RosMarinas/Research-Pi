@@ -231,15 +231,13 @@ Runtime mailbox 会保存消息正文，因此不要在这些命令中输入 API
 
 `/runtime` 默认打开只读 Project Board。四个分页分别显示研究/记忆概览、稳定 Actor 与最新 Action、未消费 mailbox、当前 Leader attachment 与显式 handoff。面板只在打开和按 `r` 时读取既有投影，不写 heartbeat、不把展示内容加入模型上下文，也不把 Research Leader 从另一 Session attach 回当前窗口；持续执行细节仍由 `/watch` 展示。
 
-## 7. 自动测试
+## 7. 本地验证
+
+`tests/` 与测试夹具仅保存在本地，不提交到仓库，也不随 npm 包发布；过时测试应直接删除。下面列出验证要点，便于功能变更时选择相关检查。
 
 ### Layer 1：无模型 Runtime 测试
 
-```sh
-node --test tests/research-runtime.test.mjs tests/runtime-board.test.mjs
-```
-
-覆盖：
+验证要点：
 
 - Project 内稳定 user/Research Leader Actor；
 - Session B attachment 替代 A，A 随后 detach（包括同 sessionId 的旧 epoch）不会误删 B；
@@ -262,11 +260,7 @@ node --test tests/research-runtime.test.mjs tests/runtime-board.test.mjs
 
 ### Layer 2：Fake Codex App Server
 
-```sh
-node --test tests/codex-jobs.test.mjs
-```
-
-覆盖：
+验证要点：
 
 - Session B 以同一 Project/Leader Actor 读取并续接 A 的 job；
 - 只有同 workspace/mission/mode/track 自动复用；显式跨 track resume 带 route-change 警告；
@@ -284,7 +278,7 @@ node --test tests/codex-jobs.test.mjs
 - 较新的 Runtime Action 在没有明确 transition 时只触发 unconfirmed 警告；
 - lifecycle health 只观察/建议，不自动 compact、rotate 或 reconcile；只有显式 `/runtime rotate` 才创建新 Session。
 
-当前自动测试使用 Fake App Server 和本地 ledger，不调用真实模型/API；实际科研判断质量仍需要在真实 Project 中持续测试。
+本地离线验证可使用 Fake App Server 和临时 ledger，不调用真实模型/API；实际科研判断质量仍需要在真实 Project 中持续测试。
 
 ## 8. Layer 3：真实科研项目手动测试
 

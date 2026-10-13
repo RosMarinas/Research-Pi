@@ -61,17 +61,7 @@ pi web start --workspace /path/to/project
 
 Analysis 使用独立 Native Host（启动时 `--resident-runtime --analysis --no-web`；管理命令也带 `--analysis`）。此候选路径用于交互模式，不把 print/RPC 错误地当成后台 TUI。
 
-当前开发验收建议先只使用离线项目：
-
-```bash
-node scripts/native-runtime-demo.mjs
-node scripts/native-runtime-review.mjs tui
-node scripts/native-runtime-review.mjs open
-node scripts/native-runtime-review.mjs status
-node scripts/native-runtime-review.mjs stop
-```
-
-`output/runtime-review/native-access.json` 为私有、Git 忽略的测试指针，不能提交或分享。离线项目提供 `/web-test-dialog` 和 `pi:web-demo` 消息回环，不调用付费模型；外部编辑器用写入合成文本的 Node 测试程序代替真实编辑器。
+开发验收使用独立的临时 workspace/config/state，检查原生菜单、审批、终端分离与重新连接、外部编辑器和 Runtime 消息回环。离线测试程序、synthetic provider 与外部编辑器夹具仅保存在本地，不随仓库或 npm 包发布。`output/runtime-review/` 中的私有测试指针不提交或分享，测试结束后清理所属进程与临时目录。
 
 ## 已验证与未验证
 

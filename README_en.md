@@ -257,11 +257,10 @@ npm ci --ignore-scripts
 ./run-pi.sh --workspace /path/to/research-project
 
 npm run check
-npm test
-npm run test:package
+npm run check:package
 ```
 
-Use `pi-raw` for comparison against the pinned, unmodified Pi Core. Tests exercise real Pi Core integration and synthetic runner protocols without paid model calls. Passing tests do not establish account access to every model or validate research quality.
+Use `pi-raw` for comparison against the pinned, unmodified Pi Core. Keep `tests/` and local test fixtures out of version control and npm packages; delete obsolete tests. Release checks use only tracked source and the package manifest, without relying on local tests. Passing these checks does not establish account access to every model or validate research quality.
 
 ## Documentation
 

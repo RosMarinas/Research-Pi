@@ -87,7 +87,7 @@ Restart older Research Pi Leader processes before starting concurrent work. An o
 
 ## Validation and limits
 
-Offline validation uses Pi 1.0 itself and a synthetic provider: the exact extension loadout, a real Session with a mailbox wake and tool continuation, codemode nested-call policy hooks, and independent Codex app-server workers. Scheduler checks cover concurrent starts, overlaps, capacity, symlink scopes, independent settlement, resume, and scoped unknown outcomes. Existing tests continue to cover Runtime ownership, mailbox delivery, grants, and retention.
+Offline validation uses Pi 1.0 itself and a synthetic provider: the exact extension loadout, a real Session with a mailbox wake and tool continuation, codemode nested-call policy hooks, and independent Codex app-server workers. Scheduler checks cover concurrent starts, overlaps, capacity, symlink scopes, independent settlement, resume, and scoped unknown outcomes. Local regression checks also cover Runtime ownership, mailbox delivery, grants, and retention; test code and fixtures are excluded from version control and npm packages.
 
 Synthetic workers establish transport and scheduling behavior; they do not measure GPT research quality or prove account-specific model access. Native auth readiness and a real provider request are separate checks. No research experiment is rerun or reinterpreted by this migration.
 
