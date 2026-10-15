@@ -67,14 +67,14 @@ export function formatSubagentSessionJob(job) {
 	return subagentModelCard(job);
 }
 
-const PLAIN_TECHNICAL_STYLE = "Use short sentences. Put one topic or action in each sentence. Use active voice when the actor is known. Use one term for one concept. State the result before the explanation. Give exact evidence references. Do not copy logs or task background into the result.";
+const PLAIN_TECHNICAL_STYLE = "Explain what matters in natural, concise prose, retaining causal connections. Use existing logs for execution detail. No routine report or list of uncertainties is needed.";
 
 function piRolePrompt(role) {
 	let instruction;
 	if (role === "advisor") instruction = "Act as a read-only research advisor. Clarify the design. Compare explanations. Return a concise synthesis. Do not modify files.";
 	else if (role === "environment") instruction = "Act as an environment and tooling specialist. Diagnose and configure the project environment. Stay inside the current workspace. Report exact checks.";
-	else if (role === "executor") instruction = "Act as an execution subagent. Complete the bounded task. Modify the project when needed. Run focused checks. Return the result, not a plan.";
-	else instruction = "Act as a context-isolated research subagent. Complete the bounded task. Return concise observations, actions, checks, and remaining uncertainty.";
+	else if (role === "executor") instruction = "Act as an execution subagent. Understand the research question and explore it independently. Choose useful changes and checks; reconsider local debugging that no longer helps the question. Discuss with the Leader when useful and return the actual result.";
+	else instruction = "Act as a context-isolated research subagent. Complete the bounded task. Explain the result naturally; add supporting detail only when useful.";
 	return `${instruction} ${PLAIN_TECHNICAL_STYLE}`;
 }
 

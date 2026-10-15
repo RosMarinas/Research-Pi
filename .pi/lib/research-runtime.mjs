@@ -955,7 +955,7 @@ export async function createRuntimeMessage(runtime, input) {
 		body,
 		relatesTo: input.relatesTo ?? null,
 		payloadRef: input.payloadRef ?? null,
-		metadata: input.metadata ?? {},
+		metadata: { cwd: runtime.cwd ?? runtime.workspaceRoot, ...input.metadata },
 		projectRevision: Number.isInteger(input.projectRevision) ? input.projectRevision : snapshot.revision,
 		trackRef: input.trackRef ?? runtimeResearchTrack(snapshot).ref,
 	};
@@ -1182,7 +1182,7 @@ export async function registerSubagentRuntimeJob(runtime, job) {
 	const backend = String(job.backend ?? "codex").toLowerCase();
 	const role = String(job.role ?? job.mode ?? "general").toLowerCase();
 	const thinking = job.thinking ?? job.reasoningEffort ?? null;
-	const actorId = job.actorId ?? subagentActorId({ ...job, backend, role });
+	const actorId = job.actorId ?? subagentActorId({ ...job, jobId: job.id, backend, role });
 	await ensureRuntimeActor(runtime, {
 		id: actorId,
 		kind: "subagent",
@@ -1235,6 +1235,7 @@ export async function registerSubagentRuntimeJob(runtime, job) {
 			externalRuns: (job.externalRuns ?? []).map((run) => ({ id: run.id, status: run.status, target: run.target, externalId: run.externalId, resources: run.resources })),
 			summary: conciseRuntimeField(job.result?.summary ?? job.result?.working_synthesis ?? job.result?.shared_understanding, 1_200),
 			resultRef: `subagent:${job.id}`,
+			resultPath: job.resultPath ?? null,
 		},
 		projectRevision: Number.isInteger(job.projectRevision) ? job.projectRevision : snapshot.revision,
 		trackRef,

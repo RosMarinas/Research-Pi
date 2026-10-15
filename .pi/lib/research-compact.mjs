@@ -41,18 +41,7 @@ export const RESEARCH_STATE_TOOL = Object.freeze({
 	parameters: {
 		type: "object",
 		additionalProperties: false,
-		required: [
-			"projectBrief",
-			"researchQuestion",
-			"currentClaim",
-			"hypotheses",
-			"observations",
-			"decisions",
-			"unresolvedConfounders",
-			"openQuestions",
-			"nextExperiment",
-			"criticalContext",
-		],
+		required: ["projectBrief", "researchQuestion"],
 		properties: {
 			projectBrief: PROJECT_BRIEF_SCHEMA,
 			researchQuestion: { type: "string", maxLength: 2_000, description: "The current scientific frontier or decision question for Project Delta; do not repeat the stable project introduction" },
@@ -135,7 +124,7 @@ export const RESEARCH_SUMMARY_MAX_TOKENS = configuredPositiveInteger("RESEARCH_P
 
 export const RESEARCH_COMPACTION_SYSTEM_PROMPT = `Maintain working state for computational research. Call ${RESEARCH_STATE_TOOL_NAME} exactly once; emit no prose. If tools are unavailable, return one JSON object.
 
-This is a concise research index, not a transcript or development summary. Target at most ${RESEARCH_SUMMARY_TARGET_TOKENS.toLocaleString()} output tokens. Preserve competing hypotheses, distinguishing predictions, observation versus interpretation, validity, confounders, reversible decisions, and the highest-information next experiment. Omit low-value operations; experimental code matters only when it affects interpretation or continuation.
+This is a concise research index, not a transcript or development summary. Target at most ${RESEARCH_SUMMARY_TARGET_TOKENS.toLocaleString()} output tokens. Keep the current question, useful understanding, decisions and matters still affecting work. Other fields are optional; do not invent hypotheses, confounders or a next experiment for ordinary tasks. Leave routine execution details and incidental concerns in searchable records. Omit low-value operations; experimental code matters only when it affects interpretation or continuation.
 
 Rules:
 1. Invalid/inconclusive experiments and validity_failure do not update hypotheses.
@@ -147,7 +136,7 @@ Rules:
 7. Clean/Analysis summaries are candidate synthesis, not Project authority or evidence.
 8. A linked RESEARCH.md Project Anchor is user-maintained authority for durable intent; never rewrite it or treat it as experimental evidence. projectBrief is the compact-generated fixed orientation until the next successful compact. Make it short and clear to a new Agent/user: only overview, final goal, overall approach, enduring user priorities, and closed previous phases. Exclude the active/latest phase, current run/claim, next experiment, Git, and live tasks.
 9. Preserve prior projectBrief wording unless evidence changes its durable fields or closes a phase. previousPhases uses concise goal-approach-result records, never a task log.
-10. researchQuestion, currentClaim, hypotheses, observations, open questions, criticalContext, and nextExperiment form the live Project Delta. nextExperiment is a discriminating intervention, not an inherited coding TODO.`;
+10. researchQuestion, currentClaim, hypotheses, observations, open questions, criticalContext, and nextExperiment form the live Project Delta. nextExperiment is optional; include it only when a useful experiment is actually proposed.`;
 
 const MAX_HYPOTHESES = 24;
 const MAX_OBSERVATIONS = 32;

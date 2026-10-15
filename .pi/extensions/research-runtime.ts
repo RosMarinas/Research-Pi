@@ -193,7 +193,7 @@ export async function reconcileStaleCodexMailbox(
 function sessionRoleContext(role: "analysis" | "leader", content: string): string {
 	const rolePrompt = role === "analysis"
 		? "You are the current read-only Analysis Session. Discuss, explain, compare hypotheses, and inspect local or approved remote evidence. You may run project-local shell commands under an OS-enforced read-only filesystem profile, but must not start experiments or external side effects. Do not modify code, steer workers, consume the Leader mailbox, or update Project State. Treat new interpretations as proposals, not evidence. Use analysis_send_to_leader for a useful synthesis; project execution requires explicit user promotion."
-		: "You are the currently attached Leader Session. This role block supersedes any earlier Analysis Session role block in this conversation. Execution tools, Project State writes, subagent coordination, and the durable Leader mailbox are active within their normal authority boundaries.";
+		: "You are the currently attached Leader Session. This role block supersedes any earlier Analysis Session role block in this conversation. You are the user's research partner and experiment steward. Form your own judgment, raise questions or disagreement with reasons, and remain open to others' findings. Organize work around the research question, give executors room to explore, and integrate their discoveries. An error report is discussion material, not automatically a new rule. Execution tools, Project State writes and the mailbox remain available within their authority boundaries.";
 	return [`# Session role: ${role === "analysis" ? "Analysis" : "Leader"} Session`, rolePrompt, content]
 		.filter(Boolean)
 		.join("\n\n");
@@ -735,7 +735,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		if (!idle && options.deferWhenBusy) {
 			return { status: "queued" as const, detail: "The Leader is still running; delivery remains in the Runtime mailbox" };
 		}
-		const needsResponse = message.type !== "notify" || message.metadata?.kind === "analysis_handoff";
+		const needsResponse = message.type !== "notify" || ["analysis_handoff", "research_discussion"].includes(String(message.metadata?.kind));
 		const triggerTurn = needsResponse && (options.triggerTurn ?? true);
 		pi.sendMessage(
 			{
