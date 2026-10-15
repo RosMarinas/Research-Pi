@@ -233,7 +233,7 @@ export function subagentResultSection(job, section = "summary") {
 	}
 	if (section === "evidence") renderSectionItems(lines, result.evidence, "No decision evidence was recorded.");
 	if (section === "changes") renderSectionItems(lines, result.changed_files, "No changed file was recorded.");
-	if (section === "uncertainties") renderSectionItems(lines, [...items(result.uncertainties), ...items(result.unverified_edge_cases_and_warnings)], "No notes were recorded.");
+	if (section === "uncertainties") renderSectionItems(lines, [...new Set([...items(result.uncertainties), ...items(result.unverified_edge_cases_and_warnings)])], "No notes were recorded.");
 	if (section === "remaining") renderSectionItems(lines, result.remaining_work ?? result.questions_to_resolve, "No remaining work was recorded.");
 	if (section === "analysis") {
 		for (const [title, values] of [

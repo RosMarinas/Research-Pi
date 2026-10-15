@@ -102,7 +102,8 @@ function normalizeExecutorResult(value) {
 					? "partial"
 					: "partial";
 	let goalSatisfied = value.goal_satisfied === undefined ? outcome === "succeeded" : value.goal_satisfied === true;
-	const uncertainties = Array.isArray(value.uncertainties) ? [...value.uncertainties] : [];
+	const rawWarnings = Array.isArray(value.unverified_edge_cases_and_warnings) ? value.unverified_edge_cases_and_warnings : [];
+	const uncertainties = [...new Set([...(Array.isArray(value.uncertainties) ? value.uncertainties : []), ...rawWarnings])];
 	if (outcome === "succeeded" && !goalSatisfied) {
 		outcome = "partial";
 		uncertainties.push("Normalized contradictory executor result: outcome=succeeded while goal_satisfied=false.");
@@ -985,7 +986,7 @@ async function main() {
 					properties: {
 						audience: { type: "string", enum: ["leader", "user"] },
 						question: { type: "string", maxLength: 4000 },
-						wait: { type: "boolean", description: "Wait for an answer rather than continuing work; default false." },
+						wait: { type: "boolean", description: "Default false (queues message while you keep working). Set wait=true if your next step depends on the answer or if you have no other independent work left before finishing the turn." },
 						options: { type: "array", maxItems: 8, items: { type: "string", maxLength: 1000 } },
 					},
 				},

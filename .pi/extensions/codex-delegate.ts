@@ -355,7 +355,7 @@ export function codexResultMarkdown(result: any): string {
 		].join("\n"));
 	}
 
-	appendList("Notes", [...resultList(result.uncertainties), ...resultList(result.unverified_edge_cases_and_warnings)]);
+	appendList("Notes", [...new Set([...resultList(result.uncertainties), ...resultList(result.unverified_edge_cases_and_warnings)])]);
 	appendList("Remaining delegated work", result.remaining_work);
 	const workingSynthesis = String(result.working_synthesis ?? "").trim();
 	if (workingSynthesis) sections.push(`## Working synthesis\n\n${workingSynthesis}`);

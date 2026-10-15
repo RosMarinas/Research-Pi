@@ -974,6 +974,28 @@ export async function settleRuntimeMessage(runtime, messageId, status, details =
 	return { messageId, status, ...details };
 }
 
+// Clear the Leader inbox, not history or worker requests. Reuse existing
+// superseded events so older readers also honor dismissal; append once.
+export async function clearRuntimeMailbox(runtime, details) {
+	await mkdir(runtime.projectDir, { recursive: true, mode: 0o700 });
+	return await withRuntimeLedgerLock(runtime, async () => {
+		await repairRuntimeLedgerTail(runtime);
+		const snapshot = await readRuntimeSnapshot(runtime);
+		const attachment = runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID, details.sessionId);
+		if (!details.sessionId || !attachment || (details.attachmentEpoch && attachment.epoch !== details.attachmentEpoch)) {
+			throw new RuntimeAttachmentChangedError(RESEARCH_LEADER_ACTOR_ID);
+		}
+		const open = unconsumedRuntimeMessages(snapshot, { to: RESEARCH_LEADER_ACTOR_ID });
+		const messages = open.filter((message) => message.type !== "ask");
+		const events = messages.map((message) => prepareRuntimeEvent(runtime, "message.superseded", {
+			messageId: message.id, actorId: RESEARCH_LEADER_ACTOR_ID, sessionId: details.sessionId,
+			attachmentEpoch: attachment.epoch, reason: "mailbox_clear",
+		}, { id: `message:${message.id}:superseded:${attachment.epoch}` }));
+		if (events.length) await appendFile(runtime.ledgerPath, events.map((event) => JSON.stringify(event)).join("\n") + "\n", { encoding: "utf8", mode: 0o600 });
+		return { cleared: messages.length, retainedRequests: open.length - messages.length };
+	});
+}
+
 export async function consumeRuntimeMessagesForAttachment(runtime, messageIds, details) {
 	const ids = [...new Set(messageIds.map((messageId) => validateMessageId(messageId)))];
 	validateActorId(details.actorId);

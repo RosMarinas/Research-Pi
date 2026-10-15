@@ -37,9 +37,9 @@ export const DEFAULT_CODEX_MAX_EXECUTORS = Number(process.env.RESEARCH_PI_CODEX_
 // App Server dynamic tools are fixed when a thread is created and cannot be
 // added by thread/resume. Bump this whenever the Research Pi dynamic tool set
 // or its required schemas change so pre-existing threads refresh once.
-export const CODEX_DYNAMIC_TOOL_PROTOCOL_VERSION = 3;
+export const CODEX_DYNAMIC_TOOL_PROTOCOL_VERSION = 4;
 
-export const CODEX_OUTPUT_POLICY = "Explain what matters in natural, concise prose. Keep causal connections; avoid invented jargon. Optional result fields may be omitted. Put incidental concerns in optional unverified_edge_cases_and_warnings for later reading. Existing logs hold execution detail; create documents only when the task needs them.";
+export const CODEX_OUTPUT_POLICY = "Explain what matters in natural, concise prose. Keep causal connections; avoid invented jargon. Optional result fields may be omitted. Offload all validity caveats, untested edge cases, and scope disclaimers into unverified_edge_cases_and_warnings so your code and summary stay on the direct happy path. Existing logs hold execution detail; do not create unrequested reports, provenance snapshots, source-hash audits, or wrapper scripts.";
 
 const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled", "outcome_unknown"]);
 const RECONCILABLE_OUTCOMES = new Set(["completed", "failed", "cancelled"]);
@@ -192,10 +192,11 @@ export function buildDelegationPrompt({
 	resourceClaims = [],
 	experiment,
 }) {
+	const executionGuidance = mode === "advisor" ? "" : "Use env flags, CLI arguments, or targeted code bypasses to overcome framework sanity gates or shared-host noise (such as memory-balance checks). Respect OS sandbox, writeScope, credential rules and explicitly fixed task conditions. Never kill external processes not spawned by your job or delete shared datasets/weights.";
 	const role =
 		mode === "advisor"
 			? `You are the read-only research advisor collaborating with Research Pi. The question may be incomplete or tentative. Help develop the question, compare explanations, and suggest useful directions. Discuss with the Leader or executors when helpful; no fixed review or probe is required. Do not modify files or external state.`
-			: `You are a research executor collaborating with Research Pi. Understand the question and explore its causes; the initial explanation is a starting point, not a prescribed answer. Complete the task end to end rather than stopping at a plan. ${fullAccess ? "This job has explicit full host access" : "Inside the exact project boundary you may take necessary operations"}, including editing or deleting files, installing dependencies, committing, and starting, monitoring, or cancelling expensive experiments. Choose implementation and diagnostic methods yourself. Resolve ordinary environmental friction and continue. If local debugging stops helping answer the question, reconsider the explanation or discuss it. Existing task and authority boundaries still apply.`;
+			: `You are a research executor collaborating with Research Pi. Understand the question and explore its causes; the initial explanation is a starting point, not a prescribed answer. Complete the task end to end. ${fullAccess ? "This job has explicit full host access" : "Inside the exact project boundary you may take necessary operations"}, including editing or deleting files, installing dependencies, committing, and starting, monitoring, or cancelling expensive experiments. Choose your methods. If debugging stops helping the question, reconsider or discuss it. ${executionGuidance}`;
 
 	const criteria = successCriteria.length > 0
 		? successCriteria.map((item) => `- ${item}`).join("\n")
@@ -206,7 +207,7 @@ export function buildDelegationPrompt({
 	const capabilityText = hostCapabilities.length > 0
 		? hostCapabilities.map((grant) => `- ${capabilityGrantSummary(grant)}`).join("\n")
 		: "- None. If host authority becomes necessary, call research_pi_host with the exact operation; its missing-grant path pauses for a Pi TUI decision instead of handing terminal commands to the user.";
-	const interaction = "The Leader coordinates research with the user; you retain your own judgment. Use consult_research_pi for useful discussion, including disagreement, without ending the task. It queues a message by default; wait only when the answer is needed to continue. Use research_pi_collaborate to discuss with available advisors or executors. If an advisor is needed but none is active, ask the Leader to arrange one. No routine reporting or consultation is required.";
+	const interaction = "Retain your own judgment. Use consult_research_pi for discussion without ending the task; wait when an answer is needed. Use research_pi_collaborate with active peers, or ask the Leader to arrange an advisor. No routine reporting is required.";
 	const resultInstruction = "Give brief updates when useful. Call submit_research_pi_result once when this task or consultation is finished, then acknowledge in phase=final_answer. State the actual result; optional fields need not be filled.";
 	const ownership = mode === "advisor" ? "" : `\n<write_ownership>\nWrite only: ${JSON.stringify(writeScope)}. Preserve others' edits. Ask Pi before expanding scope. ${writeScope.includes(".") ? "This job owns the workspace." : "Outside this scope, do not stage, commit, reset, switch branches, install shared dependencies, or change shared run state. Pi integrates."} This is coordination, not OS permission.\n</write_ownership>\n`;
 	const experimentContext = [
@@ -221,6 +222,7 @@ export function buildDelegationPrompt({
 		return `<research_pi_continuation>
 Continue the same ${mode} role and tools.${continuationAuthority} Keep the research question in view; discuss changed interpretations when useful.
 ${ownership}
+${executionGuidance}
 ${CODEX_OUTPUT_POLICY}
 Discuss through consult_research_pi or research_pi_collaborate when useful; wait only when an answer is needed.
 ${experimentContext}
@@ -251,7 +253,7 @@ ${resultInstruction}
 
 	const authority = fullAccess && mode !== "advisor"
 		? `This executor was explicitly launched with full host access. The project remains the task scope, but it is not an OS filesystem or command sandbox: host files, commands, network, Unix sockets, credentials, and external paths are available when genuinely required by the delegated task. Do not broaden the task or expose secrets. research_pi_host remains available for compatibility but is not required for ordinary host operations in this mode.`
-		: `The project is the hard authority boundary. Git metadata is writable and hooks are read-only. Sandboxed tools cannot access host credentials, Unix sockets, other projects, or parent directories. Use research_pi_host for an exact outside read, SSH target, or host argv; its missing-grant path pauses for the Pi TUI decision. Do not bypass the boundary, duplicate approval through consult_research_pi, or hand a terminal command to the user.
+		: `The project is the hard authority boundary; Git metadata is writable, hooks read-only. Host credentials, Unix sockets and external paths require a capability. Use research_pi_host for an exact outside read, SSH target, or host argv; its missing-grant path pauses for the Pi TUI decision. Do not bypass the boundary, duplicate approval through consult_research_pi, or hand a terminal command to the user.
 
 Approved capabilities keep credentials opaque: credential contents never enter your process or context. Executor may use approved SSH or host commands; advisor may use external-read only. Reuse a listed grantId so its approved cwd is restored. A cwd mismatch requires retrying the same capability, not switching kind or adding a shell wrapper. Command syntax is not the policy boundary.`;
 

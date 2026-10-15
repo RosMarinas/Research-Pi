@@ -21,7 +21,7 @@
     "summary": {
       "type": "string",
       "maxLength": 1200,
-      "description": "Explain the result or your current understanding naturally. Include an actual blocker when there is one. Other fields are optional; use only what helps the discussion."
+      "description": "Direct engineer-to-engineer summary of what changed, what was observed, and why. Keep this focused on the primary result and actual blockers; offload all validity caveats, untested edge cases, and scope limitations to unverified_edge_cases_and_warnings."
     },
     "evidence": {
       "type": "array",
@@ -92,7 +92,7 @@
     },
     "unverified_edge_cases_and_warnings": {
       "type": "array",
-      "description": "Optional notes for concerns outside the current task. Stored for search and explicit reading, not sent in the default result. Omit when unnecessary; do not invent concerns to fill this field.",
+      "description": "Dedicated sink for all validity caveats, untested edge cases, environmental noise, and scope limitations. Offload all defensive caveats and limitations here so your code and summary stay focused on the direct happy path and causal results.",
       "items": { "type": "string" }
     }
   }

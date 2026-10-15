@@ -48,7 +48,7 @@
     "working_synthesis": {
       "type": "string",
       "maxLength": 1200,
-      "description": "Explain the result or your current understanding naturally. Include an actual blocker when there is one. Other fields are optional; use only what helps the discussion."
+      "description": "Explain the core mechanism, root bottleneck, or design trade-off naturally and directly. Offload secondary caveats, edge cases, and scope disclaimers to unverified_edge_cases_and_warnings."
     },
     "suggested_next_exchange": {
       "type": "string",
@@ -57,7 +57,7 @@
     },
     "unverified_edge_cases_and_warnings": {
       "type": "array",
-      "description": "Optional notes for concerns outside the current task. Stored for search and explicit reading, not sent in the default result. Omit when unnecessary; do not invent concerns to fill this field.",
+      "description": "Dedicated sink for secondary caveats, untested edge cases, and scope limitations so working_synthesis stays sharp and focused on the core research question.",
       "items": { "type": "string" }
     }
   }

@@ -52,6 +52,7 @@ import {
 	claimRuntimeActorAttachment,
 	createRuntimeMessage,
 	consumeRuntimeMessagesForAttachment,
+	clearRuntimeMailbox,
 	detachRuntimeActor,
 	ensureRuntimeActor,
 	initializeResearchRuntime,
@@ -1697,6 +1698,23 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			try {
 				const activeRuntime = await getRuntime(ctx);
 				ctx.ui.notify(inboxLines(await readRuntimeSnapshot(activeRuntime), args.trim() === "all"), "info");
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			}
+		},
+	});
+
+	pi.registerCommand("mailbox", {
+		description: "Inspect mailbox, or /mailbox clear to dismiss Leader messages while retaining requests awaiting answers",
+		handler: async (args, ctx) => {
+			try {
+				const mode = args.trim();
+				if (!["", "all", "clear"].includes(mode)) throw new Error("Usage: /mailbox [all|clear]");
+				const activeRuntime = await getRuntime(ctx);
+				if (mode !== "clear") { ctx.ui.notify(inboxLines(await readRuntimeSnapshot(activeRuntime), mode === "all"), "info"); return; }
+				if (isAnalysisSession()) throw new Error("Clear the mailbox from the attached Leader Session.");
+				const result = await clearRuntimeMailbox(activeRuntime, { sessionId: ctx.sessionManager.getSessionId(), attachmentEpoch: localAttachmentEpoch });
+				ctx.ui.notify(`Cleared ${result.cleared} Leader messages; retained ${result.retainedRequests} requests awaiting answers. History and running jobs are unchanged; already injected messages cannot be recalled.`, "info");
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 			}
