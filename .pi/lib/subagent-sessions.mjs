@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { sanitizeBoundaryEnvironment } from "./project-boundary.mjs";
-import { subagentModelCard } from "./subagent-message.mjs";
+import { subagentModelCard, SUBAGENT_WORKSPACE_POLICY } from "./subagent-message.mjs";
 
 const FINAL_STATUSES = new Set(["completed", "failed", "cancelled", "input_required"]);
 const BACKENDS = new Set(["pi", "antigravity"]);
@@ -99,7 +99,7 @@ export function buildPiRunnerArgs(input) {
 		"--session-dir", input.sessionDir,
 		"--session-id", input.sessionId,
 		"--name", `Research Pi ${input.role} ${input.id.slice(-8)}`,
-		"--append-system-prompt", input.systemPrompt ?? piRolePrompt(input.role),
+		"--append-system-prompt", `${input.systemPrompt ?? piRolePrompt(input.role)}${input.role === "advisor" ? "" : ` ${SUBAGENT_WORKSPACE_POLICY}`}`,
 	];
 	if (input.boundaryExtension) args.push("--extension", input.boundaryExtension);
 	if (input.model && input.model !== "inherit") args.push("--model", input.model);
@@ -114,8 +114,8 @@ export function buildAntigravityRunnerArgs(input) {
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--mode", input.role === "advisor" ? "plan" : "accept-edits",
-		"--sandbox",
 	];
+	if (input.role === "advisor" || input.fullAccess !== true) args.push("--sandbox");
 	// Headless Antigravity cannot show permission prompts. Non-advisor work is
 	// auto-approved inside the CLI sandbox so environment commands are executed
 	// instead of being silently soft-denied.
@@ -189,7 +189,11 @@ export function createSubagentSessionManager(options = {}) {
 		const args = buildPiRunnerArgs({ ...job, sessionDir, boundaryExtension });
 		const child = spawnProcess(process.execPath, [coreCli, ...args], {
 			cwd: job.cwd,
-			env: process.env,
+			env: { ...process.env,
+				RESEARCH_PI_FULL_ACCESS: job.fullAccess ? "1" : "0",
+				RESEARCH_PI_INITIAL_SESSION_MODE: job.role === "advisor" ? "analysis" : "project",
+				RESEARCH_PI_CAPABILITY_SESSION_ID: job.leaderSessionId ?? job.sessionId,
+			},
 			shell: false,
 			stdio: ["pipe", "pipe", "pipe"],
 		});
@@ -226,9 +230,12 @@ export function createSubagentSessionManager(options = {}) {
 			await emit(job, { type: "progress", summary: "runner model settings resolved" });
 		} else if (record.type === "extension_ui_request") {
 			if (["select", "confirm", "input", "editor"].includes(record.method) && record.id) {
-				writeRecord(job.child, { type: "extension_ui_response", id: record.id, cancelled: true });
-				job.progress = `${record.method} request declined; interactive approvals stay with the Leader`;
-				await emit(job, { type: "input_required", summary: job.progress });
+				job.progress = `${record.method} request awaiting the Leader UI`;
+				await emit(job, { type: "progress", summary: job.progress });
+				const response = await options.onUiRequest?.(publicJob(job), record);
+				writeRecord(job.child, { ...response, type: "extension_ui_response", id: record.id, ...(!response ? { cancelled: true } : {}) });
+				job.progress = response && !response.cancelled ? "Leader UI responded; continuing" : "Leader UI unavailable or request cancelled";
+				await emit(job, { type: "progress", summary: job.progress });
 			}
 		} else if (record.type === "tool_execution_start") {
 			job.progress = `${record.toolName ?? "tool"} running`;
@@ -278,7 +285,7 @@ export function createSubagentSessionManager(options = {}) {
 				if (!FINAL_STATUSES.has(job.status)) await settle(job, job.cancelling ? "cancelled" : "failed", null, `Antigravity runner exited (${code ?? "?"}${signal ? `, ${signal}` : ""})`);
 			});
 		});
-		await beginTurn(job, `${job.systemPrompt}\n\nTask: ${task}`);
+		await beginTurn(job, `${job.systemPrompt}${job.role === "advisor" ? "" : ` ${SUBAGENT_WORKSPACE_POLICY}`}\n\nTask: ${task}`);
 	};
 
 	const handleAntigravityRecord = async (job, line) => {
@@ -324,6 +331,8 @@ export function createSubagentSessionManager(options = {}) {
 			actorId: input.actorId,
 			backend,
 			role: input.role ?? "general",
+			fullAccess: input.role !== "advisor" && (input.fullAccess ?? process.env.RESEARCH_PI_FULL_ACCESS === "1"),
+			leaderSessionId: input.leaderSessionId,
 			mission: input.mission ?? null,
 			task: input.task,
 			model: input.model ?? "inherit",

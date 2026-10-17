@@ -132,7 +132,7 @@ All delegated workers enter through one `subagent` tool and one Runtime Actor mo
     "general": { "backend": "pi", "model": "inherit", "thinking": "inherit" }
   },
   "codex": {
-    "maxExecutors": 4,
+    "maxExecutors": 10,
     "internalSubagent": { "model": "gpt-6.1-sol", "thinking": "high" },
     "retention": { "terminalDays": 30, "keepTerminalJobs": 200 }
   }
@@ -202,7 +202,13 @@ The display journal is distinct from the canonical mailbox: Pi/Antigravity displ
 
 Mailbox messages have no time-based expiry. Ordinary Leader messages become consumed after the receiving turn settles; Codex blocking requests remain open until answered or superseded by task settlement. Delivered but unconsumed Leader messages can be recovered after session rotation. Job retention below is separate from mailbox history.
 
-`maxExecutors` caps concurrent executors in each exact workspace, including jobs paused for input. Start independent background jobs with different missions and literal workspace-relative `writeScope` paths. Disjoint paths may run together; identical or ancestor/descendant paths conflict. Omitted scope means `["."]`, an exclusive whole-workspace writer. Resume inherits the prior scope unless the caller explicitly supplies a new one. A capacity error returns immediately: dispatch remaining work after a result instead of polling.
+`maxExecutors` caps concurrent Codex executors in each exact workspace (default 10), including jobs paused for input. It is not a shared limit across Pi, Antigravity and advisors; Pi and Antigravity currently have no numerical concurrency cap. Start independent background jobs with different missions and literal workspace-relative `writeScope` paths. Disjoint paths may run together; identical or ancestor/descendant paths conflict. Omitted scope means `["."]`, an exclusive whole-workspace writer. Resume inherits the prior scope unless the caller explicitly supplies a new one. A capacity error returns immediately: dispatch remaining work after a result instead of polling.
+
+Subagent start and resume default to background execution for every role and backend. The call returns a job receipt and results arrive through the Runtime mailbox. Set `background: false` explicitly to wait for a result in the calling turn.
+
+Permission inheritance is project-independent. Pi execution subagents inherit the Leader's explicit full-access mode and capability session, so existing session grants remain usable; missing grants are requested through the Leader UI rather than automatically cancelled. Codex executors likewise use their job's full-access authority in the host bridge without requesting a second grant, while bounded jobs pause the same tool call for approval. Antigravity execution subagents omit its CLI sandbox only in full-access mode; bounded Antigravity keeps its native sandbox, and native `WAITING` results go to the Leader mailbox (its CLI does not expose Pi's interactive approval-response protocol). Advisors never acquire full access from this inheritance.
+
+In bounded mode, trust a project's exact command entry point (for example `python3 remote_run.py` or `bash sync.sh`) with project scope to reuse it across sessions. Trust is bound to the project and working directory, not a global script filename allowlist. Full-access mode needs no per-project script allowlist. Do not grant an unrestricted `env` or interpreter prefix to authorize one project script.
 
 Codex executors and advisors have `research_pi_collaborate`: `peers` discovers active same-workspace/same-track collaborators, `send` queues a directed message (at most 1,200 characters), and `inbox` reads recent messages/receipts. A send records a Runtime participant envelope while the native worker command queue performs delivery and records the receipt; discovery and inspection remain tool calls. Delivery uses the recipient's existing active turn; it does not restart a finished worker. `queued` is not delivered; `applied` means submitted to the turn, not acknowledged or acted upon. Peer input cannot change task authority or write ownership. The Leader can inspect receipts with `subagent action=messages, jobId=...`; conversations are not broadcast into Leader context. Advisors cannot send executor messages. Old dynamic-tool threads refresh once on their next explicit resume; running jobs are not interrupted by this upgrade.
 

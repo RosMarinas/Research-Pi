@@ -4,6 +4,8 @@
 
 > Session is not enough for research. Project is.
 
+Recent updates: a project-management skill gives the Leader ownership of directory layout, Git history and temporary worktrees. Subagents now start and resume in the background by default, with up to 10 Codex executors per workspace. Execution subagents inherit full-access authority; bounded Pi and Codex jobs request additional authorization through the Leader, while advisors remain read-only. Restart the Runtime after updating.
+
 A research-first agent harness for AI, robotics, communications, optimization, and simulation. Built on **Pi Core 1.0.0** for macOS, Linux, and WSL2.
 
 Research Pi keeps research goals, experiment records, decisions, and multi-agent collaboration at the project level. Sessions and models can change without restarting the explanation. Beyond code correctness, it asks: did the experiment test the intended hypothesis, what conclusions does the evidence support, and what would teach us the most next?

@@ -19,6 +19,16 @@ export default function subagentRunnersExtension(pi: ExtensionAPI) {
 	const manager = createSubagentSessionManager({
 		coreCli: process.env.RESEARCH_PI_CORE_CLI, stateRoot,
 		boundaryExtension: process.env.RESEARCH_PI_HARNESS_ROOT ? join(process.env.RESEARCH_PI_HARNESS_ROOT, ".pi", "extensions", "project-boundary.ts") : undefined,
+		onUiRequest: async (job: any, request: any) => {
+			const ctx = contexts.get(job.id);
+			if (!ctx?.hasUI) return { cancelled: true };
+			const title = `${job.backend}/${job.role} · ${job.mission ?? job.id}\n${request.title ?? ""}`;
+			if (request.method === "confirm") return { confirmed: await ctx.ui.confirm(title, request.message ?? "") };
+			const value = request.method === "select" ? await ctx.ui.select(title, request.options ?? [])
+				: request.method === "editor" ? await ctx.ui.editor(title, request.prefill ?? "")
+				: await ctx.ui.input(title, request.placeholder);
+			return value === undefined ? { cancelled: true } : { value };
+		},
 		onUpdate: async (job: any, event: any) => {
 			const ctx = contexts.get(job.id);
 			if (!ctx) return;

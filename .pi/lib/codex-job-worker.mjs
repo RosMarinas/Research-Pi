@@ -6,6 +6,7 @@ import { appendFile, mkdir, readdir, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import {
 	capabilityResultNeedsDetail,
+	createCapabilityGrant,
 	executeGrantedCapability,
 	formatCapabilityResultForModel,
 	inspectCapabilityAuthorization,
@@ -473,6 +474,10 @@ async function main() {
 							timeoutSeconds: args.timeoutSeconds,
 						};
 				let inspected = await inspectCapabilityAuthorization(request.hostCapabilityContext, input);
+				if (!inspected.grant && request.fullAccess === true && request.mode !== "advisor") {
+					await createCapabilityGrant(request.hostCapabilityContext, inspected.request, "once");
+					inspected = await inspectCapabilityAuthorization(request.hostCapabilityContext, input);
+				}
 				if (!inspected.grant) {
 					const record = {
 						version: 1,

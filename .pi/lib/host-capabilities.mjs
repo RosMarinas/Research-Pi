@@ -67,7 +67,10 @@ function normalizeGrantId(value) {
 
 function recommendedCommandPrefix(argv) {
 	const executable = basename(argv[0]).toLowerCase();
+	// Trusting just `env`, or `uv run --flag`, would authorize arbitrary commands.
+	if (executable === "env") return [...argv];
 	if (executable === "uv" && argv[1] === "run" && argv[2]) {
+		if (argv[2].startsWith("-")) return [...argv];
 		const runner = basename(argv[2]).toLowerCase();
 		if (["python", "python3"].includes(runner) && argv[3] === "-m" && argv[4]) return argv.slice(0, 5);
 		if (["python", "python3"].includes(runner) && argv[3] && !argv[3].startsWith("-")) return argv.slice(0, 4);

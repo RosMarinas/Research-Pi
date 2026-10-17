@@ -188,7 +188,7 @@ const ParamsSchema = Type.Object({
 	})),
 	background: Type.Optional(
 		Type.Boolean({
-			description: "Return a job id immediately. Defaults to true for executor and false for advisor.",
+			description: "Return a job id without waiting for completion. Defaults to true for every role and backend, including resume. Set false only when this call should wait for the result.",
 		}),
 	),
 	timeoutMinutes: Type.Optional(
@@ -1299,7 +1299,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			const owner = await leaderScope(ctx, { requireAttached: mutatesSubagent });
 			const projectOwnerCheck = projectJobManagementScope(ctx, owner);
 			let ownerCheck = projectOwnerCheck;
-			let effectiveBackground = params.background ?? (["executor", "environment"].includes(startRole));
+			const effectiveBackground = params.background ?? true;
 			let job;
 			let commandReceipt: string | undefined;
 			const dispatchTask = async () => dispatchRuntimeSubagent({
@@ -1312,7 +1312,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 				projectKey: owner.projectKey, workspaceKey: owner.runtime.workspaceKey,
 				projectRevision: owner.projectRevision, researchTrackRef: owner.researchTrackRef, researchTrackLabel: owner.researchTrackLabel,
 				leaderSessionId: owner.leaderSessionId, leaderActorId: owner.leaderActorId, leaderBranchAnchorId: owner.leaderBranchAnchorId,
-				background: params.action === "start" ? effectiveBackground : params.background,
+				background: effectiveBackground,
 			});
 			if (ctx.hasUI && (params.action === "start" || params.action === "resume")) {
 				ctx.ui.setWorkingMessage(params.action === "start" ? `Starting ${backend} subagent...` : `Resuming ${backend} subagent...`);
@@ -1327,7 +1327,14 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 						const dispatched = await dispatchTask();
 						job = dispatched.job;
 						commandReceipt = dispatched.receipt;
-						if (!effectiveBackground) job = await adapter.wait({ jobId: job.id, signal });
+						if (ctx.hasUI) ctx.ui.setStatus("subagent", `⚙ ${backend}/${job.role ?? startRole} · ${job.status}`);
+						if (!effectiveBackground) {
+							if (ctx.hasUI) {
+								ctx.ui.setWorkingMessage(`Waiting for ${backend}/${job.role ?? startRole} to finish...`);
+								ctx.ui.setStatus("subagent", `⚙ ${backend}/${job.role ?? startRole} · waiting for result`);
+							}
+							job = await adapter.wait({ jobId: job.id, signal });
+						}
 					} else if (params.action === "status" || params.action === "result") {
 						job = await adapter[params.action]({ jobId: requireText(params.jobId, "jobId") });
 					} else if (params.action === "cancel") {
@@ -1362,7 +1369,6 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 						const dispatched = await dispatchTask();
 						job = dispatched.job;
 						commandReceipt = dispatched.receipt;
-						effectiveBackground = params.background ?? job.autoNotify ?? (job.mode === "executor");
 						break;
 					}
 					case "respond": {

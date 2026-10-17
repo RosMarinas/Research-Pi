@@ -262,6 +262,7 @@ async function spawnCore(argv, { background = false } = {}) {
 	if (web.enabled && !userArgs.includes("--tui-mode")) args.push("--tui-mode", "fullscreen");
 	const skillPaths = [
 		join(packageRoot, ".pi", "skills", "research-briefing"),
+		join(packageRoot, ".pi", "skills", "research-project-management"),
 		...config.resources.skills.map((configuredPath) => expandUserPath(configuredPath)),
 	];
 	for (const skill of new Set(skillPaths)) {

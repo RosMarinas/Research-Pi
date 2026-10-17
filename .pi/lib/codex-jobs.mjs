@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { access, appendFile, mkdir, readFile, readdir, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { SUBAGENT_WORKSPACE_POLICY } from "./subagent-message.mjs";
 import { capabilityGrantSummary, listCapabilityGrants, resolveCapabilityContext } from "./host-capabilities.mjs";
 import { withOwnerFileLock } from "./owner-file-lock.mjs";
 import { researchPiStateRoot } from "./runtime-paths.mjs";
@@ -33,7 +34,7 @@ export const DEFAULT_CODEX_MODEL = DEFAULT_CODEX_EXECUTOR_MODEL;
 export const DEFAULT_CODEX_REASONING_EFFORT = DEFAULT_CODEX_EXECUTOR_REASONING_EFFORT;
 export const DEFAULT_CODEX_RETENTION_DAYS = Number.parseInt(process.env.RESEARCH_PI_CODEX_RETENTION_DAYS ?? "30", 10) || 30;
 export const DEFAULT_CODEX_KEEP_TERMINAL_JOBS = Number.parseInt(process.env.RESEARCH_PI_CODEX_KEEP_TERMINAL_JOBS ?? "200", 10) || 200;
-export const DEFAULT_CODEX_MAX_EXECUTORS = Number(process.env.RESEARCH_PI_CODEX_MAX_EXECUTORS ?? 4);
+export const DEFAULT_CODEX_MAX_EXECUTORS = Number(process.env.RESEARCH_PI_CODEX_MAX_EXECUTORS ?? 10);
 // App Server dynamic tools are fixed when a thread is created and cannot be
 // added by thread/resume. Bump this whenever the Research Pi dynamic tool set
 // or its required schemas change so pre-existing threads refresh once.
@@ -192,7 +193,7 @@ export function buildDelegationPrompt({
 	resourceClaims = [],
 	experiment,
 }) {
-	const executionGuidance = mode === "advisor" ? "" : "Use env flags, CLI arguments, or targeted code bypasses to overcome framework sanity gates or shared-host noise (such as memory-balance checks). Respect OS sandbox, writeScope, credential rules and explicitly fixed task conditions. Never kill external processes not spawned by your job or delete shared datasets/weights.";
+	const executionGuidance = mode === "advisor" ? "" : `${SUBAGENT_WORKSPACE_POLICY} Use env flags, CLI arguments, or targeted code bypasses to overcome framework sanity gates or shared-host noise (such as memory-balance checks). Respect OS sandbox, writeScope, credential rules and explicitly fixed task conditions. Never kill external processes not spawned by your job or delete shared datasets/weights.`;
 	const role =
 		mode === "advisor"
 			? `You are the read-only research advisor collaborating with Research Pi. The question may be incomplete or tentative. Help develop the question, compare explanations, and suggest useful directions. Discuss with the Leader or executors when helpful; no fixed review or probe is required. Do not modify files or external state.`
@@ -773,7 +774,7 @@ export async function startCodexJob(options) {
 			leaderBranchAnchorId: options.leaderBranchAnchorId ?? null,
 			actorId: options.actorId ?? `codex:${jobId.toLowerCase()}`,
 			actionId: options.actionId ?? `action:${jobId}`,
-			autoNotify: options.background ?? (mode === "executor"),
+			autoNotify: options.background ?? true,
 			status: "starting",
 			mode,
 			role,
@@ -1342,7 +1343,7 @@ export async function resumeCodexJob(jobId, options) {
 		leaderSessionId: options.leaderSessionId ?? previous.leaderSessionId,
 		leaderActorId: options.leaderActorId ?? previous.leaderActorId ?? null,
 		actorId: options.actorId ?? previous.actorId ?? null,
-		background: options.background ?? previous.autoNotify,
+		background: options.background ?? true,
 	});
 }
 

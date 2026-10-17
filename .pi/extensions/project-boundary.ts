@@ -350,6 +350,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 		announce = true,
 		allowProjectScope = true,
 	) => {
+		if (leaderHasFullAccess(ctx)) return await createCapabilityGrant(approvalContext, request, "once");
 		if (!ctx.hasUI) return undefined;
 		const projectTrustLabel = !allowProjectScope
 			? undefined
@@ -385,7 +386,6 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			if (pendingRequest?.kind !== "host_capability" || !capability?.input || !capability?.context) {
 				return { status: "unsupported" as const };
 			}
-			if (!ctx.hasUI) return { status: "unavailable" as const };
 			const activeContext = requireCapabilityContext();
 			const sourceContext = capability.context as CapabilityContext;
 			if (!sameCapabilityProject(activeContext, sourceContext)) {
@@ -395,6 +395,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			if (inspected.grant) {
 				return { status: "approved" as const, grant: inspected.grant, existing: true };
 			}
+			if (!ctx.hasUI && !leaderHasFullAccess(ctx)) return { status: "unavailable" as const };
 			const grant = await requestInteractiveGrant(inspected.request, ctx, capability.input, sourceContext, false);
 			if (grant) await refreshBoundaryStatus(ctx).catch(() => undefined);
 			return grant
@@ -588,7 +589,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			// harness variable, so set it before initialization and wrapping.
 			process.env.CLAUDE_CODE_TMPDIR = runtime.runtimeTmp;
 			systemRuntime = await resolveSystemRuntimePolicy();
-			capabilityContext = await resolveCapabilityContext(runtime.root, ctx.sessionManager.getSessionId());
+			capabilityContext = await resolveCapabilityContext(runtime.root, process.env.RESEARCH_PI_CAPABILITY_SESSION_ID ?? ctx.sessionManager.getSessionId());
 			gitIdentity = await readGitIdentity(runtime.root);
 			await ensureProjectSandbox(ctx);
 			initializationError = undefined;

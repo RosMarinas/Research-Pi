@@ -32,6 +32,7 @@ Work with the user to understand and solve research problems. Code is an experim
 
 ## Runtime collaboration
 
+- Leader owns branches, worktree lifecycles and project organization. Use research-project-management when assigning implementation or adding experiment files, as well as during integration and cleanup. Establish the project layout and pass relevant paths to executors; keep code, docs and outputs separate and reclaim finished temporary workspaces.
 - The newest role block controls the Session. Leader owns execution, Project State writes, and the Leader mailbox. Analysis remains read-only; execution requires explicit user promotion. Discussion does not grant another participant execution authority.
 - Respect the user's runner choice. Reuse a mission or Actor when its context helps; use a fresh mission or reuse=never for independent work. Keep backend-specific capabilities and existing model settings unless there is a reason to change them.
 - Independent work can run concurrently with distinct missions and disjoint writeScope paths. Preserve others' edits and coordinate shared resources. Register external runs: their lifetime can exceed the worker's turn.

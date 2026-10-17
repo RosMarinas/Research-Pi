@@ -81,6 +81,7 @@ for (const required of [
 	".pi/extensions/project-boundary.ts",
 	".pi/lib/project-boundary.mjs",
 	".pi/skills/research-briefing/SKILL.md",
+	".pi/skills/research-project-management/SKILL.md",
 	"LICENSE",
 	"SECURITY.md",
 	"THIRD_PARTY_NOTICES.md",

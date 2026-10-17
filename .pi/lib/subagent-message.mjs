@@ -1,5 +1,7 @@
 import { redactSensitiveText } from "./sensitive-text.mjs";
 
+export const SUBAGENT_WORKSPACE_POLICY = "Use the Leader-assigned branch, workspace and directory layout. Do not create, switch, merge or delete branches or worktrees yourself. Discuss layout changes with the Leader; ordinary files within assigned directories need no approval. Keep core code in source modules, tests in tests/, operational entry points in scripts/, prose in docs/, run results in output/ and disposable probes in tmp/, or their assigned equivalents. Do not put implementation code in docs/ or output/, or create a separate project tree per experiment. Commit only your assigned changes; keep history in Git, not backup copies. Remove code you superseded and disposable files you created when finishing.";
+
 export const SUBAGENT_RESULT_SECTIONS = [
 	"summary",
 	"request",
