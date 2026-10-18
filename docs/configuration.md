@@ -375,3 +375,11 @@ In the TUI:
 5. run `/runtime view` to inspect the current ProjectView; the model's automatic snapshot stays fixed until compaction or an explicit context/role change.
 
 This is sufficient for an ordinary route check. Long-context continuation, compact quality and cache behavior are best judged during real project use.
+
+### Ending Actor participation
+
+A completed turn leaves its Actor available for follow-up. `cancel` stops execution; `release_resources` manages Codex resource claims. Neither retires an Actor.
+
+Use `subagent` with `action: "retire"` and the current `jobId`, or `/actors retire <actor-id-or-job-id>`, to retire a settled participant. The attached Leader owns this operation. Outstanding actions, unresolved outcomes and live registered external runs must be settled first. Pi and Antigravity close their idle processes; Codex retains its completed thread as history. Retirement does not erase results, messages or session records.
+
+Retired Actors cannot receive new messages, resume or be selected for mission reuse. Pending messages to them are superseded. They disappear from the work board and `/watch` selection; `/actors all` retains them with a `retired` label. Starting the same mission after retirement creates a new Actor. Creating another Actor with the same role does not automatically retire existing participants.

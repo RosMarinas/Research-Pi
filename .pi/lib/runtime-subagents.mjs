@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { withOwnerFileLock } from "./owner-file-lock.mjs";
 import { getSubagentRuntimeAdapter } from "./research-runtime-adapters.mjs";
 import {
-	RESEARCH_LEADER_ACTOR_ID, USER_ACTOR_ID, assertRuntimeActorAttachment, createRuntimeMessage, readRuntimeSnapshot, registerSubagentRuntimeJob,
+	appendRuntimeEvent, runtimeActorRetired, RESEARCH_LEADER_ACTOR_ID, USER_ACTOR_ID, assertRuntimeActorAttachment, createRuntimeMessage, readRuntimeSnapshot, registerSubagentRuntimeJob,
 	resolveRuntimeActor, runtimeActorBackend, settleRuntimeMessage, subagentActorId,
 } from "./research-runtime.mjs";
 
@@ -61,6 +61,10 @@ export async function deliverSubagentMessage(runtime, message, ctx) {
 		const current = snapshot.messages.find((item) => item.id === message.id);
 		if (!current || current.status !== "queued") return { status: current?.status ?? "missing", detail: "already handled" };
 		const actor = resolveRuntimeActor(snapshot, current.to);
+		if (runtimeActorRetired(actor)) {
+			await settleRuntimeMessage(runtime, current.id, "superseded", { reason: "actor_retired" });
+			return { status: "superseded", detail: "Actor retired", settledByDelivery: true };
+		}
 		if ((current.metadata?.workspaceKey && current.metadata.workspaceKey !== runtime.workspaceKey)
 			|| (actor.metadata?.workspaceKey && actor.metadata.workspaceKey !== runtime.workspaceKey)) {
 			return { status: "queued", detail: "waiting for the owning workspace" };
@@ -72,6 +76,7 @@ export async function deliverSubagentMessage(runtime, message, ctx) {
 		const actorLock = `${Buffer.from(actor.id).toString("hex")}.actor-delivery.lock`;
 		const receipt = await withOwnerFileLock(join(runtime.projectDir, actorLock), async () => {
 			await assertRuntimeActorAttachment(runtime, RESEARCH_LEADER_ACTOR_ID, { sessionId: ctx.sessionManager.getSessionId() });
+			if (runtimeActorRetired((await readRuntimeSnapshot(runtime)).actors.find((item) => item.id === actor.id))) return { status: "superseded", detail: "Actor retired" };
 			return await adapter.dispatch({ runtime, actor, message: current, ctx,
 				jobId: current.metadata?.jobId ?? undefined, preempt: current.metadata?.preempt === true });
 		});
@@ -105,9 +110,12 @@ export async function dispatchRuntimeSubagent(input) {
 	await mkdir(runtime.projectDir, { recursive: true, mode: 0o700 });
 	return await withOwnerFileLock(join(runtime.projectDir, "subagent-dispatch.lock"), async () => {
 		if (input.leaderSessionId) await assertRuntimeActorAttachment(runtime, RESEARCH_LEADER_ACTOR_ID, { sessionId: input.leaderSessionId });
+		const snapshot = await readRuntimeSnapshot(runtime);
+		const retired = new Set(snapshot.actors.filter(runtimeActorRetired).map((actor) => actor.id));
 		const previous = input.jobId
 			? await adapter.status({ ...input, jobId: input.jobId })
-			: selectRuntimeSubagent(await adapter.list(input), input);
+			: selectRuntimeSubagent((await adapter.list(input)).filter((job) => !retired.has(job.actorId)), input);
+		if (previous && retired.has(previous.actorId)) throw new Error("Actor is retired; start a new Actor");
 		if (previous && !subagentBelongsToWorkspace(previous, runtime)) throw new Error("The subagent belongs to another workspace");
 		if (previous && input.role && input.role !== (previous.role ?? previous.mode)) throw new Error("Choose a new subagent to change its role");
 		if (previous?.status === "outcome_unknown") throw new Error("Reconcile the previous subagent outcome before continuing");
@@ -136,5 +144,33 @@ export async function dispatchRuntimeSubagent(input) {
 			serviceTier: input.serviceTier ?? input.defaults.speed });
 		await registerSubagentRuntimeJob(runtime, job);
 		return { job, reused: false, receipt: `Started ${backend} Actor ${actorId}` };
+	});
+}
+
+// Retirement ends participation, not the recorded outcome of the last turn.
+export async function retireRuntimeSubagent({ runtime, jobId, leaderSessionId, ctx }) {
+	return await withOwnerFileLock(join(runtime.projectDir, "subagent-dispatch.lock"), async () => {
+		await assertRuntimeActorAttachment(runtime, RESEARCH_LEADER_ACTOR_ID, { sessionId: leaderSessionId });
+		const snapshot = await readRuntimeSnapshot(runtime);
+		const actor = snapshot.actors.find((item) => item.metadata?.latestJobId === jobId);
+		if (!actor || !runtimeActorBackend(actor)) throw new Error("Unknown subagent job");
+		if (actor.metadata?.workspaceKey && actor.metadata.workspaceKey !== runtime.workspaceKey) throw new Error("Actor belongs to another workspace");
+		const lock = `${Buffer.from(actor.id).toString("hex")}.actor-delivery.lock`;
+		return await withOwnerFileLock(join(runtime.projectDir, lock), async () => {
+			await assertRuntimeActorAttachment(runtime, RESEARCH_LEADER_ACTOR_ID, { sessionId: leaderSessionId });
+			const state = await readRuntimeSnapshot(runtime);
+			const current = state.actors.find((item) => item.id === actor.id);
+			if (runtimeActorRetired(current)) return current;
+			const actions = state.actions.filter((item) => item.actorId === actor.id);
+			if (!actions.length || actions.some((item) => !["completed", "failed", "cancelled"].includes(item.status))) throw new Error("Stop or reconcile outstanding Actor actions before retirement");
+			if (actions.some((item) => (item.metadata?.externalRuns ?? []).some((run) => !["completed", "failed", "cancelled"].includes(run.status)))) throw new Error("Settle external runs before Actor retirement");
+			const adapter = getSubagentRuntimeAdapter(runtimeActorBackend(actor));
+			if (adapter?.retire) await adapter.retire({ jobId, runtime, ctx });
+			await appendRuntimeEvent(runtime, "actor.retired", { actorId: actor.id }, { id: `retire:${actor.id}` });
+			for (const message of state.messages.filter((item) => item.to === actor.id && ["queued", "delivered"].includes(item.status))) {
+				await settleRuntimeMessage(runtime, message.id, "superseded", { reason: "actor_retired" });
+			}
+			return { ...current, retiredAt: new Date().toISOString() };
+		});
 	});
 }

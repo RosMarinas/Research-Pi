@@ -66,6 +66,7 @@ export default function subagentRunnersExtension(pi: ExtensionAPI) {
 	for (const backend of ["pi", "antigravity"]) {
 		registerSubagentRuntimeAdapter(backend, {
 			start,
+			retire: async ({ jobId }: any) => manager.retire(jobId),
 			resume: async (input: any) => {
 				contexts.set(input.jobId, input.ctx); runtimes.set(input.jobId, input.runtime);
 				return await manager.resume(input.jobId, { ...input, followUp: subagentTaskText({ ...input, task: input.followUp }) });

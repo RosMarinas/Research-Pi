@@ -6,7 +6,7 @@ import { CodexActivityCursor } from "./codex-activity.mjs";
 import { publicSubagentText } from "./subagent-activity.mjs";
 import { readCodexJob, publicJobView } from "./codex-jobs.mjs";
 import { queueSubagentMessage } from "./runtime-subagents.mjs";
-import { readRuntimeSnapshot, resolveResearchRuntime, resolveRuntimeActor, runtimeActorBackend, runtimeActorTarget, RESEARCH_LEADER_ACTOR_ID } from "./research-runtime.mjs";
+import { runtimeActorRetired, readRuntimeSnapshot, resolveResearchRuntime, resolveRuntimeActor, runtimeActorBackend, runtimeActorTarget, RESEARCH_LEADER_ACTOR_ID } from "./research-runtime.mjs";
 
 const runFile = promisify(execFile);
 const active = (status) => ["starting", "running", "input_required", "cancelling"].includes(status);
@@ -24,7 +24,7 @@ export async function createSubagentWatchClient({ cwd, stateRoot }) {
 	};
 	const list = async () => {
 		const state = await refresh();
-		return state.actors.filter((actor) => runtimeActorBackend(actor)
+		return state.actors.filter((actor) => !runtimeActorRetired(actor) && runtimeActorBackend(actor)
 			&& (!actor.metadata?.workspaceKey || actor.metadata.workspaceKey === runtime.workspaceKey))
 			.map((actor) => ({ ...actor, action: state.actions.filter((action) => action.actorId === actor.id).at(-1) }))
 			.sort((a, b) => Number(active(b.action?.status)) - Number(active(a.action?.status)) || String(b.updatedAt).localeCompare(String(a.updatedAt)));

@@ -1,5 +1,5 @@
 import { basename } from "node:path";
-import { RESEARCH_LEADER_ACTOR_ID, runtimeActorBackend, runtimeActorTarget } from "./research-runtime.mjs";
+import { runtimeActorRetired, RESEARCH_LEADER_ACTOR_ID, runtimeActorBackend, runtimeActorTarget } from "./research-runtime.mjs";
 
 const ACTIVE_ACTION_STATUSES = new Set(["starting", "running", "cancelling"]);
 const OPEN_MESSAGE_STATUSES = new Set(["queued", "delivered"]);
@@ -48,7 +48,7 @@ function actorPriority(actor, state) {
  */
 export function buildRuntimeBoardModel({ runtime, snapshot, view, health, sessionId, inheritancePolicy = "project" }) {
 	const actionByActor = latestActionsByActor(snapshot.actions);
-	const actors = snapshot.actors.map((actor) => {
+	const actors = snapshot.actors.filter((actor) => !runtimeActorRetired(actor)).map((actor) => {
 		const action = actionByActor.get(actor.id) ?? null;
 		const attachment = snapshot.attachments.find((candidate) => candidate.actorId === actor.id) ?? null;
 		const state = actorState(actor, action, attachment);
@@ -165,7 +165,7 @@ export function buildRuntimeBoardModel({ runtime, snapshot, view, health, sessio
 			active: health.active,
 			waiting: health.waiting,
 			unknown: health.unknown,
-			actors: snapshot.actors.length,
+			actors: actors.length,
 			// The rows are bounded, but the headline must not imply that the
 			// eighth visible message is the whole mailbox.
 			openMessages: openMessageRecords.length,

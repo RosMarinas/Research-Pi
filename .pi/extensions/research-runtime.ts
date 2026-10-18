@@ -37,9 +37,10 @@ import { normalizeCodexAnalysisHandoff } from "../lib/research-analysis-bridge.m
 import { runtimeCompactionReserved } from "../lib/runtime-compaction-gate.mjs";
 import { createRuntimeMailboxWatcher } from "../lib/runtime-mailbox-watch.mjs";
 import { projectResearchContextMessages, runtimeMessageContextText } from "../lib/research-context.mjs";
-import { deliverSubagentMessage, drainSubagentMailbox } from "../lib/runtime-subagents.mjs";
+import { retireRuntimeSubagent, deliverSubagentMessage, drainSubagentMailbox } from "../lib/runtime-subagents.mjs";
 import { openSubagentWatch } from "../lib/subagent-watch-ui.mjs";
 import {
+	runtimeActorRetired,
 	RESEARCH_LEADER_ACTOR_ID,
 	RUNTIME_EVENT_ENTRY_KIND,
 	RUNTIME_MESSAGE_KIND,
@@ -277,11 +278,12 @@ export function runtimeActorSummary(snapshot: RuntimeSnapshot) {
 	let active = 0;
 	let waiting = 0;
 	for (const actor of snapshot.actors) {
+		if (runtimeActorRetired(actor)) continue;
 		const status = latest.get(actor.id)?.status;
 		if (status === "input_required") waiting += 1;
 		else if (ACTIVE_ACTION_STATUSES.has(status)) active += 1;
 	}
-	return { active, waiting, registered: snapshot.actors.length };
+	return { active, waiting, registered: snapshot.actors.filter((actor) => !runtimeActorRetired(actor)).length };
 }
 
 export function runtimeRotationReadiness(snapshot: RuntimeSnapshot) {
@@ -392,7 +394,7 @@ export function actorLines(snapshot: RuntimeSnapshot, activeOnly = true): string
 	const visibleActors = activeOnly
 		? snapshot.actors.filter((actor) => {
 			const status = latest.get(actor.id)?.status;
-			return status === "input_required" || ACTIVE_ACTION_STATUSES.has(status);
+			return !runtimeActorRetired(actor) && (status === "input_required" || ACTIVE_ACTION_STATUSES.has(status));
 		})
 		: snapshot.actors;
 	const stateSummary = [
@@ -406,7 +408,8 @@ export function actorLines(snapshot: RuntimeSnapshot, activeOnly = true): string
 			const latestAction = latest.get(actor.id);
 			const target = `@${runtimeActorTarget(actor)}`;
 			let state;
-			if (actor.kind === "user") state = "present";
+			if (runtimeActorRetired(actor)) state = "retired";
+			else if (actor.kind === "user") state = "present";
 			else if (latestAction?.status === "input_required") state = "waiting for input";
 			else if (ACTIVE_ACTION_STATUSES.has(latestAction?.status)) state = `active (${latestAction.status})`;
 			else if (runtimeActorBackend(actor)) {
@@ -1679,12 +1682,22 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("actors", {
-		description: "List active project Runtime Actors (/actors all includes suspended history)",
+		description: "List Actors; /actors all includes history; /actors retire <actor-id> ends participation",
 		handler: async (args, ctx) => {
 			try {
 				const mode = args.trim() || "active";
-				if (mode !== "active" && mode !== "all") throw new Error("Usage: /actors [active|all]");
 				const activeRuntime = await getRuntime(ctx);
+				if (mode.startsWith("retire ")) {
+					if (isAnalysisSession()) throw new Error("Only the Leader may retire Actors");
+					const snapshot = await readRuntimeSnapshot(activeRuntime);
+					const target = mode.slice(7).trim();
+					const actor = snapshot.actors.find((item) => item.metadata?.latestJobId === target) ?? resolveRuntimeActor(snapshot, target);
+					await retireRuntimeSubagent({ runtime: activeRuntime, jobId: actor.metadata?.latestJobId, leaderSessionId: ctx.sessionManager.getSessionId(), ctx });
+					await refreshDock(ctx);
+					ctx.ui.notify(`Retired ${actor.id}; history remains in /actors all.`, "info");
+					return;
+				}
+				if (mode !== "active" && mode !== "all") throw new Error("Usage: /actors [active|all|retire <actor-id-or-job-id>]");
 				ctx.ui.notify(actorLines(await readRuntimeSnapshot(activeRuntime), mode !== "all"), "info");
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");

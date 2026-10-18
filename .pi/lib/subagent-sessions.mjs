@@ -467,6 +467,14 @@ export function createSubagentSessionManager(options = {}) {
 
 	return {
 		start,
+		retire: async (id) => {
+			const job = jobs.get(id);
+			if (!job) return; // A prior host already closed this process.
+			if (!["completed", "failed", "cancelled"].includes(job.status)) throw new Error("Finish or cancel the subagent before retirement");
+			job.closed = true;
+			job.child?.stdin?.end();
+			job.child?.kill("SIGTERM");
+		},
 		get,
 		getByActor,
 		resume,

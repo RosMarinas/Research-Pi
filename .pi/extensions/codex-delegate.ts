@@ -31,6 +31,7 @@ import {
 	runtimeHeartbeatNeeded,
 } from "../lib/runtime-dock-ui.mjs";
 import {
+	runtimeActorRetired,
 	RESEARCH_LEADER_ACTOR_ID,
 	RUNTIME_MESSAGE_KIND,
 	assertRuntimeActorAttachment,
@@ -53,7 +54,7 @@ import {
 	subagentModelCard,
 	subagentResultSection,
 } from "../lib/subagent-message.mjs";
-import { dispatchRuntimeSubagent, queueSubagentMessage, deliverSubagentMessage } from "../lib/runtime-subagents.mjs";
+import { retireRuntimeSubagent, dispatchRuntimeSubagent, queueSubagentMessage, deliverSubagentMessage } from "../lib/runtime-subagents.mjs";
 
 // A mailbox jobId identifies the turn observed by the sender, not necessarily
 // the current turn of a durable Actor. Only follow actual continuation links.
@@ -86,6 +87,7 @@ const ActionSchema = Type.Union(
 		Type.Literal("status"),
 		Type.Literal("result"),
 		Type.Literal("cancel"),
+		Type.Literal("retire"),
 		Type.Literal("resume"),
 		Type.Literal("respond"),
 		Type.Literal("steer"),
@@ -95,7 +97,7 @@ const ActionSchema = Type.Union(
 		Type.Literal("settle_run"),
 		Type.Literal("release_resources"),
 	],
-	{ description: "Start or manage one Runtime subagent Action" },
+	{ description: "Start or manage one Runtime subagent Action. retire permanently ends a settled Actor participation while preserving history; cancel only stops a running turn" },
 );
 
 const BackendSchema = Type.Union(SUBAGENT_BACKENDS.map((backend) => Type.Literal(backend)), {
@@ -198,7 +200,7 @@ const ParamsSchema = Type.Object({
 	),
 	jobId: Type.Optional(
 		Type.String({
-			description: "Existing job id for status, result, cancel, resume, respond, steer, or reconcile",
+			description: "Existing job id for status, result, cancel, retire, resume, respond, steer, or reconcile",
 		}),
 	),
 	resultSection: Type.Optional(ResultSectionSchema),
@@ -1234,7 +1236,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		},
 		renderResult(result, { expanded, isPartial }, theme) {
 			const details = result.details as CodexJobView | { missions?: unknown[] } | undefined;
-			if (!details || !("id" in details)) {
+			if (!details || !("id" in details) || "retiredAt" in details) {
 				const content = result.content.find((item) => item.type === "text");
 				return new Text(content?.type === "text" ? content.text : "Subagent returned no result.", 0, 0);
 			}
@@ -1300,6 +1302,12 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			const projectOwnerCheck = projectJobManagementScope(ctx, owner);
 			let ownerCheck = projectOwnerCheck;
 			const effectiveBackground = params.background ?? true;
+			if (params.jobId && mutatesSubagent && params.action !== "retire") {
+				const snapshot = await readRuntimeSnapshot(owner.runtime);
+				const action = snapshot.actions.find((item) => item.externalId === params.jobId);
+				const actor = snapshot.actors.find((item) => item.id === action?.actorId || item.metadata?.latestJobId === params.jobId);
+				if (runtimeActorRetired(actor)) throw new Error("Actor is retired; only history and result reads remain available");
+			}
 			let job;
 			let commandReceipt: string | undefined;
 			const dispatchTask = async () => dispatchRuntimeSubagent({
@@ -1320,6 +1328,11 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			}
 
 			try {
+				if (params.action === "retire") {
+					const actor = await retireRuntimeSubagent({ runtime: owner.runtime, jobId: requireText(params.jobId, "jobId"), leaderSessionId: owner.leaderSessionId, ctx });
+					await getRuntimeUiAdapter()?.refresh(ctx);
+					return { content: [{ type: "text", text: `Retired ${actor.id}. History and results remain available; start a new Actor for future work.` }], details: actor };
+				}
 				if (backend !== "codex") {
 					const adapter = getSubagentRuntimeAdapter(backend);
 					if (!adapter) throw new Error(`${backend} subagent adapter is not loaded`);

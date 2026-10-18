@@ -303,6 +303,12 @@ export async function readRuntimeSnapshot(runtime) {
 				actors.set(data.id, { ...current, ...data, createdAt: current.createdAt ?? data.createdAt ?? event.at, updatedAt: event.at });
 				break;
 			}
+			case "actor.retired": {
+				const actor = actors.get(data.actorId);
+				if (actor) actors.set(data.actorId, { ...actor, retiredAt: event.at });
+				attachments.delete(data.actorId);
+				break;
+			}
 			case "actor.attached":
 				attachments.set(data.actorId, { ...data, attachedAt: event.at });
 				break;
@@ -947,6 +953,7 @@ export async function createRuntimeMessage(runtime, input) {
 	if (!body) throw new Error("Runtime message body is required");
 	if (body.length > MAX_MESSAGE_LENGTH) throw new Error(`Runtime message body must be at most ${MAX_MESSAGE_LENGTH} characters`);
 	const snapshot = await readRuntimeSnapshot(runtime);
+	if (runtimeActorRetired(snapshot.actors.find((actor) => actor.id === to))) throw new Error("Actor is retired; start a new Actor");
 	const message = {
 		id,
 		type,
@@ -1174,6 +1181,8 @@ export async function upsertRuntimeAction(runtime, action) {
 	return data;
 }
 
+export function runtimeActorRetired(actor) { return Boolean(actor?.retiredAt); }
+
 export function resolveRuntimeActor(snapshot, rawTarget) {
 	const target = String(rawTarget ?? "").trim().replace(/^@/, "").toLowerCase();
 	if (!target) throw new Error("An Actor target is required");
@@ -1181,6 +1190,7 @@ export function resolveRuntimeActor(snapshot, rawTarget) {
 	if (target === "me") return snapshot.actors.find((actor) => actor.id === USER_ACTOR_ID);
 	const matches = snapshot.actors.filter((actor) => {
 		if (actor.id.toLowerCase() === target) return true;
+		if (runtimeActorRetired(actor)) return false;
 		if (runtimeActorTarget(actor).toLowerCase() === target) return true;
 		if (String(actor.label ?? "").toLowerCase() === target) return true;
 		const jobId = String(actor.metadata?.latestJobId ?? "").toLowerCase();
