@@ -6,6 +6,7 @@ import { appendFile, mkdir, readdir, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import {
 	capabilityResultNeedsDetail,
+	createCapabilityGrant,
 	executeGrantedCapability,
 	formatCapabilityResultForModel,
 	inspectCapabilityAuthorization,
@@ -26,7 +27,7 @@ import { codexPermissionConfigArguments, resolveExecutablePath, runCodexSandboxP
 import { resolveSystemRuntimePolicy } from "./security-policy.mjs";
 import { CODEX_COLLABORATION_TOOL, collaborateWithCodexPeers, formatPeerMessage } from "./codex-collaboration.mjs";
 import { CODEX_RUN_TOOL, listCodexExternalRuns, registerCodexExternalRun, releaseCodexResources, settleCodexExternalRun } from "./codex-resources.mjs";
-import { resolveResearchRuntime, settleRuntimeMessage } from "./research-runtime.mjs";
+import { createRuntimeMessage, registerCodexRuntimeJob, RESEARCH_LEADER_ACTOR_ID, resolveResearchRuntime, settleRuntimeMessage } from "./research-runtime.mjs";
 
 function now() {
 	return new Date().toISOString();
@@ -77,7 +78,6 @@ function fallbackStructuredResult(text, error, mode) {
 	return {
 		outcome: error ? "blocked" : "partial",
 		goal_satisfied: false,
-		completion_basis: error ? "The Codex turn encountered a blocking protocol or execution error." : "No valid structured final handoff was returned.",
 		summary: sourceText,
 		evidence: [],
 		actions_taken: [],
@@ -102,8 +102,9 @@ function normalizeExecutorResult(value) {
 				: legacyStatus === "inconclusive"
 					? "partial"
 					: "partial";
-	let goalSatisfied = value.goal_satisfied === true;
-	const uncertainties = Array.isArray(value.uncertainties) ? [...value.uncertainties] : [];
+	let goalSatisfied = value.goal_satisfied === undefined ? outcome === "succeeded" : value.goal_satisfied === true;
+	const rawWarnings = Array.isArray(value.unverified_edge_cases_and_warnings) ? value.unverified_edge_cases_and_warnings : [];
+	const uncertainties = [...new Set([...(Array.isArray(value.uncertainties) ? value.uncertainties : []), ...rawWarnings])];
 	if (outcome === "succeeded" && !goalSatisfied) {
 		outcome = "partial";
 		uncertainties.push("Normalized contradictory executor result: outcome=succeeded while goal_satisfied=false.");
@@ -116,16 +117,11 @@ function normalizeExecutorResult(value) {
 		: !goalSatisfied && value.recommended_next_step
 			? [value.recommended_next_step]
 			: [];
-	const normalized = {
-		...value,
-		outcome,
-		goal_satisfied: goalSatisfied,
-		completion_basis: String(value.completion_basis ?? (goalSatisfied
-			? "Codex reported that the delegated objective and success criteria were completed."
-			: "Codex ended the turn with delegated work or a blocker still remaining.")),
-		uncertainties,
-		remaining_work: goalSatisfied ? [] : remainingWork,
-	};
+	if (remainingWork.length && goalSatisfied) {
+		outcome = "partial";
+		goalSatisfied = false;
+	}
+	const normalized = { ...value, outcome, goal_satisfied: goalSatisfied, uncertainties, remaining_work: remainingWork };
 	delete normalized.status;
 	return normalized;
 }
@@ -478,6 +474,10 @@ async function main() {
 							timeoutSeconds: args.timeoutSeconds,
 						};
 				let inspected = await inspectCapabilityAuthorization(request.hostCapabilityContext, input);
+				if (!inspected.grant && request.fullAccess === true && request.mode !== "advisor") {
+					await createCapabilityGrant(request.hostCapabilityContext, inspected.request, "once");
+					inspected = await inspectCapabilityAuthorization(request.hostCapabilityContext, input);
+				}
 				if (!inspected.grant) {
 					const record = {
 						version: 1,
@@ -531,6 +531,18 @@ async function main() {
 			}
 			if (method === "item/tool/call" && params.tool === "consult_research_pi") {
 				const args = params.arguments ?? {};
+				if (args.wait !== true && args.why_blocking === undefined) {
+					const job = await readCodexJob(request.jobId, { jobRoot: dirname(jobDir) });
+					const runtime = await resolveResearchRuntime(job.cwd, { runtimeRoot: job.runtimeRoot });
+					const from = await registerCodexRuntimeJob(runtime, job);
+					const discussion = await createRuntimeMessage(runtime, {
+						type: "notify", from, to: RESEARCH_LEADER_ACTOR_ID,
+						body: sourceField(args.question, 4000, "Discussion"),
+						metadata: { kind: "research_discussion", audience: args.audience ?? "leader", jobId: job.id, workspaceKey: job.workspaceKey },
+					});
+					send({ id: message.id, result: { success: true, contentItems: [{ type: "inputText", text: JSON.stringify({ messageId: discussion.id, status: "queued", replyTo: from }) }] } });
+					return;
+				}
 				const record = {
 					version: 1,
 					id,
@@ -934,15 +946,15 @@ async function main() {
 			await enqueueJobUpdate({ codexSqliteLogs: { mode: "unavailable", database: null, error: diagnosticReceipt(message, 1000, "stderr.log") } });
 		}
 
-		const consultationWhyField = request.mode === "advisor" ? "why_it_matters" : "why_blocking";
 		const dynamicTools = [
-			...(request.mode === "executor" ? [CODEX_COLLABORATION_TOOL, CODEX_RUN_TOOL] : []),
+			CODEX_COLLABORATION_TOOL,
+			...(request.mode === "executor" ? [CODEX_RUN_TOOL] : []),
 			{
 				type: "function",
 				name: "submit_research_pi_result",
 				description: request.mode === "advisor"
 					? "Submit the advisor working synthesis exactly once when the consultation turn is ready to hand back to Research Pi. Do not use this for commentary or progress updates."
-					: "Submit the executor's structured final handoff exactly once, only after the delegated objective succeeds, reaches a genuine blocker, or irrecoverably fails. Do not use this for plans, preambles, audit checkpoints, or progress updates.",
+					: "Submit the executor's structured final handoff exactly once, only after the delegated objective succeeds (including a credible negative result or isolated confounder when that answers the task), reaches a genuine blocker, or irrecoverably fails. Do not use this for plans, preambles, audit checkpoints, or progress updates.",
 				inputSchema: resultInputSchema,
 			},
 			{
@@ -973,18 +985,15 @@ async function main() {
 			{
 				type: "function",
 				name: "consult_research_pi",
-				description:
-					request.mode === "advisor"
-						? "Continue the research dialogue with Research Pi. Ask a focused clarification, assumption check, or interpretation choice when the answer would materially improve shared understanding; the discussion does not need to be completely blocked. Avoid performative or repetitive questions. Never request or transmit secrets."
-						: "Ask Research Pi only when a missing research decision or user-only fact materially blocks progress. Resolve implementation details yourself. Never request or transmit secrets with this tool.",
+				description: "Discuss a question, discovery or disagreement with the Leader or user. Default queues a discussion and lets you continue; set wait=true only when you need an answer before proceeding. For an advisor not currently available, ask the Leader to arrange a consultation.",
 				inputSchema: {
 					type: "object",
 					additionalProperties: false,
-					required: ["audience", "question", consultationWhyField],
+					required: ["question"],
 					properties: {
 						audience: { type: "string", enum: ["leader", "user"] },
 						question: { type: "string", maxLength: 4000 },
-						[consultationWhyField]: { type: "string", maxLength: 4000 },
+						wait: { type: "boolean", description: "Default false (queues message while you keep working). Set wait=true if your next step depends on the answer or if you have no other independent work left before finishing the turn." },
 						options: { type: "array", maxItems: 8, items: { type: "string", maxLength: 1000 } },
 					},
 				},

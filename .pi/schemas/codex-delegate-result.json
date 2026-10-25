@@ -5,37 +5,23 @@
   "additionalProperties": false,
   "required": [
     "outcome",
-    "goal_satisfied",
-    "completion_basis",
-    "summary",
-    "evidence",
-    "actions_taken",
-    "changed_files",
-    "checks",
-    "external_effects",
-    "uncertainties",
-    "remaining_work",
-    "recommended_next_step"
+    "summary"
   ],
   "properties": {
     "outcome": {
       "type": "string",
-      "enum": ["succeeded", "partial", "blocked", "failed"],
+      "enum": [
+        "succeeded",
+        "partial",
+        "blocked",
+        "failed"
+      ],
       "description": "Semantic outcome of the delegated objective, not the transport status of the Codex turn."
-    },
-    "goal_satisfied": {
-      "type": "boolean",
-      "description": "True only when the delegated objective and its success criteria are complete."
-    },
-    "completion_basis": {
-      "type": "string",
-      "maxLength": 400,
-      "description": "Why this is a legitimate final handoff rather than an intermediate progress update."
     },
     "summary": {
       "type": "string",
       "maxLength": 1200,
-      "description": "State the result first. Use short sentences. Include only the limits needed for the next decision. Reference evidence; do not repeat task background."
+      "description": "State the primary result and any limitation that changes its interpretation or the next decision. Distinguish implementation completion from real execution and scientific evidence. Put only secondary, non-blocking caveats in optional details."
     },
     "evidence": {
       "type": "array",
@@ -62,7 +48,10 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["command", "result"],
+        "required": [
+          "command",
+          "result"
+        ],
         "properties": {
           "command": { "type": "string", "maxLength": 1000 },
           "result": { "type": "string", "maxLength": 800 }
@@ -76,7 +65,12 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["kind", "target", "identifier", "detail"],
+        "required": [
+          "kind",
+          "target",
+          "identifier",
+          "detail"
+        ],
         "properties": {
           "kind": { "type": "string", "maxLength": 256 },
           "target": { "type": "string", "maxLength": 1000 },
@@ -84,12 +78,6 @@
           "detail": { "type": "string", "maxLength": 800 }
         }
       }
-    },
-    "uncertainties": {
-      "type": "array",
-      "maxItems": 32,
-      "description": "One material uncertainty per item. Explain how it limits the result.",
-      "items": { "type": "string", "maxLength": 800 }
     },
     "remaining_work": {
       "type": "array",
@@ -100,7 +88,12 @@
     "recommended_next_step": {
       "type": "string",
       "maxLength": 600,
-      "description": "Give one next decision or task. Do not put unfinished current-turn work here."
+      "description": "Optional suggested next decision, not an instruction or authorization. Omit when none is useful; keep unfinished current work in remaining_work."
+    },
+    "unverified_edge_cases_and_warnings": {
+      "type": "array",
+      "description": "Optional secondary, non-blocking limitations. Decision-changing validity limitations must also appear in summary. Do not invent hypothetical risks to fill this field.",
+      "items": { "type": "string" }
     }
   }
 }

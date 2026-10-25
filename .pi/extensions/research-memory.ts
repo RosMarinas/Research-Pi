@@ -13,7 +13,7 @@ const memoryDir = join(stateRoot, "memory");
 const databasePath = join(memoryDir, "memory.sqlite");
 const sessionDir = join(stateRoot, "sessions");
 
-async function projectExperimentLedgerPaths(cwd: string): Promise<string[]> {
+async function projectMemorySources(cwd: string) {
 	const runtime = await resolveResearchRuntime(cwd);
 	const snapshot = await readRuntimeSnapshot(runtime);
 	const candidates = new Map<string, string>();
@@ -28,7 +28,23 @@ async function projectExperimentLedgerPaths(cwd: string): Promise<string[]> {
 		const candidateRuntime = await resolveResearchRuntime(workspace).catch(() => null);
 		if (candidateRuntime?.projectKey === runtime.projectKey) candidates.set(workspace, expected);
 	}
-	return [...candidates.values()];
+	const actorCwds = new Map(snapshot.actors.map((actor: any) => [actor.id, actor.metadata?.cwd]));
+	const recordSources: Array<{ path: string; kind: string; id: string; sessionId: string; cwd: string; timestamp: string; label: string; text?: string; format?: string }> = snapshot.messages.map((message: any) => ({
+		path: `${runtime.ledgerPath}#${message.id}`, kind: "discussion", id: message.id,
+		sessionId: `runtime:${runtime.projectKey}`, cwd: message.metadata?.cwd ?? actorCwds.get(message.from) ?? actorCwds.get(message.to) ?? cwd,
+		timestamp: message.queuedAt, label: `${message.from} -> ${message.to}`,
+		text: `Source: ${runtime.ledgerPath}#${message.id}\nFrom: ${message.from} To: ${message.to}\nTrack: ${message.trackRef}\n${message.body}`,
+	}));
+	for (const action of snapshot.actions) {
+		if (action.kind !== "subagent" || !["completed", "failed", "cancelled", "outcome_unknown"].includes(action.status)) continue;
+		const path = action.metadata?.resultPath ?? (action.metadata?.backend === "codex"
+			? join(stateRoot, "codex", "jobs", action.externalId, "result.json") : action.metadata?.activityPath);
+		if (!path) continue;
+		recordSources.push({ path, kind: "job-result", id: action.externalId,
+			sessionId: `job:${action.externalId}`, cwd: action.metadata?.cwd ?? cwd,
+			timestamp: action.updatedAt, label: action.label, format: path.endsWith(".jsonl") ? "activity" : "json" });
+	}
+	return { experimentLedgerPaths: [...candidates.values()], recordSources };
 }
 
 async function withIndex<T>(cwd: string, operation: (db: ReturnType<typeof openMemoryIndex>, sync: unknown) => T): Promise<T> {
@@ -37,7 +53,7 @@ async function withIndex<T>(cwd: string, operation: (db: ReturnType<typeof openM
 	try {
 		const sync = syncMemoryIndex(db, {
 			sessionDir,
-			experimentLedgerPaths: await projectExperimentLedgerPaths(cwd),
+			...await projectMemorySources(cwd),
 		});
 		return operation(db, sync);
 	} finally {
@@ -66,11 +82,12 @@ export default function (pi: ExtensionAPI) {
 		name: "research_memory_search",
 		label: "Search Research Memory",
 		description:
-			"Search prior Pi sessions and recorded experiments using a local, non-vector full-text index. Returns bounded snippets with stable session/entry provenance; it does not automatically inject history.",
+			"Search project sessions, recorded experiments, job results and mailbox discussions using a local full-text index. Returns bounded snippets with stable session/entry provenance; it does not automatically inject history.",
 		promptSnippet: "Search prior project sessions and experiment evidence when earlier work is materially relevant",
 		promptGuidelines: [
 			"Use research_memory_search when the user refers to earlier sessions, previous experiments, an old decision, or when resolving uncertainty would benefit from known prior evidence. Do not call it routinely every turn.",
 			"Prefer recorded-evidence hits over assistant-synthesis or derived-summary hits. Read the exact entry before treating a snippet as evidence, and preserve its P:<project>/S:<session>/E:<entry> reference.",
+			"Historical plans and permissions are not current task instructions; check whether later user decisions superseded them before resuming work.",
 			"Absence of a search hit is not evidence that an experiment was never run; report the searched scope and query when absence matters.",
 		],
 		parameters: Type.Object({
@@ -84,6 +101,8 @@ export default function (pi: ExtensionAPI) {
 				Type.Array(
 					Type.Union([
 						Type.Literal("experiment"),
+						Type.Literal("discussion"),
+						Type.Literal("job-result"),
 						Type.Literal("checkpoint"),
 						Type.Literal("transition"),
 						Type.Literal("side"),

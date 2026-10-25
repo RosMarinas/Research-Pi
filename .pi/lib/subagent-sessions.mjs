@@ -1,10 +1,11 @@
+import { RESEARCH_PRINCIPLES, researchRolePrompt } from "./research-prompts.mjs";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { sanitizeBoundaryEnvironment, sanitizeWslInteropEnvironment } from "./project-boundary.mjs";
+import { sanitizeBoundaryEnvironment, sanitizeWslInteropEnvironment, assertWslFullAccess } from "./project-boundary.mjs";
 import { assertWslHostCommand } from "./host-capabilities.mjs";
-import { subagentModelCard } from "./subagent-message.mjs";
+import { subagentModelCard, SUBAGENT_WORKSPACE_POLICY } from "./subagent-message.mjs";
 
 const FINAL_STATUSES = new Set(["completed", "failed", "cancelled", "input_required"]);
 const BACKENDS = new Set(["pi", "antigravity"]);
@@ -68,20 +69,9 @@ export function formatSubagentSessionJob(job) {
 	return subagentModelCard(job);
 }
 
-const PLAIN_TECHNICAL_STYLE = "Use short sentences. Put one topic or action in each sentence. Use active voice when the actor is known. Use one term for one concept. State the result before the explanation. Give exact evidence references. Do not copy logs or task background into the result.";
-
-function piRolePrompt(role) {
-	let instruction;
-	if (role === "advisor") instruction = "Act as a read-only research advisor. Clarify the design. Compare explanations. Return a concise synthesis. Do not modify files.";
-	else if (role === "environment") instruction = "Act as an environment and tooling specialist. Diagnose and configure the project environment. Stay inside the current workspace. Report exact checks.";
-	else if (role === "executor") instruction = "Act as an execution subagent. Complete the bounded task. Modify the project when needed. Run focused checks. Return the result, not a plan.";
-	else instruction = "Act as a context-isolated research subagent. Complete the bounded task. Return concise observations, actions, checks, and remaining uncertainty.";
-	return `${instruction} ${PLAIN_TECHNICAL_STYLE}`;
-}
-
-function antigravityRolePrompt(role) {
-	if (role === "environment") return `You are the environment specialist for Research Pi. Configure and diagnose the toolchain, dependencies, SDKs, runtime, containers, remote execution, and system integration needed by the task. Complete the work. Report exact checks. ${PLAIN_TECHNICAL_STYLE}`;
-	return piRolePrompt(role);
+export function buildWorkerPrompt(input) {
+	return [RESEARCH_PRINCIPLES, researchRolePrompt(input.role), input.systemPrompt,
+		input.role === "advisor" ? "" : SUBAGENT_WORKSPACE_POLICY].filter(Boolean).join("\n\n");
 }
 
 function writeRecord(child, value) {
@@ -100,7 +90,7 @@ export function buildPiRunnerArgs(input) {
 		"--session-dir", input.sessionDir,
 		"--session-id", input.sessionId,
 		"--name", `Research Pi ${input.role} ${input.id.slice(-8)}`,
-		"--append-system-prompt", input.systemPrompt ?? piRolePrompt(input.role),
+		"--append-system-prompt", buildWorkerPrompt(input),
 	];
 	if (input.boundaryExtension) args.push("--extension", input.boundaryExtension);
 	if (input.model && input.model !== "inherit") args.push("--model", input.model);
@@ -115,8 +105,8 @@ export function buildAntigravityRunnerArgs(input) {
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--mode", input.role === "advisor" ? "plan" : "accept-edits",
-		"--sandbox",
 	];
+	if (input.role === "advisor" || input.fullAccess !== true) args.push("--sandbox");
 	// Headless Antigravity cannot show permission prompts. Non-advisor work is
 	// auto-approved inside the CLI sandbox so environment commands are executed
 	// instead of being silently soft-denied.
@@ -190,7 +180,11 @@ export function createSubagentSessionManager(options = {}) {
 		const args = buildPiRunnerArgs({ ...job, sessionDir, boundaryExtension });
 		const child = spawnProcess(process.execPath, [coreCli, ...args], {
 			cwd: job.cwd,
-			env: sanitizeWslInteropEnvironment(process.env),
+			env: { ...sanitizeWslInteropEnvironment(process.env),
+				RESEARCH_PI_FULL_ACCESS: job.fullAccess ? "1" : "0",
+				RESEARCH_PI_INITIAL_SESSION_MODE: job.role === "advisor" ? "analysis" : "project",
+				RESEARCH_PI_CAPABILITY_SESSION_ID: job.leaderSessionId ?? job.sessionId,
+			},
 			shell: false,
 			stdio: ["pipe", "pipe", "pipe"],
 		});
@@ -227,9 +221,12 @@ export function createSubagentSessionManager(options = {}) {
 			await emit(job, { type: "progress", summary: "runner model settings resolved" });
 		} else if (record.type === "extension_ui_request") {
 			if (["select", "confirm", "input", "editor"].includes(record.method) && record.id) {
-				writeRecord(job.child, { type: "extension_ui_response", id: record.id, cancelled: true });
-				job.progress = `${record.method} request declined; interactive approvals stay with the Leader`;
-				await emit(job, { type: "input_required", summary: job.progress });
+				job.progress = `${record.method} request awaiting the Leader UI`;
+				await emit(job, { type: "progress", summary: job.progress });
+				const response = await options.onUiRequest?.(publicJob(job), record);
+				writeRecord(job.child, { ...response, type: "extension_ui_response", id: record.id, ...(!response ? { cancelled: true } : {}) });
+				job.progress = response && !response.cancelled ? "Leader UI responded; continuing" : "Leader UI unavailable or request cancelled";
+				await emit(job, { type: "progress", summary: job.progress });
 			}
 		} else if (record.type === "tool_execution_start") {
 			job.progress = `${record.toolName ?? "tool"} running`;
@@ -253,7 +250,6 @@ export function createSubagentSessionManager(options = {}) {
 	};
 
 	const startAntigravity = async (job, task) => {
-		job.systemPrompt = job.systemPrompt ?? antigravityRolePrompt(job.role);
 		assertWslHostCommand([agyBin]);
 		const child = spawnProcess(agyBin, buildAntigravityRunnerArgs(job), {
 			cwd: job.cwd,
@@ -280,7 +276,7 @@ export function createSubagentSessionManager(options = {}) {
 				if (!FINAL_STATUSES.has(job.status)) await settle(job, job.cancelling ? "cancelled" : "failed", null, `Antigravity runner exited (${code ?? "?"}${signal ? `, ${signal}` : ""})`);
 			});
 		});
-		await beginTurn(job, `${job.systemPrompt}\n\nTask: ${task}`);
+		await beginTurn(job, `${buildWorkerPrompt(job)}\n\nTask: ${task}`);
 	};
 
 	const handleAntigravityRecord = async (job, line) => {
@@ -320,12 +316,16 @@ export function createSubagentSessionManager(options = {}) {
 		if (!BACKENDS.has(backend)) throw new Error(`Unsupported process subagent backend: ${backend}`);
 		const id = input.id ?? createJobId(backend);
 		if (actorJobs.has(input.actorId)) throw new Error("This Actor already has a session; continue it instead of starting another process");
+		const fullAccess = input.role !== "advisor" && (input.fullAccess ?? process.env.RESEARCH_PI_FULL_ACCESS === "1");
+		assertWslFullAccess(fullAccess);
 		const job = {
 			id,
 			actionId: input.actionId ?? `action:${id}:turn-1`,
 			actorId: input.actorId,
 			backend,
 			role: input.role ?? "general",
+			fullAccess,
+			leaderSessionId: input.leaderSessionId,
 			mission: input.mission ?? null,
 			task: input.task,
 			model: input.model ?? "inherit",
@@ -460,6 +460,14 @@ export function createSubagentSessionManager(options = {}) {
 
 	return {
 		start,
+		retire: async (id) => {
+			const job = jobs.get(id);
+			if (!job) return; // A prior host already closed this process.
+			if (!["completed", "failed", "cancelled"].includes(job.status)) throw new Error("Finish or cancel the subagent before retirement");
+			job.closed = true;
+			job.child?.stdin?.end();
+			job.child?.kill("SIGTERM");
+		},
 		get,
 		getByActor,
 		resume,

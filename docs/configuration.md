@@ -134,7 +134,7 @@ All delegated workers enter through one `subagent` tool and one Runtime Actor mo
     "general": { "backend": "pi", "model": "inherit", "thinking": "inherit" }
   },
   "codex": {
-    "maxExecutors": 4,
+    "maxExecutors": 10,
     "internalSubagent": { "model": "gpt-6.1-sol", "thinking": "high" },
     "retention": { "terminalDays": 30, "keepTerminalJobs": 200 }
   }
@@ -200,9 +200,19 @@ The display journal is distinct from the canonical mailbox: Pi/Antigravity displ
 
 ### Codex-specific execution controls
 
-`maxExecutors` caps concurrent executors in each exact workspace, including jobs paused for input. Start independent background jobs with different missions and literal workspace-relative `writeScope` paths. Disjoint paths may run together; identical or ancestor/descendant paths conflict. Omitted scope means `["."]`, an exclusive whole-workspace writer. Resume inherits the prior scope unless the caller explicitly supplies a new one. A capacity error returns immediately: dispatch remaining work after a result instead of polling.
+`/mailbox` lists open Runtime messages; `/mailbox all` includes settled history (`/inbox` remains available). `/mailbox clear` dismisses queued/delivered non-ask messages addressed to the current project's Leader in one ledger append. Only the attached Leader can clear. Waiting questions, messages to other Actors, running jobs and historical records remain intact. It cannot recall content already injected into a model turn or rewrite the existing conversation prefix.
 
-Executors have `research_pi_collaborate`: `peers` discovers active same-workspace/same-track collaborators, `send` queues a directed message (at most 2,000 characters), and `inbox` reads recent messages/receipts. A send records a Runtime participant envelope while the native worker command queue performs delivery and records the receipt; discovery and inspection remain tool calls. Delivery uses the recipient's existing active turn; it does not restart a finished worker. `queued` is not delivered; `applied` means submitted to the turn, not acknowledged or acted upon. Peer input cannot change task authority or write ownership. The Leader can inspect receipts with `subagent action=messages, jobId=...`; conversations are not broadcast into Leader context. Advisors cannot send executor messages. Old dynamic-tool threads refresh once on their next explicit resume; running jobs are not interrupted by this upgrade.
+Mailbox messages have no time-based expiry. Ordinary Leader messages become consumed after the receiving turn settles; Codex blocking requests remain open until answered or superseded by task settlement. Delivered but unconsumed Leader messages can be recovered after session rotation. Job retention below is separate from mailbox history.
+
+`maxExecutors` caps concurrent Codex executors in each exact workspace (default 10), including jobs paused for input. It is not a shared limit across Pi, Antigravity and advisors; Pi and Antigravity currently have no numerical concurrency cap. Start independent background jobs with different missions and literal workspace-relative `writeScope` paths. Disjoint paths may run together; identical or ancestor/descendant paths conflict. Omitted scope means `["."]`, an exclusive whole-workspace writer. Resume inherits the prior scope unless the caller explicitly supplies a new one. A capacity error returns immediately: dispatch remaining work after a result instead of polling.
+
+Subagent start and resume default to background execution for every role and backend. The call returns a job receipt and results arrive through the Runtime mailbox. Set `background: false` explicitly to wait for a result in the calling turn.
+
+Permission inheritance is project-independent. Pi execution subagents inherit the Leader's explicit full-access mode and capability session, so existing session grants remain usable; missing grants are requested through the Leader UI rather than automatically cancelled. Codex executors likewise use their job's full-access authority in the host bridge without requesting a second grant, while bounded jobs pause the same tool call for approval. Antigravity execution subagents omit its CLI sandbox only in full-access mode; bounded Antigravity keeps its native sandbox, and native `WAITING` results go to the Leader mailbox (its CLI does not expose Pi's interactive approval-response protocol). Advisors never acquire full access from this inheritance.
+
+In bounded mode, trust a project's exact command entry point (for example `python3 remote_run.py` or `bash sync.sh`) with project scope to reuse it across sessions. Trust is bound to the project and working directory, not a global script filename allowlist. Full-access mode needs no per-project script allowlist. Do not grant an unrestricted `env` or interpreter prefix to authorize one project script.
+
+Codex executors and advisors have `research_pi_collaborate`: `peers` discovers active same-workspace/same-track collaborators, `send` queues a directed message (at most 1,200 characters), and `inbox` reads recent messages/receipts. A send records a Runtime participant envelope while the native worker command queue performs delivery and records the receipt; discovery and inspection remain tool calls. Delivery uses the recipient's existing active turn; it does not restart a finished worker. `queued` is not delivered; `applied` means submitted to the turn, not acknowledged or acted upon. Peer input cannot change task authority or write ownership. The Leader can inspect receipts with `subagent action=messages, jobId=...`; conversations are not broadcast into Leader context. Advisors cannot send executor messages. Old dynamic-tool threads refresh once on their next explicit resume; running jobs are not interrupted by this upgrade.
 
 For shared compute or run directories, optionally supply `resourceClaims`, such as `["gpu:server-a:0", "run:server-a:/runs/ablation"]`. Keys must match exactly across dispatchers using the same Research Pi state store, including different workspaces. Conflicts return immediately; this is coordination, not an OS/cluster lock. An optional `experiment` brief contains `question`, `distinguishingOutcomes`, `validityChecks`, and `budgetAndStop`; omit it for ordinary code tasks. The budget is worker guidance, not automatic remote cancellation.
 
@@ -367,3 +377,11 @@ In the TUI:
 5. run `/runtime view` to inspect the current ProjectView; the model's automatic snapshot stays fixed until compaction or an explicit context/role change.
 
 This is sufficient for an ordinary route check. Long-context continuation, compact quality and cache behavior are best judged during real project use.
+
+### Ending Actor participation
+
+A completed turn leaves its Actor available for follow-up. `cancel` stops execution; `release_resources` manages Codex resource claims. Neither retires an Actor.
+
+Use `subagent` with `action: "retire"` and the current `jobId`, or `/actors retire <actor-id-or-job-id>`, to retire a settled participant. The attached Leader owns this operation. Outstanding actions, unresolved outcomes and live registered external runs must be settled first. Pi and Antigravity close their idle processes; Codex retains its completed thread as history. Retirement does not erase results, messages or session records.
+
+Retired Actors cannot receive new messages, resume or be selected for mission reuse. Pending messages to them are superseded. They disappear from the work board and `/watch` selection; `/actors all` retains them with a `retired` label. Starting the same mission after retirement creates a new Actor. Creating another Actor with the same role does not automatically retire existing participants.

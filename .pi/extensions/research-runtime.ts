@@ -1,3 +1,4 @@
+import { researchRolePrompt } from "../lib/research-prompts.mjs";
 import { getMarkdownTheme, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Box, Markdown, Text } from "@earendil-works/pi-tui";
 import { join } from "node:path";
@@ -37,9 +38,10 @@ import { normalizeCodexAnalysisHandoff } from "../lib/research-analysis-bridge.m
 import { runtimeCompactionReserved } from "../lib/runtime-compaction-gate.mjs";
 import { createRuntimeMailboxWatcher } from "../lib/runtime-mailbox-watch.mjs";
 import { projectResearchContextMessages, runtimeMessageContextText } from "../lib/research-context.mjs";
-import { deliverSubagentMessage, drainSubagentMailbox } from "../lib/runtime-subagents.mjs";
+import { retireRuntimeSubagent, deliverSubagentMessage, drainSubagentMailbox } from "../lib/runtime-subagents.mjs";
 import { openSubagentWatch } from "../lib/subagent-watch-ui.mjs";
 import {
+	runtimeActorRetired,
 	RESEARCH_LEADER_ACTOR_ID,
 	RUNTIME_EVENT_ENTRY_KIND,
 	RUNTIME_MESSAGE_KIND,
@@ -52,6 +54,7 @@ import {
 	claimRuntimeActorAttachment,
 	createRuntimeMessage,
 	consumeRuntimeMessagesForAttachment,
+	clearRuntimeMailbox,
 	detachRuntimeActor,
 	ensureRuntimeActor,
 	initializeResearchRuntime,
@@ -191,9 +194,7 @@ export async function reconcileStaleCodexMailbox(
 }
 
 function sessionRoleContext(role: "analysis" | "leader", content: string): string {
-	const rolePrompt = role === "analysis"
-		? "You are the current read-only Analysis Session. Discuss, explain, compare hypotheses, and inspect local or approved remote evidence. You may run project-local shell commands under an OS-enforced read-only filesystem profile, but must not start experiments or external side effects. Do not modify code, steer workers, consume the Leader mailbox, or update Project State. Treat new interpretations as proposals, not evidence. Use analysis_send_to_leader for a useful synthesis; project execution requires explicit user promotion."
-		: "You are the currently attached Leader Session. This role block supersedes any earlier Analysis Session role block in this conversation. Execution tools, Project State writes, subagent coordination, and the durable Leader mailbox are active within their normal authority boundaries.";
+	const rolePrompt = researchRolePrompt(role);
 	return [`# Session role: ${role === "analysis" ? "Analysis" : "Leader"} Session`, rolePrompt, content]
 		.filter(Boolean)
 		.join("\n\n");
@@ -276,11 +277,12 @@ export function runtimeActorSummary(snapshot: RuntimeSnapshot) {
 	let active = 0;
 	let waiting = 0;
 	for (const actor of snapshot.actors) {
+		if (runtimeActorRetired(actor)) continue;
 		const status = latest.get(actor.id)?.status;
 		if (status === "input_required") waiting += 1;
 		else if (ACTIVE_ACTION_STATUSES.has(status)) active += 1;
 	}
-	return { active, waiting, registered: snapshot.actors.length };
+	return { active, waiting, registered: snapshot.actors.filter((actor) => !runtimeActorRetired(actor)).length };
 }
 
 export function runtimeRotationReadiness(snapshot: RuntimeSnapshot) {
@@ -391,7 +393,7 @@ export function actorLines(snapshot: RuntimeSnapshot, activeOnly = true): string
 	const visibleActors = activeOnly
 		? snapshot.actors.filter((actor) => {
 			const status = latest.get(actor.id)?.status;
-			return status === "input_required" || ACTIVE_ACTION_STATUSES.has(status);
+			return !runtimeActorRetired(actor) && (status === "input_required" || ACTIVE_ACTION_STATUSES.has(status));
 		})
 		: snapshot.actors;
 	const stateSummary = [
@@ -405,7 +407,8 @@ export function actorLines(snapshot: RuntimeSnapshot, activeOnly = true): string
 			const latestAction = latest.get(actor.id);
 			const target = `@${runtimeActorTarget(actor)}`;
 			let state;
-			if (actor.kind === "user") state = "present";
+			if (runtimeActorRetired(actor)) state = "retired";
+			else if (actor.kind === "user") state = "present";
 			else if (latestAction?.status === "input_required") state = "waiting for input";
 			else if (ACTIVE_ACTION_STATUSES.has(latestAction?.status)) state = `active (${latestAction.status})`;
 			else if (runtimeActorBackend(actor)) {
@@ -735,7 +738,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		if (!idle && options.deferWhenBusy) {
 			return { status: "queued" as const, detail: "The Leader is still running; delivery remains in the Runtime mailbox" };
 		}
-		const needsResponse = message.type !== "notify" || message.metadata?.kind === "analysis_handoff";
+		const needsResponse = message.type !== "notify" || ["analysis_handoff", "research_discussion"].includes(String(message.metadata?.kind));
 		const triggerTurn = needsResponse && (options.triggerTurn ?? true);
 		pi.sendMessage(
 			{
@@ -776,7 +779,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		ctx: ExtensionContext,
 		options: { preempt?: boolean; triggerTurn?: boolean; deferWhenBusy?: boolean } = {},
 	): Promise<"delivered" | "deferred" | "handled"> => {
-		if (runtimeCompactionReserved(ctx)) return "deferred";
+		if (runtimeCompactionReserved(ctx) || (options.deferWhenBusy && !options.preempt && !ctx.isIdle())) return "deferred";
 		if (deliveringMessageIds.has(messageId)) return "deferred";
 		deliveringMessageIds.add(messageId);
 		try {
@@ -839,14 +842,22 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		const sessionId = ctx.sessionManager.getSessionId();
 		const attachment = runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID, sessionId);
 		if (!attachment) return null;
-		const subagentDeliveries = await drainSubagentMailbox(activeRuntime, ctx);
+		let pending = false;
+		const subagentDeliveries = await drainSubagentMailbox(activeRuntime, ctx, {
+			snapshot, onDeferred: () => { pending = true; },
+		});
 		const open = unconsumedRuntimeMessages(snapshot, {
 			to: RESEARCH_LEADER_ACTOR_ID,
 			forSessionId: sessionId,
 			forAttachmentEpoch: attachment.epoch,
 		});
-		if (!open.length) return subagentDeliveries;
-		return subagentDeliveries + await deliverOpenLeaderMessages(activeRuntime, snapshot, ctx, options);
+		if (!open.length) return { delivered: subagentDeliveries, pending };
+		const delivered = subagentDeliveries + await deliverOpenLeaderMessages(activeRuntime, snapshot, ctx, options);
+		const latest = await readRuntimeSnapshot(activeRuntime);
+		pending ||= unconsumedRuntimeMessages(latest, {
+			to: RESEARCH_LEADER_ACTOR_ID, forSessionId: sessionId, forAttachmentEpoch: attachment.epoch,
+		}).length > 0;
+		return { delivered, pending };
 	};
 
 	const runtimeMailboxWatcher = createRuntimeMailboxWatcher({
@@ -1399,7 +1410,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 				triggerTurn: true,
 				deferWhenBusy: true,
 			});
-			if (delivered) runtimeChanged = true;
+			if (delivered?.delivered) runtimeChanged = true;
 		}
 		if (runtimeChanged) {
 			await refreshProjectView(ctx);
@@ -1678,12 +1689,22 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("actors", {
-		description: "List active project Runtime Actors (/actors all includes suspended history)",
+		description: "List Actors; /actors all includes history; /actors retire <actor-id> ends participation",
 		handler: async (args, ctx) => {
 			try {
 				const mode = args.trim() || "active";
-				if (mode !== "active" && mode !== "all") throw new Error("Usage: /actors [active|all]");
 				const activeRuntime = await getRuntime(ctx);
+				if (mode.startsWith("retire ")) {
+					if (isAnalysisSession()) throw new Error("Only the Leader may retire Actors");
+					const snapshot = await readRuntimeSnapshot(activeRuntime);
+					const target = mode.slice(7).trim();
+					const actor = snapshot.actors.find((item) => item.metadata?.latestJobId === target) ?? resolveRuntimeActor(snapshot, target);
+					await retireRuntimeSubagent({ runtime: activeRuntime, jobId: actor.metadata?.latestJobId, leaderSessionId: ctx.sessionManager.getSessionId(), ctx });
+					await refreshDock(ctx);
+					ctx.ui.notify(`Retired ${actor.id}; history remains in /actors all.`, "info");
+					return;
+				}
+				if (mode !== "active" && mode !== "all") throw new Error("Usage: /actors [active|all|retire <actor-id-or-job-id>]");
 				ctx.ui.notify(actorLines(await readRuntimeSnapshot(activeRuntime), mode !== "all"), "info");
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -1697,6 +1718,23 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 			try {
 				const activeRuntime = await getRuntime(ctx);
 				ctx.ui.notify(inboxLines(await readRuntimeSnapshot(activeRuntime), args.trim() === "all"), "info");
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			}
+		},
+	});
+
+	pi.registerCommand("mailbox", {
+		description: "Inspect mailbox, or /mailbox clear to dismiss Leader messages while retaining requests awaiting answers",
+		handler: async (args, ctx) => {
+			try {
+				const mode = args.trim();
+				if (!["", "all", "clear"].includes(mode)) throw new Error("Usage: /mailbox [all|clear]");
+				const activeRuntime = await getRuntime(ctx);
+				if (mode !== "clear") { ctx.ui.notify(inboxLines(await readRuntimeSnapshot(activeRuntime), mode === "all"), "info"); return; }
+				if (isAnalysisSession()) throw new Error("Clear the mailbox from the attached Leader Session.");
+				const result = await clearRuntimeMailbox(activeRuntime, { sessionId: ctx.sessionManager.getSessionId(), attachmentEpoch: localAttachmentEpoch });
+				ctx.ui.notify(`Cleared ${result.cleared} Leader messages; retained ${result.retainedRequests} requests awaiting answers. History and running jobs are unchanged; already injected messages cannot be recalled.`, "info");
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 			}

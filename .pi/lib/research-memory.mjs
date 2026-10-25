@@ -418,13 +418,13 @@ function replaceSource(db, source, stat, extracted) {
 	}
 }
 
-export function syncMemoryIndex(db, { sessionDir, experimentLedgerPaths = [] }) {
-	const files = sourceFiles(sessionDir, experimentLedgerPaths);
+export function syncMemoryIndex(db, { sessionDir, experimentLedgerPaths = [], recordSources = [] }) {
+	const files = [...sourceFiles(sessionDir, experimentLedgerPaths), ...recordSources.filter((source) => source.text !== undefined || existsSync(source.path))];
 	let rebuiltSources = 0;
 	let indexedUnits = 0;
 	let invalidLines = 0;
 	for (const source of files) {
-		const stat = statSync(source.path);
+		const stat = source.text !== undefined ? { size: source.text.length, mtimeMs: Date.parse(source.timestamp) || 0 } : statSync(source.path);
 		const prior = db.prepare("SELECT size, mtime_ms, extractor_version FROM memory_sources WHERE path = ?").get(source.path);
 		if (
 			prior &&
@@ -434,8 +434,15 @@ export function syncMemoryIndex(db, { sessionDir, experimentLedgerPaths = [] }) 
 		) {
 			continue;
 		}
-		const extracted =
-			source.kind === "session" ? extractSessionUnits(source.path) : extractExperimentLedgerUnits(source.path);
+		const extracted = source.kind === "session" ? extractSessionUnits(source.path)
+			: source.kind === "experiment-ledger" ? extractExperimentLedgerUnits(source.path)
+			: { invalidLines: 0, units: [makeUnit({ sourcePath: source.path, sourceKind: source.kind,
+				sessionId: source.sessionId, projectCwd: source.cwd, sessionName: source.label,
+				entry: { id: source.id, timestamp: source.timestamp }, kind: source.kind, active: true,
+				text: source.text ?? (source.format === "activity"
+					? parseJsonLines(source.path).values.filter((record) => ["assistant", "message"].includes(record.category)).map((record) => record.text).join("\n\n")
+					: JSON.stringify(JSON.parse(readFileSync(source.path, "utf8")), null, 2)),
+			})].filter(Boolean) };
 		replaceSource(db, source, stat, extracted);
 		rebuiltSources += 1;
 		indexedUnits += extracted.units.length;

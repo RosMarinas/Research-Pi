@@ -34,7 +34,7 @@ export default function (pi: ExtensionAPI) {
 			"Create a persistent Git ref for the current tracked code state without changing the branch, index, or working tree. Use only at a research decision boundary. Untracked files are reported but not captured.",
 		promptSnippet: "Create a persistent, non-mutating Git checkpoint at a research decision boundary",
 		promptGuidelines: [
-			"Use research_checkpoint only before a high-contrast intervention, rollback, or abandonment of a research route; never call it automatically every turn or for read-only work.",
+			"Use research_checkpoint only when losing the current state would be meaningfully costly before a high-contrast intervention, rollback, or abandonment of a research route; never call it automatically every turn or for read-only work.",
 			"research_checkpoint does not capture untracked files. If they matter, explicitly review and stage only the intended files before checkpointing; never stage secrets or large artifacts.",
 		],
 		parameters: Type.Object({

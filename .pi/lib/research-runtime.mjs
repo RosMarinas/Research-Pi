@@ -3,6 +3,7 @@ import { appendFile, mkdir, open, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveCodexWorkspaceIdentity } from "./codex-jobs.mjs";
+import { createRuntimeLedgerCache, freezeRuntimeValue } from "./runtime-ledger-cache.mjs";
 import { withOwnerFileLock } from "./owner-file-lock.mjs";
 import { applyResearchStatePatch } from "./research-compact.mjs";
 import { researchPiStateRoot } from "./runtime-paths.mjs";
@@ -251,7 +252,14 @@ export async function appendRuntimeEventAtRevision(runtime, eventType, data, exp
 	});
 }
 
+const cachedRuntimeEvents = createRuntimeLedgerCache(loadRuntimeEvents);
+const runtimeSnapshots = new WeakMap();
+
 export async function readRuntimeEvents(runtime) {
+	return await cachedRuntimeEvents(runtime);
+}
+
+async function loadRuntimeEvents(runtime) {
 	let text;
 	try {
 		text = await readFile(runtime.ledgerPath, "utf8");
@@ -278,7 +286,17 @@ export async function readRuntimeEvents(runtime) {
 	return events;
 }
 
+// Snapshots and events are read-only, shared for an unchanged ledger version.
 export async function readRuntimeSnapshot(runtime) {
+	const events = await readRuntimeEvents(runtime);
+	let views = runtimeSnapshots.get(events);
+	if (!views) { views = new Map(); runtimeSnapshots.set(events, views); }
+	const key = JSON.stringify([runtime.workspaceKey, runtime.workspaceRoot]);
+	if (!views.has(key)) views.set(key, freezeRuntimeValue(projectRuntimeEvents(runtime, events)));
+	return views.get(key);
+}
+
+function projectRuntimeEvents(runtime, events) {
 	const actors = new Map();
 	const attachments = new Map();
 	const messages = new Map();
@@ -293,7 +311,6 @@ export async function readRuntimeSnapshot(runtime) {
 	let projectState = null;
 	let projectBrief = null;
 	let revision = 0;
-	const events = await readRuntimeEvents(runtime);
 	for (const event of events) {
 		const data = event.data ?? {};
 		if (PROJECT_REVISION_EVENT_TYPES.has(event.type)) revision += 1;
@@ -301,6 +318,12 @@ export async function readRuntimeSnapshot(runtime) {
 			case "actor.registered": {
 				const current = actors.get(data.id) ?? {};
 				actors.set(data.id, { ...current, ...data, createdAt: current.createdAt ?? data.createdAt ?? event.at, updatedAt: event.at });
+				break;
+			}
+			case "actor.retired": {
+				const actor = actors.get(data.actorId);
+				if (actor) actors.set(data.actorId, { ...actor, retiredAt: event.at });
+				attachments.delete(data.actorId);
 				break;
 			}
 			case "actor.attached":
@@ -947,6 +970,7 @@ export async function createRuntimeMessage(runtime, input) {
 	if (!body) throw new Error("Runtime message body is required");
 	if (body.length > MAX_MESSAGE_LENGTH) throw new Error(`Runtime message body must be at most ${MAX_MESSAGE_LENGTH} characters`);
 	const snapshot = await readRuntimeSnapshot(runtime);
+	if (runtimeActorRetired(snapshot.actors.find((actor) => actor.id === to))) throw new Error("Actor is retired; start a new Actor");
 	const message = {
 		id,
 		type,
@@ -955,7 +979,7 @@ export async function createRuntimeMessage(runtime, input) {
 		body,
 		relatesTo: input.relatesTo ?? null,
 		payloadRef: input.payloadRef ?? null,
-		metadata: input.metadata ?? {},
+		metadata: { cwd: runtime.cwd ?? runtime.workspaceRoot, ...input.metadata },
 		projectRevision: Number.isInteger(input.projectRevision) ? input.projectRevision : snapshot.revision,
 		trackRef: input.trackRef ?? runtimeResearchTrack(snapshot).ref,
 	};
@@ -972,6 +996,28 @@ export async function settleRuntimeMessage(runtime, messageId, status, details =
 		id: `message:${messageId}:${status}:${details.attachmentEpoch ?? details.sessionId ?? details.actorId ?? "runtime"}`,
 	});
 	return { messageId, status, ...details };
+}
+
+// Clear the Leader inbox, not history or worker requests. Reuse existing
+// superseded events so older readers also honor dismissal; append once.
+export async function clearRuntimeMailbox(runtime, details) {
+	await mkdir(runtime.projectDir, { recursive: true, mode: 0o700 });
+	return await withRuntimeLedgerLock(runtime, async () => {
+		await repairRuntimeLedgerTail(runtime);
+		const snapshot = await readRuntimeSnapshot(runtime);
+		const attachment = runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID, details.sessionId);
+		if (!details.sessionId || !attachment || (details.attachmentEpoch && attachment.epoch !== details.attachmentEpoch)) {
+			throw new RuntimeAttachmentChangedError(RESEARCH_LEADER_ACTOR_ID);
+		}
+		const open = unconsumedRuntimeMessages(snapshot, { to: RESEARCH_LEADER_ACTOR_ID });
+		const messages = open.filter((message) => message.type !== "ask");
+		const events = messages.map((message) => prepareRuntimeEvent(runtime, "message.superseded", {
+			messageId: message.id, actorId: RESEARCH_LEADER_ACTOR_ID, sessionId: details.sessionId,
+			attachmentEpoch: attachment.epoch, reason: "mailbox_clear",
+		}, { id: `message:${message.id}:superseded:${attachment.epoch}` }));
+		if (events.length) await appendFile(runtime.ledgerPath, events.map((event) => JSON.stringify(event)).join("\n") + "\n", { encoding: "utf8", mode: 0o600 });
+		return { cleared: messages.length, retainedRequests: open.length - messages.length };
+	});
 }
 
 export async function consumeRuntimeMessagesForAttachment(runtime, messageIds, details) {
@@ -1152,6 +1198,8 @@ export async function upsertRuntimeAction(runtime, action) {
 	return data;
 }
 
+export function runtimeActorRetired(actor) { return Boolean(actor?.retiredAt); }
+
 export function resolveRuntimeActor(snapshot, rawTarget) {
 	const target = String(rawTarget ?? "").trim().replace(/^@/, "").toLowerCase();
 	if (!target) throw new Error("An Actor target is required");
@@ -1159,6 +1207,7 @@ export function resolveRuntimeActor(snapshot, rawTarget) {
 	if (target === "me") return snapshot.actors.find((actor) => actor.id === USER_ACTOR_ID);
 	const matches = snapshot.actors.filter((actor) => {
 		if (actor.id.toLowerCase() === target) return true;
+		if (runtimeActorRetired(actor)) return false;
 		if (runtimeActorTarget(actor).toLowerCase() === target) return true;
 		if (String(actor.label ?? "").toLowerCase() === target) return true;
 		const jobId = String(actor.metadata?.latestJobId ?? "").toLowerCase();
@@ -1182,7 +1231,7 @@ export async function registerSubagentRuntimeJob(runtime, job) {
 	const backend = String(job.backend ?? "codex").toLowerCase();
 	const role = String(job.role ?? job.mode ?? "general").toLowerCase();
 	const thinking = job.thinking ?? job.reasoningEffort ?? null;
-	const actorId = job.actorId ?? subagentActorId({ ...job, backend, role });
+	const actorId = job.actorId ?? subagentActorId({ ...job, jobId: job.id, backend, role });
 	await ensureRuntimeActor(runtime, {
 		id: actorId,
 		kind: "subagent",
@@ -1235,6 +1284,7 @@ export async function registerSubagentRuntimeJob(runtime, job) {
 			externalRuns: (job.externalRuns ?? []).map((run) => ({ id: run.id, status: run.status, target: run.target, externalId: run.externalId, resources: run.resources })),
 			summary: conciseRuntimeField(job.result?.summary ?? job.result?.working_synthesis ?? job.result?.shared_understanding, 1_200),
 			resultRef: `subagent:${job.id}`,
+			resultPath: job.resultPath ?? null,
 		},
 		projectRevision: Number.isInteger(job.projectRevision) ? job.projectRevision : snapshot.revision,
 		trackRef,

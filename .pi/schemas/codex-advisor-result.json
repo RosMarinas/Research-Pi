@@ -5,19 +5,16 @@
   "additionalProperties": false,
   "required": [
     "status",
-    "shared_understanding",
-    "points_of_agreement",
-    "candidate_explanations",
-    "questions_to_resolve",
-    "evidence",
-    "uncertainties",
-    "working_synthesis",
-    "suggested_next_exchange"
+    "working_synthesis"
   ],
   "properties": {
     "status": {
       "type": "string",
-      "enum": ["working_synthesis", "needs_clarification", "blocked"]
+      "enum": [
+        "working_synthesis",
+        "needs_clarification",
+        "blocked"
+      ]
     },
     "shared_understanding": {
       "type": "string",
@@ -48,21 +45,20 @@
       "description": "Order by decision value. State one observation and its exact reference per item. Do not copy logs.",
       "items": { "type": "string", "maxLength": 800 }
     },
-    "uncertainties": {
-      "type": "array",
-      "maxItems": 32,
-      "description": "One material uncertainty per item. Explain how it affects the synthesis.",
-      "items": { "type": "string", "maxLength": 800 }
-    },
     "working_synthesis": {
       "type": "string",
       "maxLength": 1200,
-      "description": "State the synthesis first. Use short sentences. Include material uncertainty. Refer to evidence instead of duplicating it."
+      "description": "Explain the mechanism or tradeoff and any limitation that changes the judgment. Suggestions are options for the Leader, not requirements. Put only secondary, non-blocking caveats in optional details."
     },
     "suggested_next_exchange": {
       "type": "string",
       "maxLength": 600,
-      "description": "Give one next discussion action."
+      "description": "Optional suggested next discussion, not a new requirement. Omit when none is useful."
+    },
+    "unverified_edge_cases_and_warnings": {
+      "type": "array",
+      "description": "Dedicated sink for secondary caveats, untested edge cases, and scope limitations so working_synthesis stays sharp and focused on the core research question.",
+      "items": { "type": "string" }
     }
   }
 }

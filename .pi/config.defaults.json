@@ -53,7 +53,7 @@
     }
   },
   "codex": {
-    "maxExecutors": 4,
+    "maxExecutors": 10,
     "internalSubagent": {
       "model": "gpt-6.1-sol",
       "thinking": "high"

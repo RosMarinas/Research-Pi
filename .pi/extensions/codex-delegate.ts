@@ -31,6 +31,7 @@ import {
 	runtimeHeartbeatNeeded,
 } from "../lib/runtime-dock-ui.mjs";
 import {
+	runtimeActorRetired,
 	RESEARCH_LEADER_ACTOR_ID,
 	RUNTIME_MESSAGE_KIND,
 	assertRuntimeActorAttachment,
@@ -53,7 +54,7 @@ import {
 	subagentModelCard,
 	subagentResultSection,
 } from "../lib/subagent-message.mjs";
-import { dispatchRuntimeSubagent, queueSubagentMessage, deliverSubagentMessage } from "../lib/runtime-subagents.mjs";
+import { retireRuntimeSubagent, dispatchRuntimeSubagent, queueSubagentMessage, deliverSubagentMessage } from "../lib/runtime-subagents.mjs";
 
 // A mailbox jobId identifies the turn observed by the sender, not necessarily
 // the current turn of a durable Actor. Only follow actual continuation links.
@@ -86,6 +87,7 @@ const ActionSchema = Type.Union(
 		Type.Literal("status"),
 		Type.Literal("result"),
 		Type.Literal("cancel"),
+		Type.Literal("retire"),
 		Type.Literal("resume"),
 		Type.Literal("respond"),
 		Type.Literal("steer"),
@@ -95,7 +97,7 @@ const ActionSchema = Type.Union(
 		Type.Literal("settle_run"),
 		Type.Literal("release_resources"),
 	],
-	{ description: "Start or manage one Runtime subagent Action" },
+	{ description: "Start or manage one Runtime subagent Action. retire permanently ends a settled Actor participation while preserving history; cancel only stops a running turn" },
 );
 
 const BackendSchema = Type.Union(SUBAGENT_BACKENDS.map((backend) => Type.Literal(backend)), {
@@ -188,7 +190,7 @@ const ParamsSchema = Type.Object({
 	})),
 	background: Type.Optional(
 		Type.Boolean({
-			description: "Return a job id immediately. Defaults to true for executor and false for advisor.",
+			description: "Return a job id without waiting for completion. Defaults to true for every role and backend, including resume. Set false only when this call should wait for the result.",
 		}),
 	),
 	timeoutMinutes: Type.Optional(
@@ -198,7 +200,7 @@ const ParamsSchema = Type.Object({
 	),
 	jobId: Type.Optional(
 		Type.String({
-			description: "Existing job id for status, result, cancel, resume, respond, steer, or reconcile",
+			description: "Existing job id for status, result, cancel, retire, resume, respond, steer, or reconcile",
 		}),
 	),
 	resultSection: Type.Optional(ResultSectionSchema),
@@ -316,15 +318,7 @@ export function codexResultMarkdown(result: any): string {
 	if (!result || typeof result !== "object") return "Codex returned no structured result.";
 	const sections: string[] = [];
 	const outcome = String(result.outcome ?? "").trim();
-	const completionBasis = String(result.completion_basis ?? "").trim();
-	if (outcome || completionBasis) {
-		sections.push([
-			"## Delegation outcome",
-			"",
-			outcome ? `**${outcome}** · goal satisfied: ${result.goal_satisfied === true ? "yes" : "no"}` : "",
-			completionBasis,
-		].filter(Boolean).join("\n\n"));
-	}
+	if (outcome) sections.push(`## Result\n\n${outcome}`);
 	const summary = String(result.summary ?? "").trim();
 	if (summary) sections.push(`## Summary\n\n${summary}`);
 	const sharedUnderstanding = String(result.shared_understanding ?? "").trim();
@@ -363,7 +357,7 @@ export function codexResultMarkdown(result: any): string {
 		].join("\n"));
 	}
 
-	appendList("Uncertainties", result.uncertainties);
+	appendList("Notes", [...new Set([...resultList(result.uncertainties), ...resultList(result.unverified_edge_cases_and_warnings)])]);
 	appendList("Remaining delegated work", result.remaining_work);
 	const workingSynthesis = String(result.working_synthesis ?? "").trim();
 	if (workingSynthesis) sections.push(`## Working synthesis\n\n${workingSynthesis}`);
@@ -1218,11 +1212,12 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			"Codex advisor and executor are the primary path: advisor for architecture, design, competing explanations and read-only review; executor for implementation, experiments, testing and validation. Prefer these roles whenever they fit.",
 			"Use Antigravity environment for dependency, SDK, toolchain, container, runtime, remote-execution and other environment configuration work. Use Pi general when a different authenticated Pi model or provider perspective is the reason for delegation.",
 			"Use the user's configured runner by default. Set backend, model, or thinking only when the task has a concrete reason to override it; never replace an explicit user choice.",
+			"Delegate only independently useful work; do not add an advisor or tester automatically. Assess suggestions against the current question instead of accumulating requirements.",
 			"Use subagent for context isolation and genuinely independent parallel work. Codex executors use distinct missions and disjoint writeScope paths; omitted writeScope reserves the workspace. Do not poll in a loop.",
 			"Default to concise Runtime results, not handoff files or new reports. A runner change is an ordinary new Action with a short context message, not a handoff artifact.",
 			"Continue an Actor or named mission when its context helps; choose a new mission or reuse=never for independent work. Runtime handles continuation for every backend. Lifecycle operations remain tools; questions, replies and steering are participant messages.",
 			"Let Codex executor finish in-project work without command-by-command approval. External access must use the structured host bridge; never manufacture a grant, transmit a secret, or replace a job to bypass a request.",
-			"Interpret completed as transport state. Judge semantic outcome, goal_satisfied, evidence, validity, and remaining work; reconcile outcome_unknown only after inspecting external state.",
+			"Read the result to understand progress; inspect details when useful. Completed is transport state. Reconcile outcome_unknown from external state.",
 			"The default result is a concise decision card. Use resultSection to request one exact detail class. Do not request every section unless each section is necessary for the current decision.",
 			"Answer input_required on the exact jobId/requestId with respond when Pi can decide; ask the user only for a user-owned choice or direct credential setup.",
 			"Runtime delivers blocking and terminal events. The user may inspect with /watch and message an Actor directly; do not interpose or duplicate that instruction unless coordination actually requires it.",
@@ -1242,7 +1237,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 		},
 		renderResult(result, { expanded, isPartial }, theme) {
 			const details = result.details as CodexJobView | { missions?: unknown[] } | undefined;
-			if (!details || !("id" in details)) {
+			if (!details || !("id" in details) || "retiredAt" in details) {
 				const content = result.content.find((item) => item.type === "text");
 				return new Text(content?.type === "text" ? content.text : "Subagent returned no result.", 0, 0);
 			}
@@ -1307,7 +1302,13 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			const owner = await leaderScope(ctx, { requireAttached: mutatesSubagent });
 			const projectOwnerCheck = projectJobManagementScope(ctx, owner);
 			let ownerCheck = projectOwnerCheck;
-			let effectiveBackground = params.background ?? (["executor", "environment"].includes(startRole));
+			const effectiveBackground = params.background ?? true;
+			if (params.jobId && mutatesSubagent && params.action !== "retire") {
+				const snapshot = await readRuntimeSnapshot(owner.runtime);
+				const action = snapshot.actions.find((item) => item.externalId === params.jobId);
+				const actor = snapshot.actors.find((item) => item.id === action?.actorId || item.metadata?.latestJobId === params.jobId);
+				if (runtimeActorRetired(actor)) throw new Error("Actor is retired; only history and result reads remain available");
+			}
 			let job;
 			let commandReceipt: string | undefined;
 			const dispatchTask = async () => dispatchRuntimeSubagent({
@@ -1320,7 +1321,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 				projectKey: owner.projectKey, workspaceKey: owner.runtime.workspaceKey,
 				projectRevision: owner.projectRevision, researchTrackRef: owner.researchTrackRef, researchTrackLabel: owner.researchTrackLabel,
 				leaderSessionId: owner.leaderSessionId, leaderActorId: owner.leaderActorId, leaderBranchAnchorId: owner.leaderBranchAnchorId,
-				background: params.action === "start" ? effectiveBackground : params.background,
+				background: effectiveBackground,
 			});
 			if (ctx.hasUI && (params.action === "start" || params.action === "resume")) {
 				ctx.ui.setWorkingMessage(params.action === "start" ? `Starting ${backend} subagent...` : `Resuming ${backend} subagent...`);
@@ -1328,6 +1329,11 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			}
 
 			try {
+				if (params.action === "retire") {
+					const actor = await retireRuntimeSubagent({ runtime: owner.runtime, jobId: requireText(params.jobId, "jobId"), leaderSessionId: owner.leaderSessionId, ctx });
+					await getRuntimeUiAdapter()?.refresh(ctx);
+					return { content: [{ type: "text", text: `Retired ${actor.id}. History and results remain available; start a new Actor for future work.` }], details: actor };
+				}
 				if (backend !== "codex") {
 					const adapter = getSubagentRuntimeAdapter(backend);
 					if (!adapter) throw new Error(`${backend} subagent adapter is not loaded`);
@@ -1335,7 +1341,14 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 						const dispatched = await dispatchTask();
 						job = dispatched.job;
 						commandReceipt = dispatched.receipt;
-						if (!effectiveBackground) job = await adapter.wait({ jobId: job.id, signal });
+						if (ctx.hasUI) ctx.ui.setStatus("subagent", `⚙ ${backend}/${job.role ?? startRole} · ${job.status}`);
+						if (!effectiveBackground) {
+							if (ctx.hasUI) {
+								ctx.ui.setWorkingMessage(`Waiting for ${backend}/${job.role ?? startRole} to finish...`);
+								ctx.ui.setStatus("subagent", `⚙ ${backend}/${job.role ?? startRole} · waiting for result`);
+							}
+							job = await adapter.wait({ jobId: job.id, signal });
+						}
 					} else if (params.action === "status" || params.action === "result") {
 						job = await adapter[params.action]({ jobId: requireText(params.jobId, "jobId") });
 					} else if (params.action === "cancel") {
@@ -1370,7 +1383,6 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 						const dispatched = await dispatchTask();
 						job = dispatched.job;
 						commandReceipt = dispatched.receipt;
-						effectiveBackground = params.background ?? job.autoNotify ?? (job.mode === "executor");
 						break;
 					}
 					case "respond": {

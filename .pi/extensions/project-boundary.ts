@@ -46,7 +46,7 @@ type BoundaryRuntime = Awaited<ReturnType<typeof prepareBoundaryRuntime>>;
 type CapabilityContext = Awaited<ReturnType<typeof resolveCapabilityContext>>;
 type SystemRuntimePolicy = Awaited<ReturnType<typeof resolveSystemRuntimePolicy>>;
 const INITIAL_SESSION_POLICY = process.env.RESEARCH_PI_INITIAL_SESSION_MODE === "analysis" ? "analysis" : "project";
-const FULL_ACCESS_PROMPT_SUFFIX = "\n\n<research_pi_full_access>\nThe user explicitly launched Research Pi with full access. The project remains the task scope, but it is not an OS filesystem or command sandbox for this Leader Session. You may use host files, commands, network, Unix sockets, credentials, and external paths when they are genuinely required by the user's task, without requesting a Research Pi boundary grant. Do not broaden the task, expose secrets, or skip exact-target checks for destructive operations. Analysis Sessions and Codex advisor Actors remain read-only.\n</research_pi_full_access>";
+const FULL_ACCESS_PROMPT_SUFFIX = "\n\n<research_pi_full_access>\nThe user explicitly launched Research Pi with full access. The project remains the task scope, but it is not an OS filesystem or command sandbox for this Leader Session. You may use host files, commands, network, Unix sockets, credentials, and external paths when they are genuinely required by the user's task, without requesting a Research Pi boundary grant. Tool access does not authorize additional tasks or cancellation of active runs. Do not broaden the task, expose secrets, or skip exact-target checks for destructive operations. Analysis Sessions and Codex advisor Actors remain read-only.\n</research_pi_full_access>";
 
 function appendFullAccessPrompt(prompt: string): string {
 	return prompt.includes(FULL_ACCESS_PROMPT_SUFFIX) ? prompt : prompt + FULL_ACCESS_PROMPT_SUFFIX;
@@ -379,6 +379,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 		announce = true,
 		allowProjectScope = true,
 	) => {
+		if (leaderHasFullAccess(ctx)) return await createCapabilityGrant(approvalContext, request, "once");
 		if (!ctx.hasUI) return undefined;
 		const wslOneShot = approvalContext.wslVersion !== undefined &&
 			(request.kind === "host-command" || request.kind === "project-script");
@@ -418,7 +419,6 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			if (pendingRequest?.kind !== "host_capability" || !capability?.input || !capability?.context) {
 				return { status: "unsupported" as const };
 			}
-			if (!ctx.hasUI) return { status: "unavailable" as const };
 			const activeContext = requireCapabilityContext();
 			const sourceContext = capability.context as CapabilityContext;
 			if (!sameCapabilityProject(activeContext, sourceContext)) {
@@ -428,6 +428,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			if (inspected.grant) {
 				return { status: "approved" as const, grant: inspected.grant, existing: true };
 			}
+			if (!ctx.hasUI && !leaderHasFullAccess(ctx)) return { status: "unavailable" as const };
 			const grant = await requestInteractiveGrant(inspected.request, ctx, capability.input, sourceContext, false);
 			if (grant) await refreshBoundaryStatus(ctx).catch(() => undefined);
 			return grant
@@ -624,7 +625,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			// harness variable, so set it before initialization and wrapping.
 			process.env.CLAUDE_CODE_TMPDIR = runtime.runtimeTmp;
 			systemRuntime = await resolveSystemRuntimePolicy();
-			capabilityContext = await resolveCapabilityContext(runtime.root, ctx.sessionManager.getSessionId());
+			capabilityContext = await resolveCapabilityContext(runtime.root, process.env.RESEARCH_PI_CAPABILITY_SESSION_ID ?? ctx.sessionManager.getSessionId());
 			gitIdentity = await readGitIdentity(runtime.root);
 			await ensureProjectSandbox(ctx);
 			wslIsolation = await verifyWslHostInteropBlocked(runtime, gitIdentity);

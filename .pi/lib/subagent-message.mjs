@@ -1,5 +1,7 @@
 import { redactSensitiveText } from "./sensitive-text.mjs";
 
+export const SUBAGENT_WORKSPACE_POLICY = "Use the Leader-assigned branch, workspace, directory layout and write scope. Do not create, switch, merge or delete branches or worktrees. Ordinary files within scope need no approval. Preserve others' work and active runs. Commit only assigned changes. Remove only paths this task clearly supersedes or disposable files it created; preserve meaningful evidence.";
+
 export const SUBAGENT_RESULT_SECTIONS = [
 	"summary",
 	"request",
@@ -61,7 +63,7 @@ function detailSections(result, job) {
 		|| items(result?.candidate_explanations).length
 		|| items(result?.questions_to_resolve).length
 	) sections.push("analysis");
-	if (items(result?.uncertainties).length) sections.push("uncertainties");
+	if (items(result?.uncertainties).length || items(result?.unverified_edge_cases_and_warnings).length) sections.push("uncertainties");
 	if (items(result?.remaining_work ?? result?.questions_to_resolve).length) sections.push("remaining");
 	if (Array.isArray(job?.externalRuns) && job.externalRuns.length) sections.push("runs");
 	return sections;
@@ -78,14 +80,12 @@ function resultCard(job, messageId) {
 		`State: ${line(job?.status) || "terminal"}.`,
 		result.outcome ? `Outcome: ${line(result.outcome)}.` : undefined,
 		typeof result.goal_satisfied === "boolean" ? `Goal satisfied: ${result.goal_satisfied ? "yes" : "no"}.` : undefined,
-		result.completion_basis ? `Basis: ${block(result.completion_basis)}` : undefined,
 		summary ? `Result: ${summary}` : undefined,
 		fullSummary && !summary ? "Result: The full summary is in Runtime. It was not copied because it does not satisfy the concise-message contract." : undefined,
 	].filter(Boolean);
 	addSelected(lines, "Decision evidence", result.evidence, 3, "Read resultSection=evidence for the remaining items.");
-	addSelected(lines, "Material uncertainty", result.uncertainties, 2, "Read resultSection=uncertainties for the remaining items.");
 	addSelected(lines, "Remaining work", result.remaining_work ?? result.questions_to_resolve, 2, "Read resultSection=remaining for the remaining items.");
-	if (next) lines.push(`Next action: ${next}`);
+	if (next) lines.push(`Suggested next decision: ${next}`);
 	const error = block(job?.error);
 	if (error && !summary) {
 		lines.push(error.length <= 1_200
@@ -201,9 +201,8 @@ export function subagentResultSection(job, section = "summary") {
 	if (section === "summary") {
 		const summary = block(result.summary ?? result.working_synthesis ?? result.shared_understanding);
 		lines.push(summary ? `Result: ${summary}` : "No result summary was recorded.");
-		if (result.completion_basis) lines.push(`Basis: ${block(result.completion_basis)}`);
 		const next = block(result.recommended_next_step ?? result.suggested_next_exchange);
-		if (next) lines.push(`Next action: ${next}`);
+		if (next) lines.push(`Suggested next decision: ${next}`);
 	}
 	if (section === "request") {
 		const pending = job?.pendingRequest && typeof job.pendingRequest === "object" ? job.pendingRequest : null;
@@ -236,7 +235,7 @@ export function subagentResultSection(job, section = "summary") {
 	}
 	if (section === "evidence") renderSectionItems(lines, result.evidence, "No decision evidence was recorded.");
 	if (section === "changes") renderSectionItems(lines, result.changed_files, "No changed file was recorded.");
-	if (section === "uncertainties") renderSectionItems(lines, result.uncertainties, "No material uncertainty was recorded.");
+	if (section === "uncertainties") renderSectionItems(lines, [...new Set([...items(result.uncertainties), ...items(result.unverified_edge_cases_and_warnings)])], "No notes were recorded.");
 	if (section === "remaining") renderSectionItems(lines, result.remaining_work ?? result.questions_to_resolve, "No remaining work was recorded.");
 	if (section === "analysis") {
 		for (const [title, values] of [
@@ -282,6 +281,7 @@ export function runtimeDirectedMessageCard(message, actors = []) {
 		metadata.jobId ? `Job: ${line(metadata.jobId)}.` : undefined,
 		metadata.requestId ? `Request: ${line(metadata.requestId)}.` : undefined,
 		metadata.kind ? `Purpose: ${line(metadata.kind)}.` : undefined,
+		metadata.kind === "research_discussion" ? `Audience: ${line(metadata.audience) || "leader"}. Reply to ${line(message.from)} through the subagent mailbox; the sender may still be working.` : undefined,
 		message?.payloadRef ? `Payload: ${line(message.payloadRef)}.` : undefined,
 		"Content:",
 		block(message?.body),

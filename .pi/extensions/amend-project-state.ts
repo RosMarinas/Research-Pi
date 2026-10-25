@@ -75,6 +75,7 @@ export default function amendProjectStateExtension(pi: ExtensionAPI) {
 		promptSnippet: "Correct a bounded part of current Project State with authority and revision provenance",
 		promptGuidelines: [
 			"Use amend_project_state only when the existing ProjectView is narrowly wrong, incomplete, or out of date and the correction is supported by an explicit user decision, experiment, run, or authority document.",
+			"Use an explicit user change to steps, seeds, evaluation prerequisites, pauses or cancellations to correct affected active decisions and nextExperiment fields; do not wait for compaction or revive the old plan. Ordinary progress needs no amendment.",
 			"Do not use it to create initial Project State or to change the active research route; use /compact for initial synthesis and record_research_transition for route changes.",
 			"Copy the latest basedOnRevision, justify the correction, and omit unchanged fields. Array fields replace the array; nextExperiment merges supplied sub-fields. If stale, account for every freshness reason before retaining omitted fields.",
 			"Never manufacture evidenceRefs. Strong updates need actual references, and clean Sessions must use /runtime inherit before amendment.",
