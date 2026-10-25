@@ -1,3 +1,4 @@
+import { nativeInvocation, POWERSHELL_ARGS, POWERSHELL_PREAMBLE, psLiteral, windowsPowerShell } from "./windows-native.mjs";
 import { execFile } from "node:child_process";
 import { constants, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { access, appendFile, mkdir, readFile, realpath, stat } from "node:fs/promises";
@@ -288,7 +289,7 @@ export function sanitizeBoundaryEnvironment(source = process.env) {
 
 function executableCandidates(command, environment, platform) {
 	if (isAbsolute(command) || command.includes("/") || command.includes("\\")) return [command];
-	const pathEntries = String(environment.PATH ?? "").split(delimiter).filter(Boolean);
+	const pathEntries = String(environment[Object.keys(environment).find(key => key.toLowerCase() === "path") ?? "PATH"] ?? "").split(platform === "win32" ? ";" : delimiter).filter(Boolean);
 	if (platform !== "win32") return pathEntries.map((entry) => join(entry, command));
 	const extensions = command.includes(".")
 		? [""]
@@ -349,7 +350,7 @@ function workspaceRules(access) {
 }
 
 function temporaryDenyRules() {
-	const paths = new Set(["/tmp", "/private/tmp", tmpdir()]);
+	const paths = new Set(process.platform === "win32" ? [tmpdir()] : ["/tmp", "/private/tmp", tmpdir()]);
 	if (tmpdir().startsWith("/var/")) paths.add(`/private${tmpdir()}`);
 	return [...paths].map((path) => `${JSON.stringify(path)} = "deny"`).join(", ");
 }
@@ -445,7 +446,7 @@ export function codexPermissionConfigArguments(mode, workspaceRoot, runtimeTmp, 
 	const normalizedRuntime = normalizeSystemRuntimePolicy(runtimePolicy);
 	const shellEnvironment = {
 		...normalizedRuntime.environment,
-		GIT_CONFIG_GLOBAL: "/dev/null",
+		GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
 		GIT_CONFIG_NOSYSTEM: "1",
 		GIT_OPTIONAL_LOCKS: "0",
 		...(runtimeTmp
@@ -522,7 +523,7 @@ export async function runCodexSandboxPreflight(options) {
 	const environment = {
 		...sanitizeBoundaryEnvironment(options.environment ?? process.env),
 		...runtimePolicy.environment,
-		GIT_CONFIG_GLOBAL: "/dev/null",
+		GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
 		GIT_CONFIG_NOSYSTEM: "1",
 		GIT_OPTIONAL_LOCKS: "0",
 	};
@@ -531,16 +532,17 @@ export async function runCodexSandboxPreflight(options) {
 			cwd,
 			environment,
 		});
+		const invocation = nativeInvocation(codexBin, []);
 		const selfProbe = await execFileAsync(
-			codexBin,
+			invocation.executable,
 			[
-				...permissionArgs,
+				...invocation.args, ...permissionArgs,
 				"sandbox",
 				"-P",
 				profile,
 				"-C",
 				cwd,
-				codexBin,
+				invocation.executable, ...invocation.args,
 				"--version",
 			],
 			{
@@ -550,18 +552,25 @@ export async function runCodexSandboxPreflight(options) {
 				maxBuffer: 64 * 1024,
 			},
 		);
+		const nativeProbe = process.platform === "win32" ? [
+			POWERSHELL_PREAMBLE,
+			'git --version | Out-Null; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }',
+			...(existsSync(join(cwd, '.git')) ? ['git status --porcelain=v1 --untracked-files=no | Out-Null; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'] : []),
+			...(!fullAccess && existsSync(join(cwd, '.env')) ? ["$readable = $false; try { $null = [IO.File]::ReadAllBytes(" + psLiteral(join(cwd, '.env')) + "); $readable = $true } catch {} ; if ($readable) { throw 'project .env became readable' }"] : []),
+			...(mode === 'executor' && options.runtimeTmp ? ["$probe = Join-Path " + psLiteral(options.runtimeTmp) + " ([guid]::NewGuid().ToString()); try { $null = New-Item -ItemType Directory -Path $probe; Set-Content -LiteralPath (Join-Path $probe 'probe.txt') -Value 'permission probe' -Encoding utf8NoBOM } finally { if (Test-Path -LiteralPath $probe) { Remove-Item -LiteralPath $probe -Recurse -Force } }"] : []),
+			"Write-Output 'research-pi-codex-preflight=ok'",
+		].join('\n') : commands.join('\n');
+		const probeShell = process.platform === "win32" ? [(await windowsPowerShell()).exe, ...POWERSHELL_ARGS, nativeProbe] : ["/bin/sh", "-c", nativeProbe];
 		const { stdout, stderr } = await execFileAsync(
-			codexBin,
+			invocation.executable,
 			[
-				...permissionArgs,
+				...invocation.args, ...permissionArgs,
 				"sandbox",
 				"-P",
 				profile,
 				"-C",
 				cwd,
-				"/bin/sh",
-				"-c",
-				commands.join("\n"),
+				...probeShell,
 			],
 			{
 				cwd,
@@ -587,7 +596,7 @@ export async function runCodexSandboxPreflight(options) {
 }
 
 function canonicalTemporaryPaths() {
-	const paths = new Set(["/tmp", "/private/tmp", "/var/tmp", tmpdir()]);
+	const paths = new Set(process.platform === "win32" ? [tmpdir()] : ["/tmp", "/private/tmp", "/var/tmp", tmpdir()]);
 	if (tmpdir().startsWith("/var/")) paths.add(`/private${tmpdir()}`);
 	return [...paths];
 }
@@ -647,8 +656,8 @@ export function buildSandboxRuntimeConfig(root, environment = process.env, runti
 		...discoverSensitiveProjectPaths(root),
 	];
 	const externalDefaultWrites = [
-		"/tmp/claude",
-		"/private/tmp/claude",
+		...(process.platform === "win32" ? [] : ["/tmp/claude",
+		"/private/tmp/claude"]),
 		join(homedir(), ".npm", "_logs"),
 		join(homedir(), ".claude", "debug"),
 	];

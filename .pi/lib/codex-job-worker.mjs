@@ -1,3 +1,4 @@
+import { nativeInvocation, terminateOwnedProcess } from "./windows-native.mjs";
 import { spawn } from "node:child_process";
 import { codexModelConfigArgs, codexServiceTierParams } from "./model-settings.mjs";
 import { createHash } from "node:crypto";
@@ -771,6 +772,7 @@ async function main() {
 	};
 
 	const terminateChild = (signal = "SIGTERM") => {
+		if (process.platform === "win32") { terminateOwnedProcess(child); return; }
 		if (!child || child.exitCode !== null) return;
 		try {
 			child.kill(signal);
@@ -874,7 +876,9 @@ async function main() {
 		// The worker retains the opaque SSH agent handle for research_pi_host;
 		// the sandboxed Codex process itself must not even inherit its path.
 		delete codexChildEnvironment.SSH_AUTH_SOCK;
-		child = spawn(codexBin, appServerArgs, {
+		const invocation = nativeInvocation(codexBin, appServerArgs);
+		child = spawn(invocation.executable, invocation.args, {
+			windowsHide: true,
 			cwd: request.cwd,
 			detached: false,
 			shell: false,

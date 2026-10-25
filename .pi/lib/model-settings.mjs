@@ -1,6 +1,7 @@
+import { nativeInvocation } from "./windows-native.mjs";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import { sanitizeBoundaryEnvironment } from "./project-boundary.mjs";
+import { sanitizeBoundaryEnvironment, resolveExecutablePath } from "./project-boundary.mjs";
 export { getSupportedThinkingLevels } from "@earendil-works/pi-ai/models";
 
 export function validateServiceTier(value) {
@@ -60,9 +61,10 @@ export function parseAntigravityModels(output) {
 	}).filter(Boolean);
 }
 
-export function listAntigravityModels({ cwd, agyBin = process.env.PI_ANTIGRAVITY_BIN ?? "agy", timeoutMs = 15000 } = {}) {
+export async function listAntigravityModels({ cwd, agyBin = process.env.PI_ANTIGRAVITY_BIN ?? "agy", timeoutMs = 15000 } = {}) {
+	const invocation = nativeInvocation(process.platform === "win32" ? await resolveExecutablePath(agyBin, { cwd }) : agyBin, ["models"]);
 	return new Promise((resolve, reject) => {
-		const child = spawn(agyBin, ["models"], { cwd, env: sanitizeBoundaryEnvironment(process.env), stdio: ["ignore", "pipe", "pipe"], shell: false });
+		const child = spawn(invocation.executable, invocation.args, { cwd, env: sanitizeBoundaryEnvironment(process.env), stdio: ["ignore", "pipe", "pipe"], shell: false });
 		let stdout = "";
 		let stderr = "";
 		let settled = false;
@@ -86,9 +88,10 @@ export function listAntigravityModels({ cwd, agyBin = process.env.PI_ANTIGRAVITY
 
 // Read the signed-in Codex client's catalog, including supported efforts and tiers.
 // No thread or model turn is created; only this short-lived catalog process is closed.
-export function listCodexModels({ cwd, codexBin = process.env.PI_CODEX_BIN ?? "codex", timeoutMs = 15000 } = {}) {
+export async function listCodexModels({ cwd, codexBin = process.env.PI_CODEX_BIN ?? "codex", timeoutMs = 15000 } = {}) {
+	const invocation = nativeInvocation(process.platform === "win32" ? await resolveExecutablePath(codexBin, { cwd }) : codexBin, ["app-server", "--stdio"]);
 	return new Promise((resolve, reject) => {
-		const child = spawn(codexBin, ["app-server", "--stdio"], { cwd, stdio: ["pipe", "pipe", "ignore"], shell: false });
+		const child = spawn(invocation.executable, invocation.args, { cwd, stdio: ["pipe", "pipe", "ignore"], shell: false });
 		const lines = createInterface({ input: child.stdout });
 		const models = [];
 		let settled = false;

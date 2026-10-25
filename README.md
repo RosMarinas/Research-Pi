@@ -1,5 +1,8 @@
 # Research Pi
 
+此分支是 **windows-powershell-research-pi 原生 Windows 预览**，使用 PowerShell 7.6+，不依赖 WSL。安装与已知范围见 [原生 Windows 指南](docs/windows-powershell-guide.md)。当前支持前台 TUI/RPC 与 worker，未开放原生 resident/Web 模式；下方主线的 shell 安装说明不适用于此入口。
+
+
 简体中文 · [English](README_en.md)
 
 > Session is not enough for research. Project is.

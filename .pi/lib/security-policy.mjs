@@ -1,3 +1,4 @@
+import { nativeInvocation } from "./windows-native.mjs";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { realpath } from "node:fs/promises";
@@ -75,6 +76,26 @@ export async function resolveSystemRuntimePolicy(options = {}) {
 	const injectedEnvironment = {};
 	const diagnostics = [];
 
+	if (platform === "win32") {
+		for (const executable of [process.execPath, ...(await Promise.all(["pwsh.exe", "git.exe", "python.exe", "codex", "agy"].map(async name => {
+			try { const { stdout } = await (options.execFile ?? execFileAsync)("where.exe", [name], { env: environment, timeout: 3000 }); return stdout.trim().split(/\r?\n/)[0]; } catch { return null; }
+		})))]) {
+			if (executable) {
+				if (/\.(cmd|bat)$/i.test(executable)) {
+					try {
+						const entry = nativeInvocation(executable, [], 'win32').args[0];
+						let dir = dirname(entry);
+						while (dirname(dir) !== dir && !existsSync(join(dir, 'package.json'))) dir = dirname(dir);
+						if (existsSync(join(dir, 'package.json'))) {
+							readRoots.add(dir);
+							// Codex's platform binary is an optional sibling scoped package.
+							if (basename(dirname(dir)) === '@openai') readRoots.add(dirname(dir));
+						}
+					} catch { diagnostics.push('Unsupported runtime shim: ' + executable); }
+				} else { const dir = await canonicalDirectory(dirname(executable)); if (dir) readRoots.add(dir); }
+			}
+		}
+	}
 	if (platform === "darwin") {
 		const developerDirectory = await activeDeveloperDirectory(environment, options.execFile ?? execFileAsync);
 		if (developerDirectory) {

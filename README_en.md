@@ -1,5 +1,8 @@
 # Research Pi
 
+This is the **windows-powershell-research-pi native Windows preview** using PowerShell 7.6+, without WSL. See the [native Windows guide](docs/windows-powershell-guide.md). Foreground TUI/RPC and workers are the initial scope; resident/Web modes are not enabled on Windows. Use the branch guide instead of the Unix installation instructions below.
+
+
 [简体中文](README.md) · English
 
 > Session is not enough for research. Project is.

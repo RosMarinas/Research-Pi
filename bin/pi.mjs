@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { windowsPowerShell, nativeWindowsMode } from "../.pi/lib/windows-native.mjs";
 import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -233,7 +234,7 @@ async function spawnCore(argv, { background = false } = {}) {
 	argv = argv.filter(arg => arg !== "--resident-runtime");
 	const baseConfig = prepareConfig();
 	if (background && baseConfig.ui.web.mode === "off" && !argv.includes("--no-web") && !argv.includes("--web-tailscale") && !argv.includes("--web")) argv = [...argv, "--web"];
-	const web = parseWebOptions(argv, baseConfig.ui.web, { interactive: background || Boolean(process.stdin.isTTY && process.stdout.isTTY) });
+	const web = parseWebOptions(argv, process.platform === "win32" ? { ...baseConfig.ui.web, mode: "off" } : baseConfig.ui.web, { interactive: background || Boolean(process.stdin.isTTY && process.stdout.isTTY) });
 	const { workspace, args: userArgs, config, sessionMode, fullAccess } = takeResearchOptions(web.args, baseConfig);
 	if (web.enabled && userArgs.some((arg) => ["--mode", "--print", "-p"].includes(arg) || arg.startsWith("--mode="))) throw new Error("--web requires interactive TUI mode");
 	if (background && !web.enabled) throw new Error("pi web start requires Web mode");
@@ -258,6 +259,7 @@ async function spawnCore(argv, { background = false } = {}) {
 	if (process.env.RESEARCH_PI_TRACE === "1") process.env.PI_TRACE_DIR = paths.traceDir;
 
 	const args = ["--no-skills", "--no-extensions", "--no-themes"];
+	if (process.platform === "win32" && !informational) { await windowsPowerShell(); args.push("--exclude-tools", "bash"); }
 	// A shared, resizable terminal needs an application-owned scroll viewport.
 	if (web.enabled && !userArgs.includes("--tui-mode")) args.push("--tui-mode", "fullscreen");
 	const skillPaths = [
@@ -281,7 +283,7 @@ async function spawnCore(argv, { background = false } = {}) {
 	})) args.push("--extension", extension);
 	args.push(...userArgs);
 
-	if (!informational && !nativeRuntime) {
+	if (process.platform !== "win32" && !informational && !nativeRuntime) {
 		const { findNativeRuntime } = await import("../.pi/lib/native-runtime-launcher.mjs");
 		if (await findNativeRuntime(paths.stateRoot, workspace, sessionMode === "analysis")) nativeRuntime = true;
 	}
@@ -357,6 +359,7 @@ async function webCommand(argv) {
 
 async function main() {
 	const argv = process.argv.slice(2);
+	if (process.platform === "win32") nativeWindowsMode(argv);
 	if (argv[0] === "web") return await webCommand(argv.slice(1));
 	if (argv[0] === "watch") {
 		const { runSubagentWatch } = await import("../.pi/lib/subagent-watch-ui.mjs");

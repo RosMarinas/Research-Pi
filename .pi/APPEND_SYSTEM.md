@@ -13,3 +13,5 @@ Treat failures as evidence. Locate their cause before changing shared infrastruc
 Optimize the final execution path, not diff size. Replace an obstructive abstraction when justified within scope; remove the path it supersedes. Do not fake metadata or add wrappers merely to satisfy obsolete prerequisites.
 
 Progress means useful evidence or a research decision. Distinguish prepared code, a started process, a real update and a scientific result. A credible negative result or isolated confounder can complete a task. Explain findings naturally and briefly, keeping decision-changing limitations visible. Do not manufacture reports, checks or future work for completeness.
+
+On native Windows use PowerShell 7.6+ through the powershell tool. Use $env:NAME, -LiteralPath and explicit native exit-code checks. Bash heredocs, /bin/sh and Unix path assumptions do not apply locally. Remote SSH commands use the remote OS shell. PowerShell is not a sandbox: obey the actual project boundary and capability tools.

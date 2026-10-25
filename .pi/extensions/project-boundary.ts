@@ -1,10 +1,11 @@
+import { windowsPowerShell, POWERSHELL_PREAMBLE, terminateOwnedProcess } from "../lib/windows-native.mjs";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import type { ExtensionAPI, BashOperations } from "@earendil-works/pi-coding-agent";
-import { createBashTool } from "@earendil-works/pi-coding-agent";
+import { createBashTool, createPowerShellTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
 	authorizeCapabilityRequest,
@@ -174,14 +175,7 @@ function describeCapabilityRequest(request: any, operation?: any): string {
 	].join("\n");
 }
 
-function terminateProcess(child: ReturnType<typeof spawn>) {
-	if (!child.pid) return;
-	try {
-		process.kill(-child.pid, "SIGKILL");
-	} catch {
-		child.kill("SIGKILL");
-	}
-}
+const terminateProcess = terminateOwnedProcess;
 
 function createProjectBashOperations(
 	runtime: BoundaryRuntime,
@@ -198,7 +192,7 @@ function createProjectBashOperations(
 			}
 
 			const commandId = `research-pi-${randomUUID()}`;
-			const wrapped = await SandboxManager.wrapWithSandboxArgv(command, "/bin/zsh", undefined, signal, cwd, {
+			const wrapped = await SandboxManager.wrapWithSandboxArgv(process.platform === "win32" ? POWERSHELL_PREAMBLE + command : command, process.platform === "win32" ? await windowsPowerShell() : "/bin/zsh", undefined, signal, cwd, {
 				commandId,
 				commandText: command,
 			});
@@ -207,13 +201,13 @@ function createProjectBashOperations(
 			childEnv.TMPDIR = runtime.runtimeTmp;
 			childEnv.TMP = runtime.runtimeTmp;
 			childEnv.TEMP = runtime.runtimeTmp;
-			childEnv.GIT_CONFIG_GLOBAL = "/dev/null";
+			childEnv.GIT_CONFIG_GLOBAL = process.platform === "win32" ? "NUL" : "/dev/null";
 			childEnv.GIT_CONFIG_NOSYSTEM = "1";
 			childEnv.GIT_OPTIONAL_LOCKS = "0";
 			const gitConfigCount = Number.parseInt(childEnv.GIT_CONFIG_COUNT ?? "0", 10) || 0;
 			childEnv.GIT_CONFIG_COUNT = String(gitConfigCount + 1);
 			childEnv[`GIT_CONFIG_KEY_${gitConfigCount}`] = "core.excludesFile";
-			childEnv[`GIT_CONFIG_VALUE_${gitConfigCount}`] = "/dev/null";
+			childEnv[`GIT_CONFIG_VALUE_${gitConfigCount}`] = process.platform === "win32" ? "NUL" : "/dev/null";
 			if (gitIdentity) {
 				childEnv.GIT_AUTHOR_NAME = gitIdentity.name;
 				childEnv.GIT_AUTHOR_EMAIL = gitIdentity.email;
@@ -224,7 +218,8 @@ function createProjectBashOperations(
 			return await new Promise((resolveExec, reject) => {
 				const child = spawn(wrapped.argv[0], wrapped.argv.slice(1), {
 					cwd,
-					detached: true,
+					detached: process.platform !== "win32",
+					windowsHide: true,
 					shell: false,
 					stdio: ["ignore", "pipe", "pipe"],
 					env: childEnv,
@@ -288,7 +283,8 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 	let sandboxAccess: "read" | "write" | "full" | undefined;
 	let sandboxUpdate = Promise.resolve();
 	const inheritedSandboxTmp = process.env.CLAUDE_CODE_TMPDIR;
-	const baseBash = createBashTool(process.cwd());
+	const createShellTool = process.platform === "win32" ? createPowerShellTool : createBashTool;
+	const baseBash = createShellTool(process.cwd());
 	const launchFullAccess = researchPiFullAccessEnabled();
 	const leaderHasFullAccess = (ctx: any) => launchFullAccess && currentSessionPolicy(ctx) !== "analysis";
 
@@ -477,7 +473,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 
 	pi.registerTool({
 		...baseBash,
-		label: launchFullAccess ? "bash (full access for Leader)" : "bash (project boundary)",
+		label: `${baseBash.name} (${launchFullAccess ? "full access for Leader" : "project boundary"})`,
 		promptSnippet: launchFullAccess
 			? "Execute host commands with explicit full access in the Leader Session; Analysis remains project-read-only"
 			: "Execute shell commands inside the current project boundary with role-scoped write and network authority",
@@ -512,7 +508,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 				};
 			}
 			if (leaderHasFullAccess(ctx)) return await baseBash.execute(id, params, signal, onUpdate);
-			const sandboxed = createBashTool(ctx.cwd, {
+			const sandboxed = createShellTool(ctx.cwd, {
 				operations: createProjectBashOperations(runtime, gitIdentity, systemRuntime ?? await resolveSystemRuntimePolicy()),
 				exposeSessionEnvironment: false,
 			});
@@ -521,6 +517,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
+		if (process.platform === "win32" && event.toolName === "bash") return { block: true, reason: "Use the project-boundary powershell tool on native Windows.", terminate: false };
 		if (leaderHasFullAccess(ctx)) return undefined;
 		const requestedPath = directToolPath(event.toolName, event.input);
 		if (requestedPath === undefined) return undefined;
@@ -578,6 +575,10 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		try {
+			if (process.platform === "win32") {
+				await windowsPowerShell();
+				pi.setActiveTools([...new Set(pi.getActiveTools().filter(name => name !== "bash").concat("powershell"))]);
+			}
 			runtime = await prepareBoundaryRuntime(ctx.cwd);
 			const localExclude = await ensureProjectLocalStateExcluded(runtime.root).catch((error) => ({
 				status: "failed",

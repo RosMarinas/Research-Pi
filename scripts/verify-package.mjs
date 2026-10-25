@@ -7,7 +7,7 @@ import { join } from "node:path";
 const cache = mkdtempSync(join(tmpdir(), "research-pi-npm-cache-"));
 let output;
 try {
-	output = execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], {
+	output = execFileSync(process.platform === "win32" ? process.execPath : "npm", [...(process.platform === "win32" ? [process.env.npm_execpath] : []), "pack", "--dry-run", "--json", "--ignore-scripts"], {
 		encoding: "utf8",
 		maxBuffer: 4 * 1024 * 1024,
 		env: { ...process.env, npm_config_cache: cache },

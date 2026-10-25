@@ -35,12 +35,12 @@ export async function runBoundaryDoctor(options) {
 	const environment = {
 		...sanitizeBoundaryEnvironment(options.environment ?? process.env),
 		...systemRuntime.environment,
-		GIT_CONFIG_GLOBAL: "/dev/null",
+		GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
 		GIT_CONFIG_NOSYSTEM: "1",
 		GIT_OPTIONAL_LOCKS: "0",
 	};
 	const hostGit = await hostCommand("git", ["status", "--porcelain=v1", "--untracked-files=no"], runtime.root, environment);
-	const hostPython = await hostCommand("python3", ["--version"], runtime.root, environment);
+	const hostPython = await hostCommand(process.platform === "win32" ? "python.exe" : "python3", ["--version"], runtime.root, environment);
 	const gitIdentity = await readGitIdentity(runtime.root);
 	const probeCodex = async (mode) => {
 		try {

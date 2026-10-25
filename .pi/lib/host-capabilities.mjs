@@ -1,3 +1,4 @@
+import { nativeInvocation, terminateOwnedProcess } from "./windows-native.mjs";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { access, mkdir, open, readFile, readdir, realpath, rename, stat, writeFile } from "node:fs/promises";
@@ -576,22 +577,16 @@ export function hostBridgeEnvironment(source = process.env) {
 	return env;
 }
 
-function terminateProcess(child) {
-	if (!child?.pid || child.exitCode !== null) return;
-	try {
-		if (process.platform !== "win32") process.kill(-child.pid, "SIGKILL");
-		else child.kill("SIGKILL");
-	} catch {
-		child.kill("SIGKILL");
-	}
-}
+const terminateProcess = terminateOwnedProcess;
 
 async function runBoundedProcess(executable, args, options = {}) {
 	const timeoutSeconds = Math.min(Math.max(Number(options.timeoutSeconds ?? 3600), 1), 86400);
 	return await new Promise((resolveRun, rejectRun) => {
-		const child = spawn(executable, args, {
+		const invocation = nativeInvocation(executable, args);
+		const child = spawn(invocation.executable, invocation.args, {
 			cwd: options.cwd,
-			detached: true,
+			detached: process.platform !== "win32",
+			windowsHide: true,
 			shell: false,
 			stdio: ["ignore", "pipe", "pipe"],
 			env: hostBridgeEnvironment(options.env),

@@ -1,9 +1,10 @@
+import { nativeInvocation, terminateOwnedProcess } from "./windows-native.mjs";
 import { RESEARCH_PRINCIPLES, researchRolePrompt } from "./research-prompts.mjs";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { sanitizeBoundaryEnvironment } from "./project-boundary.mjs";
+import { sanitizeBoundaryEnvironment, resolveExecutablePath } from "./project-boundary.mjs";
 import { subagentModelCard, SUBAGENT_WORKSPACE_POLICY } from "./subagent-message.mjs";
 
 const FINAL_STATUSES = new Set(["completed", "failed", "cancelled", "input_required"]);
@@ -249,7 +250,9 @@ export function createSubagentSessionManager(options = {}) {
 	};
 
 	const startAntigravity = async (job, task) => {
-		const child = spawnProcess(agyBin, buildAntigravityRunnerArgs(job), {
+		const invocation = nativeInvocation(process.platform === "win32" ? await resolveExecutablePath(agyBin, { cwd: job.cwd }) : agyBin, buildAntigravityRunnerArgs(job));
+		const child = spawnProcess(invocation.executable, invocation.args, {
+			windowsHide: true,
 			cwd: job.cwd,
 			env: sanitizeBoundaryEnvironment(process.env),
 			shell: false,
@@ -447,7 +450,7 @@ export function createSubagentSessionManager(options = {}) {
 		for (const job of jobs.values()) {
 			if (!FINAL_STATUSES.has(job.status)) {
 				job.cancelling = true;
-				job.child?.kill("SIGTERM");
+				if (process.platform === "win32") terminateOwnedProcess(job.child); else job.child?.kill("SIGTERM");
 				await settle(job, "cancelled", null, "Research Pi session closed");
 			}
 			job.child?.stdin?.end();
@@ -462,7 +465,7 @@ export function createSubagentSessionManager(options = {}) {
 			if (!["completed", "failed", "cancelled"].includes(job.status)) throw new Error("Finish or cancel the subagent before retirement");
 			job.closed = true;
 			job.child?.stdin?.end();
-			job.child?.kill("SIGTERM");
+			if (process.platform === "win32") terminateOwnedProcess(job.child); else job.child?.kill("SIGTERM");
 		},
 		get,
 		getByActor,
