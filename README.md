@@ -14,7 +14,25 @@ Research Pi 是一个科研助手：帮你读代码、设计和运行实验、�
 
 ## 安装和启动
 
-先安装 **PowerShell 7.6+、Node.js 22.19+ 和 Git**。打开 PowerShell 7，不要使用系统自带的 Windows PowerShell 5.1。
+先安装 **PowerShell 7.6+、Node.js 22.19+ 和 Git**。打开 Windows 自带的 PowerShell，依次执行：
+
+```powershell
+winget install --id Microsoft.PowerShell --exact --source winget --installer-type wix
+winget install --id OpenJS.NodeJS.LTS --exact --source winget
+winget install --id Git.Git --exact --source winget
+```
+
+这些命令安装 PowerShell 稳定版、Node.js LTS 和 Git。如果找不到 `winget`，先在 Microsoft Store 中安装或更新“应用安装程序”。
+
+安装完成后，关闭终端，从开始菜单重新打开 **PowerShell 7**（不是 Windows PowerShell 5.1），确认版本：
+
+```powershell
+$PSVersionTable.PSVersion
+node --version
+git --version
+```
+
+PowerShell 应为 7.6 或更新的 7.x 稳定版，Node.js 应不低于 22.19。然后下载 Research Pi：
 
 ```powershell
 git clone -b windows-powershell-research-pi https://github.com/RosMarinas/Research-Pi.git

@@ -14,7 +14,25 @@ Research Pi helps with research: reading code, designing and running experiments
 
 ## Install and start
 
-Install **PowerShell 7.6+, Node.js 22.19+, and Git**. Open PowerShell 7, rather than the built-in Windows PowerShell 5.1.
+Install **PowerShell 7.6+, Node.js 22.19+, and Git**. Open the built-in Windows PowerShell and run these commands one at a time:
+
+```powershell
+winget install --id Microsoft.PowerShell --exact --source winget --installer-type wix
+winget install --id OpenJS.NodeJS.LTS --exact --source winget
+winget install --id Git.Git --exact --source winget
+```
+
+These install stable PowerShell, Node.js LTS, and Git. If `winget` is missing, install or update **App Installer** in the Microsoft Store first.
+
+After installation, close the terminal and open **PowerShell 7** from the Start menu (not Windows PowerShell 5.1). Check the versions:
+
+```powershell
+$PSVersionTable.PSVersion
+node --version
+git --version
+```
+
+Use stable PowerShell 7.6 or a newer 7.x release, and Node.js 22.19 or newer. Then download Research Pi:
 
 ```powershell
 git clone -b windows-powershell-research-pi https://github.com/RosMarinas/Research-Pi.git
