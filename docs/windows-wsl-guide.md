@@ -11,13 +11,13 @@ Research Pi 在 Windows 上的推荐入口是 WSL2。Agent、项目文件、Node
 | 分支 | 定位 | Host capability |
 |---|---|---|
 | `main` | macOS/Linux 主线，也可在正常 WSL2 中运行 | 按主线规则批准 SSH、外部读取和宿主命令；项目可信 command prefix 可持久复用 |
-| `windows-research-pi` | WSL2 严格隔离预览 | 只允许 SSH target 持久信任；host command/project script 必须 one-shot，并拒绝 `/mnt`、Windows executable 与 interop |
+| `windows-wsl-research-pi` | WSL2 严格隔离预览 | 只允许 SSH target 持久信任；host command/project script 必须 one-shot，并拒绝 `/mnt`、Windows executable 与 interop |
 
-如果你只是把 WSL2 当作 Linux 使用，项目始终在 `/home/...`，可直接安装 `main`。如果 Agent 拥有较高自动执行权限，而且“即使模型或项目脚本出错，也不能碰 Windows 系统盘”是硬要求，选择 `windows-research-pi`。
+如果你只是把 WSL2 当作 Linux 使用，项目始终在 `/home/...`，可直接安装 `main`。如果 Agent 拥有较高自动执行权限，而且“即使模型或项目脚本出错，也不能碰 Windows 系统盘”是硬要求，选择 `windows-wsl-research-pi`。
 
 ## 安全边界
 
-`windows-research-pi` 分支增加以下启动不变量：
+`windows-wsl-research-pi` 分支增加以下启动不变量：
 
 - 只支持 WSL2，拒绝 WSL1；
 - Research Pi 与目标科研项目必须位于 WSL 文件系统，例如 `/home/user/research/project`；
@@ -88,7 +88,7 @@ command -v node npm git zsh rg fdfind bwrap socat
 ```sh
 mkdir -p ~/research
 cd ~/research
-npm install -g 'git+https://github.com/RosMarinas/Research-Pi.git#windows-research-pi'
+npm install -g 'git+https://github.com/RosMarinas/Research-Pi.git#windows-wsl-research-pi'
 pi setup
 pi paths
 ```
@@ -109,7 +109,7 @@ OPENCODE_API_KEY=...
 
 ```sh
 cd ~/research
-git clone --branch windows-research-pi https://github.com/RosMarinas/Research-Pi.git
+git clone --branch windows-wsl-research-pi https://github.com/RosMarinas/Research-Pi.git
 cd Research-Pi
 npm ci --ignore-scripts
 ./run-pi.sh setup
@@ -123,7 +123,7 @@ npm ci --ignore-scripts
 ### 更新已有安装
 
 ```sh
-npm install -g 'git+https://github.com/RosMarinas/Research-Pi.git#windows-research-pi'
+npm install -g 'git+https://github.com/RosMarinas/Research-Pi.git#windows-wsl-research-pi'
 pi setup
 pi paths
 ```

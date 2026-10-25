@@ -4,7 +4,7 @@
 
 > Session is not enough for research. Project is.
 
-A research-first agent harness for AI, robotics, communications, optimization, and simulation. This `windows-research-pi` branch uses **Pi Core 1.0.0**, follows the main branch's features, and preserves strict isolation from the Windows host under WSL2.
+A research-first agent harness for AI, robotics, communications, optimization, and simulation. This `windows-wsl-research-pi` branch uses **Pi Core 1.0.0**, follows the main branch's features, and preserves strict isolation from the Windows host under WSL2.
 
 Research Pi keeps research goals, experiment records, decisions, and multi-agent collaboration at the project level. Sessions and models can change without restarting the explanation. Beyond code correctness, it asks: did the experiment test the intended hypothesis, what conclusions does the evidence support, and what would teach us the most next?
 
@@ -21,7 +21,7 @@ The `pi` commands below refer to Research Pi. If native Pi is also installed, fi
 ### 1. Install and create configuration
 
 ```sh
-npm install -g 'git+https://github.com/RosMarinas/Research-Pi.git#windows-research-pi'
+npm install -g 'git+https://github.com/RosMarinas/Research-Pi.git#windows-wsl-research-pi'
 pi setup
 pi paths
 ```
@@ -250,7 +250,7 @@ Re-run the installation command, then **exit and restart older Pi processes**. `
 For source development:
 
 ```sh
-git clone --branch windows-research-pi https://github.com/RosMarinas/Research-Pi.git
+git clone --branch windows-wsl-research-pi https://github.com/RosMarinas/Research-Pi.git
 cd Research-Pi
 npm ci --ignore-scripts
 ./run-pi.sh setup

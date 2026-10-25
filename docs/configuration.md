@@ -1,6 +1,6 @@
 # Research Pi Configuration
 
-On the `windows-research-pi` branch, WSL2 retains strict Windows-host isolation. Host commands and project scripts require one-shot approval; opaque SSH targets may be trusted per project. `--full-access` and `RESEARCH_PI_FULL_ACCESS=1` are rejected under WSL. See the [Windows / WSL2 guide](windows-wsl-guide.md) for installation and upgrade steps.
+On the `windows-wsl-research-pi` branch, WSL2 retains strict Windows-host isolation. Host commands and project scripts require one-shot approval; opaque SSH targets may be trusted per project. `--full-access` and `RESEARCH_PI_FULL_ACCESS=1` are rejected under WSL. See the [Windows / WSL2 guide](windows-wsl-guide.md) for installation and upgrade steps.
 
 Research Pi has one non-secret configuration for the research runtime. Leader model discovery, provider authentication, model scope and thinking controls belong to Pi Core rather than a second Research Pi profile system.
 

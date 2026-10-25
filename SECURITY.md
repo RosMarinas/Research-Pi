@@ -9,7 +9,7 @@ the documented project, credential, approval, or session boundaries.
 | Branch | Status |
 |---|---|
 | `main` | Supported |
-| `windows-research-pi` | Preview; security reports and fixes are handled on a best-effort basis |
+| `windows-wsl-research-pi` | Preview; security reports and fixes are handled on a best-effort basis |
 | Older commits and other development branches | Not supported |
 
 Research Pi does not yet publish stable release tags. Reproduce a report on the

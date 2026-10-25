@@ -16,7 +16,7 @@ export const CODEX_FULL_ACCESS_PROFILE = "research_pi_full_access";
 
 export function assertWslFullAccess(fullAccess, wslVersion = getWslVersion()) {
 	if (fullAccess && wslVersion !== undefined) {
-		throw new Error("windows-research-pi does not support --full-access or RESEARCH_PI_FULL_ACCESS=1 under WSL. Keep the project sandbox and use an approved host_capability for external operations.");
+		throw new Error("windows-wsl-research-pi does not support --full-access or RESEARCH_PI_FULL_ACCESS=1 under WSL. Keep the project sandbox and use an approved host_capability for external operations.");
 	}
 }
 

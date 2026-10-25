@@ -4,7 +4,7 @@
 
 > Session is not enough for research. Project is.
 
-面向 AI、机器人、通信、优化与仿真的科研 Agent Harness，基于 **Pi Core 1.0.0**。本页介绍 `windows-research-pi` 分支：同步主线功能，并保留 WSL2 与 Windows 宿主之间的严格隔离。
+面向 AI、机器人、通信、优化与仿真的科研 Agent Harness，基于 **Pi Core 1.0.0**。本页介绍 `windows-wsl-research-pi` 分支：同步主线功能，并保留 WSL2 与 Windows 宿主之间的严格隔离。
 
 Research Pi 把研究目标、实验记录、关键决定和多 Agent 协作留在项目中。Session 可以轮换，模型可以更换，研究主线不必从头解释。它关注的不只是“代码是否正确”，还包括：实验是否检验了预期假设、证据允许什么结论、下一步做什么最有信息量。
 
@@ -21,7 +21,7 @@ DeepSeek、OpenCode Go、Z.AI 都按同一流程接入：**安装 → 在凭据�
 ### 1. 安装并创建配置
 
 ```sh
-npm install -g 'git+https://github.com/RosMarinas/Research-Pi.git#windows-research-pi'
+npm install -g 'git+https://github.com/RosMarinas/Research-Pi.git#windows-wsl-research-pi'
 pi setup
 pi paths
 ```
@@ -335,7 +335,7 @@ WSL 下不支持 `pi --full-access` 或 `RESEARCH_PI_FULL_ACCESS=1`；Leader／C
 从源码开发：
 
 ```sh
-git clone --branch windows-research-pi https://github.com/RosMarinas/Research-Pi.git
+git clone --branch windows-wsl-research-pi https://github.com/RosMarinas/Research-Pi.git
 cd Research-Pi
 npm ci --ignore-scripts
 ./run-pi.sh setup
