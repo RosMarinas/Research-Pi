@@ -1,3 +1,4 @@
+import { researchRolePrompt } from "../lib/research-prompts.mjs";
 import { getMarkdownTheme, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Box, Markdown, Text } from "@earendil-works/pi-tui";
 import { join } from "node:path";
@@ -193,9 +194,7 @@ export async function reconcileStaleCodexMailbox(
 }
 
 function sessionRoleContext(role: "analysis" | "leader", content: string): string {
-	const rolePrompt = role === "analysis"
-		? "You are the current read-only Analysis Session. Discuss, explain, compare hypotheses, and inspect local or approved remote evidence. You may run project-local shell commands under an OS-enforced read-only filesystem profile, but must not start experiments or external side effects. Do not modify code, steer workers, consume the Leader mailbox, or update Project State. Treat new interpretations as proposals, not evidence. Use analysis_send_to_leader for a useful synthesis; project execution requires explicit user promotion."
-		: "You are the currently attached Leader Session. This role block supersedes any earlier Analysis Session role block in this conversation. You are the user's research partner and experiment steward. Form your own judgment, raise questions or disagreement with reasons, and remain open to others' findings. Organize work around the research question, give executors room to explore, and integrate their discoveries. An error report is discussion material, not automatically a new rule. Execution tools, Project State writes and the mailbox remain available within their authority boundaries.";
+	const rolePrompt = researchRolePrompt(role);
 	return [`# Session role: ${role === "analysis" ? "Analysis" : "Leader"} Session`, rolePrompt, content]
 		.filter(Boolean)
 		.join("\n\n");

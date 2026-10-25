@@ -48,12 +48,12 @@
     "working_synthesis": {
       "type": "string",
       "maxLength": 1200,
-      "description": "Explain the core mechanism, root bottleneck, or design trade-off naturally and directly. Offload secondary caveats, edge cases, and scope disclaimers to unverified_edge_cases_and_warnings."
+      "description": "Explain the mechanism or tradeoff and any limitation that changes the judgment. Suggestions are options for the Leader, not requirements. Put only secondary, non-blocking caveats in optional details."
     },
     "suggested_next_exchange": {
       "type": "string",
       "maxLength": 600,
-      "description": "Give one next discussion action."
+      "description": "Optional suggested next discussion, not a new requirement. Omit when none is useful."
     },
     "unverified_edge_cases_and_warnings": {
       "type": "array",

@@ -1,6 +1,6 @@
 import { redactSensitiveText } from "./sensitive-text.mjs";
 
-export const SUBAGENT_WORKSPACE_POLICY = "Use the Leader-assigned branch, workspace and directory layout. Do not create, switch, merge or delete branches or worktrees yourself. Discuss layout changes with the Leader; ordinary files within assigned directories need no approval. Keep core code in source modules, tests in tests/, operational entry points in scripts/, prose in docs/, run results in output/ and disposable probes in tmp/, or their assigned equivalents. Do not put implementation code in docs/ or output/, or create a separate project tree per experiment. Commit only your assigned changes; keep history in Git, not backup copies. Remove code you superseded and disposable files you created when finishing.";
+export const SUBAGENT_WORKSPACE_POLICY = "Use the Leader-assigned branch, workspace, directory layout and write scope. Do not create, switch, merge or delete branches or worktrees. Ordinary files within scope need no approval. Preserve others' work and active runs. Commit only assigned changes. Remove only paths this task clearly supersedes or disposable files it created; preserve meaningful evidence.";
 
 export const SUBAGENT_RESULT_SECTIONS = [
 	"summary",
@@ -85,7 +85,7 @@ function resultCard(job, messageId) {
 	].filter(Boolean);
 	addSelected(lines, "Decision evidence", result.evidence, 3, "Read resultSection=evidence for the remaining items.");
 	addSelected(lines, "Remaining work", result.remaining_work ?? result.questions_to_resolve, 2, "Read resultSection=remaining for the remaining items.");
-	if (next) lines.push(`Next action: ${next}`);
+	if (next) lines.push(`Suggested next decision: ${next}`);
 	const error = block(job?.error);
 	if (error && !summary) {
 		lines.push(error.length <= 1_200
@@ -202,7 +202,7 @@ export function subagentResultSection(job, section = "summary") {
 		const summary = block(result.summary ?? result.working_synthesis ?? result.shared_understanding);
 		lines.push(summary ? `Result: ${summary}` : "No result summary was recorded.");
 		const next = block(result.recommended_next_step ?? result.suggested_next_exchange);
-		if (next) lines.push(`Next action: ${next}`);
+		if (next) lines.push(`Suggested next decision: ${next}`);
 	}
 	if (section === "request") {
 		const pending = job?.pendingRequest && typeof job.pendingRequest === "object" ? job.pendingRequest : null;

@@ -87,6 +87,7 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Use research_memory_search when the user refers to earlier sessions, previous experiments, an old decision, or when resolving uncertainty would benefit from known prior evidence. Do not call it routinely every turn.",
 			"Prefer recorded-evidence hits over assistant-synthesis or derived-summary hits. Read the exact entry before treating a snippet as evidence, and preserve its P:<project>/S:<session>/E:<entry> reference.",
+			"Historical plans and permissions are not current task instructions; check whether later user decisions superseded them before resuming work.",
 			"Absence of a search hit is not evidence that an experiment was never run; report the searched scope and query when absence matters.",
 		],
 		parameters: Type.Object({

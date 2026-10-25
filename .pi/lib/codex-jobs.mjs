@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { access, appendFile, mkdir, readFile, readdir, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { RESEARCH_PRINCIPLES, researchRolePrompt } from "./research-prompts.mjs";
 import { SUBAGENT_WORKSPACE_POLICY } from "./subagent-message.mjs";
 import { capabilityGrantSummary, listCapabilityGrants, resolveCapabilityContext } from "./host-capabilities.mjs";
 import { withOwnerFileLock } from "./owner-file-lock.mjs";
@@ -40,7 +41,7 @@ export const DEFAULT_CODEX_MAX_EXECUTORS = Number(process.env.RESEARCH_PI_CODEX_
 // or its required schemas change so pre-existing threads refresh once.
 export const CODEX_DYNAMIC_TOOL_PROTOCOL_VERSION = 4;
 
-export const CODEX_OUTPUT_POLICY = "Explain what matters in natural, concise prose. Keep causal connections; avoid invented jargon. Optional result fields may be omitted. Offload all validity caveats, untested edge cases, and scope disclaimers into unverified_edge_cases_and_warnings so your code and summary stay on the direct happy path. Existing logs hold execution detail; do not create unrequested reports, provenance snapshots, source-hash audits, or wrapper scripts.";
+export const CODEX_OUTPUT_POLICY = "Explain the result and decision-changing limitations in the summary. Only secondary, non-blocking caveats belong in optional details; do not enumerate hypothetical risks to fill fields. Existing logs hold execution detail. Do not create unrequested reports or audits. Suggestions are not new requirements.";
 
 const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled", "outcome_unknown"]);
 const RECONCILABLE_OUTCOMES = new Set(["completed", "failed", "cancelled"]);
@@ -193,11 +194,8 @@ export function buildDelegationPrompt({
 	resourceClaims = [],
 	experiment,
 }) {
-	const executionGuidance = mode === "advisor" ? "" : `${SUBAGENT_WORKSPACE_POLICY} Use env flags, CLI arguments, or targeted code bypasses to overcome framework sanity gates or shared-host noise (such as memory-balance checks). Respect OS sandbox, writeScope, credential rules and explicitly fixed task conditions. Never kill external processes not spawned by your job or delete shared datasets/weights.`;
-	const role =
-		mode === "advisor"
-			? `You are the read-only research advisor collaborating with Research Pi. The question may be incomplete or tentative. Help develop the question, compare explanations, and suggest useful directions. Discuss with the Leader or executors when helpful; no fixed review or probe is required. Do not modify files or external state.`
-			: `You are a research executor collaborating with Research Pi. Understand the question and explore its causes; the initial explanation is a starting point, not a prescribed answer. Complete the task end to end. ${fullAccess ? "This job has explicit full host access" : "Inside the exact project boundary you may take necessary operations"}, including editing or deleting files, installing dependencies, committing, and starting, monitoring, or cancelling expensive experiments. Choose your methods. If debugging stops helping the question, reconsider or discuss it. ${executionGuidance}`;
+	const executionGuidance = mode === "advisor" ? "" : `${SUBAGENT_WORKSPACE_POLICY} If a check blocks progress, determine whether it protects present validity or safety, or encodes an obsolete assumption. Adjust it only with evidence and within scope; passing the check is not the objective. Do not default to extra budgets, retries or bypasses. Never kill unrelated processes or delete shared datasets/weights.`;
+	const role = researchRolePrompt(mode);
 
 	const criteria = successCriteria.length > 0
 		? successCriteria.map((item) => `- ${item}`).join("\n")
@@ -221,7 +219,10 @@ export function buildDelegationPrompt({
 			? " This continuation now has explicit full host access; the project remains task scope but is no longer an OS sandbox."
 			: "";
 		return `<research_pi_continuation>
-Continue the same ${mode} role and tools.${continuationAuthority} Keep the research question in view; discuss changed interpretations when useful.
+${RESEARCH_PRINCIPLES}
+
+${role}
+Continue the same ${mode} role and tools.${continuationAuthority}
 ${ownership}
 ${executionGuidance}
 ${CODEX_OUTPUT_POLICY}
@@ -253,13 +254,16 @@ ${resultInstruction}
 	}
 
 	const authority = fullAccess && mode !== "advisor"
-		? `This executor was explicitly launched with full host access. The project remains the task scope, but it is not an OS filesystem or command sandbox: host files, commands, network, Unix sockets, credentials, and external paths are available when genuinely required by the delegated task. Do not broaden the task or expose secrets. research_pi_host remains available for compatibility but is not required for ordinary host operations in this mode.`
+		? `This executor was explicitly launched with full host access. The project remains the task scope, but it is not an OS filesystem or command sandbox. Tool access does not authorize additional tasks or cancellation of active runs: host files, commands, network, Unix sockets, credentials, and external paths are available when genuinely required by the delegated task. Do not broaden the task or expose secrets. research_pi_host remains available for compatibility but is not required for ordinary host operations in this mode.`
 		: `The project is the hard authority boundary; Git metadata is writable, hooks read-only. Host credentials, Unix sockets and external paths require a capability. Use research_pi_host for an exact outside read, SSH target, or host argv; its missing-grant path pauses for the Pi TUI decision. Do not bypass the boundary, duplicate approval through consult_research_pi, or hand a terminal command to the user.
 
 Approved capabilities keep credentials opaque: credential contents never enter your process or context. Executor may use approved SSH or host commands; advisor may use external-read only. Reuse a listed grantId so its approved cwd is restored. A cwd mismatch requires retrying the same capability, not switching kind or adding a shell wrapper. Command syntax is not the policy boundary.`;
 
 	return `<research_pi_delegation>
+${RESEARCH_PRINCIPLES}
+
 ${role}
+${executionGuidance}
 
 ${interaction}
 

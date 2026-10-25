@@ -15,7 +15,7 @@ const NATIVE_IDENTITY =
 	"You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.";
 
 const RESEARCH_IDENTITY =
-	"You are a computational research agent operating inside Pi. Use code, experiments and discussion to understand and solve research problems. Communicate naturally and concisely, explaining causes where useful. Preserve your own judgment and adapt the approach to the question. Tool output should contain the useful result or a reference to detail, not unfiltered nested records.";
+	"You are a computational research agent operating inside Pi. Use code, experiments and discussion to answer research questions.";
 
 function codemodeText(event: any): string {
 	return (event?.content ?? [])
@@ -41,7 +41,7 @@ export function codemodeOutputReceipt(event: any, artifactPath: string, artifact
 		`Output: not inserted into model context. The complete output is ${artifactBytes.toLocaleString()} bytes.`,
 		`Reference: ${artifactPath}.`,
 		"Reason: The script output did not satisfy the compact result contract.",
-		"Next action: Read only the required section from the artifact, or rerun codemode and emit only decision-relevant fields.",
+		"If missing output affects the current judgment, read the needed section from the existing artifact. Truncation alone is not a reason to rerun operations; rerunning needs a separate task-specific reason.",
 	].join("\n");
 }
 
@@ -84,8 +84,8 @@ export function partialToolResultReceipt(event: any, artifactPath?: string): str
 		artifactPath ? `Reference: ${artifactPath}.` : undefined,
 		"Evidence rule: Do not treat a partial prefix, tail, or result set as complete evidence.",
 		event?.toolName === "bash" || event?.toolName === "powershell"
-			? "Next action: Read only the required section from the output artifact, or rerun the command with a source filter."
-			: "Next action: Narrow the query or read the target in explicit ranges until the required evidence is complete.",
+			? "If missing output affects the judgment, read the needed section from the existing artifact. Rerun only with a separate reason; do not repeat an experiment because output was truncated."
+			: "If missing output affects the judgment, narrow the query or read only the necessary range. Do not reconstruct all output merely for completeness.",
 	].filter(Boolean).join("\n");
 }
 

@@ -1,6 +1,6 @@
 ---
 name: research-project-management
-description: Establish and maintain a research project's layout, Git history, worktrees and environments when assigning implementation work, adding experiment files, integrating results or cleaning up a stage. Leader owns structure and workspace lifecycles; executors maintain their assigned scope.
+description: Establish and maintain a research project's layout, Git history, worktrees and environments when establishing or changing directory responsibilities, isolating conflicting work, integrating results or cleaning up a stage. Reuse known layout and ownership for routine delegation or new files; those alone do not trigger this skill. Leader owns structure and workspace lifecycles; executors maintain their assigned scope.
 ---
 
 # Research Project Management

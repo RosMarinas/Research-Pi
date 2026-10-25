@@ -1,3 +1,4 @@
+import { RESEARCH_PRINCIPLES, researchRolePrompt } from "./research-prompts.mjs";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
@@ -67,20 +68,9 @@ export function formatSubagentSessionJob(job) {
 	return subagentModelCard(job);
 }
 
-const PLAIN_TECHNICAL_STYLE = "Explain what matters in natural, concise prose, retaining causal connections. Use existing logs for execution detail. No routine report or list of uncertainties is needed.";
-
-function piRolePrompt(role) {
-	let instruction;
-	if (role === "advisor") instruction = "Act as a read-only research advisor. Clarify the design. Compare explanations. Return a concise synthesis. Do not modify files.";
-	else if (role === "environment") instruction = "Act as an environment and tooling specialist. Diagnose and configure the project environment. Stay inside the current workspace. Report exact checks.";
-	else if (role === "executor") instruction = "Act as an execution subagent. Understand the research question and explore it independently. Choose useful changes and checks; reconsider local debugging that no longer helps the question. Discuss with the Leader when useful and return the actual result.";
-	else instruction = "Act as a context-isolated research subagent. Complete the bounded task. Explain the result naturally; add supporting detail only when useful.";
-	return `${instruction} ${PLAIN_TECHNICAL_STYLE}`;
-}
-
-function antigravityRolePrompt(role) {
-	if (role === "environment") return `You are the environment specialist for Research Pi. Configure and diagnose the toolchain, dependencies, SDKs, runtime, containers, remote execution, and system integration needed by the task. Complete the work. Report exact checks. ${PLAIN_TECHNICAL_STYLE}`;
-	return piRolePrompt(role);
+export function buildWorkerPrompt(input) {
+	return [RESEARCH_PRINCIPLES, researchRolePrompt(input.role), input.systemPrompt,
+		input.role === "advisor" ? "" : SUBAGENT_WORKSPACE_POLICY].filter(Boolean).join("\n\n");
 }
 
 function writeRecord(child, value) {
@@ -99,7 +89,7 @@ export function buildPiRunnerArgs(input) {
 		"--session-dir", input.sessionDir,
 		"--session-id", input.sessionId,
 		"--name", `Research Pi ${input.role} ${input.id.slice(-8)}`,
-		"--append-system-prompt", `${input.systemPrompt ?? piRolePrompt(input.role)}${input.role === "advisor" ? "" : ` ${SUBAGENT_WORKSPACE_POLICY}`}`,
+		"--append-system-prompt", buildWorkerPrompt(input),
 	];
 	if (input.boundaryExtension) args.push("--extension", input.boundaryExtension);
 	if (input.model && input.model !== "inherit") args.push("--model", input.model);
@@ -259,7 +249,6 @@ export function createSubagentSessionManager(options = {}) {
 	};
 
 	const startAntigravity = async (job, task) => {
-		job.systemPrompt = job.systemPrompt ?? antigravityRolePrompt(job.role);
 		const child = spawnProcess(agyBin, buildAntigravityRunnerArgs(job), {
 			cwd: job.cwd,
 			env: sanitizeBoundaryEnvironment(process.env),
@@ -285,7 +274,7 @@ export function createSubagentSessionManager(options = {}) {
 				if (!FINAL_STATUSES.has(job.status)) await settle(job, job.cancelling ? "cancelled" : "failed", null, `Antigravity runner exited (${code ?? "?"}${signal ? `, ${signal}` : ""})`);
 			});
 		});
-		await beginTurn(job, `${job.systemPrompt}${job.role === "advisor" ? "" : ` ${SUBAGENT_WORKSPACE_POLICY}`}\n\nTask: ${task}`);
+		await beginTurn(job, `${buildWorkerPrompt(job)}\n\nTask: ${task}`);
 	};
 
 	const handleAntigravityRecord = async (job, line) => {

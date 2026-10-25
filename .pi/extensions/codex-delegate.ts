@@ -1212,6 +1212,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			"Codex advisor and executor are the primary path: advisor for architecture, design, competing explanations and read-only review; executor for implementation, experiments, testing and validation. Prefer these roles whenever they fit.",
 			"Use Antigravity environment for dependency, SDK, toolchain, container, runtime, remote-execution and other environment configuration work. Use Pi general when a different authenticated Pi model or provider perspective is the reason for delegation.",
 			"Use the user's configured runner by default. Set backend, model, or thinking only when the task has a concrete reason to override it; never replace an explicit user choice.",
+			"Delegate only independently useful work; do not add an advisor or tester automatically. Assess suggestions against the current question instead of accumulating requirements.",
 			"Use subagent for context isolation and genuinely independent parallel work. Codex executors use distinct missions and disjoint writeScope paths; omitted writeScope reserves the workspace. Do not poll in a loop.",
 			"Default to concise Runtime results, not handoff files or new reports. A runner change is an ordinary new Action with a short context message, not a handoff artifact.",
 			"Continue an Actor or named mission when its context helps; choose a new mission or reuse=never for independent work. Runtime handles continuation for every backend. Lifecycle operations remain tools; questions, replies and steering are participant messages.",

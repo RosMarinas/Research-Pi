@@ -21,7 +21,7 @@
     "summary": {
       "type": "string",
       "maxLength": 1200,
-      "description": "Direct engineer-to-engineer summary of what changed, what was observed, and why. Keep this focused on the primary result and actual blockers; offload all validity caveats, untested edge cases, and scope limitations to unverified_edge_cases_and_warnings."
+      "description": "State the primary result and any limitation that changes its interpretation or the next decision. Distinguish implementation completion from real execution and scientific evidence. Put only secondary, non-blocking caveats in optional details."
     },
     "evidence": {
       "type": "array",
@@ -88,11 +88,11 @@
     "recommended_next_step": {
       "type": "string",
       "maxLength": 600,
-      "description": "Give one next decision or task. Do not put unfinished current-turn work here."
+      "description": "Optional suggested next decision, not an instruction or authorization. Omit when none is useful; keep unfinished current work in remaining_work."
     },
     "unverified_edge_cases_and_warnings": {
       "type": "array",
-      "description": "Dedicated sink for all validity caveats, untested edge cases, environmental noise, and scope limitations. Offload all defensive caveats and limitations here so your code and summary stay focused on the direct happy path and causal results.",
+      "description": "Optional secondary, non-blocking limitations. Decision-changing validity limitations must also appear in summary. Do not invent hypothetical risks to fill this field.",
       "items": { "type": "string" }
     }
   }

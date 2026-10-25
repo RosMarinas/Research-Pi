@@ -954,7 +954,7 @@ async function main() {
 				name: "submit_research_pi_result",
 				description: request.mode === "advisor"
 					? "Submit the advisor working synthesis exactly once when the consultation turn is ready to hand back to Research Pi. Do not use this for commentary or progress updates."
-					: "Submit the executor's structured final handoff exactly once, only after the delegated objective succeeds, reaches a genuine blocker, or irrecoverably fails. Do not use this for plans, preambles, audit checkpoints, or progress updates.",
+					: "Submit the executor's structured final handoff exactly once, only after the delegated objective succeeds (including a credible negative result or isolated confounder when that answers the task), reaches a genuine blocker, or irrecoverably fails. Do not use this for plans, preambles, audit checkpoints, or progress updates.",
 				inputSchema: resultInputSchema,
 			},
 			{
