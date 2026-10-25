@@ -87,8 +87,8 @@ export async function deliverSubagentMessage(runtime, message, ctx) {
 	});
 }
 
-export async function drainSubagentMailbox(runtime, ctx) {
-	const snapshot = await readRuntimeSnapshot(runtime);
+export async function drainSubagentMailbox(runtime, ctx, options = {}) {
+	const snapshot = options.snapshot ?? await readRuntimeSnapshot(runtime);
 	const actors = new Map(snapshot.actors.map((actor) => [actor.id, actor]));
 	let delivered = 0;
 	for (const message of snapshot.messages) {
@@ -97,6 +97,7 @@ export async function drainSubagentMailbox(runtime, ctx) {
 		if (message.metadata?.workspaceKey && message.metadata.workspaceKey !== runtime.workspaceKey) continue;
 		const result = await deliverSubagentMessage(runtime, message, ctx);
 		if (result.status === "delivered") delivered++;
+		else if (result.status === "queued") options.onDeferred?.(message);
 	}
 	return delivered;
 }

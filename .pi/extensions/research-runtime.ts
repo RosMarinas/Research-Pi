@@ -780,7 +780,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		ctx: ExtensionContext,
 		options: { preempt?: boolean; triggerTurn?: boolean; deferWhenBusy?: boolean } = {},
 	): Promise<"delivered" | "deferred" | "handled"> => {
-		if (runtimeCompactionReserved(ctx)) return "deferred";
+		if (runtimeCompactionReserved(ctx) || (options.deferWhenBusy && !options.preempt && !ctx.isIdle())) return "deferred";
 		if (deliveringMessageIds.has(messageId)) return "deferred";
 		deliveringMessageIds.add(messageId);
 		try {
@@ -843,14 +843,22 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		const sessionId = ctx.sessionManager.getSessionId();
 		const attachment = runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID, sessionId);
 		if (!attachment) return null;
-		const subagentDeliveries = await drainSubagentMailbox(activeRuntime, ctx);
+		let pending = false;
+		const subagentDeliveries = await drainSubagentMailbox(activeRuntime, ctx, {
+			snapshot, onDeferred: () => { pending = true; },
+		});
 		const open = unconsumedRuntimeMessages(snapshot, {
 			to: RESEARCH_LEADER_ACTOR_ID,
 			forSessionId: sessionId,
 			forAttachmentEpoch: attachment.epoch,
 		});
-		if (!open.length) return subagentDeliveries;
-		return subagentDeliveries + await deliverOpenLeaderMessages(activeRuntime, snapshot, ctx, options);
+		if (!open.length) return { delivered: subagentDeliveries, pending };
+		const delivered = subagentDeliveries + await deliverOpenLeaderMessages(activeRuntime, snapshot, ctx, options);
+		const latest = await readRuntimeSnapshot(activeRuntime);
+		pending ||= unconsumedRuntimeMessages(latest, {
+			to: RESEARCH_LEADER_ACTOR_ID, forSessionId: sessionId, forAttachmentEpoch: attachment.epoch,
+		}).length > 0;
+		return { delivered, pending };
 	};
 
 	const runtimeMailboxWatcher = createRuntimeMailboxWatcher({
@@ -1403,7 +1411,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 				triggerTurn: true,
 				deferWhenBusy: true,
 			});
-			if (delivered) runtimeChanged = true;
+			if (delivered?.delivered) runtimeChanged = true;
 		}
 		if (runtimeChanged) {
 			await refreshProjectView(ctx);

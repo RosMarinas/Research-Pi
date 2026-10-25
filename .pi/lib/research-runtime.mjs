@@ -3,6 +3,7 @@ import { appendFile, mkdir, open, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveCodexWorkspaceIdentity } from "./codex-jobs.mjs";
+import { createRuntimeLedgerCache, freezeRuntimeValue } from "./runtime-ledger-cache.mjs";
 import { withOwnerFileLock } from "./owner-file-lock.mjs";
 import { applyResearchStatePatch } from "./research-compact.mjs";
 import { researchPiStateRoot } from "./runtime-paths.mjs";
@@ -251,7 +252,14 @@ export async function appendRuntimeEventAtRevision(runtime, eventType, data, exp
 	});
 }
 
+const cachedRuntimeEvents = createRuntimeLedgerCache(loadRuntimeEvents);
+const runtimeSnapshots = new WeakMap();
+
 export async function readRuntimeEvents(runtime) {
+	return await cachedRuntimeEvents(runtime);
+}
+
+async function loadRuntimeEvents(runtime) {
 	let text;
 	try {
 		text = await readFile(runtime.ledgerPath, "utf8");
@@ -278,7 +286,17 @@ export async function readRuntimeEvents(runtime) {
 	return events;
 }
 
+// Snapshots and events are read-only, shared for an unchanged ledger version.
 export async function readRuntimeSnapshot(runtime) {
+	const events = await readRuntimeEvents(runtime);
+	let views = runtimeSnapshots.get(events);
+	if (!views) { views = new Map(); runtimeSnapshots.set(events, views); }
+	const key = JSON.stringify([runtime.workspaceKey, runtime.workspaceRoot]);
+	if (!views.has(key)) views.set(key, freezeRuntimeValue(projectRuntimeEvents(runtime, events)));
+	return views.get(key);
+}
+
+function projectRuntimeEvents(runtime, events) {
 	const actors = new Map();
 	const attachments = new Map();
 	const messages = new Map();
@@ -293,7 +311,6 @@ export async function readRuntimeSnapshot(runtime) {
 	let projectState = null;
 	let projectBrief = null;
 	let revision = 0;
-	const events = await readRuntimeEvents(runtime);
 	for (const event of events) {
 		const data = event.data ?? {};
 		if (PROJECT_REVISION_EVENT_TYPES.has(event.type)) revision += 1;
