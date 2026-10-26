@@ -45,3 +45,9 @@ Counters start when monitoring is enabled. Missing counters mean no instrumented
 To check a real workload, enable monitoring before it starts, inspect `/perf status` while watching a subagent, then detach with `Ctrl+]` and inspect again from the Leader. Compare CPU and terminal traffic at similar workload phases; these observational samples alone do not establish an exact UI overhead percentage. Turn monitoring off when finished. Leader-controlled sampling turns monitoring on/off in its children; a standalone child `/perf on` remains local until the Leader next changes its monitoring setting.
 
 The optimized transport strips cumulative assistant snapshots and coalesces replaceable tool output over 100ms. Journal batches keep only the latest intermediate/final result per tool call per 400ms batch, retaining start arguments and final results. Native sessions still own the complete conversation. Hidden subagents retain conversation components but skip terminal redraws, progress animation and peer-state disk polling; attachment redraws their current state.
+
+## Follow the Leader terminal
+
+In VS Code, **Open a new terminal** now uses the Research Pi Terminal bridge extension to open an integrated terminal in the Leader's VS Code window, preferably split beside the Leader. Install the included bridge using `python3 scripts/package-vscode-terminal.py` followed by `code --install-extension output/research-pi-terminal.vsix`, then start the Leader in a new integrated terminal. If a resident Host is used, the open request is executed by its currently attached physical client, using that client's VS Code window instead of the Host's startup environment.
+
+Without the bridge, VS Code receives an explicit setup hint and a manual command; it never silently falls back to Terminal.app. Existing tmux sessions still use tmux new-window. Same-terminal switching needs no VS Code extension. Other terminal applications keep the existing platform launcher.

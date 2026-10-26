@@ -10,6 +10,11 @@ export async function attachNativeTerminal(record, { terminal, onAction } = {}) 
  const input=data=>{if(acting)return;if(data==='\x1d')return detach();send({type:'capabilities',kitty:physical.kittyProtocolActive});send({type:'input',data})};
  const start=()=>{physical.start(input,resize);started=true;resize();physical.write('\x1b]10;?\x07\x1b]11;?\x07')};
  const action=async event=>{
+  if(event.action==='open-subagent-terminal') {
+   try { const {openSubagentTerminal}=await import('./subagent-watch.mjs'); send({type:'action_result',id:event.id,result:await openSubagentTerminal(event.params)}); send({type:'attach'}); }
+   catch(error){send({type:'action_result',id:event.id,error:error.message})}
+   return;
+  }
   if(acting)return;acting=true;physical.stop();started=false;physical.write('\x1b[?1049l\x1b[?25h\x1b[0m');
   try{let result;if(onAction)result=await onAction(event);
    else if(event.action==='external-editor')result=await editInExternalEditor(event.params);
