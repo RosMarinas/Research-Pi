@@ -60,6 +60,7 @@ function publicJob(job) {
 		startedAt: job.startedAt,
 		finishedAt: job.finishedAt,
 		turn: job.turn,
+		reportToLeader: job.reportToLeader,
 		result: job.result,
 		error: job.error,
 		backendSessionId: job.backendSessionId,
@@ -171,6 +172,7 @@ export function createSubagentSessionManager(options = {}) {
 	};
 
 	const beginTurn = async (job, body, source = "research-leader", messageId = null) => {
+		job.reportToLeader = source !== "user";
 		job.turn += 1;
 		job.actionId = `action:${job.id}:turn-${job.turn}`;
 		job.status = "running";
@@ -183,7 +185,7 @@ export function createSubagentSessionManager(options = {}) {
 		job.progress = `turn ${job.turn} running`;
 		await emit(job, { type: "message", text: body, summary: compact(body, 300), source, messageId });
 		if (job.backend === "pi") {
-			writeRecord(job.child, { id: `prompt-${job.turn}`, type: "prompt", message: body });
+			writeRecord(job.child, { id: `prompt-${job.turn}`, type: "prompt", message: body, source });
 		} else {
 			writeRecord(job.child, { event: "user", message: { content: body } });
 		}
@@ -245,6 +247,7 @@ export function createSubagentSessionManager(options = {}) {
 			job.nativeTerminal = record.nativeTerminal;
 			await emit(job, { type: "progress", summary: "Native conversation ready" });
 		} else if (record.type === "agent_start" && FINAL_STATUSES.has(job.status)) {
+			job.reportToLeader = false;
 			job.turn += 1; job.actionId = `action:${job.id}:turn-${job.turn}`;
 			job.status = "running"; job.result = null; job.finishedAt = null; job.error = null; job.lastResponse = ""; job.lastStopReason = null; job.cancelling = false;
 			await emit(job, { type: "progress", summary: "User started a turn in the native conversation" });
@@ -431,7 +434,8 @@ export function createSubagentSessionManager(options = {}) {
 				// Pi steering enters the current agent loop at its next safe boundary,
 				// matching Runtime's direct-message semantics without creating a
 				// second queued turn whose lifecycle would be ambiguous here.
-				writeRecord(job.child, { type: "steer", message: body });
+				if (message.from && message.from !== "user") job.reportToLeader = true;
+				writeRecord(job.child, { type: "steer", message: body, source: message.from ?? "user" });
 				await emit(job, { type: "message", source: message.from ?? "user", messageId: message.id, text: body, summary: compact(body, 300) });
 				return { status: "delivered", detail: `delivered to active Pi Actor ${actorId}` };
 			}

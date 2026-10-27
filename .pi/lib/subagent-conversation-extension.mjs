@@ -19,9 +19,12 @@ export function subagentConversationExtension(pi, options) {
   ctx.ui.notify(`User → Leader queued (${receipt.id})`, "info");
  }});
  pi.registerCommand("agents", { description: "Search and switch conversations", handler: async () => options.navigate("agents") });
- pi.registerTool({ name: "message_leader", label: "Message Leader", description: "Ask the Leader a question or report progress without ending your work. A reply arrives as a subsequent directed message.",
+ pi.registerTool({ name: "message_leader", label: "Message Leader", description: "Send an explicit message to the Leader. During a user discussion, use only if the user asks you to contact the Leader; do not automatically relay discussion or progress. A reply arrives as a subsequent directed message.",
   parameters: Type.Object({ message: Type.String(), type: Type.Optional(Type.Union([Type.Literal("ask"), Type.Literal("notify")])) }),
   async execute(_id, args) { const receipt = await send(args.message, options.actorId, args.type ?? "ask"); return { content: [{ type: "text", text: `Queued to Leader: ${receipt.id}` }], details: { messageId: receipt.id } }; }
+ });
+ pi.on("before_agent_start", async event => {
+  if (options.isUserDiscussion?.()) return { systemPrompt: event.systemPrompt + "\nThis turn is a direct discussion with the User. Answer the User here. Do not automatically notify, ask, or report to the Leader unless the User explicitly requests it. The User can also use /leader <message> to contact the Leader." };
  });
  pi.on("session_start", async (_event, ctx) => {
   runtime = await resolveResearchRuntime(ctx.cwd, { runtimeRoot: join(options.stateRoot, "runtime", "projects") });

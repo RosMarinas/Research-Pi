@@ -7,6 +7,7 @@ New Pi subagents run the same `AgentSessionRuntime` and `InteractiveMode` as the
 - `/watch` on the Leader: search conversations by name, role or model. Choose the same terminal or a new terminal.
 - `/agents` inside a native subagent: search and switch conversations. Leader is a fixed entry.
 - `/leader` or `Ctrl+]`: return/detach. The subagent continues, retaining its editor draft and transcript position. A standalone watch terminal exits back to its shell.
+- User-started discussion turns stay in the subagent conversation: completion, failure, cancellation and input requests do not automatically enqueue Leader messages. A User steering a still-running Leader task does not remove that original task’s completion notification. An explicit new Leader instruction restores reporting.
 - `/leader <message>`: queue a message from **you** to the Leader. Its receipt identifies delivery; this does not impersonate the subagent.
 - `/model`: the native model picker. History remains in the same session. An already running model call keeps its original model; subsequent calls use the new selection.
 - Native Enter/steering, follow-up queuing, Escape/abort, tool expansion and thinking controls behave as on the Leader. Detach is distinct from cancellation.

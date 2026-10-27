@@ -1306,6 +1306,9 @@ export async function registerCodexRuntimeJob(runtime, job) {
 
 export async function recordSubagentRuntimeEvent(runtime, job) {
 	const actorId = await registerSubagentRuntimeJob(runtime, job);
+	// User-started discussions still update visible status/history, but must not
+	// enqueue a Leader result or input request merely because the turn settled.
+	if (job.reportToLeader === false) return null;
 	const turnSuffix = Number.isInteger(job.turn) ? `:turn-${job.turn}` : "";
 	const eventKey = job.status === "input_required"
 		? `request:${job.pendingRequest?.id ?? `turn-${job.turn ?? "current"}`}`

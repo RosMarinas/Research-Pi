@@ -22,7 +22,7 @@ const output = event => {
  process.stdout.write(line);
 };
 const ownerEvents = createOwnerEventWriter(output);
-let host, runtime, directory, unsubscribe, closing = false;
+let host, runtime, directory, unsubscribe, closing = false, turnSource = null;
 const controls = createInterface({ input: process.stdin });
 const queued = [];
 controls.on("line", line => { if (runtime && host) void dispatch(line); else queued.push(line); });
@@ -41,8 +41,8 @@ async function dispatch(line) {
   let data;
   switch (command.type) {
    case "performance": runtimePerformance.setEnabled(command.enabled); output({ type: "performance_sample", sample: runtimePerformance.snapshot() }); return;
-   case "prompt": await session.prompt(command.message, { source: "rpc" }); break;
-   case "steer": await session.steer(command.message, undefined, { source: "rpc" }); break;
+   case "prompt": turnSource = command.source ?? "research-leader"; await session.prompt(command.message, { source: "rpc" }); break;
+   case "steer": if (command.source && command.source !== "user") turnSource = command.source; await session.steer(command.message, undefined, { source: "rpc" }); break;
    case "follow_up": await session.followUp(command.message, undefined, { source: "rpc" }); break;
    case "abort": await session.abort(); break;
    case "get_state": data = { model: session.model, thinkingLevel: session.thinkingLevel }; break;
@@ -62,7 +62,7 @@ try {
  const terminalSocket = join(directory, "terminal.sock"), instance = randomUUID();
  let navigate;
  runtime = await createResearchSessionRuntime({ args: process.argv.slice(2), cwd: process.cwd(), agentDir: getAgentDir(),
-  extensionFactories: [pi => subagentConversationExtension(pi, { ...options, navigate: target => navigate?.(target), output, isObserved: () => host?.observed === true })] });
+  extensionFactories: [pi => subagentConversationExtension(pi, { ...options, navigate: target => navigate?.(target), output, isObserved: () => host?.observed === true, isUserDiscussion: () => !turnSource || turnSource === "user" })] });
  host = await createNativeRuntimeHost({ runtime, terminalSocket, instance, tuiMode: "fullscreen", suspendUnobserved: true,
   configureMode({ mode, terminal, navigate: route }) {
    const reportStatus = terminal.setProgramStatus.bind(terminal);
@@ -71,6 +71,7 @@ try {
    const subscribe = mode.subscribeToAgent.bind(mode);
    mode.subscribeToAgent = () => { subscribe(); unsubscribe?.(); unsubscribe = runtime.session.subscribe(event => {
     ownerEvents.append(event);
+    if (event.type === "agent_settled") turnSource = null;
     if (["agent_start", "agent_settled"].includes(event.type)) output({ type: "response", command: "get_state", success: true, data: { model: runtime.session.model, thinkingLevel: runtime.session.thinkingLevel } });
    }); };
   }, onShutdown: async () => { if (!closing) await close(); } });
