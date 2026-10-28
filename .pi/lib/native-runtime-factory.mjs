@@ -5,12 +5,13 @@ import { parseArgs } from "../../node_modules/@earendil-works/pi-coding-agent/di
 import { builtInExtensions } from "../../node_modules/@earendil-works/pi-coding-agent/dist/extensions/index.js";
 import { resolveCliModel, resolveModelScope } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/model-resolver.js";
 import { initTheme, setThemeJsonValidator } from "../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js";
-import { validateThemeJson } from "../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme-json.js";
+import { validateThemeJson } from "../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme-schema.js";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/trust-manager.js";
 import { processFileArguments } from "../../node_modules/@earendil-works/pi-coding-agent/dist/cli/file-processor.js";
 import { buildInitialMessage } from "../../node_modules/@earendil-works/pi-coding-agent/dist/cli/initial-message.js";
 
 export async function createResearchSessionRuntime({ args, cwd, agentDir, sessionDir, extensionFactories = [], model, settingsManager }) {
+	setThemeJsonValidator(validateThemeJson);
 	const parsed = parseArgs(args);
 	sessionDir = parsed.sessionDir ?? sessionDir;
 	const parseErrors = parsed.diagnostics.filter((x) => x.type === "error"); if (parseErrors.length) throw new Error(parseErrors.map((x) => x.message).join("\n"));
@@ -32,7 +33,7 @@ export async function createResearchSessionRuntime({ args, cwd, agentDir, sessio
 		const created = await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent,
 			model: sessionStartEvent ? undefined : model ?? resolved.model, thinkingLevel: sessionStartEvent ? undefined : parsed.thinking ?? resolved.thinkingLevel,
 			scopedModels, tools: parsed.tools, excludeTools: parsed.excludeTools, noTools: parsed.noTools ? "all" : parsed.noBuiltinTools ? "builtin" : undefined });
-		setThemeJsonValidator(validateThemeJson); initTheme(services.settingsManager.getTheme(), false);
+		initTheme(services.settingsManager.getTheme(), false);
 		return { ...created, services, diagnostics: services.diagnostics };
 	};
 	let sessionManager;

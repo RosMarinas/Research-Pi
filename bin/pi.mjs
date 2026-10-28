@@ -228,6 +228,11 @@ async function analysisCommand(argv) {
 	throw new Error("Usage: pi analysis [context|send <message>]");
 }
 
+function restartSessionArgs(args, sessionId, { emptyUnpersistedSession = false } = {}) {
+	const selectsSession = args.some(arg => ["--session", "--session-id", "--resume", "-r", "--continue", "-c", "--fork", "--no-session"].includes(arg));
+	return selectsSession || emptyUnpersistedSession ? [...args] : [...args, ...(sessionId ? ["--session", sessionId] : ["--continue"])];
+}
+
 async function spawnCore(argv, { background = false } = {}) {
 	let nativeRuntime = argv.includes("--resident-runtime");
 	argv = argv.filter(arg => arg !== "--resident-runtime");
@@ -236,7 +241,7 @@ async function spawnCore(argv, { background = false } = {}) {
 	const web = parseWebOptions(argv, baseConfig.ui.web, { interactive: background || Boolean(process.stdin.isTTY && process.stdout.isTTY) });
 	const { workspace, args: userArgs, config, sessionMode, fullAccess } = takeResearchOptions(web.args, baseConfig);
 	if (web.enabled && userArgs.some((arg) => ["--mode", "--print", "-p"].includes(arg) || arg.startsWith("--mode="))) throw new Error("--web requires interactive TUI mode");
-	if (background && !web.enabled) throw new Error("pi web start requires Web mode");
+	if (background && !web.enabled && !nativeRuntime) throw new Error("Background launch requires a resident Runtime or Web mode");
 	writeResearchPiAgentConfig(paths.agentDir, config, { coreVersion });
 	if (!existsSync(workspace)) throw new Error(`Research workspace does not exist: ${workspace}`);
 	loadConfigurationEnvironment();
@@ -359,6 +364,22 @@ async function webCommand(argv) {
 
 async function main() {
 	const argv = process.argv.slice(2);
+	if (argv[0] === "restart" || argv[0] === "stop") {
+		const args = argv.slice(1).filter(arg => arg !== "--background");
+		if (argv[0] === "restart" && args.some(arg => ["--mode", "--print", "-p", "--version", "--help", "-h"].includes(arg) || arg.startsWith("--mode="))) throw new Error("pi restart requires resident interactive mode");
+		const { workspace, sessionMode } = takeResearchOptions(args, prepareConfig());
+		const { findNativeRuntime, stopNativeRuntime } = await import("../.pi/lib/native-runtime-launcher.mjs");
+		const record = await findNativeRuntime(paths.stateRoot, workspace, sessionMode === "analysis");
+		const sessionId = record?.state?.sessionId;
+		if (record) await stopNativeRuntime(record);
+		else {
+			const { findResidentWeb, stopResidentWeb } = await import("../.pi/lib/web-resident.mjs");
+			const legacy = await findResidentWeb(paths.stateRoot, workspace);
+			if (legacy) await stopResidentWeb(legacy);
+		}
+		if (argv[0] === "stop") { process.stdout.write(`Stopped Research Pi for ${workspace}\n`); return; }
+		return spawnCore([...restartSessionArgs(args, sessionId, { emptyUnpersistedSession: record?.state?.emptyUnpersistedSession === true }), "--resident-runtime"], { background: argv.includes("--background") || !(process.stdin.isTTY && process.stdout.isTTY) });
+	}
 	if (argv[0] === "web") return await webCommand(argv.slice(1));
 	if (argv[0] === "watch") {
 		const { runSubagentWatch } = await import("../.pi/lib/subagent-watch-ui.mjs");

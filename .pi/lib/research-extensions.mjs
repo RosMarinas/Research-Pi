@@ -3,7 +3,7 @@ import { join } from "node:path";
 // An explicit loadout: --no-extensions also disables Pi 1.0's built-ins.
 export function researchPiExtensions(root, { search = false, anchor = false, trace = false, web = false } = {}) {
 	const extensions = [
-		"project-boundary", "runtime-performance", "tool-activity", "research-config", "research-mode",
+		"openai-codex-terra", "project-boundary", "runtime-performance", "tool-activity", "research-config", "research-mode",
 		"record-experiment", "research-transition", "amend-project-state",
 		"research-checkpoint", "research-memory", "research-compaction",
 		"research-runtime", "research-side", "subagent-runners", "subagent-watch", "codex-delegate", "cache-audit", "token-speed",

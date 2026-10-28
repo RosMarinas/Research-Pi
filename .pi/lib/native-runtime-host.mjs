@@ -1,5 +1,6 @@
 import { runtimePerformance } from "./runtime-performance.mjs";
 import { chmod, unlink } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { InteractiveMode } from '../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js';
 import { NativeTerminal } from './native-terminal.mjs';
 import { createDesktopTerminal } from './web-terminal.mjs';
@@ -27,6 +28,8 @@ export async function createNativeRuntimeHost({ runtime, terminalSocket, instanc
     else terminal.setProgress(false);
   };
   const state = () => ({ready: !closing && mode.isInitialized, cwd: runtime.cwd, sessionId:runtime.session.sessionId,
+    emptyUnpersistedSession: !runtime.session.messages.some(message => message.role === 'user' || message.role === 'assistant')
+      && (!runtime.session.sessionFile || !existsSync(runtime.session.sessionFile)),
     idle:runtime.session.isIdle, model:runtime.session.model && {id:runtime.session.model.id,provider:runtime.session.model.provider}});
   // Native quit is a presentation detach. Runtime disposal is only explicit stop.
   const nativeShutdown = mode.shutdown.bind(mode);

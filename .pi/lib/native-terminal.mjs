@@ -27,6 +27,9 @@ export class NativeTerminal {
   clearFromCursor() { this.write('\x1b[J'); }
   clearScreen() { this.write('\x1b[2J\x1b[H'); }
   setTitle(title) { this.write('\x1b]0;' + String(title).replace(/[\x00-\x1f\x7f]/g,'') + '\x07'); }
+  // Pi 1.2 requires this Terminal method. The headless screen does not
+  // support OSC 7501, so retain the report without emitting that protocol.
+  setProgramStatus(status) { this.programStatus = status.state === 'clear' ? undefined : { ...status }; }
   setProgress(active) {
     clearInterval(this.progressTimer); this.progressTimer = undefined;
     this.write(active ? "\x1b]9;4;3\x07" : "\x1b]9;4;0\x07");
