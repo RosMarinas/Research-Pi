@@ -111,10 +111,11 @@ Leader 通过一个 `subagent` 入口调度工作；Runtime 统一记录 Actor�
 | Pi Leader | Pi 原生 provider | 把握研究主线、组织证据、委派与整合结果 |
 | advisor | Codex | 设计、架构、竞争解释、只读审查 |
 | executor | Codex | 开发、实验执行、测试与验证 |
+| systems-optimizer（Systems Optimizer） | Codex | 从资源盘点与系统分析开始优化实验代码；权限与 executor 相同 |
 | environment | Antigravity | 依赖、SDK、工具链与环境配置 |
 | general | Pi | 使用任意已接入 Pi 的模型完成独立任务 |
 
-这些是注入 Leader 提示词的调用倾向，不是四套独立工具或强制路由。Pi runner 复用 Leader 的模型目录与认证，支持单独配置模型和思考强度，不局限于 OpenCode Go。Codex 保持原生 Web Search 默认开启；可选的 DeepSeek 搜索不是使用 Research Pi 的前提。
+这些是注入 Leader 提示词的调用倾向，不是独立的工具组或强制路由。Pi runner 复用 Leader 的模型目录与认证，支持单独配置模型和思考强度，不局限于 OpenCode Go。Codex 保持原生 Web Search 默认开启；可选的 DeepSeek 搜索不是使用 Research Pi 的前提。
 
 ```mermaid
 flowchart LR
@@ -128,6 +129,10 @@ flowchart LR
 ```
 
 每个 subagent 的界面都显示 **backend · role · model · thinking**；继承配置时会标示 `inherit`。用户不必经过 Leader，就能查看其行为和发送指令。切换 runner 时用普通任务与上下文消息接续，不额外生成 handoff 文件。
+
+Systems Optimizer 是与 executor 平级的实验优化角色，可在 `/models` 独立选择模型、思考强度和 backend，权限沿用 executor。它自动接收内置的 `experiment-systems-optimization` skill：先盘点 CPU、内存、GPU/显存及可用额度，缺失时询问用户；再定位整个实验的关键路径，优先优化实验代码、数据移动、批处理和调度，并鼓励查阅一手资料。成熟库内部优化优先级最低。
+
+内置 `/skill:research-html` 可生成离线研究说明：默认中文正文、英文流程关键词，支持可点击流程图和 LaTeX。字体随包提供思源黑体、Inter 与 JetBrains Mono；按页面字符嵌入分片，不需要在线字体或新建 viewer 服务。写作与视觉规则已融合为一个 skill。
 
 ### 可选：接入其他 subagent 后端
 
@@ -156,6 +161,8 @@ Pi 的 `/login` 不会登录 Codex CLI，Codex 后端需单独运行 `codex logi
 /models
 /models show
 /models advisor thinking high
+/models systems-optimizer model gpt-6.1-sol
+/models systems-optimizer thinking high
 /models general backend pi
 /models general thinking high
 ```

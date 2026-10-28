@@ -263,6 +263,8 @@ async function spawnCore(argv, { background = false } = {}) {
 	const skillPaths = [
 		join(packageRoot, ".pi", "skills", "research-briefing"),
 		join(packageRoot, ".pi", "skills", "research-project-management"),
+		join(packageRoot, ".pi", "skills", "experiment-systems-optimization"),
+		join(packageRoot, ".pi", "skills", "research-html"),
 		...config.resources.skills.map((configuredPath) => expandUserPath(configuredPath)),
 	];
 	for (const skill of new Set(skillPaths)) {

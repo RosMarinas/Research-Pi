@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Research Pi 实验优化</title>
+<link rel="stylesheet" href="../runtime/htmlplan.css">
+<script src="../runtime/htmlplan.js" defer></script>
+<link rel="stylesheet" href="../runtime/research.css">
+<style>
+:root { --col: 940px; }
+html { line-height: 1.75; font-weight:400; }
+h1 { line-height: 1.35; }
+.intro { color:var(--ink-2); max-width:44em; }
+.pl-row { font-family:var(--sans); }
+doc-math { overflow-x:auto; padding:18px 12px; background:var(--card); border:1px solid var(--line); border-radius:var(--r); }
+.math-source summary { font-size:13px; color:var(--ink-3); cursor:pointer; }
+.math-source pre { white-space:pre-wrap; }
+.reading { max-width:42em; }
+body > footer { margin-top:32px; color:var(--ink-3); font-size:13px; }
+</style>
+<style data-mock-shared>
+.panel { font:15px/1.7 var(--sans); color:#141413; background:#fff; border:1px solid #ddd8cc; border-radius:10px; padding:18px 22px; }
+.panel b { font-weight:700; } .panel p { margin:6px 0 0; } .meta { color:#73726c; font-size:13px; } .tag { color:#c6613f; font:600 13px/1.5 var(--mono); }
+</style>
+<body>
+<header>
+<h1>Research Pi 实验优化</h1>
+<p class="intro">先确认资源，再定位完整实验的瓶颈。下图展示建议的工作流程；点击英文状态，查看对应的中文说明。</p>
+<details class="thread"><summary>需求依据</summary><doc-quote via="prompt" from="用户">主要是借鉴这个排版格式，注意，这里的关键词应该使用英文，不必强求中文，重点是流程图</doc-quote></details>
+</header>
+<main>
+<doc-plan open="1">
+<doc-claim id="system-flow">
+<p>先确认资源，再验证优化是否缩短实验时间。</p>
+<doc-machine class="readable-graph" name="experiment" caption="实线表示主流程；虚线表示未获得有效收益后的重新分析。">
+<script type="text/plain">
+machine experiment initial inspect
+state inspect # 确认资源，并定位完整实验的瓶颈。
+state evaluate # 执行候选改造，并比较同等有效工作。
+state keep final # 保留有证据支持且值得回本的改动。
+state stop final # 预算用尽或没有值得继续的方向时结束。
+state revisit # 解释无收益的原因，再选择下一步。
+
+| inspect | evaluate | keep |
+| stop | revisit | . |
+
+inspect -start-> evaluate : ready
+inspect -end-> stop : budget end
+evaluate -accept-> keep : valid gain
+evaluate -reject-> revisit : no gain
+revisit -end-> stop : no value
++ revisit -refine-> evaluate : revise
+</script>
+<div data-state="inspect"><doc-mock frame="none" w="450"><template><div class="panel"><span class="tag">Resource inventory</span><p><b>CPU · RAM · GPU · VRAM</b></p><p>复用已有资源分配；信息不足时询问用户。小 batch 和少 worker 可能只是历史默认值。</p><p class="meta">机器总容量、当前空闲量和实验额度分别确认。</p></div></template></doc-mock></div>
+<div data-state="evaluate"><doc-mock frame="none" w="450"><template><div class="panel"><span class="tag">Matched comparison</span><p><b>对同一批有效工作测量完整耗时。</b></p><p>优先改写实验代码，调整 batching、cache 和 worker。检查样本覆盖、数值行为和资源用量。</p></div></template></doc-mock></div>
+<div data-state="stop"><doc-mock frame="none" w="450"><template><div class="panel"><span class="tag">Stop</span><p><b>没有值得继续的方向时结束。</b></p><p>保留有用的诊断和负结果，不为了完成流程增加无效实验。</p></div></template></doc-mock></div>
+<div data-state="keep"><doc-mock frame="none" w="450"><template><div class="panel"><span class="tag">Keep</span><p><b>记录实测收益及其适用范围。</b></p><p>说明目标硬件、工作负载和验证边界；将实际测量与预期收益分开。</p></div></template></doc-mock></div>
+<div data-state="revisit"><doc-mock frame="none" w="450"><template><div class="panel"><span class="tag">Revisit</span><p><b>先解释没有收益的原因。</b></p><p>重新选择有区分力的干预。预算耗尽或缺少有价值的方向时结束，不无限迭代。</p></div></template></doc-mock></div>
+</doc-machine>
+<doc-claim>
+<p>图中的状态名与代码术语保持一致。</p>
+<doc-code title="Terminology · 示例" lang="text"><script type="text/plain">
+inspect   确认资源与边界
+evaluate  改写实现并测量端到端收益
+stop      结束无价值或超出预算的方向
+keep      保留改动
+revisit   重新分析
+</script></doc-code>
+</doc-claim>
+</doc-claim>
+<doc-claim id="math">
+<p>准备成本决定优化需要多少工作量才能回本。</p>
+<div class="reading">
+<doc-math><script type="text/plain">\[N_{\mathrm{break\text{-}even}} = \frac{C_{\mathrm{setup}}}{t_{\mathrm{base}}-t_{\mathrm{opt}}},\qquad t_{\mathrm{base}}>t_{\mathrm{opt}}\]</script></doc-math>
+<p><code>C_setup</code> 是额外准备时间；<code>t_base</code> 和 <code>t_opt</code> 是优化前后每单位有效工作的耗时。该估计只适用于单位工作可比、稳态耗时近似不变的情形。</p>
+<details class="math-source"><summary>查看 LaTeX 源码</summary><pre>N_{\mathrm{break\text{-}even}} = \frac{C_{\mathrm{setup}}}{t_{\mathrm{base}}-t_{\mathrm{opt}}}</pre></details>
+</div>
+</doc-claim>
+<doc-claim aux="scope"><p>此页面展示版式和交互，不表示已有性能结果。</p><ul><li>中文解释搭配英文状态名、变量名和技术关键词。</li><li>图中的节点点击仅切换说明，不执行实验或授权任务。</li><li>本页没有需要用户审批的决策。</li></ul></doc-claim>
+</doc-plan>
+</main>
+<footer>Research HTML · 思源黑体（Research Han Sans） / Inter / JetBrains Mono · LaTeX via KaTeX。字体与交互均已内嵌，可离线阅读。</footer>
+</body>
+</html>

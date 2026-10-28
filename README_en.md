@@ -111,10 +111,11 @@ The Leader delegates through one `subagent` tool. Runtime records actors, tasks,
 | Pi Leader | Native Pi provider | Research direction, evidence interpretation, delegation, and integration |
 | advisor | Codex | Design, architecture, competing explanations, and read-only review |
 | executor | Codex | Implementation, experiments, tests, and verification |
+| systems-optimizer (Systems Optimizer) | Codex | Experiment performance, starting with resources and whole-system analysis; executor authority |
 | environment | Antigravity | Dependencies, SDKs, toolchains, and environment setup |
 | general | Pi | Independent work using any model connected through Pi |
 
-These preferences are injected into the Leader's instructions, not enforced as four separate tools or mandatory routes. Pi runners share the Leader's model catalog and authentication while allowing independent model and thinking settings; they are not restricted to OpenCode Go. Codex native Web Search stays enabled by default. Optional DeepSeek search is not a prerequisite.
+These preferences are injected into the Leader's instructions, not enforced as separate tools or mandatory routes. Pi runners share the Leader's model catalog and authentication while allowing independent model and thinking settings; they are not restricted to OpenCode Go. Codex native Web Search stays enabled by default. Optional DeepSeek search is not a prerequisite.
 
 ```mermaid
 flowchart LR
@@ -128,6 +129,10 @@ flowchart LR
 ```
 
 Subagent views display **backend · role · model · thinking**, with inherited settings labelled `inherit`. Users can inspect workers and send instructions without going through the Leader. Switching runners uses an ordinary task/context message, not another handoff file.
+
+Systems Optimizer is a peer of executor with the same execution authority and independent model, thinking and backend settings in `/models`. Its bundled `experiment-systems-optimization` skill starts with available CPU, RAM, GPUs/VRAM and allocations (asking when needed), then analyzes the whole experiment. It prioritizes experiment code, data movement, batching and scheduling, encourages primary-source research, and leaves mature library internals last.
+
+The bundled `/skill:research-html` creates offline research documents with Chinese prose by default, English technical labels, interactive diagrams, and LaTeX. Source Han Sans, Inter, and JetBrains Mono are bundled; Chinese font shards are embedded as needed. One unified skill handles writing and visual design, with no online fonts or extra viewer service.
 
 ### Optional: connect other subagent backends
 
@@ -157,6 +162,8 @@ Start with `/config`: Models and roles → Leader / Subagents / Codex internal s
 /models
 /models show
 /models advisor thinking high
+/models systems-optimizer model gpt-6.1-sol
+/models systems-optimizer thinking high
 /models general backend pi
 /models general thinking high
 ```
