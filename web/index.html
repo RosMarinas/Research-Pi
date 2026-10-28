@@ -3,8 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#f5f4ef">
+<meta name="theme-color" content="#faf9f5">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="Research Pi">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="manifest" href="/manifest.webmanifest">
@@ -15,68 +16,346 @@
 <body>
 <section id="pair" class="pair-screen" hidden>
   <div class="pair-card">
-    <img src="/icon.svg" width="54" height="54" alt="">
-    <p class="eyebrow">YOUR RESEARCH, WITH YOU</p>
+    <div class="pair-icon">
+      <img src="/icon.svg" width="56" height="56" alt="Research Pi Logo">
+    </div>
+    <div class="eyebrow">RESEARCH PI · WORKBENCH</div>
     <h1>连接 Research Pi</h1>
-    <p>使用电脑终端给出的访问链接或令牌。手机会连接同一个 Pi 会话。</p>
-    <form id="pair-form"><label for="token">访问令牌</label><input id="token" type="password" autocomplete="off" required><button type="submit" class="primary">连接</button></form>
-    <p id="pair-error" role="alert"></p>
-    <small>凭据留在电脑 · 连接由 Tailscale 保护</small>
+    <p>输入终端给出的配对令牌，或点击终端链接。同一个项目，同一个 Pi 进程。</p>
+    <form id="pair-form">
+      <div class="input-field">
+        <label for="token">访问令牌</label>
+        <input id="token" type="password" placeholder="粘贴配对令牌 (Token)…" autocomplete="off" required>
+      </div>
+      <button type="submit" class="primary full-width">连接会话</button>
+    </form>
+    <p id="pair-error" class="error-text" role="alert"></p>
+    <div class="pair-footer">
+      <span>本地计算 · 凭据受保护 · Tailscale 安全网络</span>
+    </div>
   </div>
 </section>
+
 <div id="app" hidden>
+  <!-- Top Navigation & Brand Header -->
   <header class="topbar">
-    <img src="/icon.svg" width="34" height="34" alt="">
-    <div class="identity"><strong>Research Pi</strong><span id="workspace">正在连接</span></div>
-    <span id="connection" class="connection"><i></i><span>连接中</span></span>
-    <button id="settings-button" class="icon-button" aria-label="模型与设置">⚙</button>
+    <div class="brand">
+      <img src="/icon.svg" width="28" height="28" alt="Logo" class="brand-logo">
+      <div class="identity">
+        <strong>Research Pi</strong>
+        <span id="workspace" title="当前工作区">正在连接…</span>
+      </div>
+    </div>
+    <div class="topbar-center">
+      <div id="pending-banner" class="pending-banner" hidden>
+        <span class="pending-dot"></span>
+        <span class="pending-text">Pi 正在等待操作</span>
+        <button id="pending-open" class="pending-action">处理</button>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <span id="connection" class="connection-badge">
+        <i class="indicator"></i>
+        <span>连接中</span>
+      </span>
+      <button id="workbench-toggle" class="icon-button desktop-only" title="切换桌面双栏工作台" aria-label="切换双栏">
+        <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2.5" y="3.5" width="15" height="13" rx="2.5"/>
+          <path d="M10 3.5v13"/>
+        </svg>
+      </button>
+      <button id="settings-button" class="icon-button" aria-label="模型与设置" title="模型与设置">
+        <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="10" cy="10" r="3"/>
+          <path d="M16.2 12.5a1.2 1.2 0 0 0 .24 1.34l.05.05a1.5 1.5 0 1 1-2.12 2.12l-.05-.05a1.2 1.2 0 0 0-1.34-.24 1.2 1.2 0 0 0-.73 1.1v.14a1.5 1.5 0 1 1-3 0v-.14a1.2 1.2 0 0 0-.73-1.1 1.2 1.2 0 0 0-1.34.24l-.05.05a1.5 1.5 0 1 1-2.12-2.12l.05-.05a1.2 1.2 0 0 0 .24-1.34 1.2 1.2 0 0 0-1.1-.73H4a1.5 1.5 0 0 1 0-3h.14a1.2 1.2 0 0 0 1.1-.73 1.2 1.2 0 0 0-.24-1.34l-.05-.05a1.5 1.5 0 1 1 2.12-2.12l.05.05a1.2 1.2 0 0 0 1.34.24 1.2 1.2 0 0 0 .73-1.1V4a1.5 1.5 0 0 1 3 0v.14a1.2 1.2 0 0 0 .73 1.1 1.2 1.2 0 0 0 1.34-.24l.05-.05a1.5 1.5 0 1 1 2.12 2.12l-.05.05a1.2 1.2 0 0 0-.24 1.34 1.2 1.2 0 0 0 1.1.73h.14a1.5 1.5 0 0 1 0 3h-.14a1.2 1.2 0 0 0-1.1.73z"/>
+        </svg>
+      </button>
+    </div>
   </header>
-  <nav id="tabs" class="tabs" aria-label="工作区">
-    <button data-tab="chat" class="active">对话</button><button data-tab="agents">Agents</button><button data-tab="project">项目</button><button data-tab="terminal">终端</button>
+
+  <!-- Workspace Nav Tabs (Mobile bottom bar / Desktop secondary tabs) -->
+  <nav id="tabs" class="tabs" aria-label="工作区导航">
+    <button data-tab="chat" class="tab-button active">
+      <svg class="tab-icon" viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 14.5L2.5 18l3.8-1.2A8 8 0 1 0 4 14.5z"/>
+      </svg>
+      <span>对话</span>
+    </button>
+    <button data-tab="agents" class="tab-button">
+      <svg class="tab-icon" viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="8" cy="7" r="3.5"/>
+        <path d="M2.5 16.5c0-3 2.5-5 5.5-5s5.5 2 5.5 5"/>
+        <path d="M14 4.5a3 3 0 0 1 0 5.6M17.5 16.5c0-2.2-1.5-3.8-3.5-4.2"/>
+      </svg>
+      <span>Agents</span>
+    </button>
+    <button data-tab="project" class="tab-button">
+      <svg class="tab-icon" viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3.5" width="14" height="13" rx="2.5"/>
+        <path d="M3 8h14M8 8v8.5"/>
+      </svg>
+      <span>项目</span>
+    </button>
+    <button data-tab="terminal" class="tab-button">
+      <svg class="tab-icon" viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2.5" y="3.5" width="15" height="13" rx="2.5"/>
+        <path d="M6 8l3 2.5-3 2.5M11 13h3"/>
+      </svg>
+      <span>终端</span>
+    </button>
   </nav>
-  <div id="pending-banner" class="pending-banner" hidden><span>Pi 正在等待操作</span><button id="pending-open">查看</button></div>
-  <main>
-    <section id="chat-view" class="view">
-      <div class="conversation-meta"><span id="model-label">—</span><span id="run-state">等待连接</span></div>
-      <div id="messages" class="messages" aria-live="polite"><div class="empty"><h2>把研究继续下去。</h2><p>同一个项目，同一个 Pi。</p></div></div>
-      <div id="activity" class="activity" hidden></div>
+
+  <!-- Main Viewport -->
+  <main id="main-content" class="main-content">
+    <!-- Chat View (Primary Conversation Stream) -->
+    <section id="chat-view" class="view chat-view">
+      <div class="conversation-meta">
+        <div class="meta-model" title="当前模型与思考配置">
+          <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+            <path d="M8 1.5v13M1.5 8h13M3.5 3.5l9 9M12.5 3.5l-9 9"/>
+          </svg>
+          <span id="model-label">—</span>
+        </div>
+        <div class="meta-status">
+          <span class="status-pill" id="run-state">等待连接</span>
+        </div>
+      </div>
+
+      <div id="messages" class="messages" aria-live="polite">
+        <div class="empty">
+          <div class="empty-badge">RESEARCH PI</div>
+          <h2>把研究继续推进下去</h2>
+          <p>同一个项目，同一个 Pi。实验记录、当前假设与多代理协作始终保持在上下文中。</p>
+          <div class="empty-chips">
+            <button type="button" class="empty-chip" onclick="document.getElementById('message').value='/runtime'; document.getElementById('message').focus();">/runtime 查看账本</button>
+            <button type="button" class="empty-chip" onclick="document.getElementById('message').value='/watch'; document.getElementById('message').focus();">/watch 观察代理</button>
+            <button type="button" class="empty-chip" onclick="document.getElementById('message').value='/models'; document.getElementById('message').focus();">/models 切换模型</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="activity" class="activity" hidden>
+        <span class="activity-spinner"></span>
+        <span class="activity-text"></span>
+      </div>
+
       <form id="composer" class="composer">
         <div id="attachments" class="attachments"></div>
-        <textarea id="message" rows="2" placeholder="继续讨论，或输入 / 命令" aria-label="消息"></textarea>
-        <div class="composer-actions">
-          <label class="attach-button" title="添加图片">＋<input id="image-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden></label>
-          <select id="send-mode" aria-label="忙时如何发送"><option value="followUp">下一步处理</option><option value="steer">调整当前方向</option></select>
-          <button type="button" id="abort" class="quiet" hidden>停止当前轮</button>
-          <button type="submit" id="send" class="primary">发送 ↑</button>
+        <div class="composer-input-row">
+          <textarea id="message" rows="1" placeholder="发送研究指令，或输入 / 命令…" aria-label="消息"></textarea>
         </div>
-        <small id="composer-status">内容由电脑上的 Pi 处理</small>
+        <div class="composer-toolbar">
+          <div class="composer-tools-left">
+            <label class="attach-button" title="添加图片附件" aria-label="添加图片">
+              <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M10 4v12M4 10h12"/>
+              </svg>
+              <input id="image-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+            </label>
+            <div class="select-pill" title="忙时发送行为">
+              <select id="send-mode" aria-label="忙时如何发送">
+                <option value="followUp">下一步处理</option>
+                <option value="steer">调整当前方向 ⚡</option>
+              </select>
+            </div>
+            <button type="button" id="abort" class="abort-button" title="停止当前轮" hidden>
+              <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor">
+                <rect x="2" y="2" width="12" height="12" rx="2"/>
+              </svg>
+              <span>停止</span>
+            </button>
+          </div>
+          <div class="composer-tools-right">
+            <small id="composer-status" class="composer-hint">Pi 在本地运行</small>
+            <button type="submit" id="send" class="send-button primary" aria-label="发送消息" title="发送 (Enter 或 ⌘Enter)">
+              <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M10 16V4M4 10l6-6 6 6"/>
+              </svg>
+            </button>
+          </div>
+        </div>
       </form>
     </section>
-    <section id="agents-view" class="view" hidden>
-      <div class="section-title"><h2>协作成员</h2><button id="refresh-agents" class="quiet">刷新</button></div>
-      <div id="actors" class="actor-grid"></div>
-      <section id="actor-detail" hidden>
-        <div class="section-title"><h3 id="actor-title"></h3><button id="close-actor" class="quiet">收起</button></div>
-        <div id="actor-messages" class="messages actor-messages"></div>
-        <form id="actor-form" class="composer">
-          <textarea id="actor-input" rows="2" placeholder="直接向这个 Agent 发消息" aria-label="Agent 消息" required></textarea>
-          <div class="composer-actions"><select id="actor-kind" aria-label="消息类型"><option value="notify">消息</option><option value="ask">提问</option><option value="reply">回答</option><option value="steer">调整方向</option></select><button class="primary" type="submit">发送</button></div>
-          <small id="actor-receipt">通过现有 Runtime 投递</small>
-        </form>
+
+    <!-- Side Canvas / Workbench Panel Container for Desktop -->
+    <div id="workbench-pane" class="workbench-pane">
+      <!-- Agents View -->
+      <section id="agents-view" class="view" hidden>
+        <div class="section-title">
+          <div class="title-with-badge">
+            <h2>协作成员</h2>
+            <span class="badge">Subagents</span>
+          </div>
+          <button id="refresh-agents" class="quiet refresh-btn">
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 8A6 6 0 1 1 9.5 2.5M14 2.5V7h-4.5"/>
+            </svg>
+            <span>刷新</span>
+          </button>
+        </div>
+        <div id="actors" class="actor-grid"></div>
+        <section id="actor-detail" class="actor-detail-sheet" hidden>
+          <div class="section-title">
+            <h3 id="actor-title"></h3>
+            <button id="close-actor" class="quiet icon-button" title="关闭详情" aria-label="关闭">×</button>
+          </div>
+          <div id="actor-messages" class="messages actor-messages"></div>
+          <form id="actor-form" class="composer actor-composer">
+            <textarea id="actor-input" rows="2" placeholder="直接向该 Agent 发送消息…" aria-label="Agent 消息" required></textarea>
+            <div class="composer-toolbar">
+              <div class="select-pill">
+                <select id="actor-kind" aria-label="消息类型">
+                  <option value="notify">消息</option>
+                  <option value="ask">提问</option>
+                  <option value="reply">回答</option>
+                  <option value="steer">调整方向</option>
+                </select>
+              </div>
+              <small id="actor-receipt" class="composer-hint">经 Runtime 投递</small>
+              <button class="primary send-button" type="submit" aria-label="发送">
+                <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M10 16V4M4 10l6-6 6 6"/>
+                </svg>
+              </button>
+            </div>
+          </form>
+        </section>
       </section>
-    </section>
-    <section id="project-view" class="view" hidden><div class="section-title"><h2>Project Runtime</h2><button id="runtime-terminal" class="quiet">完整面板 ↗</button></div><div id="project-content"></div></section>
-    <section id="terminal-view" class="view terminal-view" hidden>
-      <div class="terminal-actions"><select id="terminal-command" aria-label="终端快捷命令"><option value="">快捷命令…</option><option>/runtime</option><option>/watch</option><option>/config</option><option>/models</option><option>/model</option><option>/login</option><option>/tree</option><option>/resume</option><option>/settings</option><option>/help</option></select><button id="fit-terminal" class="quiet">适配</button></div>
-      <div id="terminal" aria-label="Pi 终端"></div>
-      <div class="keybar" aria-label="终端按键"><button data-key="esc">Esc</button><button data-key="tab">Tab</button><button data-key="up">↑</button><button data-key="down">↓</button><button data-key="left">←</button><button data-key="right">→</button><button data-key="ctrl">Ctrl</button><button data-key="ctrlc">Ctrl C</button><button data-key="pageup">PgUp</button><button data-key="pagedown">PgDn</button><button data-key="altenter">Alt ↵</button><button data-key="enter">↵</button></div>
-      <form id="terminal-input-form" class="terminal-input"><input id="terminal-input" placeholder="输入中文或命令…" aria-label="终端文字"><button type="submit">输入 ↵</button></form>
-      <small class="terminal-note">与电脑共享终端 · 断开网页不会停止 Pi</small>
-    </section>
+
+      <!-- Project Runtime View -->
+      <section id="project-view" class="view" hidden>
+        <div class="section-title">
+          <div class="title-with-badge">
+            <h2>Project Runtime</h2>
+            <span class="badge">账本状态</span>
+          </div>
+          <button id="runtime-terminal" class="quiet action-btn">
+            <span>在终端打开 /runtime</span>
+            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 4L4 12M12 9V4H7"/>
+            </svg>
+          </button>
+        </div>
+        <div id="project-content" class="project-dashboard"></div>
+      </section>
+
+      <!-- Terminal View (PTY / xterm.js) -->
+      <section id="terminal-view" class="view terminal-view" hidden>
+        <div class="terminal-actions">
+          <div class="terminal-command-wrap">
+            <select id="terminal-command" aria-label="终端快捷命令">
+              <option value="">快捷执行命令…</option>
+              <option>/runtime</option>
+              <option>/watch</option>
+              <option>/config</option>
+              <option>/models</option>
+              <option>/model</option>
+              <option>/login</option>
+              <option>/tree</option>
+              <option>/resume</option>
+              <option>/settings</option>
+              <option>/help</option>
+            </select>
+          </div>
+          <button id="fit-terminal" class="quiet action-btn" title="调整终端到当前窗口尺寸">
+            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M2.5 6V2.5H6M13.5 6V2.5H10M2.5 10v3.5H6M13.5 10v3.5H10"/>
+            </svg>
+            <span>适配</span>
+          </button>
+        </div>
+
+        <div id="terminal" class="terminal-container" aria-label="Pi 终端"></div>
+
+        <div class="keybar" aria-label="终端常用快捷键">
+          <div class="key-group">
+            <button type="button" data-key="esc">Esc</button>
+            <button type="button" data-key="tab">Tab</button>
+            <button type="button" data-key="ctrl">Ctrl</button>
+            <button type="button" data-key="ctrlc">^C</button>
+          </div>
+          <div class="key-group arrows">
+            <button type="button" data-key="left" aria-label="左箭头">←</button>
+            <button type="button" data-key="up" aria-label="上箭头">↑</button>
+            <button type="button" data-key="down" aria-label="下箭头">↓</button>
+            <button type="button" data-key="right" aria-label="右箭头">→</button>
+          </div>
+          <div class="key-group">
+            <button type="button" data-key="pageup">PgUp</button>
+            <button type="button" data-key="pagedown">PgDn</button>
+            <button type="button" data-key="altenter">Alt↵</button>
+            <button type="button" data-key="enter" class="key-enter">↵</button>
+          </div>
+        </div>
+
+        <form id="terminal-input-form" class="terminal-input">
+          <input id="terminal-input" placeholder="输入中文、文字或命令后回车…" aria-label="终端文字输入">
+          <button type="submit" class="primary">发送</button>
+        </form>
+        <small class="terminal-note">与电脑终端实时共享 PTY 会话 · 关闭网页后台任务不受影响</small>
+      </section>
+    </div>
   </main>
 </div>
-<dialog id="approval"><form id="approval-form"><p class="eyebrow">PI 正在等待你</p><h2 id="approval-title"></h2><p id="approval-message"></p><div id="approval-fields"></div><div class="dialog-actions"><button id="approval-cancel" type="button" class="quiet">取消</button><button id="approval-submit" type="submit" class="primary">确认</button></div></form></dialog>
-<dialog id="settings"><div class="section-title"><h2>模型与设置</h2><button id="settings-close" class="quiet">关闭</button></div><label for="model-select">Leader 模型</label><select id="model-select"></select><label for="thinking-select">思考强度</label><select id="thinking-select"><option>off</option><option>minimal</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option><option>ultra</option></select><button id="save-model" class="primary">应用</button><hr><button id="full-config" class="quiet">在终端打开完整配置 ↗</button><button id="logout" class="quiet">断开此浏览器</button></dialog>
+
+<!-- Approval Dialog / Bottom Sheet -->
+<dialog id="approval" class="modal-dialog">
+  <form id="approval-form">
+    <div class="dialog-header">
+      <div class="eyebrow">PI 正在等待确认</div>
+      <h2 id="approval-title"></h2>
+    </div>
+    <div class="dialog-body">
+      <p id="approval-message"></p>
+      <div id="approval-fields"></div>
+    </div>
+    <div class="dialog-actions">
+      <button id="approval-cancel" type="button" class="quiet">拒绝</button>
+      <button id="approval-submit" type="submit" class="primary">允许</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- Settings & Model Dialog -->
+<dialog id="settings" class="modal-dialog">
+  <div class="dialog-header">
+    <div class="section-title">
+      <h2>模型与会话设置</h2>
+      <button id="settings-close" class="quiet icon-button" aria-label="关闭">×</button>
+    </div>
+  </div>
+  <div class="dialog-body">
+    <div class="form-group">
+      <label for="model-select">Leader 默认模型</label>
+      <select id="model-select"></select>
+    </div>
+    <div class="form-group">
+      <label for="thinking-select">思考强度 (Thinking Budget)</label>
+      <select id="thinking-select">
+        <option>off</option>
+        <option>minimal</option>
+        <option>low</option>
+        <option>medium</option>
+        <option>high</option>
+        <option>xhigh</option>
+        <option>max</option>
+        <option>ultra</option>
+      </select>
+    </div>
+    <button id="save-model" class="primary full-width">保存并应用</button>
+    <div class="dialog-divider"></div>
+    <div class="dialog-secondary-actions">
+      <button id="full-config" class="quiet secondary-btn">在终端打开完整配置 (/config) ↗</button>
+      <button id="logout" class="quiet danger-btn">断开此浏览器配对</button>
+    </div>
+  </div>
+</dialog>
+
 <div id="toast" role="status" hidden></div>
-<script src="/vendor/xterm.js"></script><script src="/vendor/fit.js"></script><script src="/vendor/purify.js"></script><script type="module" src="/app.js"></script>
-</body></html>
+
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/fit.js"></script>
+<script src="/vendor/purify.js"></script>
+<script type="module" src="/app.js"></script>
+</body>
+</html>
