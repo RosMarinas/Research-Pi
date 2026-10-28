@@ -80,14 +80,14 @@ export function registerModelSettings(pi: ExtensionAPI, {
 			if (/^RESEARCH_PI_(?:SUBAGENT_|CODEX_)/.test(key)) process.env[key] = value;
 		}
 	};
-	const roleNames = ["leader", "advisor", "executor", "environment", "general", "internal"] as const;
+	const roleNames = ["leader", "advisor", "executor", "systems-optimizer", "environment", "general", "internal"] as const;
 	type Role = typeof roleNames[number];
 	const summary = (ctx: ExtensionContext) => {
 		const config = load();
 		const modelId = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "not selected";
 		return [
 			`Leader: ${modelId} · ${pi.getThinkingLevel()} · context ${ctx.model?.contextWindow ?? "unknown"} · speed ${config.pi.modelServiceTiers[modelId] ?? "inherit"}`,
-			...(["advisor", "executor", "environment", "general"] as const).map((role) => {
+			...(["advisor", "executor", "systems-optimizer", "environment", "general"] as const).map((role) => {
 				const runner = config.subagents[role];
 				return `${role}: ${runner.backend} · ${runner.model} · ${runner.thinking}${runner.speed ? ` · speed ${runner.speed}` : ""}`;
 			}),
@@ -237,7 +237,7 @@ export function registerModelSettings(pi: ExtensionAPI, {
 			if (parts[0] === "show" || (!parts.length && !ctx.hasUI)) { ctx.ui.notify(summary(ctx), "info"); return; }
 			if (!parts.length) { await showModelPanel(ctx); return; }
 			const role = parts[0] as Role;
-			if (!roleNames.includes(role!)) throw new Error("Usage: /models [show|leader|advisor|executor|environment|general|internal] [backend|model|thinking|speed|context] [value]");
+			if (!roleNames.includes(role!)) throw new Error("Usage: /models [show|leader|advisor|executor|systems-optimizer|environment|general|internal] [backend|model|thinking|speed|context] [value]");
 			let field = parts[1];
 			if (!field) {
 				if (role === "leader") field = await ctx.ui.select(`${role}: setting`, ["model", "thinking", "speed", "context"]);
@@ -306,8 +306,8 @@ export function registerModelSettings(pi: ExtensionAPI, {
 			else {
 				while (true) {
 					const config = load();
-					const roles = ["advisor", "executor", "environment", "general"] as const;
-					const rows = roles.map((role) => { const r = config.subagents[role]; return `${role}  ·  ${r.backend} / ${r.model} / ${r.thinking}`; });
+					const roles = ["advisor", "executor", "systems-optimizer", "environment", "general"] as const;
+					const rows = roles.map((role) => { const r = config.subagents[role]; return `${role === "systems-optimizer" ? "Systems Optimizer" : role}  ·  ${r.backend} / ${r.model} / ${r.thinking}`; });
 					const selected = await ctx.ui.select("Config / Models / Subagents — Esc: back", rows);
 					if (!selected) break;
 					await editRole(roles[rows.indexOf(selected)], ctx);
@@ -335,6 +335,10 @@ export function registerModelSettings(pi: ExtensionAPI, {
 export default function researchConfigExtension(pi: ExtensionAPI) {
 	const configPath = process.env.RESEARCH_PI_CONFIG_FILE ?? paths.configPath;
 	const modelSettings = registerModelSettings(pi, { configPath });
+	// Discover the bundled HTML skill on /reload in an existing Host.
+	pi.on("resources_discover", () => ({
+		skillPaths: [fileURLToPath(new URL("../skills/research-html", import.meta.url))],
+	}));
 
 	const activateTheme = async (name: string, ctx: ExtensionContext) => {
 		const available = ctx.ui.getAllThemes().map((theme) => theme.name);

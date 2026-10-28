@@ -48,9 +48,9 @@ export function codexSupportsFast(model) {
 }
 
 export function codexReasoningChoices(config, models, modelId) {
-	const ids = modelId === "inherit" ? [config.subagents.advisor.model, config.subagents.executor.model] : [modelId];
+	const ids = modelId === "inherit" ? Object.values(config.subagents).filter((runner) => runner.backend === "codex").map((runner) => runner.model) : [modelId];
 	const capabilities = ids.map((id) => models.find((model) => model.model === id)?.supportedReasoningEfforts.map((item) => item.reasoningEffort) ?? []);
-	return capabilities.reduce((common, supported) => common.filter((effort) => supported.includes(effort)));
+	return capabilities.length ? capabilities.reduce((common, supported) => common.filter((effort) => supported.includes(effort))) : [];
 }
 
 export function parseAntigravityModels(output) {

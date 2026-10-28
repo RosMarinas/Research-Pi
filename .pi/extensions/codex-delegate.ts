@@ -78,7 +78,7 @@ export function selectCodexMailboxJob(jobs: any[], jobId?: string, requestId?: s
 		&& descendsFrom(job)) ?? target;
 }
 
-const SUBAGENT_ROLES = ["advisor", "executor", "environment", "general"] as const;
+const SUBAGENT_ROLES = ["advisor", "executor", "systems-optimizer", "environment", "general"] as const;
 const SUBAGENT_BACKENDS = ["codex", "antigravity", "pi"] as const;
 
 const ActionSchema = Type.Union(
@@ -105,7 +105,7 @@ const BackendSchema = Type.Union(SUBAGENT_BACKENDS.map((backend) => Type.Literal
 });
 
 const RoleSchema = Type.Union(SUBAGENT_ROLES.map((role) => Type.Literal(role)), {
-	description: "advisor and executor are Codex-first; environment is Antigravity-first; general is Pi-first",
+	description: "advisor, executor, and systems-optimizer are Codex-first; environment is Antigravity-first; general is Pi-first",
 });
 
 const EffortSchema = Type.Union(
@@ -241,9 +241,9 @@ function requireText(value: string | undefined, label: string): string {
 }
 
 function configuredRunner(role: typeof SUBAGENT_ROLES[number]) {
-	const prefix = `RESEARCH_PI_SUBAGENT_${role.toUpperCase()}`;
+	const prefix = `RESEARCH_PI_SUBAGENT_${role.toUpperCase().replaceAll("-", "_")}`;
 	return {
-		backend: String(process.env[`${prefix}_BACKEND`] ?? (role === "advisor" || role === "executor" ? "codex" : role === "environment" ? "antigravity" : "pi")),
+		backend: String(process.env[`${prefix}_BACKEND`] ?? (role === "advisor" || role === "executor" || role === "systems-optimizer" ? "codex" : role === "environment" ? "antigravity" : "pi")),
 		model: String(process.env[`${prefix}_MODEL`] ?? "inherit"),
 		thinking: String(process.env[`${prefix}_THINKING`] ?? "inherit"),
 		speed: String(process.env[`${prefix}_SPEED`] ?? "inherit"),
@@ -1207,9 +1207,9 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			"Choose a role and normally omit backend/model/thinking to use the user's configured runner; explicit values override only this Action.",
 			"All Actors expose backend, role, model and thinking in Runtime, and user messages can reach them directly without passing through the Leader.",
 		].join(" "),
-		promptSnippet: "Delegate isolated design, implementation, validation, environment, or alternate-model work to a Runtime subagent",
+		promptSnippet: "Delegate isolated design, implementation, systems optimization, environment, or alternate-model work to a Runtime subagent",
 		promptGuidelines: [
-			"Codex advisor and executor are the primary path: advisor for architecture, design, competing explanations and read-only review; executor for implementation, experiments, testing and validation. Prefer these roles whenever they fit.",
+			"Use advisor for read-only design and competing explanations; executor for implementation and experiments; systems-optimizer (Systems Optimizer) for experiment performance work, starting with available resources and whole-system bottlenecks. Systems Optimizer has executor authority and its own model settings; its optimization skill is supplied automatically. Prefer the configured runner for each role.",
 			"Use Antigravity environment for dependency, SDK, toolchain, container, runtime, remote-execution and other environment configuration work. Use Pi general when a different authenticated Pi model or provider perspective is the reason for delegation.",
 			"Use the user's configured runner by default. Set backend, model, or thinking only when the task has a concrete reason to override it; never replace an explicit user choice.",
 			"Delegate only independently useful work; do not add an advisor or tester automatically. Assess suggestions against the current question instead of accumulating requirements.",

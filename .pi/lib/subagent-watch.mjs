@@ -1,3 +1,4 @@
+import { openVsCodeTerminal } from "./vscode-terminal.mjs";
 import { stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { execFile } from "node:child_process";
@@ -24,9 +25,10 @@ export async function createSubagentWatchClient({ cwd, stateRoot }) {
 	};
 	const list = async () => {
 		const state = await refresh();
+		const latest = new Map(); for (const action of state.actions) latest.set(action.actorId, action);
 		return state.actors.filter((actor) => !runtimeActorRetired(actor) && runtimeActorBackend(actor)
 			&& (!actor.metadata?.workspaceKey || actor.metadata.workspaceKey === runtime.workspaceKey))
-			.map((actor) => ({ ...actor, action: state.actions.filter((action) => action.actorId === actor.id).at(-1) }))
+			.map((actor) => ({ ...actor, action: latest.get(actor.id) }))
 			.sort((a, b) => Number(active(b.action?.status)) - Number(active(a.action?.status)) || String(b.updatedAt).localeCompare(String(a.updatedAt)));
 	};
 	const read = async (selector) => {
@@ -65,11 +67,22 @@ export async function createSubagentWatchClient({ cwd, stateRoot }) {
 
 export function subagentWatchTranscript(view) {
 	const rows = [];
+	const tools = new Map();
 	for (const event of view.events) {
 		const text = publicSubagentText(event.text ?? event.summary ?? "");
 		if (!text) continue;
 		const previous = rows.at(-1);
-		if (event.category === "assistant_delta" && previous?.streaming && previous.turn === event.turn) previous.text += text;
+		if (event.category === "tool" && event.tool) {
+			const key = event.toolCallId ?? `${event.turn}:${event.tool}:${event.timestamp}`;
+			let row = tools.get(key);
+			if (!row) { row = { kind: "tool", timestamp: event.timestamp }; tools.set(key, row); rows.push(row); }
+			Object.assign(row, { text, tool: event.tool, toolCallId: key, phase: event.phase, isError: event.isError });
+			if (event.args) row.args = event.args;
+			if (event.result) row.result = event.result;
+		} else if (event.category === "thinking_delta") {
+			if (previous?.kind === "thinking" && previous.turn === event.turn) previous.text += text;
+			else rows.push({ kind: "thinking", text, turn: event.turn, timestamp: event.timestamp });
+		} else if (event.category === "assistant_delta" && previous?.streaming && previous.turn === event.turn) previous.text += text;
 		else if (event.category === "assistant") {
 			if (previous?.streaming && previous.turn === event.turn) rows.pop();
 			if (rows.at(-1)?.text !== text) rows.push({ kind: "assistant", text, timestamp: event.timestamp, turn: event.turn });
@@ -105,7 +118,9 @@ export async function openSubagentTerminal(options, { platform = process.platfor
 	const launch = subagentWatchCommand(options);
 	try {
 		if (environment.TMUX) await exec("tmux", ["new-window", "-n", "Pi subagent", "-c", options.cwd, launch.command]);
-		else if (platform === "darwin") await exec("osascript", ["-e", 'on run argv\ntell application "Terminal"\ndo script (item 1 of argv)\nactivate\nend tell\nend run', launch.command]);
+		else if (environment.TERM_PROGRAM === "vscode" || environment.RESEARCH_PI_VSCODE_TERMINAL) {
+			return { ...await openVsCodeTerminal(options, { environment, exec, platform }), command: launch.command };
+		} else if (platform === "darwin") await exec("osascript", ["-e", 'on run argv\ntell application "Terminal"\ndo script (item 1 of argv)\nactivate\nend tell\nend run', launch.command]);
 		else await exec("x-terminal-emulator", ["-e", process.execPath, ...launch.args]);
 		return { opened: true, command: launch.command };
 	} catch (error) {

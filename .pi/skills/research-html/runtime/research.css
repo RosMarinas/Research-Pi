@@ -1,0 +1,18 @@
+/* Research Pi: offline bilingual research document typography. */
+@import url("./fonts/fonts.css");
+:root {
+  --sans: "Inter", "Research Han Sans", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --serif: "Songti SC", "STSong", "Noto Serif CJK SC", Georgia, serif;
+  --mono: "JetBrains Mono", "Research Han Sans", "SFMono-Regular", Consolas, monospace;
+}
+html { font-weight: 400; line-height: 1.75; }
+h1, h2 { font-family: var(--sans); font-weight: 700; line-height: 1.35; }
+strong, b, .pl-row > p { font-weight: 700; }
+code, pre { font-variant-ligatures: none; }
+.pl-row { font-family: var(--sans); }
+doc-math { overflow-x: auto; padding: 18px 12px; }
+doc-math[inline] { padding: 0; }
+@media (max-width: 640px) {
+  .readable-graph .mc-fig svg { min-width: 560px; max-width: none; }
+  .readable-graph .mc-fig::before { content: "左右滑动查看流程图"; display: block; color: var(--ink-3); font: 13px/1.6 var(--sans); margin-bottom: 8px; }
+}

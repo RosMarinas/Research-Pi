@@ -1,0 +1,13 @@
+{
+  "name": "research-pi-terminal",
+  "displayName": "Research Pi Terminal",
+  "description": "Open Research Pi subagent conversations beside their Leader in VS Code.",
+  "version": "0.1.0",
+  "publisher": "rosmarinas",
+  "license": "MIT",
+  "engines": { "vscode": "^1.85.0" },
+  "main": "./extension.cjs",
+  "activationEvents": ["onStartupFinished"],
+  "extensionKind": ["workspace"],
+  "capabilities": { "untrustedWorkspaces": { "supported": false } }
+}

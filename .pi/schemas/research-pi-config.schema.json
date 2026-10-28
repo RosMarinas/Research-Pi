@@ -28,6 +28,7 @@
       "properties": {
         "advisor": { "$ref": "#/$defs/runner" },
         "executor": { "$ref": "#/$defs/runner" },
+        "systems-optimizer": { "$ref": "#/$defs/runner" },
         "environment": { "$ref": "#/$defs/runner" },
         "general": { "$ref": "#/$defs/runner" }
       },

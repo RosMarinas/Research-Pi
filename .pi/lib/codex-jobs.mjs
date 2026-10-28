@@ -78,17 +78,28 @@ export function validateReasoningEffort(effort) {
 	return effort;
 }
 
+function optimizerCodexSetting(role, field) {
+	if (role !== "systems-optimizer") return undefined;
+	const prefix = "RESEARCH_PI_SUBAGENT_SYSTEMS_OPTIMIZER";
+	if (process.env[`${prefix}_BACKEND`] && process.env[`${prefix}_BACKEND`] !== "codex") return undefined;
+	const value = process.env[`${prefix}_${field}`]?.trim();
+	return value && value !== "inherit" ? value : undefined;
+}
+
 export function defaultCodexModel(mode) {
+	if (optimizerCodexSetting(mode, "MODEL")) return optimizerCodexSetting(mode, "MODEL");
 	return process.env[`RESEARCH_PI_CODEX_${mode === "advisor" ? "ADVISOR" : "EXECUTOR"}_MODEL`]?.trim()
 		|| (mode === "advisor" ? DEFAULT_CODEX_ADVISOR_MODEL : DEFAULT_CODEX_EXECUTOR_MODEL);
 }
 
 export function defaultCodexReasoningEffort(mode) {
+	if (optimizerCodexSetting(mode, "THINKING")) return optimizerCodexSetting(mode, "THINKING");
 	return process.env[`RESEARCH_PI_CODEX_${mode === "advisor" ? "ADVISOR" : "EXECUTOR"}_EFFORT`]?.trim()
 		|| (mode === "advisor" ? DEFAULT_CODEX_ADVISOR_REASONING_EFFORT : DEFAULT_CODEX_EXECUTOR_REASONING_EFFORT);
 }
 
 export function defaultCodexServiceTier(mode) {
+	if (mode === "systems-optimizer") return validateServiceTier(optimizerCodexSetting(mode, "SPEED") ?? "inherit");
 	return validateServiceTier(process.env[`RESEARCH_PI_CODEX_${mode === "advisor" ? "ADVISOR" : "EXECUTOR"}_SERVICE_TIER`] ?? "inherit");
 }
 
@@ -182,6 +193,7 @@ export function sanitizeCodexEnvironment(source = process.env) {
 
 export function buildDelegationPrompt({
 	mode,
+	role = mode,
 	task,
 	successCriteria = [],
 	context = "",
@@ -195,7 +207,7 @@ export function buildDelegationPrompt({
 	experiment,
 }) {
 	const executionGuidance = mode === "advisor" ? "" : `${SUBAGENT_WORKSPACE_POLICY} If a check blocks progress, determine whether it protects present validity or safety, or encodes an obsolete assumption. Adjust it only with evidence and within scope; passing the check is not the objective. Do not default to extra budgets, retries or bypasses. Never kill unrelated processes or delete shared datasets/weights.`;
-	const role = researchRolePrompt(mode);
+	const rolePrompt = researchRolePrompt(role);
 
 	const criteria = successCriteria.length > 0
 		? successCriteria.map((item) => `- ${item}`).join("\n")
@@ -221,8 +233,8 @@ export function buildDelegationPrompt({
 		return `<research_pi_continuation>
 ${RESEARCH_PRINCIPLES}
 
-${role}
-Continue the same ${mode} role and tools.${continuationAuthority}
+${rolePrompt}
+Continue the same ${role} role and ${mode} tools.${continuationAuthority}
 ${ownership}
 ${executionGuidance}
 ${CODEX_OUTPUT_POLICY}
@@ -262,7 +274,7 @@ Approved capabilities keep credentials opaque: credential contents never enter y
 	return `<research_pi_delegation>
 ${RESEARCH_PRINCIPLES}
 
-${role}
+${rolePrompt}
 ${executionGuidance}
 
 ${interaction}
@@ -666,11 +678,11 @@ function createCommandId() {
 export async function startCodexJob(options) {
 	if (typeof options.task !== "string" || !options.task.trim()) throw new Error("Codex task is required");
 	const mode = options.mode === "advisor" || options.role === "advisor" ? "advisor" : "executor";
-	const role = ["advisor", "executor", "environment", "general"].includes(options.role) ? options.role : mode;
+	const role = ["advisor", "executor", "systems-optimizer", "environment", "general"].includes(options.role) ? options.role : mode;
 	const fullAccess = mode !== "advisor" && (options.fullAccess ?? researchPiFullAccessEnabled());
-	const model = validateModel(options.model ?? defaultCodexModel(mode));
-	const reasoningEffort = validateReasoningEffort(options.reasoningEffort ?? defaultCodexReasoningEffort(mode));
-	const serviceTier = validateServiceTier(options.serviceTier ?? defaultCodexServiceTier(mode));
+	const model = validateModel(options.model ?? defaultCodexModel(role));
+	const reasoningEffort = validateReasoningEffort(options.reasoningEffort ?? defaultCodexReasoningEffort(role));
+	const serviceTier = validateServiceTier(options.serviceTier ?? defaultCodexServiceTier(role));
 	const subagent = codexSubagentSettings(options.subagent);
 	const identity = await resolveCodexWorkspaceIdentity(options.cwd);
 	const { cwd, workspaceRoot, workspaceKey, projectKey } = identity;
@@ -713,6 +725,7 @@ export async function startCodexJob(options) {
 		const sandbox = codexPermissionProfile(mode, { fullAccess });
 		const prompt = buildDelegationPrompt({
 			mode,
+			role,
 			task: options.task,
 			successCriteria: options.successCriteria,
 			context: options.context,

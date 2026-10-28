@@ -31,7 +31,7 @@ const TOP_LEVEL_KEYS = new Set([
 	"diagnostics",
 ]);
 const SUBAGENT_BACKENDS = new Set(["codex", "antigravity", "pi"]);
-const SUBAGENT_ROLES = Object.freeze(["advisor", "executor", "environment", "general"]);
+const SUBAGENT_ROLES = Object.freeze(["advisor", "executor", "systems-optimizer", "environment", "general"]);
 const SUBAGENT_THINKING = new Set(["inherit", "off", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
 const SERVICE_TIERS = new Set(["inherit", "standard", "fast"]);
 const UI_DENSITIES = new Set(["compact", "balanced"]);
@@ -319,7 +319,7 @@ export function researchPiEnvironment(config) {
 	const runnerEnvironment = {};
 	for (const role of SUBAGENT_ROLES) {
 		const runner = config.subagents[role];
-		const prefix = `RESEARCH_PI_SUBAGENT_${role.toUpperCase()}`;
+		const prefix = `RESEARCH_PI_SUBAGENT_${role.toUpperCase().replaceAll("-", "_")}`;
 		runnerEnvironment[`${prefix}_BACKEND`] = runner.backend;
 		runnerEnvironment[`${prefix}_MODEL`] = runner.model;
 		runnerEnvironment[`${prefix}_THINKING`] = runner.thinking;

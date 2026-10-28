@@ -1246,6 +1246,7 @@ export async function registerSubagentRuntimeJob(runtime, job) {
 			cwd: job.cwd ?? null,
 			workspaceKey: job.workspaceKey ?? null,
 			activityPath: job.activityPath ?? null,
+			nativeTerminal: job.nativeTerminal ?? null,
 			mission: job.mission ?? null,
 			missionKey: job.missionKey ?? null,
 			role,
@@ -1271,6 +1272,7 @@ export async function registerSubagentRuntimeJob(runtime, job) {
 			cwd: job.cwd ?? null,
 			workspaceKey: job.workspaceKey ?? null,
 			activityPath: job.activityPath ?? null,
+			nativeTerminal: job.nativeTerminal ?? null,
 			turn: job.turn ?? null,
 			role,
 			threadId: job.threadId ?? null,
@@ -1304,6 +1306,9 @@ export async function registerCodexRuntimeJob(runtime, job) {
 
 export async function recordSubagentRuntimeEvent(runtime, job) {
 	const actorId = await registerSubagentRuntimeJob(runtime, job);
+	// User-started discussions still update visible status/history, but must not
+	// enqueue a Leader result or input request merely because the turn settled.
+	if (job.reportToLeader === false) return null;
 	const turnSuffix = Number.isInteger(job.turn) ? `:turn-${job.turn}` : "";
 	const eventKey = job.status === "input_required"
 		? `request:${job.pendingRequest?.id ?? `turn-${job.turn ?? "current"}`}`

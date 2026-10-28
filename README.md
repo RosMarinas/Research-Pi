@@ -6,6 +6,8 @@ Research Pi 是一个科研助手：帮你读代码、设计和运行实验、�
 
 **当前分支用于原生 Windows，直接运行在 PowerShell 中，不需要 WSL。**
 
+内置 Systems Optimizer 从 CPU、内存、GPU 和显存等可用资源入手分析实验瓶颈，可通过 `/models` 设置模型。`/skill:research-html` 可生成带流程图和 LaTeX 的离线研究文档。
+
 | 你的环境 | 使用分支 |
 | --- | --- |
 | Windows + PowerShell | `windows-powershell-research-pi`（本分支） |

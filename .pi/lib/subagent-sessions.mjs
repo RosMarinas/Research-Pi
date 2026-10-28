@@ -1,9 +1,11 @@
 import { nativeInvocation, terminateOwnedProcess } from "./windows-native.mjs";
+import { runtimePerformance } from "./runtime-performance.mjs";
 import { RESEARCH_PRINCIPLES, researchRolePrompt } from "./research-prompts.mjs";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { sanitizeBoundaryEnvironment, resolveExecutablePath } from "./project-boundary.mjs";
 import { subagentModelCard, SUBAGENT_WORKSPACE_POLICY } from "./subagent-message.mjs";
 
@@ -47,15 +49,19 @@ function publicJob(job) {
 		status: job.status,
 		reusable: job.closed !== true,
 		progress: job.progress,
+		pendingRequest: job.pendingRequest,
+		performance: job.performance,
 		cwd: job.cwd,
 		workspaceKey: job.workspaceKey,
 		projectKey: job.projectKey,
 		researchTrackRef: job.researchTrackRef,
 		activityPath: job.activityPath,
+		nativeTerminal: job.closed ? null : job.nativeTerminal,
 		createdAt: job.createdAt,
 		startedAt: job.startedAt,
 		finishedAt: job.finishedAt,
 		turn: job.turn,
+		reportToLeader: job.reportToLeader,
 		result: job.result,
 		error: job.error,
 		backendSessionId: job.backendSessionId,
@@ -120,7 +126,6 @@ export function buildAntigravityRunnerArgs(input) {
 
 export function createSubagentSessionManager(options = {}) {
 	const spawnProcess = options.spawn ?? spawn;
-	const coreCli = resolve(options.coreCli ?? process.env.RESEARCH_PI_CORE_CLI ?? process.argv[1]);
 	const agyBin = options.agyBin ?? process.env.PI_ANTIGRAVITY_BIN ?? "agy";
 	const stateRoot = resolve(options.stateRoot ?? process.env.RESEARCH_PI_STATE_DIR ?? ".pi");
 	const sessionDir = resolve(options.sessionDir ?? join(stateRoot, "subagents", "pi-sessions"));
@@ -129,7 +134,19 @@ export function createSubagentSessionManager(options = {}) {
 	const onUpdate = options.onUpdate ?? (async () => {});
 	const jobs = new Map();
 	const actorJobs = new Map();
-	let disposed = false;
+	let disposed = false, performanceTimer;
+	const pollPerformance = () => {
+		for (const job of jobs.values()) if (job.backend === "pi" && job.nativeTerminal && !job.closed && job.child?.stdin?.writable) {
+			writeRecord(job.child, { type: "performance", enabled: runtimePerformance.enabled });
+			if (!runtimePerformance.enabled) job.performance = undefined;
+		}
+	};
+	const configurePerformance = () => {
+		clearInterval(performanceTimer); pollPerformance();
+		if (runtimePerformance.enabled) { performanceTimer = setInterval(pollPerformance, 2000); performanceTimer.unref(); }
+	};
+	const unsubscribePerformance = runtimePerformance.onToggle(configurePerformance);
+	configurePerformance();
 
 	const emit = async (job, event) => {
 		if (event) {
@@ -156,6 +173,7 @@ export function createSubagentSessionManager(options = {}) {
 	};
 
 	const beginTurn = async (job, body, source = "research-leader", messageId = null) => {
+		job.reportToLeader = source !== "user";
 		job.turn += 1;
 		job.actionId = `action:${job.id}:turn-${job.turn}`;
 		job.status = "running";
@@ -164,11 +182,11 @@ export function createSubagentSessionManager(options = {}) {
 		job.result = null;
 		job.error = null;
 		job.cancelling = false;
-		job.lastResponse = "";
+		job.lastResponse = ""; job.lastStopReason = null;
 		job.progress = `turn ${job.turn} running`;
 		await emit(job, { type: "message", text: body, summary: compact(body, 300), source, messageId });
 		if (job.backend === "pi") {
-			writeRecord(job.child, { id: `prompt-${job.turn}`, type: "prompt", message: body });
+			writeRecord(job.child, { id: `prompt-${job.turn}`, type: "prompt", message: body, source });
 		} else {
 			writeRecord(job.child, { event: "user", message: { content: body } });
 		}
@@ -178,9 +196,10 @@ export function createSubagentSessionManager(options = {}) {
 		await mkdir(sessionDir, { recursive: true, mode: 0o700 });
 		job.sessionId = randomUUID();
 		const args = buildPiRunnerArgs({ ...job, sessionDir, boundaryExtension });
-		const child = spawnProcess(process.execPath, [coreCli, ...args], {
+		const child = spawnProcess(process.execPath, [options.piRunner ?? fileURLToPath(new URL("./subagent-native-process.mjs", import.meta.url)), ...args], {
 			cwd: job.cwd,
 			env: { ...process.env,
+				RESEARCH_PI_SUBAGENT: JSON.stringify({ id: job.id, actorId: job.actorId, mission: job.mission, role: job.role, stateRoot }),
 				RESEARCH_PI_FULL_ACCESS: job.fullAccess ? "1" : "0",
 				RESEARCH_PI_INITIAL_SESSION_MODE: job.role === "advisor" ? "analysis" : "project",
 				RESEARCH_PI_CAPABILITY_SESSION_ID: job.leaderSessionId ?? job.sessionId,
@@ -214,10 +233,34 @@ export function createSubagentSessionManager(options = {}) {
 	const handlePiRecord = async (job, line) => {
 		let record;
 		try { record = JSON.parse(line); } catch { return; }
-		if (record.type === "response" && record.command === "get_state" && record.success) {
+		if (record.type === "performance_sample") { job.performance = record.sample; return; }
+		if (record.type === "native_status") {
+			if (record.state === "blocked" && job.status === "running") {
+				job.nativeBlocked = true; job.status = "input_required";
+				job.pendingRequest = { id: randomUUID(), kind: record.kind, summary: record.message };
+				job.progress = `${record.message ?? "Input required"} — open /watch to respond`;
+				await emit(job, { type: "input_required", summary: job.progress });
+			} else if (record.state !== "blocked" && job.nativeBlocked) {
+				job.nativeBlocked = false; job.pendingRequest = null; job.status = "running";
+				await emit(job, { type: "progress", summary: "Native input resolved" });
+			}
+		} else if (record.type === "subagent_ready") {
+			job.nativeTerminal = record.nativeTerminal;
+			await emit(job, { type: "progress", summary: "Native conversation ready" });
+		} else if (record.type === "agent_start" && FINAL_STATUSES.has(job.status)) {
+			job.reportToLeader = false;
+			job.turn += 1; job.actionId = `action:${job.id}:turn-${job.turn}`;
+			job.status = "running"; job.result = null; job.finishedAt = null; job.error = null; job.lastResponse = ""; job.lastStopReason = null; job.cancelling = false;
+			await emit(job, { type: "progress", summary: "User started a turn in the native conversation" });
+		} else if (record.type === "message_update") {
+			const update = record.assistantMessageEvent;
+			if (["text_delta", "thinking_delta"].includes(update?.type)) {
+				await emit(job, { type: update.type === "text_delta" ? "assistant_delta" : "thinking_delta", text: update.delta });
+			}
+		} else if (record.type === "response" && record.command === "get_state" && record.success) {
 			const model = record.data?.model;
-			if (job.model === "inherit" && model?.id) job.model = model.provider ? `${model.provider}/${model.id}` : model.id;
-			if (job.thinking === "inherit" && record.data?.thinkingLevel) job.thinking = record.data.thinkingLevel;
+			if (model?.id) job.model = model.provider ? `${model.provider}/${model.id}` : model.id;
+			if (record.data?.thinkingLevel) job.thinking = record.data.thinkingLevel;
 			await emit(job, { type: "progress", summary: "runner model settings resolved" });
 		} else if (record.type === "extension_ui_request") {
 			if (["select", "confirm", "input", "editor"].includes(record.method) && record.id) {
@@ -230,11 +273,17 @@ export function createSubagentSessionManager(options = {}) {
 			}
 		} else if (record.type === "tool_execution_start") {
 			job.progress = `${record.toolName ?? "tool"} running`;
-			await emit(job, { type: "tool", summary: job.progress, tool: record.toolName ?? null });
+			await emit(job, { type: "tool", summary: job.progress, tool: record.toolName ?? null, toolCallId: record.toolCallId, phase: "running", args: record.args });
+		} else if (record.type === "tool_execution_update") {
+			await emit(job, { type: "tool", summary: `${record.toolName} running`, tool: record.toolName, toolCallId: record.toolCallId, phase: "running", result: record.partialResult });
 		} else if (record.type === "tool_execution_end") {
 			job.progress = `${record.toolName ?? "tool"} ${record.isError ? "failed" : "completed"}`;
-			await emit(job, { type: record.isError ? "error" : "tool", summary: job.progress, tool: record.toolName ?? null });
+			await emit(job, { type: record.isError ? "error" : "tool", summary: job.progress, tool: record.toolName ?? null, toolCallId: record.toolCallId, phase: "completed", result: record.result, isError: record.isError });
 		} else if (record.type === "message_end") {
+			if (record.message?.role === "assistant") {
+				job.lastStopReason = record.message.stopReason;
+				job.lastModelError = record.message.errorMessage;
+			}
 			const text = assistantText(record.message);
 			if (text) {
 				job.lastResponse = text;
@@ -242,7 +291,8 @@ export function createSubagentSessionManager(options = {}) {
 			}
 			if (record.message?.model && job.model === "inherit") job.model = record.message.model;
 		} else if (record.type === "agent_settled") {
-			if (job.cancelling) await settle(job, "cancelled", null, "cancelled by user");
+			if (job.cancelling || job.lastStopReason === "aborted") await settle(job, "cancelled", null, "cancelled by user");
+			else if (job.lastStopReason === "error") await settle(job, "failed", null, job.lastModelError ?? "Model request failed");
 			else await settle(job, "completed", { summary: job.lastResponse || "Pi runner completed without a text response." });
 		} else if (record.type === "response" && record.success === false) {
 			await settle(job, "failed", null, record.error ?? `${record.command ?? "RPC command"} failed`);
@@ -383,11 +433,12 @@ export function createSubagentSessionManager(options = {}) {
 		const body = String(message?.body ?? message ?? "").trim();
 		if (!body) throw new Error("Subagent message body is required");
 		if (job.backend === "pi") {
-			if (job.status === "running" || job.status === "starting") {
+			if (job.status === "running" || job.status === "starting" || job.nativeBlocked) {
 				// Pi steering enters the current agent loop at its next safe boundary,
 				// matching Runtime's direct-message semantics without creating a
 				// second queued turn whose lifecycle would be ambiguous here.
-				writeRecord(job.child, { type: "steer", message: body });
+				if (message.from && message.from !== "user") job.reportToLeader = true;
+				writeRecord(job.child, { type: "steer", message: body, source: message.from ?? "user" });
 				await emit(job, { type: "message", source: message.from ?? "user", messageId: message.id, text: body, summary: compact(body, 300) });
 				return { status: "delivered", detail: `delivered to active Pi Actor ${actorId}` };
 			}
@@ -415,7 +466,7 @@ export function createSubagentSessionManager(options = {}) {
 	const cancel = async (id) => {
 		const job = jobs.get(id);
 		if (!job) throw new Error(`Unknown subagent job: ${id}`);
-		if (FINAL_STATUSES.has(job.status)) return publicJob(job);
+		if (FINAL_STATUSES.has(job.status) && !job.nativeBlocked) return publicJob(job);
 		job.cancelling = true;
 		job.status = "cancelling";
 		job.progress = "cancelling";
@@ -446,7 +497,7 @@ export function createSubagentSessionManager(options = {}) {
 	};
 
 	const dispose = async () => {
-		disposed = true;
+		disposed = true; clearInterval(performanceTimer); unsubscribePerformance();
 		for (const job of jobs.values()) {
 			if (!FINAL_STATUSES.has(job.status)) {
 				job.cancelling = true;

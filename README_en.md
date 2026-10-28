@@ -6,6 +6,8 @@ Research Pi helps with research: reading code, designing and running experiments
 
 **This branch runs directly on Windows with PowerShell. WSL is not required.**
 
+The bundled Systems Optimizer starts with available CPU, memory, GPU and VRAM resources; configure its model through `/models`. `/skill:research-html` creates offline research documents with diagrams and LaTeX.
+
 | Environment | Branch |
 | --- | --- |
 | Windows + PowerShell | `windows-powershell-research-pi` (this branch) |
