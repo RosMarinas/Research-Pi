@@ -1,3 +1,4 @@
+import { runtimePerformance } from "./runtime-performance.mjs";
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { Terminal } = require('@xterm/headless');
@@ -15,7 +16,7 @@ export class NativeTerminal {
   get columns() { return this.screen.cols; }
   get rows() { return this.screen.rows; }
   async drainInput() {}
-  write(data) { this.screen.write(data, () => this.output({ type:'terminal', data, seq: ++this.seq })); }
+  write(data) { runtimePerformance.count("terminalWrites"); if (runtimePerformance.enabled) runtimePerformance.count("terminalBytes", Buffer.byteLength(data)); this.screen.write(data, () => this.output({ type:'terminal', data, seq: ++this.seq })); }
   input(data) { this.onInput?.(data); }
   resize(cols, rows) { if (cols === this.columns && rows === this.rows) return; this.screen.resize(cols, rows); this.onResize?.(); this.output({ type:'terminal_resize',cols,rows }); }
   snapshot() { return new Promise(resolve => this.screen.write('', () => resolve({data:this.serializer.serialize(), cols:this.columns, rows:this.rows, seq:this.seq}))); }

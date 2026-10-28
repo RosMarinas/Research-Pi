@@ -24,3 +24,13 @@ Dependencies installed by npm may include additional transitive components.
 Their package distributions contain the authoritative license metadata and
 texts. A future bundled or standalone distribution must preserve all applicable
 third-party LICENSE and NOTICE material.
+
+## Research HTML resources
+
+The bundled `.pi/skills/research-html/` retains separate third-party terms:
+
+- html-plan runtime, upstream snapshot `06ec7b6a0a82bdc4bec44bd82d4368c42f20d7c1`: marketplace root Apache-2.0 license in `UPSTREAM-LICENSE`; upstream plugin metadata separately declares MIT in `upstream-plugin.json`. Both are retained without relabeling upstream files as Research Pi's MIT code. Modifications to the packer and additional resources are described in `PROVENANCE.md`.
+- KaTeX 0.19.1: MIT, `runtime/math/LICENSE`.
+- Source Han Sans CN (modified and renamed Research Han Sans), Inter, and JetBrains Mono: SIL OFL 1.1, original notices in `runtime/fonts/*-OFL.txt`. The standalone HTML packer preserves their notices when embedding fonts.
+
+Other researched skills informed the unified authoring guidance; their implementations and chart templates are not bundled.

@@ -34,7 +34,7 @@ export default function subagentRunnersExtension(pi: ExtensionAPI) {
 			if (!ctx) return;
 			const writer = writers.get(job.id);
 			writer?.append(job, event);
-			const fingerprint = JSON.stringify([job.status, job.turn, job.model, job.thinking, job.backendSessionId]);
+			const fingerprint = JSON.stringify([job.status, job.turn, job.model, job.thinking, job.backendSessionId, job.nativeTerminal]);
 			const changed = fingerprint !== fingerprints.get(job.id);
 			if (changed) {
 				fingerprints.set(job.id, fingerprint);
@@ -42,7 +42,7 @@ export default function subagentRunnersExtension(pi: ExtensionAPI) {
 			}
 			// Text deltas stay in the batched display journal. The Leader Dock only
 			// refreshes for lifecycle changes or completed/started tools, not each token.
-			if (changed || event?.type === "tool") await getRuntimeUiAdapter()?.refresh(ctx, { backend: job.backend, jobs: manager.list(job.backend) });
+			if (changed || (event?.type === "tool" && (event.phase === "completed" || event.args))) await getRuntimeUiAdapter()?.refresh(ctx, { backend: job.backend, jobs: manager.list(job.backend) });
 			if (!TERMINAL.has(job.status)) return;
 			await writer?.flush();
 			const turnKey = `${job.id}:${job.turn}:${job.status}`;

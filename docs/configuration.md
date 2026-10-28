@@ -130,6 +130,7 @@ All delegated workers enter through one `subagent` tool and one Runtime Actor mo
   "subagents": {
     "advisor": { "backend": "codex", "model": "gpt-6.1-sol", "thinking": "high", "speed": "inherit" },
     "executor": { "backend": "codex", "model": "gpt-6.1-sol", "thinking": "high", "speed": "inherit" },
+    "systems-optimizer": { "backend": "codex", "model": "gpt-6.1-sol", "thinking": "high", "speed": "inherit" },
     "environment": { "backend": "antigravity", "model": "gemini-3.1-pro-high", "thinking": "high" },
     "general": { "backend": "pi", "model": "inherit", "thinking": "inherit" }
   },
@@ -142,6 +143,8 @@ All delegated workers enter through one `subagent` tool and one Runtime Actor mo
 ```
 
 The defaults deliberately make Codex advisor/executor the main design, implementation, and verification routes; Antigravity is the environment/toolchain specialist; Pi is the general alternate runner. These are defaults, not separate tool types. The Leader may select another backend for an Action by supplying `role`, `backend`, `model`, and `thinking`, and the user can change each role's defaults with `/models`.
+
+`systems-optimizer` (Systems Optimizer) is a peer role for experiment performance, with independent backend/model/thinking/speed settings. It uses executor permissions, write ownership, external-run tools and the same Codex executor concurrency pool; it does not gain new host or resource authority. Existing v3 configs acquire its bundled defaults on load without changing executor settings. Its packaged optimization skill is included in the role prompt for Codex (including resume), Pi and Antigravity, so a bounded worker need not read the harness installation. The skill starts with available resources and whole-system analysis and encourages searching primary sources; Codex native Web Search remains enabled. Other backends use their available search capabilities.
 
 The Pi runner launches Pi Core in a separate RPC Session. It reuses the same Pi provider catalog and authentication directory as the Leader, while retaining an independent model, thinking level, conversation, and Runtime Actor. It loads the project boundary; any approval dialog that cannot be represented in the isolated RPC channel is declined and reported rather than hanging or silently widening authority. The Antigravity runner uses its documented [bidirectional streaming JSON protocol](https://antigravity.google/docs/cli/headless/) and keeps the same process for follow-up messages; launch `agy` interactively once for [first-time authentication](https://antigravity.google/docs/cli/install/). Because headless mode cannot display permission prompts, non-advisor Antigravity Actions auto-approve tools inside the CLI's explicit `--sandbox`; advisor remains plan mode without that override. Neither runner creates a handoff file; task context and later steering travel through their live message stream and the Runtime mailbox.
 
@@ -170,6 +173,8 @@ Codex jobs are durable and may recover across Leader Sessions. Pi and Antigravit
 ```text
 /models leader model openai-codex/gpt-6-astra
 /models executor model gpt-6-astra
+/models systems-optimizer model gpt-6.1-sol
+/models systems-optimizer thinking high
 /models advisor thinking high
 /models environment model gemini-3.1-pro-high
 /models general model opencode-go/kimi-k2.5
@@ -313,7 +318,7 @@ The DeepSeek V4 Pro anchor is no longer in the default extension loadout. Its ex
 
 ## Skills, UI and diagnostics
 
-Research Pi uses Pi's `--no-skills`, always loads the packaged `research-briefing` skill, and then loads the external allowlist in `resources.skills`. Missing external paths are skipped. One-off `--skill` and explicitly trusted `--extension` paths remain available.
+Research Pi uses Pi's `--no-skills`, loads the packaged `research-briefing`, `research-project-management`, `experiment-systems-optimization`, and `research-html` skills, and then loads the external allowlist in `resources.skills`. Missing external paths are skipped. One-off `--skill` and explicitly trusted `--extension` paths remain available.
 
 Three Research Pi palettes are bundled:
 
@@ -385,3 +390,11 @@ A completed turn leaves its Actor available for follow-up. `cancel` stops execut
 Use `subagent` with `action: "retire"` and the current `jobId`, or `/actors retire <actor-id-or-job-id>`, to retire a settled participant. The attached Leader owns this operation. Outstanding actions, unresolved outcomes and live registered external runs must be settled first. Pi and Antigravity close their idle processes; Codex retains its completed thread as history. Retirement does not erase results, messages or session records.
 
 Retired Actors cannot receive new messages, resume or be selected for mission reuse. Pending messages to them are superseded. They disappear from the work board and `/watch` selection; `/actors all` retains them with a `retired` label. Starting the same mission after retirement creates a new Actor. Creating another Actor with the same role does not automatically retire existing participants.
+
+### Research HTML
+
+`/skill:research-html` creates an offline research document with Chinese prose by default, English technical labels, interactive diagrams, and LaTeX math. It is a bundled skill, with one authoring specification and an on-demand component reference; it does not chain other design skills. Existing Hosts using this checkout can discover it on `/reload` while idle.
+
+The packaged resources include Inter, a renamed Source Han Sans CN derivative, JetBrains Mono, and KaTeX with their licenses. Ordinary builds require only Node. The packer embeds only Chinese font shards used by the source document; maintaining or regenerating those shards is separate from authoring. The result is a standalone HTML file, opened in a browser; there is no additional viewer service or automatic feedback transport.
+
+When delegating HTML creation, provide the skill path and the required resources within the worker's existing filesystem permissions. Leader skill discovery does not automatically inject the full instructions into every worker.

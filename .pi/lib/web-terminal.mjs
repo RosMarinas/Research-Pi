@@ -2,14 +2,15 @@ import { createServer, createConnection } from "node:net";
 import { randomUUID } from "node:crypto";
 import { chmod } from "node:fs/promises";
 
-export async function createDesktopTerminal({ path, instance, terminal, state, stop }) {
+export async function createDesktopTerminal({ path, instance, terminal, state, stop, onObserversChanged = () => {} }) {
 	const clients = new Set(), actions = new Map();
+	const observersChanged = () => onObserversChanged([...clients].filter(s => s.attached && !s.destroyed).length);
 	const send = (socket, event) => { if (!socket.destroyed) socket.write(JSON.stringify(event) + "\n"); };
 	const server = createServer((socket) => {
 		clients.add(socket);
 		let buffer = "", attached = false;
 		socket.on("error", () => {});
-		socket.on("close", () => { clients.delete(socket); for (const [id, waiter] of actions) if (waiter.socket === socket) { actions.delete(id); waiter.reject(new Error("Terminal disconnected during action")); } });
+		socket.on("close", () => { clients.delete(socket); observersChanged(); for (const [id, waiter] of actions) if (waiter.socket === socket) { actions.delete(id); waiter.reject(new Error("Terminal disconnected during action")); } });
 		socket.on("data", (data) => {
 			buffer += data.toString();
 			if (buffer.length > 256 * 1024) return socket.destroy();
@@ -22,6 +23,7 @@ export async function createDesktopTerminal({ path, instance, terminal, state, s
 					if (input.type === "status") send(socket, { type: "status", instance, state: state() });
 					else if (input.type === "stop") { send(socket, { type: "stopping" }); stop(); }
 					else if (input.type === "attach") {
+						socket.attached = true; observersChanged();
 						void terminal.snapshot().then((snapshot) => { send(socket, { type: "terminal_snapshot", ...snapshot }); attached = true; socket.attached = true; socket.observer = input.observer === true; }).catch(() => socket.destroy());
 					} else if (attached && input.type === "action_result") { const waiter = actions.get(input.id); if (waiter?.socket === socket) { actions.delete(input.id); socket.actionPaused = false; input.error ? waiter.reject(new Error(input.error)) : waiter.resolve(input.result); } }
 					else if (attached && input.type === "input" && typeof input.data === "string" && input.data.length <= 64 * 1024) terminal.write(input.data, socket);
@@ -36,7 +38,7 @@ export async function createDesktopTerminal({ path, instance, terminal, state, s
 	await chmod(path, 0o600);
 	return {
 		broadcast(event) {
-			if (!["terminal", "terminal_resize", "link"].includes(event.type)) return;
+			if (!["terminal", "terminal_resize", "link", "navigate"].includes(event.type)) return;
 			for (const socket of clients) if (socket.attached && !socket.actionPaused) {
 				if (socket.writableLength > 2 * 1024 * 1024) socket.destroy();
 				else send(socket, event);
