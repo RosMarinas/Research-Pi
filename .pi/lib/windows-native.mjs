@@ -42,7 +42,7 @@ export function terminateOwnedProcess(child) {
 
 export function nativeWindowsMode(argv) {
  const options = argv.slice(0, argv.indexOf('--') < 0 ? argv.length : argv.indexOf('--'));
- const unsupported = ['web', 'native-runtime'].includes(argv[0]) || options.some(arg => ['--resident-runtime', '--web', '--web-tailscale'].includes(arg) || arg.startsWith('--web='));
+ const unsupported = ['web', 'native-runtime', 'restart', 'stop'].includes(argv[0]) || options.some(arg => ['--resident-runtime', '--web', '--web-tailscale'].includes(arg) || arg.startsWith('--web='));
  if (unsupported) throw new Error('Native Windows preview supports foreground TUI/RPC only; resident/Web modes still require the WSL branch.');
  return argv;
 }

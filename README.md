@@ -4,7 +4,7 @@
 
 Research Pi 是一个科研助手：帮你读代码、设计和运行实验、整理结果，也可以把独立任务交给其他模型。研究目标、关键决定和实验记录保存在项目中，换会话时不用全部从头解释。
 
-**当前分支用于原生 Windows，直接运行在 PowerShell 中，不需要 WSL。**
+**当前分支用于原生 Windows，直接运行在 PowerShell 中，不需要 WSL。** 基于 Pi Core 1.4.0。
 
 内置 Systems Optimizer 从 CPU、内存、GPU 和显存等可用资源入手分析实验瓶颈，可通过 `/models` 设置模型。`/skill:research-html` 可生成带流程图和 LaTeX 的离线研究文档。
 

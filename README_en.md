@@ -4,7 +4,7 @@
 
 Research Pi helps with research: reading code, designing and running experiments, and interpreting results. It can also assign independent tasks to other models. Goals, decisions, and experiment records stay with the project, so a new session does not have to start from scratch.
 
-**This branch runs directly on Windows with PowerShell. WSL is not required.**
+**This branch runs directly on Windows with PowerShell. WSL is not required.** It uses Pi Core 1.4.0.
 
 The bundled Systems Optimizer starts with available CPU, memory, GPU and VRAM resources; configure its model through `/models`. `/skill:research-html` creates offline research documents with diagrams and LaTeX.
 

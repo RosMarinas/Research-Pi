@@ -237,7 +237,12 @@ export function writeResearchPiConfig(path, config) {
 
 export function ensureResearchPiConfig(path, options = {}) {
 	if (!existsSync(path)) writeResearchPiConfig(path, options.defaults ?? defaultResearchPiConfig());
-	const raw = JSON.parse(readFileSync(path, "utf8"));
+	let raw;
+	try { raw = JSON.parse(readFileSync(path, "utf8")); }
+	catch (error) {
+		if (error instanceof SyntaxError) throw new Error(`Research Pi config is not valid JSON: ${path}: ${error.message}`, { cause: error });
+		throw error;
+	}
 	const resolved = resolveResearchPiConfig(raw);
 	if (raw.version !== RESEARCH_PI_CONFIG_VERSION || Object.hasOwn(raw, "activeProfile") || Object.hasOwn(raw, "profiles") || Object.hasOwn(raw.research?.compaction ?? {}, "recentTailTokens")) {
 		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
