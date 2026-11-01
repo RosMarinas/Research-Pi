@@ -279,7 +279,6 @@ Use `pi-raw` for comparison against the pinned, unmodified Pi Core. Keep `tests/
 - [Runtime testing and recovery](docs/research-runtime-test-guide.md)
 - [Security model and local data](docs/security-model.md)
 - [Cache diagnostics](docs/cache-diagnostics.md)
-- [Design thesis](thesis/ResearchPi.pdf)
 
 ## License
 

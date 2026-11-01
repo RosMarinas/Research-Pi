@@ -364,7 +364,6 @@ npm run check:package
 - [Runtime 测试与恢复](docs/research-runtime-test-guide.md)
 - [安全模型与本地数据](docs/security-model.md)
 - [缓存诊断](docs/cache-diagnostics.md)
-- [设计思想](thesis/ResearchPi.pdf)
 
 ## License
 

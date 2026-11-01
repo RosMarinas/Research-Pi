@@ -21,6 +21,7 @@ node_modules
 .pi/capabilities/
 .pi/context-artifacts/
 /tmp/pi/
+/thesis/
 .pi/agent/*
 .pi/config.json
 
