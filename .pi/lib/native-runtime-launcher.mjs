@@ -6,11 +6,12 @@ import {residentWebDirectory,findResidentWeb} from './web-resident.mjs';
 import {residentControlDirectory} from './web-tmux.mjs';
 import {residentRequest,attachResidentTerminal} from './web-terminal.mjs';
 import {withOwnerFileLock} from './owner-file-lock.mjs';
+import {readNativeRecord} from './native-runtime-record.mjs';
 
 async function directoryFor(stateRoot,cwd,analysis=false){const legacy=await residentWebDirectory(stateRoot,cwd);return join(stateRoot,'native-hosts',legacy.split('/').at(-1)+(analysis?'-analysis':''))}
-async function gatewayRecord(directory){try{const r=JSON.parse(await readFile(join(directory,'native-gateway.json'),'utf8'));try{process.kill(r.pid,0);return r}catch(e){if(e.code!=='ESRCH')throw e;await unlink(join(directory,'native-gateway.json'));return null}}catch(e){if(e.code==='ENOENT')return null;throw e}}
+async function gatewayRecord(directory){try{const r=await readNativeRecord(join(directory,'native-gateway.json'));try{process.kill(r.pid,0);return r}catch(e){if(e.code!=='ESRCH')throw e;await unlink(join(directory,'native-gateway.json'));return null}}catch(e){if(e.code==='ENOENT')return null;throw e}}
 export async function findNativeRuntime(stateRoot,cwd,analysis=false){
- const directory=await directoryFor(stateRoot,cwd,analysis);let record;try{record=JSON.parse(await readFile(join(directory,'access.json'),'utf8'))}catch(e){if(e.code==='ENOENT')return null;throw e}
+ const directory=await directoryFor(stateRoot,cwd,analysis);let record;try{record=await readNativeRecord(join(directory,'access.json'))}catch(e){if(e.code==='ENOENT')return null;throw e}
  try{const reply=await residentRequest(record);const gateway=await gatewayRecord(directory);return {...record,directory,state:reply.state,gatewayPid:gateway?.pid,url:gateway?.url,localUrl:gateway?.localUrl}}catch(e){try{process.kill(record.pid,0)}catch(probe){if(probe.code==='ESRCH'){await unlink(join(directory,'access.json'));return null}throw probe}throw new Error('Native Host is alive but unavailable: '+e.message)}
 }
 async function launch(script,options,directory,env){
@@ -27,6 +28,16 @@ export async function ensureNativeGateway(options,record){
  },{attempts:450,waitMs:100});
 }
 export async function stopNativeGateway(record){const gateway=await gatewayRecord(record.directory);if(!gateway)return;process.kill(gateway.pid,'SIGTERM');const end=Date.now()+15000;while(Date.now()<end){if(!await gatewayRecord(record.directory))return;await new Promise(r=>setTimeout(r,50))}throw new Error('Gateway is still shutting down')}
+export async function stopNativeRuntime(record) {
+ await stopNativeGateway(record);
+ await residentRequest(record, 'stop');
+ const end = Date.now() + 15000;
+ while (Date.now() < end) {
+  try { process.kill(record.pid, 0); } catch (error) { if (error.code === 'ESRCH') return; throw error; }
+  await new Promise(resolve => setTimeout(resolve, 50));
+ }
+ throw new Error('Native Runtime is still shutting down; no replacement was started');
+}
 export async function launchNativeRuntime(options){
  const {stateRoot,cwd,analysis=false}=options,directory=await directoryFor(stateRoot,cwd,analysis);
  await mkdir(directory,{recursive:true,mode:0o700});

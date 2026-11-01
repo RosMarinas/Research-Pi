@@ -4,7 +4,9 @@
 
 > Session is not enough for research. Project is.
 
-面向 AI、机器人、通信、优化与仿真的科研 Agent Harness，基于 **Pi Core 1.0.0**。本页介绍 `windows-wsl-research-pi` 分支：同步主线功能，并保留 WSL2 与 Windows 宿主之间的严格隔离。
+近期更新：新增项目管理 skill，由 Leader 统一管理目录、Git 历史与临时 worktree。子代理启动和续接默认后台执行，Codex Executor 每工作区并发上限提高到 10。执行型子代理继承 full-access；Pi 与 Codex 在受限模式下通过 Leader 协调额外授权，Advisor 保持只读。更新后请重启 Runtime。
+
+面向 AI、机器人、通信、优化与仿真的科研 Agent Harness，基于 **Pi Core 1.4.0**。本页介绍 `windows-wsl-research-pi` 分支：同步主线功能，并保留 WSL2 与 Windows 宿主之间的严格隔离。
 
 Research Pi 把研究目标、实验记录、关键决定和多 Agent 协作留在项目中。Session 可以轮换，模型可以更换，研究主线不必从头解释。它关注的不只是“代码是否正确”，还包括：实验是否检验了预期假设、证据允许什么结论、下一步做什么最有信息量。
 
@@ -365,7 +367,6 @@ npm run check:package
 - [Runtime 测试与恢复](docs/research-runtime-test-guide.md)
 - [安全模型与本地数据](docs/security-model.md)
 - [缓存诊断](docs/cache-diagnostics.md)
-- [设计思想](thesis/ResearchPi.pdf)
 
 ## License
 

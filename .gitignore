@@ -20,6 +20,8 @@ node_modules
 .pi/web/
 .pi/capabilities/
 .pi/context-artifacts/
+/tmp/pi/
+/thesis/
 .pi/agent/*
 .pi/config.json
 
