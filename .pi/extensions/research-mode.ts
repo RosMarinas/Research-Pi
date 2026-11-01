@@ -1,13 +1,10 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createHash } from "node:crypto";
 import { chmod, copyFile, mkdir, stat, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { mapProviderSystemPrompt } from "../lib/provider-system-prompt.mjs";
-import { researchPiStateRoot } from "../lib/runtime-paths.mjs";
+import { resolveBoundaryPath, resolveProjectRoot } from "../lib/project-boundary.mjs";
 
-const HARNESS_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const STATE_ROOT = researchPiStateRoot(HARNESS_ROOT);
 const MAX_CODEMODE_CONTEXT_CHARS = 8_000;
 const PARTIAL_CORE_TOOLS = new Set(["bash", "powershell", "read", "grep", "find", "ls"]);
 
@@ -92,8 +89,12 @@ export function partialToolResultReceipt(event: any, artifactPath?: string): str
 async function persistContextArtifact(event: any, ctx: any, prefix: string, sourcePath: string | null, text: string) {
 	const sessionId = String(ctx.sessionManager.getSessionId());
 	const callKey = createHash("sha256").update(String(event.toolCallId)).digest("hex").slice(0, 20);
-	const artifactDir = join(STATE_ROOT, "context-artifacts", sessionId);
+	const sessionKey = /^[a-zA-Z0-9_-]+$/.test(sessionId) ? sessionId : createHash("sha256").update(sessionId).digest("hex");
+	const root = await resolveProjectRoot(ctx.cwd);
+	const artifactDir = join(root, "tmp", "pi", "context-artifacts", sessionKey);
 	const artifactPath = join(artifactDir, `${prefix}-${callKey}.txt`);
+	const boundary = await resolveBoundaryPath(root, artifactPath);
+	if (!boundary.inside || boundary.sensitive) throw new Error("Context artifact path crosses the project boundary");
 	await mkdir(artifactDir, { recursive: true, mode: 0o700 });
 	if (sourcePath) {
 		await copyFile(sourcePath, artifactPath);

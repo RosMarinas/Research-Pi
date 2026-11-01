@@ -20,6 +20,7 @@ node_modules
 .pi/web/
 .pi/capabilities/
 .pi/context-artifacts/
+/tmp/pi/
 .pi/agent/*
 .pi/config.json
 
