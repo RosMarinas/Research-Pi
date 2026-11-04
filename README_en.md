@@ -14,6 +14,15 @@ Research Pi keeps research goals, experiment records, decisions, and multi-agent
 
 Requires Node.js `>=22.19` and Git. On Windows, install and run inside WSL2. Keep projects in its Linux filesystem, not Windows mounts such as `/mnt/c`.
 
+The Linux/WSL2 project sandbox also needs `ripgrep` (the `rg` command), `bubblewrap`, and `socat`. On Ubuntu/Debian, install them first:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y ripgrep bubblewrap socat
+```
+
+On Fedora use `sudo dnf install ripgrep bubblewrap socat`; on Arch use `sudo pacman -S ripgrep bubblewrap socat`. Pi reuses or downloads `rg` into its user tool directory; install dependencies ahead of time for offline use. For `ripgrep (rg) not found`, verify `rg --version` in the shell launching Pi, then run `pi restart` from the project to reinitialize the resident Host. Opening another terminal alone reconnects to the old Host.
+
 DeepSeek, OpenCode Go, and Z.AI follow the same setup: **install → add an API key to the credentials file → start Pi and choose a model**.
 
 The `pi` commands below refer to Research Pi. If native Pi is also installed, first [check which launcher your shell selects](#distinguish-native-pi-from-research-pi-launchers).

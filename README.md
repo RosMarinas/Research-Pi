@@ -14,6 +14,15 @@ Research Pi 把研究目标、实验记录、关键决定和多 Agent 协作留�
 
 要求 Node.js `>=22.19` 与 Git。Windows 请在 WSL2 内安装和运行，并将项目放在 WSL 文件系统中，而不是 `/mnt/c` 等 Windows 挂载盘。
 
+Linux／WSL2 的项目沙箱还需要 `ripgrep`（命令为 `rg`）、`bubblewrap` 和 `socat`。Ubuntu／Debian 可先执行：
+
+```sh
+sudo apt-get update
+sudo apt-get install -y ripgrep bubblewrap socat
+```
+
+Fedora 使用 `sudo dnf install ripgrep bubblewrap socat`，Arch 使用 `sudo pacman -S ripgrep bubblewrap socat`。Pi 会复用或下载到用户工具目录中的 `rg`；离线安装时请提前安装这些依赖。若出现 `ripgrep (rg) not found`，在启动 Pi 的同一终端确认 `rg --version` 可执行，然后在项目目录执行 `pi restart` 重新初始化常驻 Host。仅关闭再打开终端会重新连接旧 Host。
+
 DeepSeek、OpenCode Go、Z.AI 都按同一流程接入：**安装 → 在凭据文件填 API key → 启动并选择模型**。
 
 以下 `pi` 命令指 Research Pi。电脑上也装过原生 Pi 时，先按[启动入口检查](#区分原生-pi-和-research-pi-的启动入口)确认命令指向。

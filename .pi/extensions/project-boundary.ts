@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import type { ExtensionAPI, BashOperations } from "@earendil-works/pi-coding-agent";
 import { createBashTool } from "@earendil-works/pi-coding-agent";
+import { getShellConfig } from "../../node_modules/@earendil-works/pi-coding-agent/dist/utils/shell.js";
 import { Type } from "typebox";
 import {
 	authorizeCapabilityRequest,
@@ -30,12 +31,14 @@ import {
 	ensureProjectLocalStateExcluded,
 	isProtectedProjectMutation,
 	likelySandboxDenial,
+	LINUX_SANDBOX_INSTALL_HINT,
 	prepareBoundaryRuntime,
 	projectTemporaryEnvironment,
 	SYSTEM_TMPDIR,
 	readGitIdentity,
 	researchPiFullAccessEnabled,
 	resolveBoundaryPath,
+	resolveSandboxDependencies,
 	runCodexSandboxPreflight,
 	sanitizeBoundaryEnvironment,
 } from "../lib/project-boundary.mjs";
@@ -200,7 +203,8 @@ function createProjectBashOperations(
 			}
 
 			const commandId = `research-pi-${randomUUID()}`;
-			const wrapped = await SandboxManager.wrapWithSandboxArgv(command, "/bin/zsh", undefined, signal, cwd, {
+			const shell = process.platform === "darwin" ? "/bin/zsh" : getShellConfig().shell;
+			const wrapped = await SandboxManager.wrapWithSandboxArgv(command, shell, undefined, signal, cwd, {
 				commandId,
 				commandText: command,
 			});
@@ -315,18 +319,28 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			// A write-to-read transition must fail closed if the previous sandbox
 			// grants cannot be revoked, especially on Windows where ACLs persist.
 			await SandboxManager.reset();
+			const dependencies = await resolveSandboxDependencies({
+				onStatus: (status: { message: string; type: "info" | "warning" }) => {
+					if (ctx.hasUI) ctx.ui.notify(status.message, status.type);
+				},
+			});
 			// Sandbox control sockets need a short OS path; they are not model
 			// scratch files. Initialization finishes before tools can produce output.
 			const savedTemp = Object.fromEntries(["TMPDIR", "TMP", "TEMP"].map(name => [name, process.env[name]]));
 			Object.assign(process.env, { TMPDIR: SYSTEM_TMPDIR, TMP: SYSTEM_TMPDIR, TEMP: SYSTEM_TMPDIR });
 			try {
 				await SandboxManager.initialize(
-					buildSandboxRuntimeConfig(runtime!.root, process.env, systemRuntime, {
+					{ ...buildSandboxRuntimeConfig(runtime!.root, process.env, systemRuntime, {
 						access, runtimeTmp: runtime!.runtimeTmp,
-					}),
+					}), ...dependencies },
 					async () => true,
 					process.platform === "darwin",
 				);
+			} catch (error) {
+				if (process.platform === "linux" && error instanceof Error && error.message.includes("Sandbox dependencies not available")) {
+					throw new Error(`${error.message}\n${LINUX_SANDBOX_INSTALL_HINT}`, { cause: error });
+				}
+				throw error;
 			} finally {
 				for (const [name, value] of Object.entries(savedTemp)) {
 					if (value === undefined) delete process.env[name]; else process.env[name] = value;

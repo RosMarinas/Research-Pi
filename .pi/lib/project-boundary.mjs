@@ -20,6 +20,21 @@ export function projectTemporaryEnvironment(runtimeTmp) {
 	return { TMPDIR: runtimeTmp, TMP: runtimeTmp, TEMP: runtimeTmp, RESEARCH_PI_SYSTEM_TMPDIR: SYSTEM_TMPDIR };
 }
 
+export const LINUX_SANDBOX_INSTALL_HINT = "Linux/WSL2 sandbox dependencies: ripgrep, bubblewrap, socat. Ubuntu/Debian: sudo apt-get install ripgrep bubblewrap socat; Fedora: sudo dnf install ripgrep bubblewrap socat; Arch: sudo pacman -S ripgrep bubblewrap socat. Restart Research Pi from a shell whose PATH includes these tools.";
+
+export async function resolveSandboxDependencies({ platform = process.platform, ensureTool, onStatus } = {}) {
+	if (platform !== "linux") return {};
+	// Reuse Core's managed binary/download instead of requiring rg on PATH.
+	const resolveTool = ensureTool ?? (await import(new URL("./utils/tools-manager.js", import.meta.resolve("@earendil-works/pi-coding-agent")).href)).ensureTool;
+	let detail;
+	const command = await resolveTool("rg", status => {
+		if (status.type === "warning") detail = status.message;
+		onStatus?.(status);
+	});
+	if (!command) throw new Error(`ripgrep (rg) is unavailable${detail ? `: ${detail}` : ""}.\n${LINUX_SANDBOX_INSTALL_HINT}`);
+	return { ripgrep: { command } };
+}
+
 export function researchPiFullAccessEnabled(environment = process.env) {
 	return environment.RESEARCH_PI_FULL_ACCESS === "1";
 }
