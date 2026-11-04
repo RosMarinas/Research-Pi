@@ -13,13 +13,15 @@ New Pi subagents run the same `AgentSessionRuntime` and `InteractiveMode` as the
 - Native Enter/steering, follow-up queuing, Escape/abort, tool expansion and thinking controls behave as on the Leader. Detach is distinct from cancellation.
 - The subagent's `message_leader` tool sends its own questions/progress through the existing Runtime mailbox. Leader follow-ups enter the same live session.
 
-The native footer reports the selected session's own usage and model. The conversation status identifies the target and provides return/switch shortcuts. Other agents' completion, failure and input requests appear as notifications/status. Permission/input dialogs stay in the owning native UI and are reported to the Leader as input required; open `/watch` to answer.
+The native footer reports the selected session's own usage and model. The conversation status identifies the target and provides return/switch shortcuts. Other agents' completion, failure and input requests appear as notifications/status. Host-capability requests, including an advisor's external-file reads, go to the owning Leader's permission policy and UI. Existing grants and explicitly enabled Leader full access are honored; otherwise the approval appears in the Leader session with the requesting agent's identity. Approval or denial resumes the same tool call. Cancellation dismisses its pending review. The advisor retains its read-only role. Other native input dialogs remain in the owning conversation and can be answered with `/watch`.
 
 ## Existing sessions and boundaries
 
 Already-running legacy RPC agents and non-Pi backends retain the journal view. They cannot be retrofitted with a native terminal without restarting their process; no automatic restart is performed. The journal now renders recorded tool names, arguments and results instead of synthetic `activity {}` cards. Historical details that were never recorded cannot be reconstructed.
 
 Multiple terminal clients mirror one native viewport, matching the existing Leader host. They do not have independent viewport sizes. The Leader still owns subagent lifetime and mailbox delivery; closing the Leader process ends its owned children as before. Terminal detachment alone does not do so.
+
+Native advisors share the Leader's project-local artifact handling. Temporary scripts, caches and full tool output use the active project's `tmp/pi` directory; the shell receives this path through `TMPDIR`, `TMP` and `TEMP`. Reading these output references needs no host-capability grant. Advisor and Analysis source access stays read-only, with disposable scratch allowed in the designated temp directory.
 
 ## Validation
 
@@ -49,6 +51,6 @@ The optimized transport strips cumulative assistant snapshots and coalesces repl
 
 ## Follow the Leader terminal
 
-In VS Code, **Open a new terminal** now uses the Research Pi Terminal bridge extension to open an integrated terminal in the Leader's VS Code window, preferably split beside the Leader. Install the included bridge using `python3 scripts/package-vscode-terminal.py` followed by `code --install-extension output/research-pi-terminal.vsix`, then start the Leader in a new integrated terminal. If a resident Host is used, the open request is executed by its currently attached physical client, using that client's VS Code window instead of the Host's startup environment.
+In VS Code, Antigravity and compatible editors, **Open a new terminal** uses the Research Pi Terminal bridge to open an integrated terminal in the originating IDE window, preferably split beside the requesting terminal. The bridge registers terminal PIDs so existing terminals can discover it after installation or an IDE reload. If it is missing, Pi identifies the originating IDE and installs the bundled extension through that IDE's own CLI. Automatic installation needs Python 3 for the bundled VSIX packager. If identification or activation fails, Pi explains the remaining setup step without switching applications.
 
-Without the bridge, VS Code receives an explicit setup hint and a manual command; it never silently falls back to Terminal.app. Existing tmux sessions still use tmux new-window. Same-terminal switching needs no VS Code extension. Other terminal applications keep the existing platform launcher.
+Resident Hosts forward the request to the physical client, including when watching a subagent through another native session. The Host's startup IDE does not choose the destination. Existing tmux sessions still use tmux new-window. Same-terminal switching needs no IDE extension. Other terminal applications keep the existing platform launcher. These changes apply to newly started Hosts and subagents; an already-running native process retains its loaded implementation.

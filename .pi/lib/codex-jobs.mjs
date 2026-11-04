@@ -705,7 +705,7 @@ export async function startCodexJob(options) {
 		? await resolveCapabilityContext(boundaryRoot, options.leaderSessionId)
 		: null);
 	const hostCapabilities = hostCapabilityContext ? await listCapabilityGrants(hostCapabilityContext) : [];
-	const boundaryRuntime = mode === "executor" ? await prepareBoundaryRuntime(boundaryRoot) : null;
+	const boundaryRuntime = await prepareBoundaryRuntime(boundaryRoot);
 	const gitIdentity = mode === "executor" ? await readGitIdentity(boundaryRoot) : null;
 	const jobId = createJobId();
 	const jobDir = join(jobRoot, jobId);
@@ -776,7 +776,7 @@ export async function startCodexJob(options) {
 			resourceClaims,
 			experiment: options.experiment ?? null,
 			workerInstanceId,
-			runtimeTmp: boundaryRuntime?.runtimeTmp,
+			runtimeTmp: boundaryRuntime.runtimeTmp,
 			gitIdentity,
 			skipSandboxPreflight: options.skipSandboxPreflight === true,
 			hostCapabilityContext,

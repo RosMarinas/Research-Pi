@@ -1,6 +1,5 @@
 import { createServer } from "node:net";
 import { mkdtemp, chmod, writeFile, readFile, rename, unlink, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
@@ -9,6 +8,7 @@ import { inspectWebTailnet, startWebTailnet } from "./web-tailscale.mjs";
 import { createDesktopTerminal } from "./web-terminal.mjs";
 import { persistentWebToken } from "./web-token.mjs";
 import { residentTmux, residentControlDirectory } from "./web-tmux.mjs";
+import { SYSTEM_TMPDIR } from "./project-boundary.mjs";
 
 const require = createRequire(import.meta.url);
 export function parseWebOptions(argv, defaults = {}, { interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY) } = {}) {
@@ -40,7 +40,7 @@ export async function launchResearchWeb({ executable, args, cwd, env, packageRoo
 	const { Terminal } = require("@xterm/headless");
 	const { SerializeAddon } = require("@xterm/addon-serialize");
 	const tailnet = options.tailscale ? await inspectWebTailnet({ httpsPort: options.httpsPort, chooseAvailable: options.autoHttpsPort }) : null;
-	const privateDir = await mkdtemp(join(tmpdir(), "rpi-web-"));
+	const privateDir = await mkdtemp(join(SYSTEM_TMPDIR, "rpi-web-"));
 	await chmod(privateDir, 0o700);
 	const socketPath = join(residentDir ? await residentControlDirectory(residentDir) : privateDir, "bridge.sock");
 	let bridge, child, gateway, serving, desktop, tmux;

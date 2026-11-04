@@ -98,6 +98,7 @@ export function buildPiRunnerArgs(input) {
 		"--append-system-prompt", buildWorkerPrompt(input),
 	];
 	if (input.boundaryExtension) args.push("--extension", input.boundaryExtension);
+	args.push("--extension", fileURLToPath(new URL("../extensions/research-mode.ts", import.meta.url)));
 	if (input.model && input.model !== "inherit") args.push("--model", input.model);
 	if (input.thinking && input.thinking !== "inherit") {
 		args.push("--thinking", input.thinking === "none" ? "off" : input.thinking);
@@ -156,6 +157,8 @@ export function createSubagentSessionManager(options = {}) {
 	};
 
 	const settle = async (job, status, result = null, error = null) => {
+		for (const request of job.approvals.values()) request.abort();
+		job.approvals.clear(); job.pendingRequest = null; job.nativeBlocked = false;
 		job.status = status;
 		job.finishedAt = now();
 		job.result = result;
@@ -239,7 +242,7 @@ export function createSubagentSessionManager(options = {}) {
 				job.pendingRequest = { id: randomUUID(), kind: record.kind, summary: record.message };
 				job.progress = `${record.message ?? "Input required"} — open /watch to respond`;
 				await emit(job, { type: "input_required", summary: job.progress });
-			} else if (record.state !== "blocked" && job.nativeBlocked) {
+			} else if (record.state !== "blocked" && job.nativeBlocked && job.pendingRequest?.route !== "leader") {
 				job.nativeBlocked = false; job.pendingRequest = null; job.status = "running";
 				await emit(job, { type: "progress", summary: "Native input resolved" });
 			}
@@ -261,6 +264,33 @@ export function createSubagentSessionManager(options = {}) {
 			if (model?.id) job.model = model.provider ? `${model.provider}/${model.id}` : model.id;
 			if (record.data?.thinkingLevel) job.thinking = record.data.thinkingLevel;
 			await emit(job, { type: "progress", summary: "runner model settings resolved" });
+		} else if (record.type === "extension_ui_cancel") {
+			job.approvals.get(record.id)?.abort(); job.approvals.delete(record.id);
+			if (job.pendingRequest?.id === record.id) {
+				job.pendingRequest = null; job.nativeBlocked = false;
+				if (job.status === "input_required") job.status = "running";
+				await emit(job, { type: "progress", summary: "Capability review cancelled" });
+			}
+		} else if (record.type === "extension_ui_request" && record.method === "host_capability" && record.id) {
+			const controller = new AbortController();
+			job.approvals.set(record.id, controller);
+			job.pendingRequest = { ...record.pendingRequest, id: record.id, route: "leader" };
+			job.nativeBlocked = true; job.status = "input_required";
+			job.progress = "Host capability awaiting review in the Leader session";
+			await emit(job, { type: "progress", summary: job.progress });
+			const respond = response => enqueue(job, async () => {
+				if (job.approvals.get(record.id) !== controller || job.closed) return;
+				job.approvals.delete(record.id);
+				writeRecord(job.child, { ...response, type: "extension_ui_response", id: record.id });
+				job.pendingRequest = null; job.nativeBlocked = false;
+				if (job.status === "input_required") job.status = "running";
+				job.progress = "Leader capability review completed; continuing the same call";
+				await emit(job, { type: "progress", summary: job.progress });
+			});
+			// Do not block the event queue while a human decides. Cancellation and
+			// process exit must still dismiss the owning Leader's dialog.
+			void Promise.resolve().then(() => options.onUiRequest?.(publicJob(job), record, { signal: controller.signal }))
+				.then(response => respond(response ?? { error: "Leader capability review is unavailable" }), error => respond({ error: error.message }));
 		} else if (record.type === "extension_ui_request") {
 			if (["select", "confirm", "input", "editor"].includes(record.method) && record.id) {
 				job.progress = `${record.method} request awaiting the Leader UI`;
@@ -392,6 +422,7 @@ export function createSubagentSessionManager(options = {}) {
 			error: null,
 			events: [],
 			records: Promise.resolve(),
+			approvals: new Map(),
 			waiters: [],
 			stderr: "",
 			cancelling: false,
@@ -496,6 +527,8 @@ export function createSubagentSessionManager(options = {}) {
 	const dispose = async () => {
 		disposed = true; clearInterval(performanceTimer); unsubscribePerformance();
 		for (const job of jobs.values()) {
+			for (const request of job.approvals.values()) request.abort();
+			job.approvals.clear();
 			if (!FINAL_STATUSES.has(job.status)) {
 				job.cancelling = true;
 				job.child?.kill("SIGTERM");

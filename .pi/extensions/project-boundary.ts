@@ -21,7 +21,7 @@ import {
 	resolveCapabilityContext,
 	revokeCapabilityGrant,
 } from "../lib/host-capabilities.mjs";
-import { registerHostCapabilityUiAdapter } from "../lib/research-runtime-adapters.mjs";
+import { getHostCapabilityRequestAdapter, registerHostCapabilityUiAdapter } from "../lib/research-runtime-adapters.mjs";
 import {
 	boundaryWarning,
 	analysisSshCommandPolicy,
@@ -31,6 +31,8 @@ import {
 	isProtectedProjectMutation,
 	likelySandboxDenial,
 	prepareBoundaryRuntime,
+	projectTemporaryEnvironment,
+	SYSTEM_TMPDIR,
 	readGitIdentity,
 	researchPiFullAccessEnabled,
 	resolveBoundaryPath,
@@ -287,7 +289,8 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 	let userOverrideNoticeShown = false;
 	let sandboxAccess: "read" | "write" | "full" | undefined;
 	let sandboxUpdate = Promise.resolve();
-	const inheritedSandboxTmp = process.env.CLAUDE_CODE_TMPDIR;
+	const temporaryVariables = ["TMPDIR", "TMP", "TEMP", "RESEARCH_PI_SYSTEM_TMPDIR", "CLAUDE_CODE_TMPDIR"];
+	const inheritedTemporaryEnvironment = Object.fromEntries(temporaryVariables.map(name => [name, process.env[name]]));
 	const baseBash = createBashTool(process.cwd());
 	const launchFullAccess = researchPiFullAccessEnabled();
 	const leaderHasFullAccess = (ctx: any) => launchFullAccess && currentSessionPolicy(ctx) !== "analysis";
@@ -312,14 +315,23 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			// A write-to-read transition must fail closed if the previous sandbox
 			// grants cannot be revoked, especially on Windows where ACLs persist.
 			await SandboxManager.reset();
-			await SandboxManager.initialize(
-				buildSandboxRuntimeConfig(runtime!.root, process.env, systemRuntime, {
-					access,
-					runtimeTmp: runtime!.runtimeTmp,
-				}),
-				async () => true,
-				process.platform === "darwin",
-			);
+			// Sandbox control sockets need a short OS path; they are not model
+			// scratch files. Initialization finishes before tools can produce output.
+			const savedTemp = Object.fromEntries(["TMPDIR", "TMP", "TEMP"].map(name => [name, process.env[name]]));
+			Object.assign(process.env, { TMPDIR: SYSTEM_TMPDIR, TMP: SYSTEM_TMPDIR, TEMP: SYSTEM_TMPDIR });
+			try {
+				await SandboxManager.initialize(
+					buildSandboxRuntimeConfig(runtime!.root, process.env, systemRuntime, {
+						access, runtimeTmp: runtime!.runtimeTmp,
+					}),
+					async () => true,
+					process.platform === "darwin",
+				);
+			} finally {
+				for (const [name, value] of Object.entries(savedTemp)) {
+					if (value === undefined) delete process.env[name]; else process.env[name] = value;
+				}
+			}
 			sandboxAccess = access;
 		});
 		sandboxUpdate = update;
@@ -349,8 +361,20 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 		approvalContext: CapabilityContext = requireCapabilityContext(),
 		announce = true,
 		allowProjectScope = true,
+		signal?: AbortSignal,
 	) => {
+		signal?.throwIfAborted();
 		if (leaderHasFullAccess(ctx)) return await createCapabilityGrant(approvalContext, request, "once");
+		const owner = getHostCapabilityRequestAdapter();
+		if (owner) {
+			const decision = await owner.request({ kind: "host_capability", capability: {
+				context: approvalContext,
+				input: operation ?? { kind: "external-read", path: request.target },
+				allowProjectScope,
+			} }, { signal });
+			signal?.throwIfAborted();
+			return decision?.status === "approved" ? decision.grant : undefined;
+		}
 		if (!ctx.hasUI) return undefined;
 		const projectTrustLabel = !allowProjectScope
 			? undefined
@@ -366,7 +390,9 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 		const choice = await ctx.ui.select(
 			`⚠️ Research Pi requests a host capability\n\n${describeCapabilityRequest(request, operation)}\n\n${footer}`,
 			choices,
+			signal ? { signal } : undefined,
 		);
+		signal?.throwIfAborted();
 		if (choice !== "Approve once" && choice !== "Approve this Pi session (24h)" && choice !== projectTrustLabel) return undefined;
 		const grant = await createCapabilityGrant(
 			approvalContext,
@@ -381,7 +407,8 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 	};
 
 	registerHostCapabilityUiAdapter({
-		review: async ({ pendingRequest, ctx }: { pendingRequest: any; ctx: any }) => {
+		review: async ({ pendingRequest, ctx, signal }: { pendingRequest: any; ctx: any; signal?: AbortSignal }) => {
+			signal?.throwIfAborted();
 			const capability = pendingRequest?.capability;
 			if (pendingRequest?.kind !== "host_capability" || !capability?.input || !capability?.context) {
 				return { status: "unsupported" as const };
@@ -389,14 +416,14 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			const activeContext = requireCapabilityContext();
 			const sourceContext = capability.context as CapabilityContext;
 			if (!sameCapabilityProject(activeContext, sourceContext)) {
-				throw new Error("Codex host-capability request belongs to another project capability ledger");
+				throw new Error("Subagent host-capability request belongs to another project capability ledger");
 			}
 			const inspected = await inspectCapabilityAuthorization(sourceContext, capability.input);
 			if (inspected.grant) {
 				return { status: "approved" as const, grant: inspected.grant, existing: true };
 			}
 			if (!ctx.hasUI && !leaderHasFullAccess(ctx)) return { status: "unavailable" as const };
-			const grant = await requestInteractiveGrant(inspected.request, ctx, capability.input, sourceContext, false);
+			const grant = await requestInteractiveGrant(inspected.request, ctx, capability.input, sourceContext, false, capability.allowProjectScope !== false, signal);
 			if (grant) await refreshBoundaryStatus(ctx).catch(() => undefined);
 			return grant
 				? { status: "approved" as const, grant, existing: false }
@@ -451,7 +478,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 				const inspected = await inspectCapabilityAuthorization(context, input);
 				const request = inspected.request;
 				if (!inspected.grant) {
-					const grant = await requestInteractiveGrant(request, ctx, input, context, true, !commandScopedSsh);
+					const grant = await requestInteractiveGrant(request, ctx, input, context, true, !commandScopedSsh, signal);
 					if (!grant) throw new Error("Host capability was not approved by the user");
 				}
 				let outputBytes = 0;
@@ -528,6 +555,13 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 		const protectedMutation =
 			(event.toolName === "write" || event.toolName === "edit") &&
 			isProtectedProjectMutation(info.root, info.resolvedPath);
+		if (currentSessionPolicy(ctx) === "analysis" && (event.toolName === "write" || event.toolName === "edit")) {
+			const scratch = runtime && await resolveBoundaryPath(runtime.runtimeTmp, info.resolvedPath);
+			if (!scratch?.inside || info.sensitive || protectedMutation) return {
+				block: true, terminate: false,
+				reason: "Analysis and advisor sessions may write disposable scratch only under $TMPDIR; project source remains read-only.",
+			};
+		}
 		if (info.inside && !info.sensitive && !protectedMutation) return undefined;
 		const readLike = event.toolName === "read" || event.toolName === "grep" || event.toolName === "find" || event.toolName === "ls";
 		if (!info.inside && readLike) {
@@ -544,7 +578,7 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 					return { block: true, reason: "Recursive grep cannot use an external directory grant; approve and read exact files instead.", terminate: false };
 				}
 				let grant = await findCapabilityGrant(requireCapabilityContext(), request);
-				if (!grant) grant = await requestInteractiveGrant(request, ctx);
+				if (!grant) grant = await requestInteractiveGrant(request, ctx, undefined, requireCapabilityContext(), true, true, ctx.signal);
 				if (!grant) return { block: true, reason: "External read was not approved by the user.", terminate: false };
 				const authorized = await authorizeCapabilityRequest(requireCapabilityContext(), { kind: "external-read", path: requestedPath });
 				if (!authorized.grant) return { block: true, reason: "External-read grant disappeared before use.", terminate: false };
@@ -588,13 +622,14 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			// sandbox-runtime bakes TMPDIR into its wrapped command from this
 			// harness variable, so set it before initialization and wrapping.
 			process.env.CLAUDE_CODE_TMPDIR = runtime.runtimeTmp;
+			Object.assign(process.env, projectTemporaryEnvironment(runtime.runtimeTmp));
 			systemRuntime = await resolveSystemRuntimePolicy();
 			capabilityContext = await resolveCapabilityContext(runtime.root, process.env.RESEARCH_PI_CAPABILITY_SESSION_ID ?? ctx.sessionManager.getSessionId());
 			gitIdentity = await readGitIdentity(runtime.root);
 			await ensureProjectSandbox(ctx);
 			initializationError = undefined;
 			await refreshBoundaryStatus(ctx);
-			if (localExclude.changed) ctx.ui.notify("Research Pi local .pi state is now hidden through Git info/exclude; no project file was modified.", "info");
+			if (localExclude.changed) ctx.ui.notify("Research Pi local state and tmp/pi scratch are now hidden through Git info/exclude; no project file was modified.", "info");
 			else if (localExclude.status === "failed") ctx.ui.notify(`Could not add the local .pi Git exclusion: ${localExclude.error}`, "warning");
 		} catch (error) {
 			runtime = undefined;
@@ -623,8 +658,10 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 		await sandboxUpdate.catch(() => undefined);
 		await SandboxManager.reset().catch(() => undefined);
 		sandboxAccess = undefined;
-		if (inheritedSandboxTmp === undefined) delete process.env.CLAUDE_CODE_TMPDIR;
-		else process.env.CLAUDE_CODE_TMPDIR = inheritedSandboxTmp;
+		for (const [name, value] of Object.entries(inheritedTemporaryEnvironment)) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
 		runtime = undefined;
 		capabilityContext = undefined;
 		systemRuntime = undefined;

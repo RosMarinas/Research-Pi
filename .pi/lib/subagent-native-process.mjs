@@ -5,13 +5,14 @@ import { runtimePerformance } from "./runtime-performance.mjs";
 import { createOwnerEventWriter } from "./subagent-owner-events.mjs";
 import { createInterface } from "node:readline";
 import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { getAgentDir } from "../../node_modules/@earendil-works/pi-coding-agent/dist/config.js";
 import { createResearchSessionRuntime } from "./native-runtime-factory.mjs";
 import { createNativeRuntimeHost } from "./native-runtime-host.mjs";
 import { subagentConversationExtension } from "./subagent-conversation-extension.mjs";
+import { registerHostCapabilityRequestAdapter } from "./research-runtime-adapters.mjs";
+import { SYSTEM_TMPDIR } from "./project-boundary.mjs";
 
 process.umask(0o077);
 const options = JSON.parse(process.env.RESEARCH_PI_SUBAGENT);
@@ -22,6 +23,21 @@ const output = event => {
  process.stdout.write(line);
 };
 const ownerEvents = createOwnerEventWriter(output);
+const approvals = new Map();
+registerHostCapabilityRequestAdapter({ request: (pendingRequest, { signal } = {}) => {
+ signal?.throwIfAborted();
+ return new Promise((resolve, reject) => {
+  const id = randomUUID();
+  const finish = (decision, error) => {
+   approvals.delete(id); signal?.removeEventListener("abort", abort);
+   error ? reject(error) : resolve(decision);
+  };
+  const abort = () => { output({ type: "extension_ui_cancel", id }); finish(undefined, new Error("Capability request cancelled")); };
+  approvals.set(id, { finish, abort });
+  signal?.addEventListener("abort", abort, { once: true });
+  output({ type: "extension_ui_request", id, method: "host_capability", pendingRequest: { ...pendingRequest, id } });
+ });
+} });
 let host, runtime, directory, unsubscribe, closing = false, turnSource = null;
 const controls = createInterface({ input: process.stdin });
 const queued = [];
@@ -29,6 +45,7 @@ controls.on("line", line => { if (runtime && host) void dispatch(line); else que
 controls.on("close", () => void close());
 async function close() {
  if (closing) return; closing = true;
+ for (const request of approvals.values()) request.finish(undefined, new Error("Owning Leader disconnected"));
  unsubscribe?.(); ownerEvents.flush(); await host?.close();
  if (directory) await rm(directory, { recursive: true, force: true });
  process.exit(0);
@@ -40,11 +57,12 @@ async function dispatch(line) {
   const session = runtime.session;
   let data;
   switch (command.type) {
+   case "extension_ui_response": approvals.get(command.id)?.finish(command.decision, command.error ? new Error(command.error) : undefined); return;
    case "performance": runtimePerformance.setEnabled(command.enabled); output({ type: "performance_sample", sample: runtimePerformance.snapshot() }); return;
    case "prompt": turnSource = command.source ?? "research-leader"; await session.prompt(command.message, { source: "rpc" }); break;
    case "steer": if (command.source && command.source !== "user") turnSource = command.source; await session.steer(command.message, undefined, { source: "rpc" }); break;
    case "follow_up": await session.followUp(command.message, undefined, { source: "rpc" }); break;
-   case "abort": await session.abort(); break;
+   case "abort": for (const request of approvals.values()) request.abort(); await session.abort(); break;
    case "get_state": data = { model: session.model, thinkingLevel: session.thinkingLevel }; break;
    case "set_model": {
     const model = session.modelRuntime.getAvailableSnapshot().find(m => m.provider === command.provider && m.id === command.modelId);
@@ -58,7 +76,7 @@ async function dispatch(line) {
  } catch (error) { output({ type: "response", command: command?.type, id: command?.id, success: false, error: error.message }); }
 }
 try {
- directory = await mkdtemp(join(tmpdir(), "pi-agent-"));
+ directory = await mkdtemp(join(SYSTEM_TMPDIR, "pi-agent-"));
  const terminalSocket = join(directory, "terminal.sock"), instance = randomUUID();
  let navigate;
  runtime = await createResearchSessionRuntime({ args: process.argv.slice(2), cwd: process.cwd(), agentDir: getAgentDir(),

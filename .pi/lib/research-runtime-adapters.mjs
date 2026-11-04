@@ -1,6 +1,7 @@
 const subagentAdapters = new Map();
 let runtimeUiAdapter;
 let hostCapabilityUiAdapter;
+let hostCapabilityRequestAdapter;
 
 function normalizeBackend(backend) {
 	const value = String(backend ?? "").trim().toLowerCase();
@@ -30,4 +31,14 @@ export function registerHostCapabilityUiAdapter(adapter) {
 
 export function getHostCapabilityUiAdapter() {
 	return hostCapabilityUiAdapter;
+}
+
+// Native subagents ask their owning Leader to review a capability. The grant
+// still comes from the project-boundary policy and its existing ledger.
+export function registerHostCapabilityRequestAdapter(adapter) {
+	hostCapabilityRequestAdapter = adapter;
+}
+
+export function getHostCapabilityRequestAdapter() {
+	return hostCapabilityRequestAdapter;
 }

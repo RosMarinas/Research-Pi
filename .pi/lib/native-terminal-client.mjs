@@ -11,7 +11,7 @@ export async function attachNativeTerminal(record, { terminal, onAction } = {}) 
  const start=()=>{physical.start(input,resize);started=true;resize();physical.write('\x1b]10;?\x07\x1b]11;?\x07')};
  const action=async event=>{
   if(event.action==='open-subagent-terminal') {
-   try { const {openSubagentTerminal}=await import('./subagent-watch.mjs'); send({type:'action_result',id:event.id,result:await openSubagentTerminal(event.params)}); send({type:'attach'}); }
+   try { const {openSubagentTerminal}=await import('./subagent-watch.mjs'); send({type:'action_result',id:event.id,result:onAction ? await onAction(event) : await openSubagentTerminal(event.params)}); send({type:'attach'}); }
    catch(error){send({type:'action_result',id:event.id,error:error.message})}
    return;
   }

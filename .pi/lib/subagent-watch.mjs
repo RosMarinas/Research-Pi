@@ -118,7 +118,7 @@ export async function openSubagentTerminal(options, { platform = process.platfor
 	const launch = subagentWatchCommand(options);
 	try {
 		if (environment.TMUX) await exec("tmux", ["new-window", "-n", "Pi subagent", "-c", options.cwd, launch.command]);
-		else if (environment.TERM_PROGRAM === "vscode" || environment.RESEARCH_PI_VSCODE_TERMINAL) {
+		else if (/^(vscode|antigravity|cursor|windsurf|code-oss|vscodium)$/i.test(environment.TERM_PROGRAM ?? "") || environment.VSCODE_IPC_HOOK_CLI || environment.RESEARCH_PI_VSCODE_TERMINAL) {
 			return { ...await openVsCodeTerminal(options, { environment, exec, platform }), command: launch.command };
 		} else if (platform === "darwin") await exec("osascript", ["-e", 'on run argv\ntell application "Terminal"\ndo script (item 1 of argv)\nactivate\nend tell\nend run', launch.command]);
 		else await exec("x-terminal-emulator", ["-e", process.execPath, ...launch.args]);

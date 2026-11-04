@@ -23,7 +23,7 @@ import {
 	updateJobFile,
 	writeJsonAtomic,
 } from "./codex-jobs.mjs";
-import { codexPermissionConfigArguments, resolveExecutablePath, runCodexSandboxPreflight } from "./project-boundary.mjs";
+import { codexPermissionConfigArguments, projectTemporaryEnvironment, resolveExecutablePath, runCodexSandboxPreflight } from "./project-boundary.mjs";
 import { resolveSystemRuntimePolicy } from "./security-policy.mjs";
 import { CODEX_COLLABORATION_TOOL, collaborateWithCodexPeers, formatPeerMessage } from "./codex-collaboration.mjs";
 import { CODEX_RUN_TOOL, listCodexExternalRuns, registerCodexExternalRun, releaseCodexResources, settleCodexExternalRun } from "./codex-resources.mjs";
@@ -871,6 +871,7 @@ async function main() {
 		const codexStateHome = join(dirname(dirname(jobDir)), "state");
 		await mkdir(codexStateHome, { recursive: true, mode: 0o700 });
 		const codexChildEnvironment = sanitizeCodexEnvironment(process.env);
+		if (request.runtimeTmp) Object.assign(codexChildEnvironment, projectTemporaryEnvironment(request.runtimeTmp));
 		// The worker retains the opaque SSH agent handle for research_pi_host;
 		// the sandboxed Codex process itself must not even inherit its path.
 		delete codexChildEnvironment.SSH_AUTH_SOCK;

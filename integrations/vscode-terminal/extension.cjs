@@ -6,11 +6,13 @@ const { randomUUID } = require('node:crypto');
 
 // Environment collection is per VS Code window/extension host. No polling,
 // command URI handler, workspace-file mutation, or shell command injection.
-async function startBridge(vscode, context) {
+async function startBridge(vscode, context, { registryRoot = path.join(os.tmpdir(), `pi-ide-bridges-${process.getuid?.() ?? os.userInfo().username}`) } = {}) {
  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-vscode-'));
  await fs.chmod(directory, 0o700);
  const address = process.platform === 'win32' ? `\\\\.\\pipe\\pi-vscode-${randomUUID()}` : path.join(directory, 'terminal.sock');
  const token = randomUUID(), clients = new Set();
+ const registration = path.join(registryRoot, `${token}.json`);
+ const appName = vscode.env?.appName ?? 'VS Code';
  const server = net.createServer(socket => {
   clients.add(socket); socket.on('error', () => {}); socket.on('close', () => clients.delete(socket));
   socket.setTimeout(5000, () => socket.destroy());
@@ -35,16 +37,31 @@ async function startBridge(vscode, context) {
      location: parent ? { parentTerminal: parent } : vscode.TerminalLocation.Panel,
      isTransient: true });
     terminal.show(true);
-    socket.end(JSON.stringify({ opened: true, target: 'vscode', split: Boolean(parent) }) + '\n');
+    socket.end(JSON.stringify({ opened: true, target: 'vscode', appName, split: Boolean(parent) }) + '\n');
    } catch (error) { socket.end(JSON.stringify({ opened: false, error: error.message }) + '\n'); }
   });
  });
  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(address, resolve); });
  if (process.platform !== 'win32') await fs.chmod(address, 0o600);
+ await fs.mkdir(registryRoot, { recursive: true, mode: 0o700 });
+ let disposed = false, updates = Promise.resolve();
+ const register = () => {
+  updates = updates.then(async () => {
+   const terminalPids = (await Promise.all(vscode.window.terminals.map(terminal => terminal.processId))).filter(Number.isInteger);
+   if (!disposed) await fs.writeFile(registration, JSON.stringify({ address, token, appName, terminalPids }), { mode: 0o600 });
+  });
+  return updates;
+ };
+ await register();
+ const subscriptions = [vscode.window.onDidOpenTerminal?.(() => { void register(); }), vscode.window.onDidCloseTerminal?.(() => { void register(); })];
  context.environmentVariableCollection.persistent = false;
- context.environmentVariableCollection.description = 'Open Pi subagents in this VS Code window';
- context.environmentVariableCollection.replace('RESEARCH_PI_VSCODE_TERMINAL', JSON.stringify({ address, token }));
+ context.environmentVariableCollection.description = `Open Pi subagents in this ${appName} window`;
+ context.environmentVariableCollection.replace('RESEARCH_PI_VSCODE_TERMINAL', JSON.stringify({ address, token, appName }));
  const dispose = async () => {
+  disposed = true;
+  for (const subscription of subscriptions) subscription?.dispose();
+  await updates;
+  await fs.rm(registration, { force: true });
   context.environmentVariableCollection.delete('RESEARCH_PI_VSCODE_TERMINAL');
   for (const socket of clients) socket.destroy();
   await new Promise(resolve => server.close(resolve));

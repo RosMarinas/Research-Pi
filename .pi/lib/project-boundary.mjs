@@ -12,6 +12,13 @@ export const PROJECT_BOUNDARY_PROFILE = "research_pi_project";
 export const CODEX_EXECUTOR_PROFILE = "research_pi_executor";
 export const CODEX_ADVISOR_PROFILE = "research_pi_advisor";
 export const CODEX_FULL_ACCESS_PROFILE = "research_pi_full_access";
+// Keep control sockets and OS sandbox exclusions on the original system temp
+// path when model-facing tools use the active project's temporary directory.
+export const SYSTEM_TMPDIR = process.env.RESEARCH_PI_SYSTEM_TMPDIR ?? tmpdir();
+
+export function projectTemporaryEnvironment(runtimeTmp) {
+	return { TMPDIR: runtimeTmp, TMP: runtimeTmp, TEMP: runtimeTmp, RESEARCH_PI_SYSTEM_TMPDIR: SYSTEM_TMPDIR };
+}
 
 export function researchPiFullAccessEnabled(environment = process.env) {
 	return environment.RESEARCH_PI_FULL_ACCESS === "1";
@@ -349,8 +356,8 @@ function workspaceRules(access) {
 }
 
 function temporaryDenyRules() {
-	const paths = new Set(["/tmp", "/private/tmp", tmpdir()]);
-	if (tmpdir().startsWith("/var/")) paths.add(`/private${tmpdir()}`);
+	const paths = new Set(["/tmp", "/private/tmp", SYSTEM_TMPDIR]);
+	if (SYSTEM_TMPDIR.startsWith("/var/")) paths.add(`/private${SYSTEM_TMPDIR}`);
 	return [...paths].map((path) => `${JSON.stringify(path)} = "deny"`).join(", ");
 }
 
@@ -410,14 +417,18 @@ function filesystemBaseRules(workspaceRoot, access, runtimePolicy) {
 		.join(", ");
 }
 
-export function permissionProfileDefinition({ access = "write", workspaceRoot, runtimePolicy } = {}) {
+export function permissionProfileDefinition({ access = "write", workspaceRoot, runtimePolicy, runtimeTmp } = {}) {
 	if (access !== "read" && access !== "write") throw new Error(`Unsupported project access: ${access}`);
+	if (runtimeTmp && (!workspaceRoot || !isWithinRoot(workspaceRoot, runtimeTmp) || resolve(runtimeTmp) === resolve(workspaceRoot))) {
+		throw new Error("Runtime temp must be a directory inside the project");
+	}
 	return [
 		"{",
 		`description = "Research Pi project ${access} access boundary",`,
 		workspaceRoot ? `workspace_roots = { ${JSON.stringify(workspaceRoot)} = true },` : undefined,
 		"filesystem = {",
 		`${filesystemBaseRules(workspaceRoot, access, runtimePolicy)},`,
+		runtimeTmp ? `${JSON.stringify(runtimeTmp)} = "write",` : undefined,
 		`":workspace_roots" = { ${workspaceRules(access)} }`,
 		"},",
 		'network = { enabled = true, allow_local_binding = true, domains = { "*" = "allow" } }',
@@ -471,7 +482,7 @@ export function codexPermissionConfigArguments(mode, workspaceRoot, runtimeTmp, 
 		"-c",
 		`default_permissions=${JSON.stringify(profile)}`,
 		"-c",
-		`permissions.${profile}=${fullAccess ? fullAccessPermissionProfileDefinition() : permissionProfileDefinition({ access, workspaceRoot, runtimePolicy: normalizedRuntime })}`,
+		`permissions.${profile}=${fullAccess ? fullAccessPermissionProfileDefinition() : permissionProfileDefinition({ access, workspaceRoot, runtimePolicy: normalizedRuntime, runtimeTmp })}`,
 		"-c",
 		'shell_environment_policy.inherit="core"',
 		"-c",
@@ -517,11 +528,15 @@ export async function runCodexSandboxPreflight(options) {
 			'git -C "$probe" -c user.name="Research Pi Doctor" -c user.email="doctor@research-pi.invalid" commit -q -m "permission probe"',
 		);
 	}
+	if (mode === "advisor" && options.runtimeTmp) {
+		commands.push('probe=$(mktemp "$TMPDIR/advisor-preflight.XXXXXX")', 'trap \'rm -f "$probe"\' EXIT', 'printf "scratch probe\\n" > "$probe"', 'cat "$probe" >/dev/null');
+	}
 	commands.push('if command -v python3 >/dev/null 2>&1; then python3 --version >/dev/null; fi');
 	commands.push('printf "research-pi-codex-preflight=ok\\n"');
 	const environment = {
 		...sanitizeBoundaryEnvironment(options.environment ?? process.env),
 		...runtimePolicy.environment,
+		...(options.runtimeTmp ? projectTemporaryEnvironment(options.runtimeTmp) : {}),
 		GIT_CONFIG_GLOBAL: "/dev/null",
 		GIT_CONFIG_NOSYSTEM: "1",
 		GIT_OPTIONAL_LOCKS: "0",
@@ -587,17 +602,17 @@ export async function runCodexSandboxPreflight(options) {
 }
 
 function canonicalTemporaryPaths() {
-	const paths = new Set(["/tmp", "/private/tmp", "/var/tmp", tmpdir()]);
-	if (tmpdir().startsWith("/var/")) paths.add(`/private${tmpdir()}`);
+	const paths = new Set(["/tmp", "/private/tmp", "/var/tmp", SYSTEM_TMPDIR]);
+	if (SYSTEM_TMPDIR.startsWith("/var/")) paths.add(`/private${SYSTEM_TMPDIR}`);
 	return [...paths];
 }
 
 function macOSXcrunCachePaths() {
 	if (process.platform !== "darwin") return [];
-	const paths = new Set([`${tmpdir()}/xcrun_db`, `${tmpdir()}/xcrun_db-*`]);
-	if (tmpdir().startsWith("/var/")) {
-		paths.add(`/private${tmpdir()}/xcrun_db`);
-		paths.add(`/private${tmpdir()}/xcrun_db-*`);
+	const paths = new Set([`${SYSTEM_TMPDIR}/xcrun_db`, `${SYSTEM_TMPDIR}/xcrun_db-*`]);
+	if (SYSTEM_TMPDIR.startsWith("/var/")) {
+		paths.add(`/private${SYSTEM_TMPDIR}/xcrun_db`);
+		paths.add(`/private${SYSTEM_TMPDIR}/xcrun_db-*`);
 	}
 	return [...paths];
 }
@@ -703,18 +718,7 @@ export async function resolveProjectRoot(root) {
 
 export async function prepareBoundaryRuntime(root) {
 	const canonicalRoot = await resolveProjectRoot(root);
-	let runtimeTmp;
-	try {
-		const gitDir = join(canonicalRoot, ".git");
-		if ((await stat(gitDir)).isDirectory()) {
-			runtimeTmp = await usableRuntimeCandidate(canonicalRoot, join(gitDir, "research-pi", "tmp"));
-		}
-	} catch {
-		// Non-Git repositories use a project-local fallback below.
-	}
-	if (!runtimeTmp) {
-		runtimeTmp = await usableRuntimeCandidate(canonicalRoot, join(canonicalRoot, ".pi", "research-pi-runtime", "tmp"));
-	}
+	const runtimeTmp = await usableRuntimeCandidate(canonicalRoot, join(canonicalRoot, "tmp", "pi"));
 	if (!runtimeTmp) throw new Error("Could not create a project-local runtime directory without crossing the project boundary");
 
 	return { root: canonicalRoot, runtimeTmp };
@@ -738,17 +742,18 @@ export async function ensureProjectLocalStateExcluded(root, options = {}) {
 		return { status: "not-git", changed: false, path: null };
 	}
 
-	try {
-		await execFileAsync("git", ["check-ignore", "-q", "--no-index", ".pi/research/experiments.jsonl"], {
-			cwd,
-			env: environment,
-			timeout: 5000,
-			maxBuffer: 4096,
-		});
-		return { status: "already-ignored", changed: false, path: null };
-	} catch (error) {
-		if (error?.code !== 1) throw error;
+	const missing = [];
+	for (const [probe, rule] of [[".pi/research/experiments.jsonl", "/.pi/"], ["tmp/pi/output.log", "/tmp/pi/"]]) {
+		try {
+			await execFileAsync("git", ["check-ignore", "-q", "--no-index", probe], {
+				cwd, env: environment, timeout: 5000, maxBuffer: 4096,
+			});
+		} catch (error) {
+			if (error?.code !== 1) throw error;
+			missing.push(rule);
+		}
 	}
+	if (!missing.length) return { status: "already-ignored", changed: false, path: null };
 
 	const { stdout } = await execFileAsync("git", ["rev-parse", "--git-path", "info/exclude"], {
 		cwd,
@@ -764,10 +769,7 @@ export async function ensureProjectLocalStateExcluded(root, options = {}) {
 		if (error?.code === "ENOENT") return "";
 		throw error;
 	});
-	if (current.split(/\r?\n/).some((line) => ["/.pi/", ".pi/", "/.pi", ".pi"].includes(line.trim()))) {
-		return { status: "already-excluded", changed: false, path: excludePath };
-	}
 	const prefix = current && !current.endsWith("\n") ? "\n" : "";
-	await appendFile(excludePath, `${prefix}# Research Pi local runtime state\n/.pi/\n`, { encoding: "utf8", mode: 0o600 });
+	await appendFile(excludePath, `${prefix}# Research Pi local runtime state\n${missing.join("\n")}\n`, { encoding: "utf8", mode: 0o600 });
 	return { status: "added", changed: true, path: excludePath };
 }

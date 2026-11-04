@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { createSubagentSessionManager, formatSubagentSessionJob } from "../lib/subagent-sessions.mjs";
 import { createSubagentActivityWriter } from "../lib/subagent-activity.mjs";
 import { subagentTaskText, subagentBelongsToWorkspace } from "../lib/runtime-subagents.mjs";
-import { getRuntimeUiAdapter, registerSubagentRuntimeAdapter } from "../lib/research-runtime-adapters.mjs";
+import { getHostCapabilityUiAdapter, getRuntimeUiAdapter, registerSubagentRuntimeAdapter } from "../lib/research-runtime-adapters.mjs";
 import { readRuntimeSnapshot, recordSubagentRuntimeEvent, registerSubagentRuntimeJob, resolveResearchRuntime, runtimeMessageText, subagentActorId } from "../lib/research-runtime.mjs";
 
 const TERMINAL = new Set(["completed", "failed", "cancelled", "input_required"]);
@@ -15,26 +15,40 @@ export default function subagentRunnersExtension(pi: ExtensionAPI) {
 	const writers = new Map<string, ReturnType<typeof createSubagentActivityWriter>>();
 	const fingerprints = new Map<string, string>();
 	const deliveredTurns = new Set<string>();
+	let approvalQueue: Promise<unknown> = Promise.resolve();
 	const stateRoot = resolve(process.env.RESEARCH_PI_STATE_DIR ?? ".pi");
 	const manager = createSubagentSessionManager({
 		coreCli: process.env.RESEARCH_PI_CORE_CLI, stateRoot,
 		boundaryExtension: process.env.RESEARCH_PI_HARNESS_ROOT ? join(process.env.RESEARCH_PI_HARNESS_ROOT, ".pi", "extensions", "project-boundary.ts") : undefined,
-		onUiRequest: async (job: any, request: any) => {
-			const ctx = contexts.get(job.id);
-			if (!ctx?.hasUI) return { cancelled: true };
-			const title = `${job.backend}/${job.role} · ${job.mission ?? job.id}\n${request.title ?? ""}`;
-			if (request.method === "confirm") return { confirmed: await ctx.ui.confirm(title, request.message ?? "") };
-			const value = request.method === "select" ? await ctx.ui.select(title, request.options ?? [])
-				: request.method === "editor" ? await ctx.ui.editor(title, request.prefill ?? "")
-				: await ctx.ui.input(title, request.placeholder);
-			return value === undefined ? { cancelled: true } : { value };
+		onUiRequest: async (job: any, request: any, { signal }: any = {}) => {
+			const review = async () => {
+				signal?.throwIfAborted();
+				const ctx = contexts.get(job.id);
+				if (request.method === "host_capability") {
+					const adapter = getHostCapabilityUiAdapter();
+					if (!ctx || !adapter) return { error: "Leader capability review is unavailable" };
+					const reviewCtx = { ...ctx, ui: { ...ctx.ui, select: (title: string, choices: string[], options: any) =>
+						ctx.ui.select(`${job.backend}/${job.role} · ${job.mission ?? job.id}\n${title}`, choices, options) } };
+					return { decision: await adapter.review({ job, pendingRequest: request.pendingRequest, ctx: reviewCtx, signal }) };
+				}
+				if (!ctx?.hasUI) return { cancelled: true };
+				const title = `${job.backend}/${job.role} · ${job.mission ?? job.id}\n${request.title ?? ""}`;
+				if (request.method === "confirm") return { confirmed: await ctx.ui.confirm(title, request.message ?? "", { signal }) };
+				const value = request.method === "select" ? await ctx.ui.select(title, request.options ?? [], { signal })
+					: request.method === "editor" ? await ctx.ui.editor(title, request.prefill ?? "")
+					: await ctx.ui.input(title, request.placeholder, { signal });
+				return value === undefined ? { cancelled: true } : { value };
+			};
+			const pending = approvalQueue.then(review, review);
+			approvalQueue = pending.catch(() => undefined);
+			return await pending;
 		},
 		onUpdate: async (job: any, event: any) => {
 			const ctx = contexts.get(job.id);
 			if (!ctx) return;
 			const writer = writers.get(job.id);
 			writer?.append(job, event);
-			const fingerprint = JSON.stringify([job.status, job.turn, job.model, job.thinking, job.backendSessionId, job.nativeTerminal]);
+			const fingerprint = JSON.stringify([job.status, job.turn, job.model, job.thinking, job.backendSessionId, job.nativeTerminal, job.pendingRequest?.id]);
 			const changed = fingerprint !== fingerprints.get(job.id);
 			if (changed) {
 				fingerprints.set(job.id, fingerprint);
@@ -44,8 +58,9 @@ export default function subagentRunnersExtension(pi: ExtensionAPI) {
 			// refreshes for lifecycle changes or completed/started tools, not each token.
 			if (changed || (event?.type === "tool" && (event.phase === "completed" || event.args))) await getRuntimeUiAdapter()?.refresh(ctx, { backend: job.backend, jobs: manager.list(job.backend) });
 			if (!TERMINAL.has(job.status)) return;
+			if (job.pendingRequest?.route === "leader") return;
 			await writer?.flush();
-			const turnKey = `${job.id}:${job.turn}:${job.status}`;
+			const turnKey = `${job.id}:${job.turn}:${job.status}:${job.pendingRequest?.id ?? ""}`;
 			if (deliveredTurns.has(turnKey)) return;
 			deliveredTurns.add(turnKey);
 			const message = await recordSubagentRuntimeEvent(runtimes.get(job.id), job);

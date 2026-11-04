@@ -217,7 +217,7 @@ export async function openSubagentWatch(ctx, selector = "") {
    const { actor } = await client.read(selector);
    const result = await openTerminalFromLeader(ctx, { launcher: join(HARNESS_ROOT, "bin", "pi.mjs"), cwd: ctx.cwd, stateRoot: paths.stateRoot, actorId: actor.id });
    ctx.ui.notify(result.opened ? "Subagent terminal opened. The Leader continues here."
-    : `${result.error ?? "Could not open a terminal automatically."}${result.command ? `\nRun this in a new integrated terminal:\n${result.command}` : ""}`, result.opened ? "info" : "warning");
+    : `${result.error ?? "Could not open a terminal automatically."}${result.command ? `\nYou can also run this in another terminal in the same IDE:\n${result.command}` : ""}`, result.opened ? "info" : "warning");
    return;
   }
   while (selector) {
