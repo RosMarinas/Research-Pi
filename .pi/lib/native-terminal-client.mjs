@@ -1,17 +1,19 @@
 import {createConnection} from 'node:net';
 import {ProcessTerminal} from '@earendil-works/pi-tui';
 import {editInExternalEditor} from '../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/external-editor.js';
+import {captureTerminalContext} from './terminal-launcher.mjs';
 
 export async function attachNativeTerminal(record, { terminal, onAction } = {}) {
  if(!terminal && (!process.stdin.isTTY||!process.stdout.isTTY))throw new Error('Attach from an interactive terminal');
  const physical=terminal ?? new ProcessTerminal(),socket=createConnection(record.terminalSocket);let buffer='',seq=0,started=false,acting=false;
+ const terminalContext=onAction ? undefined : captureTerminalContext();
  const send=value=>{if(!socket.destroyed)socket.write(JSON.stringify({...value,instance:record.instance})+'\n')};
  const detach=()=>socket.end(),resize=()=>send({type:'resize',cols:physical.columns,rows:physical.rows});
  const input=data=>{if(acting)return;if(data==='\x1d')return detach();send({type:'capabilities',kitty:physical.kittyProtocolActive});send({type:'input',data})};
  const start=()=>{physical.start(input,resize);started=true;resize();physical.write('\x1b]10;?\x07\x1b]11;?\x07')};
  const action=async event=>{
   if(event.action==='open-subagent-terminal') {
-   try { const {openSubagentTerminal}=await import('./subagent-watch.mjs'); send({type:'action_result',id:event.id,result:onAction ? await onAction(event) : await openSubagentTerminal(event.params)}); send({type:'attach'}); }
+   try { const {openSubagentTerminal}=await import('./subagent-watch.mjs'); send({type:'action_result',id:event.id,result:onAction ? await onAction(event) : await openSubagentTerminal(event.params,{context:terminalContext})}); send({type:'attach'}); }
    catch(error){send({type:'action_result',id:event.id,error:error.message})}
    return;
   }

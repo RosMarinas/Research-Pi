@@ -40,6 +40,10 @@ export async function createNativeRuntimeHost({ runtime, terminalSocket, instanc
   desktop = await createDesktopTerminal({path:terminalSocket,instance,
     terminal:{write:(data,socket)=>{inputSocket=socket;terminal.input(data)},resize:(c,r)=>terminal.resize(c,r),capabilities:({kitty})=>{terminal.kittyProtocolActive=kitty},snapshot:()=>terminal.snapshot()},onObserversChanged:setObserved,state,stop:()=>void close()});
   terminal.requestAction = (action, params) => desktop.requestAction(inputSocket, action, params);
+  terminal.captureActionClient = () => {
+    const socket = inputSocket;
+    return (action, params) => desktop.requestAction(socket, action, params);
+  };
   const externalEdit = async (editor, command) => {
     const epoch = runtime.session.sessionId, revision = editor.getText();
     try { const result = await desktop.requestAction(inputSocket, 'external-editor', { command, content: editor.getExpandedText?.() ?? revision });

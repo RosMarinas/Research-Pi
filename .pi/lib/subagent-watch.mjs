@@ -1,4 +1,5 @@
 import { openVsCodeTerminal } from "./vscode-terminal.mjs";
+import { captureTerminalContext, launchTerminal, terminalCommand } from "./terminal-launcher.mjs";
 import { stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { execFile } from "node:child_process";
@@ -110,22 +111,20 @@ export function subagentWatchTranscript(view) {
 
 export function subagentWatchCommand({ launcher, cwd, stateRoot, actorId }) {
 	const args = [launcher, "watch", "--workspace", cwd, "--state-dir", stateRoot, ...(actorId ? [actorId] : [])];
-	const quote = (value) => `'${String(value).replaceAll("'", `'"'"'`)}'`;
-	return { args, command: [process.execPath, ...args].map(quote).join(" ") };
+	return { args, command: terminalCommand(process.execPath, args) };
 }
 
-export async function openSubagentTerminal(options, { platform = process.platform, environment = process.env, exec = runFile } = {}) {
+export async function openSubagentTerminal(options, dependencies = {}) {
 	const launch = subagentWatchCommand(options);
-	try {
-		if (environment.TMUX) await exec("tmux", ["new-window", "-n", "Pi subagent", "-c", options.cwd, launch.command]);
-		else if (/^(vscode|antigravity|cursor|windsurf|code-oss|vscodium)$/i.test(environment.TERM_PROGRAM ?? "") || environment.VSCODE_IPC_HOOK_CLI || environment.RESEARCH_PI_VSCODE_TERMINAL) {
-			return { ...await openVsCodeTerminal(options, { environment, exec, platform }), command: launch.command };
-		} else if (platform === "darwin") await exec("osascript", ["-e", 'on run argv\ntell application "Terminal"\ndo script (item 1 of argv)\nactivate\nend tell\nend run', launch.command]);
-		else await exec("x-terminal-emulator", ["-e", process.execPath, ...launch.args]);
-		return { opened: true, command: launch.command };
-	} catch (error) {
-		return { opened: false, command: launch.command, error: error.message };
-	}
+	const context = dependencies.context ?? captureTerminalContext(dependencies);
+	const exec = dependencies.exec ?? runFile;
+	return await launchTerminal({ executable: process.execPath, args: launch.args, cwd: options.cwd, title: "Pi subagent" }, {
+		context, exec,
+		openIde: async () => await openVsCodeTerminal(options, {
+			environment: context.environment, platform: context.platform,
+			exec: (file, args, options) => exec(file, args, { ...options, env: context.environment }),
+		}),
+	});
 }
 
 export function subagentWatchLabel(actor) {

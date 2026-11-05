@@ -194,9 +194,10 @@ export async function attachSubagentInUi(ctx, record) {
 
 export async function openTerminalFromLeader(ctx, options) {
  return await ctx.ui.custom((tui, _theme, _keys, done) => {
+  const requestAction = tui.terminal.captureActionClient?.() ?? tui.terminal.requestAction?.bind(tui.terminal);
   setImmediate(async () => {
-   try { done(tui.terminal.requestAction
-    ? await tui.terminal.requestAction("open-subagent-terminal", options)
+   try { done(requestAction
+    ? await requestAction("open-subagent-terminal", options)
     : await openSubagentTerminal(options)); }
    catch (error) { done({ opened: false, error: error.message }); }
   });
@@ -216,8 +217,8 @@ export async function openSubagentWatch(ctx, selector = "") {
   if (mode === "Open a new terminal") {
    const { actor } = await client.read(selector);
    const result = await openTerminalFromLeader(ctx, { launcher: join(HARNESS_ROOT, "bin", "pi.mjs"), cwd: ctx.cwd, stateRoot: paths.stateRoot, actorId: actor.id });
-   ctx.ui.notify(result.opened ? "Subagent terminal opened. The Leader continues here."
-    : `${result.error ?? "Could not open a terminal automatically."}${result.command ? `\nYou can also run this in another terminal in the same IDE:\n${result.command}` : ""}`, result.opened ? "info" : "warning");
+   ctx.ui.notify(result.opened ? `Subagent terminal opened${result.appName ? ` in ${result.appName}` : ""}.`
+    : `${result.error ?? "Could not open a terminal automatically."}${result.command ? `\nRun this in another terminal in the same application, or choose “Switch in this terminal”:\n${result.command}` : ""}`, result.opened ? "info" : "warning");
    return;
   }
   while (selector) {

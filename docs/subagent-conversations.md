@@ -49,8 +49,25 @@ To check a real workload, enable monitoring before it starts, inspect `/perf sta
 
 The optimized transport strips cumulative assistant snapshots and coalesces replaceable tool output over 100ms. Journal batches keep only the latest intermediate/final result per tool call per 400ms batch, retaining start arguments and final results. Native sessions still own the complete conversation. Hidden subagents retain conversation components but skip terminal redraws, progress animation and peer-state disk polling; attachment redraws their current state.
 
-## Follow the Leader terminal
+## Follow the requesting terminal
 
-In VS Code, Antigravity and compatible editors, **Open a new terminal** uses the Research Pi Terminal bridge to open an integrated terminal in the originating IDE window, preferably split beside the requesting terminal. The bridge registers terminal PIDs so existing terminals can discover it after installation or an IDE reload. If it is missing, Pi identifies the originating IDE and installs the bundled extension through that IDE's own CLI. Automatic installation needs Python 3 for the bundled VSIX packager. If identification or activation fails, Pi explains the remaining setup step without switching applications.
+**Open a new terminal** runs on the physical client that requested it. Each attached client captures its own terminal environment; the resident Host and nested watch sessions forward requests to that client. The Host also binds the open action to its initiating client before asynchronous launch setup, so another client's input cannot retarget that action.
 
-Resident Hosts forward the request to the physical client, including when watching a subagent through another native session. The Host's startup IDE does not choose the destination. Existing tmux sessions still use tmux new-window. Same-terminal switching needs no IDE extension. Other terminal applications keep the existing platform launcher. These changes apply to newly started Hosts and subagents; an already-running native process retains its loaded implementation.
+Terminal selection and application launching are separate steps in `terminal-launcher.mjs`. Inside tmux, Pi uses the exact socket and the session belonging to the current pane. Otherwise, `TERM_PROGRAM` identifies the current application and takes precedence over inherited variables from other applications. If it is absent, Pi accepts only an unambiguous application-specific marker. Unknown, conflicting or unsupported environments receive an error and a manual watch command. A failed launcher does not switch to Terminal.app or an OS default terminal.
+
+| Requesting environment | New-terminal mechanism |
+| --- | --- |
+| Ghostty on macOS | Native right split in the requesting pane, matched by the physical client's TTY; verified with Ghostty 1.4 |
+| Ghostty on Linux | `ghostty +new-window` in the running application |
+| VS Code, Antigravity and compatible IDEs | Window-local Research Pi Terminal bridge |
+| iTerm2 | Native window creation with a command |
+| macOS Terminal.app | Native `do script`, selected only for an Apple Terminal client |
+| WezTerm | `wezterm cli spawn`, retaining the client pane/mux context |
+| kitty | Remote-control launch through the client's `KITTY_LISTEN_ON` endpoint |
+| tmux | `new-window` on the initiating pane's session and socket |
+
+The IDE bridge registers terminal PIDs so existing IDE terminals can discover it after installation or an IDE reload. If missing, Pi identifies that IDE and installs the bundled extension through its own CLI. Automatic installation needs Python 3 for the bundled VSIX packager. A Ghostty or other standalone terminal client never selects this bridge merely because it inherited IDE variables.
+
+On macOS Ghostty, the watch view opens beside the requesting pane, matching the default `Command+D` layout. Pi calls the native split API and locates the source by TTY, so a change of window focus cannot move the split elsewhere. If the source pane cannot be identified, Pi reports the problem instead of splitting an arbitrary front window. This requires a Ghostty scripting dictionary exposing terminal TTYs, as in Ghostty 1.4; no keyboard event is generated.
+
+An SSH shell needs an IDE bridge in the remote extension host or a tmux session to open another terminal on the same remote host. Pi otherwise supplies a manual command. Same-terminal switching needs no application automation. To load new client launch code, detach with `Ctrl+]` and run `pi` again in the intended terminal; the resident Host and its agents continue. The Host-side action binding loads at the next normal Host restart.
