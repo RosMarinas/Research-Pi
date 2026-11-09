@@ -76,7 +76,7 @@ export default function subagentRunnersExtension(pi: ExtensionAPI) {
 		const activityPath = join(stateRoot, "subagents", id, "events.jsonl");
 		writers.set(id, createSubagentActivityWriter(activityPath));
 		return await manager.start({ ...input, id, actorId, activityPath, workspaceKey: runtime.workspaceKey,
-			projectKey: runtime.projectKey, task: subagentTaskText(input) });
+			projectKey: runtime.projectKey, branchId: runtime.branchId, task: subagentTaskText(input) });
 	};
 	for (const backend of ["pi", "antigravity"]) {
 		registerSubagentRuntimeAdapter(backend, {

@@ -6,6 +6,7 @@ import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sanitizeBoundaryEnvironment } from "./project-boundary.mjs";
+import { redactSensitiveText } from "./sensitive-text.mjs";
 import { subagentModelCard, SUBAGENT_WORKSPACE_POLICY } from "./subagent-message.mjs";
 
 const FINAL_STATUSES = new Set(["completed", "failed", "cancelled", "input_required"]);
@@ -53,6 +54,7 @@ function publicJob(job) {
 		cwd: job.cwd,
 		workspaceKey: job.workspaceKey,
 		projectKey: job.projectKey,
+		branchId: job.branchId ?? null,
 		researchTrackRef: job.researchTrackRef,
 		activityPath: job.activityPath,
 		nativeTerminal: job.closed ? null : job.nativeTerminal,
@@ -85,9 +87,10 @@ function writeRecord(child, value) {
 }
 
 export function buildPiRunnerArgs(input) {
+	// Installed providers are extensions too. Keep them enabled, as on the
+	// Leader, so models such as antigravity-acp/* exist in the child catalog.
 	const args = [
 		"--mode", "rpc",
-		"--no-extensions",
 		"--no-skills",
 		"--no-prompt-templates",
 		"--no-themes",
@@ -225,7 +228,10 @@ export function createSubagentSessionManager(options = {}) {
 			job.closed = true;
 			void enqueue(job, async () => {
 				if (buffer.trim()) await handlePiRecord(job, buffer);
-				if (!FINAL_STATUSES.has(job.status)) await settle(job, job.cancelling ? "cancelled" : "failed", null, `Pi runner exited (${code ?? "?"}${signal ? `, ${signal}` : ""})`);
+				if (!FINAL_STATUSES.has(job.status)) {
+					const detail = job.stderr ? `: ${redactSensitiveText(job.stderr)}` : "";
+					await settle(job, job.cancelling ? "cancelled" : "failed", null, `Pi runner exited (${code ?? "?"}${signal ? `, ${signal}` : ""})${detail}`);
+				}
 			});
 		});
 		await beginTurn(job, task);
@@ -409,6 +415,7 @@ export function createSubagentSessionManager(options = {}) {
 			cwd: resolve(input.cwd),
 			workspaceKey: input.workspaceKey ?? null,
 			projectKey: input.projectKey ?? null,
+			branchId: input.branchId ?? null,
 			researchTrackRef: input.researchTrackRef ?? "project:initial",
 			activityPath: input.activityPath ?? null,
 			systemPrompt: input.systemPrompt,

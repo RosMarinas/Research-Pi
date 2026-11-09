@@ -123,7 +123,7 @@ test('same-round snapshot reuse preserves locked delivery recheck and reports de
  const { root } = await fixture(t);
  const runtime = await initializeResearchRuntime(root, { sessionId: 'leader' }, { runtimeRoot: join(root, 'runtime') });
  const ctx = { sessionManager: { getSessionId: () => 'leader' } };
- await registerSubagentRuntimeJob(runtime, { id: 'job', actorId: 'antigravity:test', backend: 'antigravity', status: 'running', workspaceKey: runtime.workspaceKey });
+ await registerSubagentRuntimeJob(runtime, { id: 'job', actorId: 'antigravity:test', backend: 'antigravity', status: 'running', branchId: runtime.branchId, workspaceKey: runtime.workspaceKey });
  let dispatches = 0, deferred = 0, ready = false;
  registerSubagentRuntimeAdapter('antigravity', { dispatch: async () => { dispatches++; return { status: ready ? 'delivered' : 'queued' }; } });
  const message = await queueSubagentMessage(runtime, { actorId: 'antigravity:test', body: 'wait' });

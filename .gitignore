@@ -31,7 +31,8 @@ node_modules
 /docs/testing/
 
 # Local validation code and fixtures
-/tests/
+/tests/*
+!/tests/*.test.mjs
 /scripts/web-demo.mjs
 /scripts/native-runtime-demo.mjs
 /scripts/native-runtime-review.mjs

@@ -73,6 +73,7 @@ const TERMINAL_ACTION_STATUSES = new Set(["completed", "failed", "cancelled"]);
 export function projectViewRefreshFingerprint(snapshot = {}) {
 	return fingerprint({
 		projectRevision: snapshot.revision ?? 0,
+		branchId: snapshot.branchId ?? null,
 		actions: (snapshot.actions ?? [])
 			.filter((action) => LIVE_ACTION_STATUSES.has(action.status))
 			.map((action) => ({
@@ -174,6 +175,8 @@ async function sessionCandidates(sessionDir) {
 }
 
 export async function migrateLatestProjectState({ runtime, sessionDir, cwd, leaderSessionId, attachmentEpoch, appendRuntimeEvent, appendRuntimeEventAtRevision, readRuntimeSnapshot }) {
+	// Branches never auto-import unbound historical summaries.
+	if (runtime.branchId) return null;
 	let bytes = 0;
 	for (const candidate of await sessionCandidates(sessionDir)) {
 		if (bytes + candidate.size > MAX_SESSION_BYTES) break;
@@ -263,7 +266,7 @@ export function buildProjectView({ runtime, snapshot, git = {}, experiments = []
 	const stateRouteStatus = runtimeTrackStatus(snapshot, stateTrackRef);
 	const transitionAfterState = snapshot.transitions?.find((transition) => transition.revision > stateRevision);
 	const evidenceById = new Map();
-	for (const item of experiments) if (item?.id) evidenceById.set(item.id, item);
+	for (const item of experiments) if (item?.id && (!runtime.branchId || item.branchId === runtime.branchId)) evidenceById.set(item.id, item);
 	for (const item of snapshot.evidence ?? []) if (item?.id) evidenceById.set(item.id, { ...evidenceById.get(item.id), ...item });
 	const recentEvidence = [...evidenceById.values()]
 		.sort((left, right) => Date.parse(left.timestamp ?? left.recordedAt ?? "") - Date.parse(right.timestamp ?? right.recordedAt ?? ""))
@@ -309,6 +312,8 @@ export function buildProjectView({ runtime, snapshot, git = {}, experiments = []
 	return {
 		version: PROJECT_VIEW_VERSION,
 		projectKey: runtime.projectKey,
+		branchId: runtime.branchId ?? null,
+		branchName: runtime.branchName ?? null,
 		workspaceRoot: runtime.workspaceRoot,
 		anchor,
 		briefState,
@@ -318,6 +323,7 @@ export function buildProjectView({ runtime, snapshot, git = {}, experiments = []
 		stateAmendment: snapshot.projectState?.amendment ?? null,
 		stateRevision,
 		projectRevision: snapshot.revision ?? 0,
+		branchId: snapshot.branchId ?? null,
 		freshness,
 		freshnessReasons,
 		currentTrack,
@@ -368,6 +374,7 @@ export function renderProjectBrief(view) {
 		"<research_project_view>",
 		"Project Brief from the latest successful research compaction: enduring orientation, complemented by the frontier captured in this ProjectView. Later conversation and tool results carry subsequent progress.",
 		`Project: ${view.projectKey} · ${view.workspaceRoot}`,
+		...(view.branchId ? [`Research branch: ${view.branchName} (${view.branchId})`] : []),
 		`Brief boundary: Project revision ${view.briefRevision || "none"}`,
 	];
 	if (view.anchor) {

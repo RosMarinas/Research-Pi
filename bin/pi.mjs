@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { formatBoundaryDoctor, runBoundaryDoctor } from "../.pi/lib/boundary-doctor.mjs";
+import { formatBoundaryDoctor, runBoundaryDoctorProcess } from "../.pi/lib/boundary-doctor.mjs";
 import {
 	ensureResearchPiConfig,
 	researchPiCredentialEnvironmentNames,
@@ -115,11 +115,12 @@ function loadConfigurationEnvironment() {
 function takeResearchOptions(argv, config) {
 	const args = [...argv];
 	let sessionMode;
-	let fullAccess = process.env.RESEARCH_PI_FULL_ACCESS === "1";
-	const fullAccessIndex = args.indexOf("--full-access");
-	if (fullAccessIndex >= 0) {
-		fullAccess = true;
-		args.splice(fullAccessIndex, 1);
+	let fullAccess = process.env.RESEARCH_PI_FULL_ACCESS !== "0";
+	for (let index = 0; index < args.length;) {
+		if (args[index] === "--full-access" || args[index] === "--no-full-access") {
+			fullAccess = args[index] === "--full-access";
+			args.splice(index, 1);
+		} else index++;
 	}
 	const analysisIndex = args.indexOf("--analysis");
 	if (analysisIndex >= 0) {
@@ -259,10 +260,11 @@ async function spawnCore(argv, { background = false } = {}) {
 	process.env.RESEARCH_PI_HARNESS_ROOT = packageRoot;
 	process.env.RESEARCH_PI_CORE_CLI = coreCli;
 	if (sessionMode === "analysis") process.env.RESEARCH_PI_INITIAL_SESSION_MODE = "analysis";
-	if (fullAccess) process.env.RESEARCH_PI_FULL_ACCESS = "1";
+	process.env.RESEARCH_PI_FULL_ACCESS = fullAccess ? "1" : "0";
 	if (process.env.RESEARCH_PI_TRACE === "1") process.env.PI_TRACE_DIR = paths.traceDir;
 
-	const args = ["--no-skills", "--no-extensions", "--no-themes"];
+	// Extensions from settings packages stay enabled so installed providers (e.g. pi-antigravity-acp-provider) load.
+	const args = ["--no-skills", "--no-themes"];
 	// A shared, resizable terminal needs an application-owned scroll viewport.
 	if (web.enabled && !userArgs.includes("--tui-mode")) args.push("--tui-mode", "fullscreen");
 	const skillPaths = [
@@ -297,7 +299,7 @@ async function spawnCore(argv, { background = false } = {}) {
 		const { launchNativeRuntime } = await import("../.pi/lib/native-runtime-launcher.mjs");
 		await launchNativeRuntime({ stateRoot: paths.stateRoot, agentDir: paths.agentDir, sessionDir: paths.sessionDir,
 			cwd: workspace, args, packageRoot, env: process.env, web, background,
-			analysis: sessionMode === "analysis", hasSessionOptions: userArgs.length > 0 || argv.includes("--full-access") });
+			analysis: sessionMode === "analysis", hasSessionOptions: userArgs.length > 0 || argv.some(arg => ["--full-access", "--no-full-access"].includes(arg)) });
 		return;
 	}
 	if (web.enabled && !informational) {
@@ -306,7 +308,7 @@ async function spawnCore(argv, { background = false } = {}) {
 			const { ensureResidentWeb } = await import("../.pi/lib/web-resident.mjs");
 			const record = await ensureResidentWeb({ stateRoot: paths.stateRoot, cwd: workspace, env: process.env, packageRoot,
 				executable: process.execPath, args: [coreCli, ...args], options: web,
-				hasSessionOptions: userArgs.length > 0 || argv.includes("--analysis") || argv.includes("--full-access") });
+				hasSessionOptions: userArgs.length > 0 || argv.includes("--analysis") || argv.some(arg => ["--full-access", "--no-full-access"].includes(arg)) });
 			printWebRecord(record);
 			if (!background) {
 				process.stderr.write("Ctrl+] detaches this terminal; Pi and Web stay running. Use pi web stop to stop the service.\n");
@@ -362,6 +364,11 @@ async function webCommand(argv) {
 	else process.stdout.write("No resident Pi for " + workspace + "\n");
 }
 
+async function branchCommand(argv) {
+	const { runResearchBranchCommand, formatResearchBranchCommand } = await import("../.pi/lib/research-branch-cli.mjs");
+	process.stdout.write(formatResearchBranchCommand(await runResearchBranchCommand(argv, { stateRoot: paths.stateRoot })));
+}
+
 async function main() {
 	const argv = process.argv.slice(2);
 	if (argv[0] === "restart" || argv[0] === "stop") {
@@ -380,6 +387,7 @@ async function main() {
 		if (argv[0] === "stop") { process.stdout.write(`Stopped Research Pi for ${workspace}\n`); return; }
 		return spawnCore([...restartSessionArgs(args, sessionId, { emptyUnpersistedSession: record?.state?.emptyUnpersistedSession === true }), "--resident-runtime"], { background: argv.includes("--background") || !(process.stdin.isTTY && process.stdout.isTTY) });
 	}
+	if (argv[0] === "branch") return await branchCommand(argv.slice(1));
 	if (argv[0] === "web") return await webCommand(argv.slice(1));
 	if (argv[0] === "watch") {
 		const { runSubagentWatch } = await import("../.pi/lib/subagent-watch-ui.mjs");
@@ -412,7 +420,7 @@ async function main() {
 		loadConfigurationEnvironment();
 		applyConfigurationEnvironment(config);
 		const { workspace } = takeResearchOptions(argv.slice(1), config);
-		const result = await runBoundaryDoctor({ cwd: workspace, environment: process.env });
+		const result = await runBoundaryDoctorProcess({ cwd: workspace, environment: process.env });
 		process.stdout.write(`${formatBoundaryDoctor(result)}\n`);
 		if (!result.ok) process.exitCode = 1;
 		return;

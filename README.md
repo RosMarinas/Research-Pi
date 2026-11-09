@@ -221,7 +221,7 @@ cd /path/to/project
 pi --resident-runtime --full-access --web-tailscale
 ```
 
-终端会显示私有配对网址。手机加入当前登录的同一个 Tailscale 网络后打开该网址，即可操作这个 Leader Session。保存过 Web 偏好后，启动命令可简化为 `pi --resident-runtime --full-access`。
+终端会显示私有配对网址。手机加入当前登录的同一个 Tailscale 网络后打开该网址，即可操作这个 Leader Session。Full access 已默认开启，保存过 Web 偏好后，启动命令可简化为 `pi --resident-runtime`。
 
 在第二个终端启动独立 Analysis：
 
@@ -230,7 +230,7 @@ cd /path/to/project
 pi --resident-runtime --analysis --no-web
 ```
 
-`--full-access` 只扩大 Leader 与相应 Codex executor 的权限；Analysis／advisor 仍只读。Analysis 可用 `/analysis send <综合>` 把当前判断、依据和建议投递给 Leader。当前远程 Web 主要连接 Leader，Analysis 建议继续使用独立 TUI。
+默认 full access 适用于 Leader 与新建的执行型 subagent；Analysis／advisor 仍只读。Analysis 可用 `/analysis send <综合>` 把当前判断、依据和建议投递给 Leader。当前远程 Web 主要连接 Leader，Analysis 建议继续使用独立 TUI。
 
 ### 场景二：终端关闭后恢复 TUI 和 Web
 
@@ -330,9 +330,9 @@ Analysis 读取同一项目的工作视图，但不抢占 Leader，不修改代�
 
 ## 权限与本地数据
 
-Leader、Pi runner 与 Codex worker 使用相应的项目边界和角色权限；宿主命令、SSH 与项目外读取通过显式授权处理。Antigravity 使用自身的 CLI sandbox；非 advisor 任务在该 sandbox 内自动批准工具，advisor 使用 plan 模式，不能把它视为与 Pi 权限协议完全等价。
+`pi` 与 `pi restart` 默认开启 full access，Leader 和新建的执行型 subagent 继承宿主用户的文件、命令与网络权限；Analysis／advisor 仍只读。Pi runner 继承同一权限开关；Codex executor 使用完整文件系统／网络 profile；Antigravity 执行任务不传 `--sandbox`，advisor 则保留 sandbox 与 plan 模式。
 
-`pi --full-access` 为本次启动显式扩大 Leader／Codex executor 的权限；Analysis／advisor 仍只读。凭据不得进入模型上下文、日志或提交。仅加载受信扩展，因为扩展运行在宿主进程内。
+使用 `pi --no-full-access`、`pi restart --no-full-access` 或 shell 环境变量 `RESEARCH_PI_FULL_ACCESS=0` 可启用项目沙箱；受限模式中的宿主命令、SSH 与项目外读取通过显式授权处理。`--full-access` 可覆盖环境变量，多个权限参数以最后一个为准。旧常驻 Host 保留启动时的权限，更新后执行一次 `pi restart`；在会话中用 `/boundary` 查看生效权限。凭据不得进入模型上下文、日志或提交。仅加载受信扩展，因为扩展运行在宿主进程内。
 
 默认安装路径如下；源码 checkout 使用独立的配置与状态，实际以 `pi paths` 为准：
 

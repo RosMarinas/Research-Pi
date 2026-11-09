@@ -159,14 +159,14 @@ function runGit(cwd, args) {
 	});
 }
 
-async function resolveWorkspaceBoundary(inputCwd) {
+export async function resolveCodexWorkspaceBoundary(inputCwd) {
 	const cwd = await realpath(resolve(inputCwd));
 	const workspaceRoot = await realpath(resolve(await resolveProjectRoot(cwd)));
 	return { cwd, workspaceRoot, workspaceKey: identityKey("workspace", workspaceRoot) };
 }
 
 export async function resolveCodexWorkspaceIdentity(inputCwd) {
-	const { cwd, workspaceRoot, workspaceKey } = await resolveWorkspaceBoundary(inputCwd);
+	const { cwd, workspaceRoot, workspaceKey } = await resolveCodexWorkspaceBoundary(inputCwd);
 	let projectAnchor = workspaceRoot;
 	let commonDir = await runGit(workspaceRoot, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
 	if (commonDir.code !== 0 || !commonDir.stdout) {
@@ -684,8 +684,11 @@ export async function startCodexJob(options) {
 	const reasoningEffort = validateReasoningEffort(options.reasoningEffort ?? defaultCodexReasoningEffort(role));
 	const serviceTier = validateServiceTier(options.serviceTier ?? defaultCodexServiceTier(role));
 	const subagent = codexSubagentSettings(options.subagent);
-	const identity = await resolveCodexWorkspaceIdentity(options.cwd);
-	const { cwd, workspaceRoot, workspaceKey, projectKey } = identity;
+	const identity = options.runtime ? await resolveCodexWorkspaceBoundary(options.cwd) : await resolveCodexWorkspaceIdentity(options.cwd);
+	const { cwd, workspaceRoot, workspaceKey } = identity;
+	if (options.runtime && options.runtime.workspaceKey !== workspaceKey) throw new Error("Runtime belongs to another workspace");
+	const projectKey = options.runtime?.projectKey ?? options.projectKey ?? identity.projectKey;
+	const branchId = options.runtime?.branchId ?? options.branchId ?? null;
 	const writeScope = mode === "executor" ? await normalizeCodexWriteScope(workspaceRoot, options.writeScope) : [];
 	const resourceClaims = normalizeResourceClaims(options.resourceClaims);
 	if (mode === "advisor" && resourceClaims.length) throw new Error("Advisors cannot reserve execution resources");
@@ -755,6 +758,7 @@ export async function startCodexJob(options) {
 			workspaceRoot,
 			workspaceKey,
 			projectKey,
+			branchId,
 			runtimeRoot: options.runtime?.runtimeRoot ?? options.runtimeRoot ?? null,
 			projectRevision: Number.isInteger(options.projectRevision) ? options.projectRevision : null,
 			researchTrackRef: options.researchTrackRef ?? "project:initial",
@@ -805,6 +809,7 @@ export async function startCodexJob(options) {
 			workspaceRoot,
 			workspaceKey,
 			projectKey,
+			branchId,
 			runtimeRoot: options.runtime?.runtimeRoot ?? options.runtimeRoot ?? null,
 			projectRevision: Number.isInteger(options.projectRevision) ? options.projectRevision : null,
 			researchTrackRef: options.researchTrackRef ?? "project:initial",
@@ -873,7 +878,7 @@ export async function startCodexJob(options) {
 }
 
 async function jobWorkspaceKey(job) {
-	const actual = await resolveWorkspaceBoundary(job.cwd);
+	const actual = await resolveCodexWorkspaceBoundary(job.cwd);
 	if (job.workspaceKey && job.workspaceKey !== actual.workspaceKey) {
 		throw new Error(`Codex job ${job.id} has inconsistent workspace metadata`);
 	}
@@ -886,7 +891,7 @@ async function jobWorkspaceKey(job) {
 
 export async function assertCodexJobWorkspace(job, expectedCwd) {
 	if (!expectedCwd) return job;
-	const expected = await resolveWorkspaceBoundary(expectedCwd);
+	const expected = await resolveCodexWorkspaceBoundary(expectedCwd);
 	const actualKey = await jobWorkspaceKey(job);
 	if (actualKey !== expected.workspaceKey) {
 		throw new Error(`Codex job ${job.id} belongs to another workspace; switch to that workspace before managing or resuming it`);
@@ -895,6 +900,10 @@ export async function assertCodexJobWorkspace(job, expectedCwd) {
 }
 
 export function assertCodexJobLeader(job, options = {}) {
+	if (Object.hasOwn(options, "expectedResearchBranchId")
+		&& (job.branchId ?? null) !== (options.expectedResearchBranchId ?? null)) {
+		throw codexJobOwnerError(`Codex job ${job.id} belongs to another research branch`);
+	}
 	if (options.expectedProjectKey || options.expectedLeaderActorId) {
 		if (options.expectedProjectKey && job.projectKey !== options.expectedProjectKey) {
 			throw codexJobOwnerError(`Codex job ${job.id} belongs to another Research Runtime project`);
@@ -941,9 +950,10 @@ export async function listCodexJobs(options = {}) {
 	for (const entry of entries) {
 		if (!entry.isDirectory() || !JOB_ID_PATTERN.test(entry.name)) continue;
 		try {
-			const job = await readCodexJob(entry.name, { jobRoot });
+			const job = await readCodexJob(entry.name, { jobRoot, reconcile: false });
 			if (options.legacyOnly && job.leaderActorId) continue;
 			if (options.projectKey && job.projectKey !== options.projectKey) continue;
+			if (Object.hasOwn(options, "branchId") && (job.branchId ?? null) !== (options.branchId ?? null)) continue;
 			if (options.leaderActorId && job.leaderActorId !== options.leaderActorId) continue;
 			if (options.actorId && job.actorId !== options.actorId) continue;
 			if (options.leaderSessionId && job.leaderSessionId !== options.leaderSessionId) continue;
@@ -963,7 +973,7 @@ export async function listCodexJobs(options = {}) {
 			if (options.missionKey && job.missionKey !== options.missionKey) continue;
 			if (options.mode && job.mode !== options.mode) continue;
 			if (options.researchTrackRef && (job.researchTrackRef ?? "project:initial") !== options.researchTrackRef) continue;
-			jobs.push(job);
+			jobs.push(options.reconcile === false ? job : await readCodexJob(entry.name, { jobRoot }));
 		} catch {
 			// One damaged job must not prevent the remaining session jobs from reattaching.
 		}
@@ -977,6 +987,7 @@ export async function listCodexMissions(options) {
 		cwd: options.cwd,
 		leaderSessionId: options.leaderSessionId,
 		projectKey: options.projectKey,
+		...(Object.hasOwn(options, "branchId") ? { branchId: options.branchId } : {}),
 		leaderActorId: options.leaderActorId,
 		legacyOnly: options.legacyOnly,
 		branchEntryIds: options.branchEntryIds,
@@ -985,10 +996,11 @@ export async function listCodexMissions(options) {
 	for (const job of jobs) {
 		const researchTrackRef = job.researchTrackRef ?? "project:initial";
 		const role = job.role ?? job.mode;
-		const key = `${job.missionKey ?? `unassigned:${job.id}`}:${role}:${researchTrackRef}`;
+		const key = `${job.projectKey}:${job.branchId ?? "legacy"}:${job.missionKey ?? `unassigned:${job.id}`}:${role}:${researchTrackRef}`;
 		const current = groups.get(key);
 		groups.set(key, {
 			mission: job.mission ?? null,
+			branchId: job.branchId ?? null,
 			missionKey: job.missionKey ?? null,
 			role,
 			mode: job.mode,
@@ -1013,6 +1025,7 @@ export async function queueCodexCommand(jobId, command, options = {}) {
 		jobRoot,
 		expectedCwd: options.expectedCwd,
 		expectedProjectKey: options.expectedProjectKey,
+		...(Object.hasOwn(options, "expectedResearchBranchId") ? { expectedResearchBranchId: options.expectedResearchBranchId } : {}),
 		expectedLeaderActorId: options.expectedLeaderActorId,
 		expectedLeaderSessionId: options.expectedLeaderSessionId,
 		expectedBranchEntryIds: options.expectedBranchEntryIds,
@@ -1028,6 +1041,7 @@ export async function queueCodexCommand(jobId, command, options = {}) {
 			jobRoot,
 			expectedCwd: options.expectedCwd,
 			expectedProjectKey: options.expectedProjectKey,
+			...(Object.hasOwn(options, "expectedResearchBranchId") ? { expectedResearchBranchId: options.expectedResearchBranchId } : {}),
 			expectedLeaderActorId: options.expectedLeaderActorId,
 			expectedLeaderSessionId: options.expectedLeaderSessionId,
 			expectedBranchEntryIds: options.expectedBranchEntryIds,
@@ -1211,6 +1225,7 @@ export async function waitForCodexJob(jobId, options = {}) {
 	const ownerOptions = {
 		expectedCwd: options.expectedCwd,
 		expectedProjectKey: options.expectedProjectKey,
+		...(Object.hasOwn(options, "expectedResearchBranchId") ? { expectedResearchBranchId: options.expectedResearchBranchId } : {}),
 		expectedLeaderActorId: options.expectedLeaderActorId,
 		expectedLeaderSessionId: options.expectedLeaderSessionId,
 		expectedBranchEntryIds: options.expectedBranchEntryIds,
@@ -1254,6 +1269,7 @@ export async function cancelCodexJob(jobId, options = {}) {
 	const ownerOptions = {
 		expectedCwd: options.expectedCwd,
 		expectedProjectKey: options.expectedProjectKey,
+		...(Object.hasOwn(options, "expectedResearchBranchId") ? { expectedResearchBranchId: options.expectedResearchBranchId } : {}),
 		expectedLeaderActorId: options.expectedLeaderActorId,
 		expectedLeaderSessionId: options.expectedLeaderSessionId,
 		expectedBranchEntryIds: options.expectedBranchEntryIds,
@@ -1307,6 +1323,7 @@ export async function resumeCodexJob(jobId, options) {
 		jobRoot: options.jobRoot,
 		expectedCwd: options.expectedCwd,
 		expectedProjectKey: options.expectedProjectKey,
+		...(Object.hasOwn(options, "expectedResearchBranchId") ? { expectedResearchBranchId: options.expectedResearchBranchId } : {}),
 		expectedLeaderActorId: options.expectedLeaderActorId,
 		expectedLeaderSessionId: options.expectedLeaderSessionId,
 		expectedBranchEntryIds: options.expectedBranchEntryIds,
@@ -1330,6 +1347,8 @@ export async function resumeCodexJob(jobId, options) {
 	return await startCodexJob({
 		...options,
 		cwd: previous.cwd,
+		projectKey: previous.projectKey,
+		branchId: previous.branchId ?? null,
 		runtimeRoot: options.runtime?.runtimeRoot ?? options.runtimeRoot ?? previous.runtimeRoot,
 		mode: options.mode ?? previous.mode,
 		role: options.role ?? previous.role ?? previous.mode,
@@ -1403,6 +1422,7 @@ export function publicJobView(job) {
 		workspaceRoot: job.workspaceRoot ?? job.writerRoot ?? job.cwd,
 		workspaceKey: job.workspaceKey ?? null,
 		projectKey: job.projectKey ?? null,
+		branchId: job.branchId ?? null,
 		runtimeRoot: job.runtimeRoot ?? null,
 		projectRevision: Number.isInteger(job.projectRevision) ? job.projectRevision : null,
 		researchTrackRef: job.researchTrackRef ?? "project:initial",

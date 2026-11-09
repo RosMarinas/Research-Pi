@@ -197,9 +197,10 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const runtime = await resolveResearchRuntime(ctx.cwd);
-			const route = resolveRuntimeResearchTrack(await readRuntimeSnapshot(runtime), params.trackRef);
+			const snapshot = await readRuntimeSnapshot(runtime);
+			const route = resolveRuntimeResearchTrack(snapshot, params.trackRef);
 			const ledgerDir = join(ctx.cwd, CONFIG_DIR_NAME, "research");
-			const ledgerPath = join(ledgerDir, "experiments.jsonl");
+			const ledgerPath = runtime.branchId ? runtime.ledgerPath : join(ledgerDir, "experiments.jsonl");
 			const sessionId = ctx.sessionManager.getSessionId();
 			const baseRecord = {
 				question: String(params.question).trim(),
@@ -229,7 +230,7 @@ export default function (pi: ExtensionAPI) {
 					: `tool:${sessionId}:${toolCallId}`;
 			const idempotencyKeyHash = sha256(idempotencySeed);
 			const id = `exp-${idempotencyKeyHash.slice(0, 24)}`;
-			const existingRecords = await readLedgerRecords(ledgerPath);
+			const existingRecords = runtime.branchId ? snapshot.evidence : await readLedgerRecords(ledgerPath);
 			let existing = existingRecords.find((item) => item.id === id);
 			if (!existing && !explicitIdempotencyKey && !runId) {
 				existing = existingRecords.find((item) => item.contentFingerprint === fingerprint || (!item.contentFingerprint && contentFingerprint(item) === fingerprint));
@@ -240,9 +241,9 @@ export default function (pi: ExtensionAPI) {
 					throw new Error(`record_experiment idempotency conflict for ${existing.id}; use a distinct idempotencyKey for a new scientific record`);
 				}
 				await recordRuntimeEvidence(runtime, {
-					...existing,
+					...existing, contentFingerprint: existingFingerprint,
 					source: { workspaceRoot: ctx.cwd, ledgerPath, sessionId: existing.sessionId ?? sessionId },
-				});
+				}, { sessionId });
 				return {
 					content: [{ type: "text", text: `Experiment ${existing.id} was already recorded; no duplicate ledger or Session entry was created.` }],
 					details: { ...existing, runtimeMirrored: true, duplicateSkipped: true },
@@ -262,6 +263,16 @@ export default function (pi: ExtensionAPI) {
 				recordedAtGit,
 			};
 
+			if (runtime.branchId) {
+				const event = await recordRuntimeEvidence(runtime, {
+					...record, source: { workspaceRoot: runtime.workspaceRoot, ledgerPath, sessionId },
+				});
+				if (!event.duplicate) pi.appendEntry<ExperimentRecord>("research-experiment", record);
+				return {
+					content: [{ type: "text", text: `Recorded ${id} in research branch ${runtime.branchName}.` }],
+					details: { ...record, branchId: runtime.branchId, duplicateSkipped: event.duplicate === true },
+				};
+			}
 			await mkdir(ledgerDir, { recursive: true });
 			await appendFile(ledgerPath, `${JSON.stringify(record)}\n`, "utf8");
 			pi.appendEntry<ExperimentRecord>("research-experiment", record);

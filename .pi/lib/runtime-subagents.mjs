@@ -13,6 +13,7 @@ const missionKey = (value) => String(value ?? "").normalize("NFKC").trim().repla
 
 export function subagentBelongsToWorkspace(job, runtime) {
 	if (job.projectKey && job.projectKey !== runtime.projectKey) return false;
+	if ((job.branchId ?? null) !== (runtime.branchId ?? null)) return false;
 	if (job.workspaceKey) return job.workspaceKey === runtime.workspaceKey;
 	return Boolean(job.cwd && resolve(job.cwd) === resolve(runtime.cwd ?? runtime.workspaceRoot));
 }
@@ -54,8 +55,8 @@ export async function queueSubagentMessage(runtime, input) {
 // Slash commands, model tools, and independent terminals use the same receipt
 // and adapter path. A per-message lock prevents two observers delivering twice.
 export async function deliverSubagentMessage(runtime, message, ctx) {
-	await mkdir(runtime.projectDir, { recursive: true, mode: 0o700 });
-	return await withOwnerFileLock(join(runtime.projectDir, `${message.id}.delivery.lock`), async () => {
+	await mkdir(runtime.scopeDir ?? runtime.projectDir, { recursive: true, mode: 0o700 });
+	return await withOwnerFileLock(join(runtime.scopeDir ?? runtime.projectDir, `${message.id}.delivery.lock`), async () => {
 		await assertRuntimeActorAttachment(runtime, RESEARCH_LEADER_ACTOR_ID, { sessionId: ctx.sessionManager.getSessionId() });
 		const snapshot = await readRuntimeSnapshot(runtime);
 		const current = snapshot.messages.find((item) => item.id === message.id);
@@ -74,7 +75,7 @@ export async function deliverSubagentMessage(runtime, message, ctx) {
 		// Different messages for one Actor must not both resume the same terminal
 		// turn. Keep per-message receipts, and serialize backend turn decisions.
 		const actorLock = `${Buffer.from(actor.id).toString("hex")}.actor-delivery.lock`;
-		const receipt = await withOwnerFileLock(join(runtime.projectDir, actorLock), async () => {
+		const receipt = await withOwnerFileLock(join(runtime.scopeDir ?? runtime.projectDir, actorLock), async () => {
 			await assertRuntimeActorAttachment(runtime, RESEARCH_LEADER_ACTOR_ID, { sessionId: ctx.sessionManager.getSessionId() });
 			if (runtimeActorRetired((await readRuntimeSnapshot(runtime)).actors.find((item) => item.id === actor.id))) return { status: "superseded", detail: "Actor retired" };
 			return await adapter.dispatch({ runtime, actor, message: current, ctx,
@@ -108,8 +109,8 @@ export async function dispatchRuntimeSubagent(input) {
 	const { runtime, backend, ctx } = input;
 	const adapter = getSubagentRuntimeAdapter(backend);
 	if (!adapter?.start) throw new Error(`${backend} subagent adapter is not loaded`);
-	await mkdir(runtime.projectDir, { recursive: true, mode: 0o700 });
-	return await withOwnerFileLock(join(runtime.projectDir, "subagent-dispatch.lock"), async () => {
+	await mkdir(runtime.scopeDir ?? runtime.projectDir, { recursive: true, mode: 0o700 });
+	return await withOwnerFileLock(join(runtime.scopeDir ?? runtime.projectDir, "subagent-dispatch.lock"), async () => {
 		if (input.leaderSessionId) await assertRuntimeActorAttachment(runtime, RESEARCH_LEADER_ACTOR_ID, { sessionId: input.leaderSessionId });
 		const snapshot = await readRuntimeSnapshot(runtime);
 		const retired = new Set(snapshot.actors.filter(runtimeActorRetired).map((actor) => actor.id));
@@ -150,14 +151,14 @@ export async function dispatchRuntimeSubagent(input) {
 
 // Retirement ends participation, not the recorded outcome of the last turn.
 export async function retireRuntimeSubagent({ runtime, jobId, leaderSessionId, ctx }) {
-	return await withOwnerFileLock(join(runtime.projectDir, "subagent-dispatch.lock"), async () => {
+	return await withOwnerFileLock(join(runtime.scopeDir ?? runtime.projectDir, "subagent-dispatch.lock"), async () => {
 		await assertRuntimeActorAttachment(runtime, RESEARCH_LEADER_ACTOR_ID, { sessionId: leaderSessionId });
 		const snapshot = await readRuntimeSnapshot(runtime);
 		const actor = snapshot.actors.find((item) => item.metadata?.latestJobId === jobId);
 		if (!actor || !runtimeActorBackend(actor)) throw new Error("Unknown subagent job");
 		if (actor.metadata?.workspaceKey && actor.metadata.workspaceKey !== runtime.workspaceKey) throw new Error("Actor belongs to another workspace");
 		const lock = `${Buffer.from(actor.id).toString("hex")}.actor-delivery.lock`;
-		return await withOwnerFileLock(join(runtime.projectDir, lock), async () => {
+		return await withOwnerFileLock(join(runtime.scopeDir ?? runtime.projectDir, lock), async () => {
 			await assertRuntimeActorAttachment(runtime, RESEARCH_LEADER_ACTOR_ID, { sessionId: leaderSessionId });
 			const state = await readRuntimeSnapshot(runtime);
 			const current = state.actors.find((item) => item.id === actor.id);

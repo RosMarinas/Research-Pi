@@ -46,7 +46,7 @@ export async function createSubagentWatchClient({ cwd, stateRoot }) {
 			const key = `${info?.size}:${info?.mtimeMs}`;
 			if (!jobs.has(jobId) || jobs.get(jobId).key !== key) {
 				const current = publicJobView(await readCodexJob(jobId, { jobRoot: join(stateRoot, "codex", "jobs"), expectedCwd: runtime.cwd,
-					expectedProjectKey: runtime.projectKey, allowLegacyLeaderJob: true, reconcile: false }));
+					expectedProjectKey: runtime.projectKey, expectedResearchBranchId: runtime.branchId, allowLegacyLeaderJob: true, reconcile: false }));
 				jobs.set(jobId, { key, job: current });
 			}
 			job = jobs.get(jobId).job;

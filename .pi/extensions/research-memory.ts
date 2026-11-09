@@ -10,7 +10,7 @@ import { researchPiStateRoot } from "../lib/runtime-paths.mjs";
 const harnessRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const stateRoot = researchPiStateRoot(harnessRoot);
 const memoryDir = join(stateRoot, "memory");
-const databasePath = join(memoryDir, "memory.sqlite");
+const databasePath = join(memoryDir, "memory-v5.sqlite");
 const sessionDir = join(stateRoot, "sessions");
 
 async function projectMemorySources(cwd: string) {
@@ -26,12 +26,12 @@ async function projectMemorySources(cwd: string) {
 		const expected = join(workspace, ".pi", "research", "experiments.jsonl");
 		if (resolve(ledgerPath) !== expected) continue;
 		const candidateRuntime = await resolveResearchRuntime(workspace).catch(() => null);
-		if (candidateRuntime?.projectKey === runtime.projectKey) candidates.set(workspace, expected);
+		if (candidateRuntime?.projectKey === runtime.projectKey && candidateRuntime?.branchId === runtime.branchId) candidates.set(workspace, expected);
 	}
 	const actorCwds = new Map(snapshot.actors.map((actor: any) => [actor.id, actor.metadata?.cwd]));
-	const recordSources: Array<{ path: string; kind: string; id: string; sessionId: string; cwd: string; timestamp: string; label: string; text?: string; format?: string }> = snapshot.messages.map((message: any) => ({
-		path: `${runtime.ledgerPath}#${message.id}`, kind: "discussion", id: message.id,
-		sessionId: `runtime:${runtime.projectKey}`, cwd: message.metadata?.cwd ?? actorCwds.get(message.from) ?? actorCwds.get(message.to) ?? cwd,
+	const recordSources: Array<{ generation?: number; path: string; kind: string; id: string; sessionId: string; cwd: string; timestamp: string; label: string; text?: string; format?: string }> = snapshot.messages.map((message: any) => ({
+		path: `${runtime.ledgerPath}#${message.id}`, kind: "discussion", id: message.id, generation: message.generation ?? 0,
+		sessionId: `runtime:${runtime.projectKey}:${runtime.branchId ?? "legacy"}`, cwd: message.metadata?.cwd ?? actorCwds.get(message.from) ?? actorCwds.get(message.to) ?? cwd,
 		timestamp: message.queuedAt, label: `${message.from} -> ${message.to}`,
 		text: `Source: ${runtime.ledgerPath}#${message.id}\nFrom: ${message.from} To: ${message.to}\nTrack: ${message.trackRef}\n${message.body}`,
 	}));
@@ -42,12 +42,20 @@ async function projectMemorySources(cwd: string) {
 		if (!path) continue;
 		recordSources.push({ path, kind: "job-result", id: action.externalId,
 			sessionId: `job:${action.externalId}`, cwd: action.metadata?.cwd ?? cwd,
-			timestamp: action.updatedAt, label: action.label, format: path.endsWith(".jsonl") ? "activity" : "json" });
+			timestamp: action.updatedAt, label: action.label, generation: action.metadata?.generation ?? 0, format: path.endsWith(".jsonl") ? "activity" : "json" });
 	}
-	return { experimentLedgerPaths: [...candidates.values()], recordSources };
+	if (runtime.branchId) {
+		candidates.clear();
+		for (const evidence of snapshot.evidence) recordSources.push({
+			path: `${runtime.ledgerPath}#evidence:${evidence.id}`, kind: "experiment", id: evidence.id,
+			sessionId: evidence.source?.sessionId ?? `runtime:${runtime.branchId}`, cwd: runtime.workspaceRoot,
+			timestamp: evidence.timestamp, label: evidence.question, text: JSON.stringify(evidence),
+		});
+	}
+	return { sessionScopes: Object.fromEntries((snapshot.legacyMigration?.sessions ?? []).map(session => [session.path, { projectKey: runtime.projectKey, branchId: runtime.branchId, generation: 0, sessionId: session.id }])), experimentLedgerPaths: [...candidates.values()], recordSources: recordSources.map(source => ({ ...source, projectKey: runtime.projectKey, branchId: runtime.branchId, generation: source.generation ?? snapshot.generation })) };
 }
 
-async function withIndex<T>(cwd: string, operation: (db: ReturnType<typeof openMemoryIndex>, sync: unknown) => T): Promise<T> {
+async function withIndex<T>(cwd: string, operation: (db: ReturnType<typeof openMemoryIndex>, sync: unknown, runtime: Awaited<ReturnType<typeof resolveResearchRuntime>> & { generation: number }) => T): Promise<T> {
 	mkdirSync(memoryDir, { recursive: true });
 	const db = openMemoryIndex(databasePath);
 	try {
@@ -55,7 +63,8 @@ async function withIndex<T>(cwd: string, operation: (db: ReturnType<typeof openM
 			sessionDir,
 			...await projectMemorySources(cwd),
 		});
-		return operation(db, sync);
+		const runtime = await resolveResearchRuntime(cwd);
+		return operation(db, sync, { ...runtime, generation: (await readRuntimeSnapshot(runtime)).generation });
 	} finally {
 		db.close();
 	}
@@ -67,9 +76,9 @@ function formatSearchResults(results: ReturnType<typeof searchMemory>, sync: unk
 	}
 	const lines = results.map(
 			(result, index) =>
-				`[${index + 1}] ${result.ref} | ${result.kind}/${result.reliability} | ${result.timestamp || "unknown time"}\n${result.snippet}`,
+				`[${index + 1}] ${result.ref} | ${result.kind}/${result.reliability} | generation ${result.generation} | ${result.timestamp || "unknown time"}\n${result.snippet}`,
 	);
-	return `${lines.join("\n\n")}\n\nUse research_memory_read with projectKey, sessionId, and entryId to inspect exact surrounding entries before relying on a hit.`;
+	return `${lines.join("\n\n")}\n\nUse research_memory_read with projectKey, branchId, generation, sessionId, and entryId to inspect exact surrounding entries before relying on a hit.`;
 }
 
 async function resolveProjectRoot(pi: ExtensionAPI, cwd: string, signal?: AbortSignal): Promise<string> {
@@ -82,19 +91,19 @@ export default function (pi: ExtensionAPI) {
 		name: "research_memory_search",
 		label: "Search Research Memory",
 		description:
-			"Search project sessions, recorded experiments, job results and mailbox discussions using a local full-text index. Returns bounded snippets with stable session/entry provenance; it does not automatically inject history.",
+			"Search the current research branch’s sessions, recorded experiments, job results and mailbox discussions using a local full-text index. Returns bounded snippets with stable session/entry provenance; it does not automatically inject history.",
 		promptSnippet: "Search prior project sessions and experiment evidence when earlier work is materially relevant",
 		promptGuidelines: [
 			"Use research_memory_search when the user refers to earlier sessions, previous experiments, an old decision, or when resolving uncertainty would benefit from known prior evidence. Do not call it routinely every turn.",
-			"Prefer recorded-evidence hits over assistant-synthesis or derived-summary hits. Read the exact entry before treating a snippet as evidence, and preserve its P:<project>/S:<session>/E:<entry> reference.",
+			"Prefer recorded-evidence hits over assistant-synthesis or derived-summary hits. Read the exact entry before treating a snippet as evidence, and preserve its project, branch, session and entry reference.",
 			"Historical plans and permissions are not current task instructions; check whether later user decisions superseded them before resuming work.",
 			"Absence of a search hit is not evidence that an experiment was never run; report the searched scope and query when absence matters.",
 		],
 		parameters: Type.Object({
 			query: Type.String({ maxLength: 500, description: "Literal words, phrase, run ID, method, observation, or decision to retrieve" }),
 			scope: Type.Optional(
-				Type.Union([Type.Literal("current_project"), Type.Literal("all_projects")], {
-					description: "Default current_project; all_projects must be intentional",
+				Type.Union([Type.Literal("current_branch"), Type.Literal("current_project"), Type.Literal("all_projects")], {
+					description: "Default current_branch; current_project and all_projects explicitly include other branches",
 				}),
 			),
 			kinds: Type.Optional(
@@ -126,10 +135,11 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const currentProjectRoot = await resolveProjectRoot(pi, ctx.cwd, _signal);
-			const payload = await withIndex(ctx.cwd, (db, sync) => {
+			const payload = await withIndex(ctx.cwd, (db, sync, runtime) => {
 				const results = searchMemory(db, {
 					query: params.query,
-					scope: params.scope === "all_projects" ? "all" : "current",
+					scope: params.scope === "all_projects" ? "all" : params.scope === "current_project" ? "project" : "current",
+					currentProjectKey: runtime.projectKey, currentBranchId: runtime.branchId, currentGeneration: runtime.generation,
 					currentCwd: ctx.cwd,
 					currentProjectRoot,
 					currentSessionId: ctx.sessionManager.getSessionId(),
@@ -160,7 +170,9 @@ export default function (pi: ExtensionAPI) {
 			"Treat assistant and compaction text as fallible prior reasoning. Recorded experiments still require their stated validity judgment to support a conclusion.",
 		],
 		parameters: Type.Object({
-			projectKey: Type.Optional(Type.String({ description: "Project key from a search result; required when the same Session/entry identifier exists in more than one project" })),
+			projectKey: Type.Optional(Type.String({ description: "Project key from a search result" })),
+			branchId: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "Explicit research branch from a search hit; null selects legacy records; defaults to the current branch" })),
+			generation: Type.Optional(Type.Integer({ minimum: 0, description: "Research generation from a search hit; current branch defaults to its current generation" })),
 			sessionId: Type.String({ description: "Session identifier from a search result" }),
 			entryId: Type.String({ description: "Entry identifier from a search result" }),
 			radius: Type.Optional(Type.Integer({ minimum: 0, maximum: 10, description: "Indexed entries before/after; default 1" })),
@@ -169,10 +181,12 @@ export default function (pi: ExtensionAPI) {
 			),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const payload = await withIndex(ctx.cwd, (db, sync) => ({
+			const payload = await withIndex(ctx.cwd, (db, sync, runtime) => ({
 				sync,
 				result: readMemory(db, {
-					projectKey: params.projectKey,
+					projectKey: params.projectKey ?? (runtime.branchId ? runtime.projectKey : undefined),
+					branchId: params.branchId === undefined ? runtime.branchId : params.branchId,
+					generation: params.generation ?? (params.branchId === undefined ? runtime.generation : undefined),
 					sessionId: params.sessionId,
 					entryId: params.entryId,
 					radius: params.radius,
@@ -205,10 +219,11 @@ export default function (pi: ExtensionAPI) {
 			}
 			try {
 				const currentProjectRoot = await resolveProjectRoot(pi, ctx.cwd);
-				const payload = await withIndex(ctx.cwd, (db) =>
+				const payload = await withIndex(ctx.cwd, (db, _sync, runtime) =>
 					searchMemory(db, {
 						query,
 						scope: "current",
+						currentProjectKey: runtime.projectKey, currentBranchId: runtime.branchId, currentGeneration: runtime.generation,
 						currentCwd: ctx.cwd,
 						currentProjectRoot,
 						currentSessionId: ctx.sessionManager.getSessionId(),

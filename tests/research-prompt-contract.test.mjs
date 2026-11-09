@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
@@ -13,6 +13,7 @@ import { RESEARCH_COMPACTION_SYSTEM_PROMPT, RESEARCH_STATE_TOOL, buildResearchCo
 import { buildPromotedHarnessContext } from '../.pi/extensions/deepseek-v4-pro-anchor.ts';
 import { buildSystemPrompt } from '../node_modules/@earendil-works/pi-coding-agent/dist/core/system-prompt.js';
 import { applyResearchIdentity } from '../.pi/extensions/research-mode.ts';
+import { createResearchSessionRuntime } from '../.pi/lib/native-runtime-factory.mjs';
 
 const once = text => assert.equal(text.split(RESEARCH_PRINCIPLES).length - 1, 1, 'one shared contract per payload');
 const schema = name => JSON.parse(readFileSync(new URL(`../.pi/schemas/${name}.json`, import.meta.url), 'utf8'));
@@ -34,7 +35,10 @@ for (const mode of ['advisor', 'executor']) for (const continuation of [false, t
   assert.match(text, /latest explicit user decision supersedes/);
   assert.match(text, /one seed and ten updates/); assert.match(text, /Historical plan/);
   assert.doesNotMatch(text, /targeted code bypasses to overcome|Offload all validity caveats/);
-  if (mode === 'advisor') assert.match(text, /Do not modify files or external state/);
+  if (mode === 'advisor') {
+   assert.match(text, /Do not modify project source or external state/);
+   assert.match(text, /scratch for inspection is allowed under \$TMPDIR/);
+  }
   else { assert.match(text, /Write only: \["training"\]/); assert.match(text, /Do not default to extra budgets/); }
  });
 }
@@ -43,8 +47,51 @@ test('Pi custom role guidance supplements rather than removes shared principles 
  const args = buildPiRunnerArgs({ role: 'advisor', id: 'test', sessionId: 'test', sessionDir: '/tmp', systemPrompt: 'Compare capacity hypotheses.' });
  const prompt = args[args.indexOf('--append-system-prompt') + 1];
  once(prompt); assert.match(prompt, /Compare capacity hypotheses/);
- assert.match(prompt, /Do not modify files or external state/);
+ assert.match(prompt, /Do not modify project source or external state/);
+ assert.match(prompt, /scratch for inspection is allowed under \$TMPDIR/);
  assert.equal(args.includes('--no-context-files'), false);
+});
+
+test('Pi child can select a model supplied by an installed provider without a model request', async () => {
+ const root = mkdtempSync(join(tmpdir(), 'pi-provider-startup-'));
+ const agentDir = join(root, 'agent');
+ const packageDir = join(root, 'provider');
+ mkdirSync(agentDir); mkdirSync(packageDir);
+ writeFileSync(join(packageDir, 'package.json'), JSON.stringify({ name: 'pi-fixture-provider', pi: { extensions: ['./index.ts'] } }));
+ writeFileSync(join(packageDir, 'index.ts'), `export default function(pi) {
+  pi.registerProvider('fixture-acp', { baseUrl: 'https://fixture.invalid', apiKey: 'fixture', api: 'openai-completions',
+   models: [{ id: 'fixture-model', name: 'Fixture', reasoning: true, input: ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 8192, maxTokens: 1024 }] });
+ }`);
+ writeFileSync(join(agentDir, 'settings.json'), JSON.stringify({ packages: [packageDir] }));
+ const args = buildPiRunnerArgs({ role: 'advisor', id: 'provider-test', sessionId: 'provider-test',
+  sessionDir: join(root, 'sessions'), model: 'fixture-acp/fixture-model', thinking: 'medium' });
+ let runtime;
+ try {
+  await assert.rejects(createResearchSessionRuntime({ args: [...args, '--no-extensions'], cwd: root, agentDir }), /Model .* not found/);
+  runtime = await createResearchSessionRuntime({ args, cwd: root, agentDir });
+  assert.equal(runtime.session.model.provider, 'fixture-acp');
+  assert.equal(runtime.session.model.id, 'fixture-model');
+  assert.equal(runtime.session.thinkingLevel, 'medium');
+ } finally { await runtime?.dispose(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Pi startup failure reports the cause and redacts credentials from stderr', async () => {
+ const root = mkdtempSync(join(tmpdir(), 'pi-startup-error-'));
+ const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.stdin = new PassThrough();
+ child.kill = () => true;
+ const manager = createSubagentSessionManager({ stateRoot: root, spawn: () => child });
+ try {
+  const job = await manager.start({ actorId: 'pi:startup-error', backend: 'pi', role: 'advisor', cwd: root, task: 'Inspect only.' });
+  child.stderr.write('Error: Model "fixture-acp/missing" not found.\nGEMINI_API_KEY=private-fixture-value\nBearer private-fixture-bearer-token\n');
+  child.emit('close', 1, null);
+  const result = await manager.wait(job.id);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.reusable, false);
+  assert.match(result.error, /Pi runner exited \(1\).*Model "fixture-acp\/missing" not found/);
+  assert.doesNotMatch(result.error, /private-fixture-value|private-fixture-bearer-token/);
+  assert.match(result.error, /REDACTED/);
+ } finally { await manager.dispose(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test('Antigravity actually receives shared principles and environment scope on its input stream', async () => {

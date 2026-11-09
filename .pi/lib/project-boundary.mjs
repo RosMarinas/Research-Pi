@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { constants, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { access, appendFile, mkdir, readFile, realpath, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
+import { createRequire } from "node:module";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { normalizeSystemRuntimePolicy } from "./security-policy.mjs";
@@ -18,6 +19,41 @@ export const SYSTEM_TMPDIR = process.env.RESEARCH_PI_SYSTEM_TMPDIR ?? tmpdir();
 
 export function projectTemporaryEnvironment(runtimeTmp) {
 	return { TMPDIR: runtimeTmp, TMP: runtimeTmp, TEMP: runtimeTmp, RESEARCH_PI_SYSTEM_TMPDIR: SYSTEM_TMPDIR };
+}
+
+export function projectSandboxSpawn(wrapped, runtime, options = {}) {
+	if ((options.platform ?? process.platform) !== "linux") return wrapped;
+	const argv = wrapped.argv.length === 3 && wrapped.argv[1] === "-c" ? parseAnalysisShellWords(wrapped.argv[2]) : null;
+	// sandbox-runtime 0.0.71 returns a quoted bwrap invocation on Linux. Spawn
+	// its argv directly, preserving the user script as one opaque argument.
+	if (!argv || basename(argv[0]) !== "bwrap" || argv.at(-4) !== "--" || argv.at(-2) !== "-c") {
+		throw new Error("Unexpected Linux sandbox wrapper; refusing to run outside the project boundary");
+	}
+	if (runtime.runtimeTmp && (!isWithinRoot(runtime.root, runtime.runtimeTmp) || resolve(runtime.runtimeTmp) === resolve(runtime.root))) {
+		throw new Error("Runtime temp must be a directory inside the project");
+	}
+	const separator = argv.length - 4;
+	const mounts = argv.slice(0, separator);
+	const result = [];
+	for (let index = 0; index < mounts.length; index += 1) {
+		result.push(mounts[index]);
+		if (mounts[index] === "--ro-bind" && mounts[index + 1] === runtime.root && mounts[index + 2] === runtime.root) {
+			result.push(mounts[++index], mounts[++index]);
+			// Restoring a read-only project under a hidden home otherwise covers
+			// its writable scratch bind. Rebind here, before credential masks.
+			if (runtime.runtimeTmp) result.push("--bind", runtime.runtimeTmp, runtime.runtimeTmp);
+		}
+	}
+	for (const socket of new Set(options.networkSockets ?? [])) {
+		if (!socket) continue;
+		if (!mounts.some((arg, index) => arg === "--bind" && mounts[index + 1] === socket && mounts[index + 2] === socket)) {
+			throw new Error("Sandbox proxy socket was not present in the generated mounts");
+		}
+		// The runtime binds proxy sockets before masking system temp. Restore
+		// only these exact sockets after the masks, leaving system temp hidden.
+		result.push("--bind", socket, socket);
+	}
+	return { ...wrapped, argv: [...result, ...argv.slice(separator)] };
 }
 
 export const LINUX_SANDBOX_INSTALL_HINT = "Linux/WSL2 sandbox dependencies: ripgrep, bubblewrap, socat. Ubuntu/Debian: sudo apt-get install ripgrep bubblewrap socat; Fedora: sudo dnf install ripgrep bubblewrap socat; Arch: sudo pacman -S ripgrep bubblewrap socat. Restart Research Pi from a shell whose PATH includes these tools.";
@@ -339,6 +375,31 @@ export async function resolveExecutablePath(command, options = {}) {
 	throw new Error(`Codex executable is unavailable or not executable: ${requested}`);
 }
 
+export function codexRuntimePolicy(runtimePolicy, codexBin) {
+	const policy = normalizeSystemRuntimePolicy(runtimePolicy);
+	const readRoots = new Set([...policy.readRoots, resolve(codexBin)]);
+	// npm's launcher re-execs a native binary, which may be in a hoisted
+	// platform package. Grant those code directories without opening $HOME.
+	let cursor = dirname(resolve(codexBin));
+	for (let depth = 0; depth < 8 && cursor !== dirname(cursor) && cursor !== homedir(); depth += 1, cursor = dirname(cursor)) {
+		const manifestPath = join(cursor, "package.json");
+		try {
+			const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+			if (manifest.name !== "@openai/codex" && !/^@openai\/codex-(linux|darwin|win32)-(x64|arm64)$/.test(manifest.name ?? "")) continue;
+			readRoots.add(cursor);
+			const require = createRequire(manifestPath);
+			for (const name of Object.keys(manifest.optionalDependencies ?? {})) {
+				if (!/^@openai\/codex-(linux|darwin|win32)-(x64|arm64)$/.test(name)) continue;
+				try { readRoots.add(dirname(require.resolve(`${name}/package.json`))); } catch { /* Other platforms need not be installed. */ }
+			}
+			break;
+		} catch {
+			// Standalone binaries need only the exact executable grant above.
+		}
+	}
+	return { ...policy, readRoots: [...readRoots] };
+}
+
 export async function readGitIdentity(cwd) {
 	const readValue = async (key) => {
 		try {
@@ -358,6 +419,10 @@ export async function readGitIdentity(cwd) {
 }
 
 function workspaceRules(access) {
+	// Scan credential-tree contents rather than inventing bind targets for
+	// absent children of Codex's own protected directories. Explicit missing
+	// .aws/credentials (or .aws itself) conflicts with its synthetic mounts.
+	const credentialPaths = [...new Set(CREDENTIAL_RELATIVE_PATHS.map((path) => path.startsWith(".pi/") ? path : `${path.split("/")[0]}/**`))];
 	return [
 		`"." = "${access}"`,
 		'".env" = "deny"',
@@ -365,7 +430,7 @@ function workspaceRules(access) {
 		'"**/.env" = "deny"',
 		'"**/.env.*" = "deny"',
 		...CREDENTIAL_BASENAMES.flatMap((name) => [`${JSON.stringify(name)} = "deny"`, `${JSON.stringify(`**/${name}`)} = "deny"`]),
-		...CREDENTIAL_RELATIVE_PATHS.map((path) => `${JSON.stringify(path)} = "deny"`),
+		...credentialPaths.map((path) => `${JSON.stringify(path)} = "deny"`),
 		'".git/hooks" = "read"',
 	].join(", ");
 }
@@ -402,15 +467,10 @@ function gitMetadataRoots(workspaceRoot) {
 function gitRules(workspaceRoot, access) {
 	const roots = gitMetadataRoots(workspaceRoot);
 	if (!roots.length) return "";
-	const writableGitPaths = roots.flatMap((gitPath) => [
-		gitPath,
-		...[
-			"COMMIT_EDITMSG", "FETCH_HEAD", "HEAD", "HEAD.lock", "MERGE_HEAD", "ORIG_HEAD", "config", "config.lock",
-			"index", "index.lock", "logs", "modules", "objects", "packed-refs", "packed-refs.lock", "refs", "research-pi", "rr-cache", "worktrees",
-		].map((name) => join(gitPath, name)),
-	]);
+	// File-level write roots make Codex scan for credential directories beneath
+	// regular files (e.g. packed-refs/.aws), which aborts its Linux mount setup.
 	return [
-		...writableGitPaths.map((path) => `${JSON.stringify(path)} = "${access}"`),
+		...roots.map((path) => `${JSON.stringify(path)} = "${access}"`),
 		...roots.map((gitPath) => `${JSON.stringify(join(gitPath, "hooks"))} = "read"`),
 	].join(", ");
 }
@@ -517,15 +577,7 @@ export async function runCodexSandboxPreflight(options) {
 	const profile = codexPermissionProfile(mode, { fullAccess });
 	const cwd = resolve(options.cwd);
 	const runtimePolicy = normalizeSystemRuntimePolicy(options.runtimePolicy);
-	const permissionArgs = codexPermissionConfigArguments(
-		mode,
-		cwd,
-		options.runtimeTmp,
-		options.gitIdentity,
-		runtimePolicy,
-		{ fullAccess },
-	);
-	const commands = ["git --version >/dev/null"];
+	const commands = ["set -eu", "git --version >/dev/null"];
 	if (existsSync(join(cwd, ".git"))) {
 		commands.push("git status --porcelain=v1 --untracked-files=no >/dev/null");
 	}
@@ -561,6 +613,10 @@ export async function runCodexSandboxPreflight(options) {
 			cwd,
 			environment,
 		});
+		const executableRuntime = codexRuntimePolicy(runtimePolicy, codexBin);
+		const permissionArgs = codexPermissionConfigArguments(
+			mode, cwd, options.runtimeTmp, options.gitIdentity, executableRuntime, { fullAccess },
+		);
 		const selfProbe = await execFileAsync(
 			codexBin,
 			[
@@ -608,7 +664,7 @@ export async function runCodexSandboxPreflight(options) {
 			codexVersion: selfProbe.stdout.trim(),
 			stdout: stdout.trim(),
 			stderr: [selfProbe.stderr, stderr].filter(Boolean).join("\n").trim(),
-			runtimePolicy,
+			runtimePolicy: executableRuntime,
 		};
 	} catch (error) {
 		const detail = [error?.message, error?.stdout, error?.stderr].filter(Boolean).join("\n").slice(-12_000);
@@ -686,7 +742,7 @@ export function buildSandboxRuntimeConfig(root, environment = process.env, runti
 			network: {
 			allowedDomains: [],
 			deniedDomains: [],
-			strictAllowlist: access === "read",
+			strictAllowlist: false,
 			allowLocalBinding: true,
 		},
 		filesystem: {

@@ -245,9 +245,9 @@ This is a proposal, not automatically research evidence. An independent Codex di
 
 ## Permissions and local data
 
-The Leader, Pi runners, and Codex workers use their respective project boundaries and role permissions. Host commands, SSH, and external reads require explicit authorization. Antigravity uses its own CLI sandbox: non-advisor tasks auto-approve tools inside that sandbox, while advisors use plan mode. Its authorization protocol is not equivalent to Pi's.
+`pi` and `pi restart` enable full access by default. The Leader and newly started execution subagents inherit the host user's filesystem, command, and network authority; Analysis and advisors remain read-only. Pi runners inherit the same access flag, Codex executors use the full filesystem/network profile, and Antigravity execution omits `--sandbox` while advisors retain sandbox and plan mode.
 
-`pi --full-access` explicitly expands Leader/Codex executor authority for that launch only; Analysis and advisors remain read-only. Credentials must stay out of model context, logs, and commits. Load only trusted extensions: they execute in the host process.
+Use `pi --no-full-access`, `pi restart --no-full-access`, or the shell environment variable `RESEARCH_PI_FULL_ACCESS=0` to enable the project sandbox. Host commands, SSH, and external reads then use explicit authorization. `--full-access` overrides the environment; the last access flag wins. Existing resident Hosts keep their launch permissions, so run `pi restart` once after updating and inspect `/boundary` for effective access. Credentials must stay out of model context, logs, and commits. Load only trusted extensions: they execute in the host process.
 
 Default installed-package locations are below. Source checkouts have separate configuration and state; `pi paths` is authoritative.
 

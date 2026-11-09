@@ -4,7 +4,7 @@ import {
 	DEFAULT_CODEX_JOB_ROOT, isTerminalStatus, listCodexJobs, readCodexJob, readJson,
 	queueCodexCommand, writeJsonAtomic,
 } from "./codex-jobs.mjs";
-import { createRuntimeMessage, registerCodexRuntimeJob, resolveResearchRuntime } from "./research-runtime.mjs";
+import { createRuntimeMessage, registerCodexRuntimeJob, resolveResearchRuntime, runtimeScopeOptions } from "./research-runtime.mjs";
 import { redactSensitiveText } from "./sensitive-text.mjs";
 
 export const CODEX_COLLABORATION_TOOL = {
@@ -24,6 +24,7 @@ export const CODEX_COLLABORATION_TOOL = {
 function sameTeam(source, target) {
 	return source.id !== target.id && ["executor", "advisor"].includes(target.mode)
 		&& source.workspaceKey === target.workspaceKey && source.projectKey === target.projectKey
+		&& (source.branchId ?? null) === (target.branchId ?? null)
 		&& source.researchTrackRef === target.researchTrackRef
 		&& (source.leaderActorId
 			? source.leaderActorId === target.leaderActorId
@@ -102,7 +103,7 @@ export async function collaborateWithCodexPeers(sourceJobId, args, options = {})
 	}
 	if (args.action === "inbox") return await readCodexPeerMessages(sourceJobId, { jobRoot });
 	if (args.action === "peers") {
-		const jobs = await listCodexJobs({ jobRoot, cwd: source.cwd });
+		const jobs = await listCodexJobs({ jobRoot, cwd: source.cwd, projectKey: source.projectKey, branchId: source.branchId ?? null, researchTrackRef: source.researchTrackRef });
 		return jobs.filter((job) => sameTeam(source, job) && !isTerminalStatus(job.status) && job.status !== "cancelling")
 			.map((job) => ({ jobId: job.id, mission: job.mission, role: job.mode, status: job.status, writeScope: job.writeScope }));
 	}
@@ -110,11 +111,11 @@ export async function collaborateWithCodexPeers(sourceJobId, args, options = {})
 	const message = String(args.message ?? "").trim();
 	if (!message || message.length > 1200) throw new Error("Peer messages must contain 1–1200 characters");
 	if (redactSensitiveText(message) !== message) throw new Error("Peer messages must not contain credentials or secret-like values");
-	const target = await readCodexJob(args.targetJobId, { jobRoot, expectedCwd: source.cwd });
+	const target = await readCodexJob(args.targetJobId, { jobRoot, expectedCwd: source.cwd, expectedProjectKey: source.projectKey, expectedResearchBranchId: source.branchId ?? null });
 	if (!sameTeam(source, target)) throw new Error("Peer messages require another advisor or executor in the same workspace, Leader ownership, and research track");
 	if (target.status === "cancelling" || isTerminalStatus(target.status)) throw new Error("Peer is no longer active; consult Pi instead of restarting it");
 	if (target.dynamicToolProtocolVersion < 2 || !target.dynamicToolProtocolVersion) throw new Error("Peer uses an older protocol; Pi must refresh it before collaboration");
-	const runtime = await resolveResearchRuntime(source.cwd, { runtimeRoot: source.runtimeRoot
+	const runtime = await resolveResearchRuntime(source.cwd, { ...runtimeScopeOptions(source), runtimeRoot: source.runtimeRoot
 		?? (jobRoot === DEFAULT_CODEX_JOB_ROOT ? undefined : join(jobRoot, "runtime")) });
 	const from = await registerCodexRuntimeJob(runtime, source);
 	const to = await registerCodexRuntimeJob(runtime, target);

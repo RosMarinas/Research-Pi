@@ -157,13 +157,13 @@ Pi 会自行选择工具。若想明确控制，可以直接说：
 !git status --short
 ```
 
-`!!command` 会运行命令但不把输出加入模型上下文。`!` / `!!` 是人工直执行通道，会以你的系统权限运行并在首次使用时警告；模型的 `bash` 则受当前项目边界约束。输入 `/boundary` 可查看生效根目录和权限。
+`!!command` 会运行命令但不把输出加入模型上下文。`!` / `!!` 是人工直执行通道，会以你的系统权限运行并在首次使用时警告。`pi` 与 `pi restart` 默认开启 full access，Leader 模型的 `bash` 也使用宿主用户权限；使用 `--no-full-access` 可切回项目沙箱。输入 `/boundary` 可查看生效根目录和权限。
 
-安装、升级或权限异常后先运行 `pi doctor`；交互会话内可运行 `/boundary doctor`。它们不调用模型，会解析 Codex 的真实可执行路径，并验证 Codex self-reexec、项目、Git、Python 与 sandbox 权限。每个 Codex job 也会在模型启动前自动执行同一 preflight。
+安装、升级或权限异常后先运行 `pi doctor`；交互会话内可运行 `/boundary doctor`。它们不调用模型，会分别验证 Pi Analysis／读写沙箱、临时目录和 Codex advisor／executor 的真实权限，包括 Codex self-reexec、Git 与 Python。交互诊断在独立进程中运行，不重置当前会话的沙箱；沙箱初始化失败时也可调用。每个 Codex job 会在模型启动前自动执行 Codex preflight。Ubuntu 的 bwrap／AppArmor 兼容性说明见 [安全模型](security-model.md)。
 
-Leader 模型 shell 可读写当前项目（包括正常 Git commit 所需的 `.git` 数据）并访问公网；Analysis 模型 shell 读取同一项目，但写入只限项目内 Runtime 临时目录，且 shell 网络关闭，公开资料使用 `web_search`，SSH 检查使用 `host_capability`。项目内的 `uv`、Python、shell、Node、Git 和测试命令不会仅因 `sh -c` 或 `python3 -c` 之类的语法形式被拒绝；Analysis 仍不得借只读 shell 启动实验或产生外部副作用。其他项目、宿主凭据和 Unix socket 保持在 sandbox 外；需要 SSH 或宿主权限时，Pi 会通过 `host_capability` 请求一次/session 授权，或复用当前项目已信任的 SSH target/command prefix，而不是默认让你复制命令到终端。
+Full access 下，Leader 与新建的执行型 subagent 可直接使用宿主文件、网络和系统 SSH。Analysis 模型 shell 仍只读取同一项目，写入只限项目内 Runtime 临时目录；它与沙箱内 Leader 一样可以访问公网 Web，不设域名白名单，也可使用 `web_search`，需要宿主凭据的 SSH 检查使用 `host_capability`。项目内的 `uv`、Python、shell、Node、Git 和测试命令不会仅因 `sh -c` 或 `python3 -c` 之类的语法形式被拒绝；Analysis 仍不得借只读 shell 启动实验或产生外部副作用。使用 `--no-full-access` 时，Leader 和执行型 subagent 恢复项目沙箱，其他项目、宿主凭据和 Unix socket 保持在 sandbox 外；需要 SSH 或宿主权限时，Pi 会通过 `host_capability` 请求一次/session 授权，或复用当前项目已信任的 SSH target/command prefix。
 
-常用预授权示例：
+项目沙箱模式的常用预授权示例：
 
 ```text
 /boundary trust-ssh 931server
@@ -201,7 +201,7 @@ Git 项目首次启动时，Research Pi 会通过本地 `.git/info/exclude` 隐�
 - `/runtime context <on|off>`：只在 Analysis Session 中切换 ProjectView 自动注入；Analysis 角色和权限不变。重新开启时恢复 ProjectView 上下文，不改写旧 transcript。
 - `/analysis send <message>`：将 Analysis Session 的讨论摘要作为 proposal 投递给当前 Leader，不更新 Project State。
 - `/runtime promote <reason>`：将当前 Analysis Session 显式晋升为 Leader Session；接管执行权并接收未消费 mailbox。
-- `/runtime takeover <reason>`：当另一 Leader Session 正在工作且确实需要人工接管时，显式转移 attachment；旧运行会在下一模型边界停止。
+- `/runtime takeover <reason>`：让已有 Leader／clean Session 显式接管或恢复当前项目的 Leader attachment，包括 `Leader elsewhere` 或 `Leader detached` 的情况；另一 Leader 的旧运行会在下一模型边界停止。它与仅供 Analysis 使用的 `promote` 不同。
 - `/runtime rotate [reason]`：在 Project State 可恢复且没有未知副作用时，人工创建一个不复制旧 transcript、但自动继承 ProjectView/mailbox 的新 Leader Session；Runtime 会记录交接和 receipt。不会自动触发。
 - `/runtime new clean [reason]`：创建不复制 transcript、也不自动继承 ProjectView/mailbox 的 clean Session；Project 数据不删除，clean compact 不回写 Project State，Codex mission 的 `reuse=auto` 会降为新 thread。
 - `/runtime inherit [reason]`：让当前 clean Session 从下一轮开始恢复 ProjectView、未消费 mailbox 与 project-aware 操作；旧 transcript 仍不会恢复。后续 compact 以 canonical Project State 为 previous state，已有 clean summary 只作为非权威候选综合。
@@ -436,10 +436,10 @@ Transition 会立即影响后续 Session 的 ProjectView，不必等待 `/compac
 
 - API key 放在 `pi paths` 的 `credentialsPath` 或 Pi 原生登录存储中；安装版默认使用 `~/.config/research-pi/credentials.env`，源码版使用 Research Pi 仓库根目录的 `.env`。不要粘贴进 prompt、日志或实验文档；
 - DeepSeek Web Search 会额外产生模型和搜索相关 token 开销；简单检索也应保持有界；
-- Pi 的模型 shell 受 OS 级 sandbox runtime 约束，Codex executor 使用 project-only permission profile：项目可写、Git commit 可用、公网开放，项目外用户文件和 Unix sockets 默认不可用；Pi shell 的通用系统 temp 写入被关闭，仅保留 Apple Git 所需的窄 `xcrun_db` 系统缓存例外；Codex CLI 0.146 仍自带系统 temp 兼容路径，Harness 已将 `TMPDIR` 指向项目内并禁止主动越界，但这一处目前是纵深防御，不与 Pi shell 等强；
-- `pi --full-access` 是单次启动的显式例外：Leader 和新建 Codex executor 不再受项目 OS 沙箱限制，状态栏会明确显示；Analysis/advisor 不随之放宽；
-- `.git/hooks` 是项目内唯一默认只读的 Git 子路径，防止实验任务植入后续持久执行；`.git/config`、objects、index 和 refs 可写；
-- 项目内任意 `uv`、Python 和 shell 命令由 sandbox 约束效果，而不是由命令字符串白名单约束；需要宿主 SSH/config/agent 的入口通过一次/session/project 三档 host capability 授权；
+- `pi` 和 `pi restart` 默认开启 full access：Leader 和新建的执行型 subagent 使用宿主用户权限，状态栏显示 `🔓 full access`；Analysis/advisor 仍只读，full access 不会自动授予 root 权限。旧常驻 Host 需要 `pi restart` 才能应用新默认值；
+- 使用 `--no-full-access` 或 shell 环境变量 `RESEARCH_PI_FULL_ACCESS=0` 可恢复项目沙箱。Pi 的模型 shell 受 OS 级 sandbox runtime 约束，Codex executor 使用 project-only permission profile：项目可写、Git commit 可用、公网开放，项目外用户文件和 Unix sockets 不可用；Pi shell 的通用系统 temp 写入被关闭，仅保留 Apple Git 所需的窄 `xcrun_db` 系统缓存例外；Codex CLI 0.146 仍自带系统 temp 兼容路径，Harness 已将 `TMPDIR` 指向项目内并禁止主动越界，但这一处目前是纵深防御，不与 Pi shell 等强；
+- 项目沙箱中的 `.git/hooks` 是项目内唯一默认只读的 Git 子路径，防止实验任务植入后续持久执行；`.git/config`、objects、index 和 refs 可写；
+- 项目沙箱中的任意 `uv`、Python 和 shell 命令由 sandbox 约束效果，而不是由命令字符串白名单约束；需要宿主 SSH/config/agent 的入口通过一次/session/project 三档 host capability 授权；
 - 项目持久 `trust-ssh` 绑定精确 target，`trust-command` 绑定界面显示的 argv 前缀；代码字符串默认绑定完整 argv。它们可被 Pi 与 Codex executor 自动复用，也可用 `/boundary revoke` 撤销；
 - `!` / `!!` 与人工批准的直接文件工具仍是最终越界通道，但 broker 能表达的操作应由 agent 申请授权后继续执行，不应常态化退回用户手动运行；
 - memory SQLite 是派生缓存，不进入 Git；它会脱敏常见凭证形式，但原始 session、实验账本和不常见秘密格式仍是敏感数据；

@@ -23,11 +23,11 @@ import {
 	updateJobFile,
 	writeJsonAtomic,
 } from "./codex-jobs.mjs";
-import { codexPermissionConfigArguments, projectTemporaryEnvironment, resolveExecutablePath, runCodexSandboxPreflight } from "./project-boundary.mjs";
+import { codexPermissionConfigArguments, codexRuntimePolicy, projectTemporaryEnvironment, resolveExecutablePath, runCodexSandboxPreflight } from "./project-boundary.mjs";
 import { resolveSystemRuntimePolicy } from "./security-policy.mjs";
 import { CODEX_COLLABORATION_TOOL, collaborateWithCodexPeers, formatPeerMessage } from "./codex-collaboration.mjs";
 import { CODEX_RUN_TOOL, listCodexExternalRuns, registerCodexExternalRun, releaseCodexResources, settleCodexExternalRun } from "./codex-resources.mjs";
-import { createRuntimeMessage, registerCodexRuntimeJob, RESEARCH_LEADER_ACTOR_ID, resolveResearchRuntime, settleRuntimeMessage } from "./research-runtime.mjs";
+import { createRuntimeMessage, registerCodexRuntimeJob, runtimeScopeOptions, RESEARCH_LEADER_ACTOR_ID, resolveResearchRuntime, settleRuntimeMessage } from "./research-runtime.mjs";
 
 function now() {
 	return new Date().toISOString();
@@ -404,7 +404,8 @@ async function main() {
 				const args = params.arguments ?? {};
 				const ownerJobId = args.ownerJobId ?? request.jobId;
 				if (ownerJobId !== request.jobId) {
-					const owner = await readCodexJob(ownerJobId, { jobRoot: dirname(jobDir), expectedCwd: request.cwd });
+					const owner = await readCodexJob(ownerJobId, { jobRoot: dirname(jobDir), expectedCwd: request.cwd,
+						expectedProjectKey: request.projectKey, expectedResearchBranchId: request.branchId ?? null });
 					if (args.action === "register" || owner.actorId !== request.actorId || owner.leaderActorId !== request.leaderActorId || owner.researchTrackRef !== request.researchTrackRef) {
 						throw new Error("Only this Actor's earlier same-track runs may be inspected or settled after resume");
 					}
@@ -533,7 +534,7 @@ async function main() {
 				const args = params.arguments ?? {};
 				if (args.wait !== true && args.why_blocking === undefined) {
 					const job = await readCodexJob(request.jobId, { jobRoot: dirname(jobDir) });
-					const runtime = await resolveResearchRuntime(job.cwd, { runtimeRoot: job.runtimeRoot });
+					const runtime = await resolveResearchRuntime(job.cwd, runtimeScopeOptions(job));
 					const from = await registerCodexRuntimeJob(runtime, job);
 					const discussion = await createRuntimeMessage(runtime, {
 						type: "notify", from, to: RESEARCH_LEADER_ACTOR_ID,
@@ -755,14 +756,14 @@ async function main() {
 						: {}),
 				});
 				if (command.runtimeMessageId) {
-					const runtime = await resolveResearchRuntime(request.cwd, { runtimeRoot: command.runtimeRoot });
+					const runtime = await resolveResearchRuntime(request.cwd, runtimeScopeOptions(request));
 					await settleRuntimeMessage(runtime, command.runtimeMessageId, "delivered", { actorId: command.runtimeActorId });
 				}
 			} catch (error) {
 				const { response: _response, answers: _answers, ...safeCommand } = command ?? {};
 				await writeJsonAtomic(path, { ...safeCommand, status: "failed", failedAt: now(), error: error instanceof Error ? error.message : String(error) });
 				if (command?.runtimeMessageId) {
-					const runtime = await resolveResearchRuntime(request.cwd, { runtimeRoot: command.runtimeRoot });
+					const runtime = await resolveResearchRuntime(request.cwd, runtimeScopeOptions(request));
 					await settleRuntimeMessage(runtime, command.runtimeMessageId, "superseded", { actorId: command.runtimeActorId, reason: "native_delivery_failed" });
 				}
 				enqueueJobUpdate({ progress: `command failed: ${error instanceof Error ? error.message : String(error)}` });
@@ -832,11 +833,12 @@ async function main() {
 		});
 		if (cancelledBeforeStart) return;
 
-		const systemRuntime = await resolveSystemRuntimePolicy();
+		const baseRuntime = await resolveSystemRuntimePolicy();
 		const codexBin = await resolveExecutablePath(request.codexBin, {
 			cwd: request.boundaryRoot ?? request.cwd,
 			environment: process.env,
 		});
+		const systemRuntime = codexRuntimePolicy(baseRuntime, codexBin);
 		const permissionArgs = codexPermissionConfigArguments(
 			request.mode,
 			request.boundaryRoot ?? request.cwd,

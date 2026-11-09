@@ -6,8 +6,8 @@ import { redactSensitiveText } from "./sensitive-text.mjs";
 
 export { redactSensitiveText } from "./sensitive-text.mjs";
 
-export const MEMORY_SCHEMA_VERSION = 1;
-export const MEMORY_EXTRACTOR_VERSION = "research-pi-memory-v3";
+export const MEMORY_SCHEMA_VERSION = 3;
+export const MEMORY_EXTRACTOR_VERSION = "research-pi-memory-v5-history";
 
 const DEFAULT_RESULT_LIMIT = 6;
 
@@ -19,8 +19,8 @@ export function memoryProjectKey(projectCwd) {
 	return `project-${sha256(resolve(projectCwd || ".")).slice(0, 24)}`;
 }
 
-function memoryRef(projectCwd, sessionId, entryId) {
-	return `P:${memoryProjectKey(projectCwd)}/S:${sessionId}/E:${entryId}`;
+function memoryRef(projectCwd, sessionId, entryId, projectKey, branchId) {
+	return `P:${projectKey || memoryProjectKey(projectCwd)}${branchId ? `/B:${branchId}` : ""}/S:${sessionId}/E:${entryId}`;
 }
 
 function scalar(value, maxChars = null) {
@@ -260,6 +260,8 @@ export function extractSessionUnits(path) {
 		if (unit) units.push(unit);
 	}
 
+	const binding = entries.findLast(entry => entry.type === "custom" && entry.customType === "research-runtime-branch")?.data;
+	if (binding) for (const unit of units) { unit.projectKey = binding.projectKey; unit.branchId = binding.branchId ?? null; unit.generation = binding.generation ?? 0; }
 	return { units, invalidLines, sessionId, projectCwd };
 }
 
@@ -313,6 +315,9 @@ export function openMemoryIndex(dbPath) {
 			source_kind TEXT NOT NULL,
 			session_id TEXT NOT NULL,
 			project_cwd TEXT NOT NULL,
+			project_key TEXT,
+			branch_id TEXT,
+			generation INTEGER NOT NULL DEFAULT 0,
 			session_name TEXT,
 			entry_id TEXT NOT NULL,
 			parent_id TEXT,
@@ -343,6 +348,12 @@ export function openMemoryIndex(dbPath) {
 			INSERT INTO memory_units_fts(rowid, text) VALUES (new.id, new.text);
 		END;
 	`);
+
+	const columns = new Set(db.prepare("PRAGMA table_info(memory_units)").all().map(column => column.name));
+	if (!columns.has("project_key")) db.exec("ALTER TABLE memory_units ADD COLUMN project_key TEXT");
+	if (!columns.has("branch_id")) db.exec("ALTER TABLE memory_units ADD COLUMN branch_id TEXT");
+	if (!columns.has("generation")) db.exec("ALTER TABLE memory_units ADD COLUMN generation INTEGER NOT NULL DEFAULT 0");
+	db.exec("CREATE INDEX IF NOT EXISTS memory_units_branch_time ON memory_units(project_key, branch_id, timestamp)");
 
 	const version = db.prepare("SELECT value FROM memory_meta WHERE key = 'extractor_version'").get()?.value;
 	if (version !== MEMORY_EXTRACTOR_VERSION) {
@@ -375,8 +386,8 @@ function replaceSource(db, source, stat, extracted) {
 	const insert = db.prepare(`
 		INSERT INTO memory_units(
 			source_path, source_kind, session_id, project_cwd, session_name, entry_id, parent_id,
-			timestamp, kind, role, active_branch, text, content_hash
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			timestamp, kind, role, active_branch, text, content_hash, project_key, branch_id, generation
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`);
 	db.exec("BEGIN IMMEDIATE;");
 	try {
@@ -396,6 +407,9 @@ function replaceSource(db, source, stat, extracted) {
 				unit.activeBranch,
 				unit.text,
 				unit.contentHash,
+				unit.projectKey ?? null,
+				unit.branchId ?? null,
+				unit.generation ?? 0,
 			);
 		}
 		db.prepare(`
@@ -418,13 +432,15 @@ function replaceSource(db, source, stat, extracted) {
 	}
 }
 
-export function syncMemoryIndex(db, { sessionDir, experimentLedgerPaths = [], recordSources = [] }) {
+export function syncMemoryIndex(db, { sessionDir, experimentLedgerPaths = [], recordSources = [], sessionScopes = {} }) {
 	const files = [...sourceFiles(sessionDir, experimentLedgerPaths), ...recordSources.filter((source) => source.text !== undefined || existsSync(source.path))];
 	let rebuiltSources = 0;
 	let indexedUnits = 0;
 	let invalidLines = 0;
 	for (const source of files) {
-		const stat = source.text !== undefined ? { size: source.text.length, mtimeMs: Date.parse(source.timestamp) || 0 } : statSync(source.path);
+		const stat = source.text !== undefined ? { size: source.text.length, mtimeMs: Number.parseInt(sha256(JSON.stringify([source.text, source.projectKey, source.branchId, source.generation])).slice(0, 12), 16) } : statSync(source.path);
+		const inheritedScope = source.kind === "session" ? sessionScopes[source.path] : null;
+		if (inheritedScope) stat.mtimeMs += Number.parseInt(sha256(JSON.stringify(inheritedScope)).slice(0, 8), 16);
 		const prior = db.prepare("SELECT size, mtime_ms, extractor_version FROM memory_sources WHERE path = ?").get(source.path);
 		if (
 			prior &&
@@ -443,6 +459,10 @@ export function syncMemoryIndex(db, { sessionDir, experimentLedgerPaths = [], re
 					? parseJsonLines(source.path).values.filter((record) => ["assistant", "message"].includes(record.category)).map((record) => record.text).join("\n\n")
 					: JSON.stringify(JSON.parse(readFileSync(source.path, "utf8")), null, 2)),
 			})].filter(Boolean) };
+		if (inheritedScope && extracted.sessionId === inheritedScope.sessionId) for (const unit of extracted.units) {
+			if (!unit.branchId || unit.branchId === inheritedScope.branchId) Object.assign(unit, inheritedScope);
+		}
+		if (source.projectKey) for (const unit of extracted.units) { unit.projectKey = source.projectKey; unit.branchId = source.branchId ?? null; unit.generation = source.generation ?? 0; }
 		replaceSource(db, source, stat, extracted);
 		rebuiltSources += 1;
 		indexedUnits += extracted.units.length;
@@ -487,7 +507,16 @@ function quoteFts(value) {
 function buildFilters(options, alias = "u") {
 	const clauses = [];
 	const params = [];
-	if (options.scope !== "all") {
+	if (options.scope !== "all" && options.currentProjectKey && (options.currentBranchId || options.scope === "project")) {
+		clauses.push(`${alias}.project_key = ?`);
+		params.push(options.currentProjectKey);
+		if (options.scope !== "project") {
+			clauses.push(`${alias}.branch_id = ?`);
+			params.push(options.currentBranchId);
+			clauses.push(`${alias}.generation = ?`); params.push(options.currentGeneration ?? 0);
+		}
+	} else if (options.scope !== "all") {
+		clauses.push(`${alias}.branch_id IS NULL`);
 		const projectRoot = resolve(options.currentProjectRoot || options.currentCwd);
 		const projectPrefix = `${projectRoot}/`;
 		clauses.push(`(${alias}.project_cwd = ? OR substr(${alias}.project_cwd, 1, ?) = ?)`);
@@ -630,8 +659,10 @@ export function searchMemory(db, options) {
 		if (seenHashes.has(row.content_hash)) continue;
 		seenHashes.add(row.content_hash);
 		results.push({
-			ref: memoryRef(row.project_cwd, row.session_id, row.entry_id),
-			projectKey: memoryProjectKey(row.project_cwd),
+			ref: memoryRef(row.project_cwd, row.session_id, row.entry_id, row.project_key, row.branch_id),
+			projectKey: row.project_key || memoryProjectKey(row.project_cwd),
+			branchId: row.branch_id ?? null,
+			generation: row.generation ?? 0,
 			sessionId: row.session_id,
 			entryId: row.entry_id,
 			parentId: row.parent_id,
@@ -650,13 +681,15 @@ export function searchMemory(db, options) {
 	return results;
 }
 
-export function readMemory(db, { projectKey, sessionId, entryId, radius = 1, maxChars = 12_000 }) {
+export function readMemory(db, { projectKey, branchId, generation, sessionId, entryId, radius = 1, maxChars = 12_000 }) {
 	const boundedRadius = Math.max(0, Math.min(Number(radius) || 0, 10));
 	const boundedChars = Math.max(500, Math.min(Number(maxChars) || 12_000, 40_000));
 	const candidates = db
 		.prepare("SELECT * FROM memory_units WHERE session_id = ? AND entry_id = ? ORDER BY source_kind = 'experiment-ledger' DESC")
 		.all(sessionId, entryId)
-		.filter((row) => !projectKey || memoryProjectKey(row.project_cwd) === projectKey);
+		.filter((row) => (!projectKey || (row.project_key || memoryProjectKey(row.project_cwd)) === projectKey)
+			&& (branchId === undefined || (row.branch_id ?? null) === branchId)
+			&& (generation === undefined || row.generation === generation));
 	const distinctSources = new Map(candidates.map((row) => [row.source_path, row]));
 	if (!projectKey && distinctSources.size > 1) {
 		throw new Error(`Memory reference S:${sessionId}/E:${entryId} is ambiguous across projects; provide the projectKey returned by research_memory_search`);
@@ -669,17 +702,17 @@ export function readMemory(db, { projectKey, sessionId, entryId, radius = 1, max
 	const rows = db
 		.prepare(`
 			SELECT * FROM memory_units
-			WHERE source_path = ? AND id BETWEEN ? AND ?
+			WHERE source_path = ? AND project_key IS ? AND branch_id IS ? AND generation = ? AND id BETWEEN ? AND ?
 			ORDER BY id
 		`)
-		.all(center.source_path, center.id - boundedRadius, center.id + boundedRadius);
+		.all(center.source_path, center.project_key, center.branch_id, center.generation, center.id - boundedRadius, center.id + boundedRadius);
 	let used = 0;
 	const entries = [];
 	for (const row of rows) {
 		const fits = used + row.text.length <= boundedChars;
 		if (fits) used += row.text.length;
 		entries.push({
-			ref: memoryRef(row.project_cwd, row.session_id, row.entry_id),
+			ref: memoryRef(row.project_cwd, row.session_id, row.entry_id, row.project_key, row.branch_id),
 			entryId: row.entry_id,
 			parentId: row.parent_id,
 			timestamp: row.timestamp,
@@ -693,7 +726,9 @@ export function readMemory(db, { projectKey, sessionId, entryId, radius = 1, max
 		});
 	}
 	return {
-		projectKey: memoryProjectKey(center.project_cwd),
+		projectKey: center.project_key || memoryProjectKey(center.project_cwd),
+		branchId: center.branch_id ?? null,
+		generation: center.generation,
 		sessionId: center.session_id,
 		projectCwd: center.project_cwd,
 		sessionName: center.session_name ?? undefined,
@@ -702,4 +737,35 @@ export function readMemory(db, { projectKey, sessionId, entryId, radius = 1, max
 		usedChars: used,
 		maxChars: boundedChars,
 	};
+}
+
+// Prune derived rows only when their actual backing file is gone. Branch
+// archives and missing worktrees do not imply that historical evidence is gone.
+export function pruneMemoryIndexSources(databasePath, { apply = false, projectKey } = {}) {
+	if (!existsSync(databasePath)) return { dryRun: !apply, sources: [], removed: 0 };
+	const db = new DatabaseSync(databasePath, { readOnly: !apply });
+	try {
+		let removed = 0;
+		const sources = (projectKey
+			? db.prepare("SELECT DISTINCT source_path AS path FROM memory_units WHERE project_key = ?").all(projectKey)
+			: db.prepare("SELECT path FROM memory_sources").all()).filter(row => {
+			try { statSync(row.path.split("#", 1)[0]); return false; }
+			catch (error) { return error.code === "ENOENT"; }
+		});
+		if (apply) {
+			db.exec("PRAGMA busy_timeout=5000; BEGIN IMMEDIATE");
+			try {
+				for (const { path } of sources) {
+					// Recheck after acquiring the database write transaction.
+					try { statSync(path.split("#", 1)[0]); continue; }
+					catch (error) { if (error.code !== "ENOENT") continue; }
+					if (projectKey) db.prepare("DELETE FROM memory_units WHERE source_path = ? AND project_key = ?").run(path, projectKey);
+					else db.prepare("DELETE FROM memory_units WHERE source_path = ?").run(path);
+					if (db.prepare("DELETE FROM memory_sources WHERE path = ? AND NOT EXISTS (SELECT 1 FROM memory_units WHERE source_path = ?)").run(path, path).changes) removed += 1;
+				}
+				db.exec("COMMIT");
+			} catch (error) { db.exec("ROLLBACK"); throw error; }
+		}
+		return { dryRun: !apply, sources: sources.map(source => source.path), removed };
+	} finally { db.close(); }
 }

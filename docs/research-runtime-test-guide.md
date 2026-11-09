@@ -10,9 +10,10 @@ Codex 不属于某个 Pi 对话。它在 Project 中承担一个有界、可续�
 
 | 对象 | 含义 | 生命周期 |
 |---|---|---|
-| Project | 长期科研边界与 Runtime 状态所有者 | 跨 Session、跨模型长期存在 |
-| Leader Actor | 项目中稳定的研究领导身份，由 Pi 当前选择的模型承载 | 身份稳定，可更换 Leader Session |
-| Leader Session | 当前拥有执行、Project State 写入、subagent 调度和 Leader mailbox 的 Pi Session | 同一 Project 同时只有一个 |
+| Project | 长期科研边界、研究分支目录与按需总览 | 跨 Session、跨模型长期存在 |
+| Research Branch | 独立研究状态、记录、Leader、任务和 mailbox 的归属 | 稳定 ID，关联一个可写 workspace |
+| Leader Actor | 分支中稳定的研究领导身份，由 Pi 当前选择的模型承载 | 身份稳定，可更换 Leader Session |
+| Leader Session | 当前拥有执行、Project State 写入、subagent 调度和 Leader mailbox 的 Pi Session | 同一 Research Branch 同时只有一个；旧 workspace 保留 legacy Project 范围 |
 | Analysis Session | 继承 ProjectView 的只读讨论入口；可查本地/远端证据，但不执行 | 可与 Leader Session 并存 |
 | Codex Actor | 一个稳定的 Codex 子职责，当前由 `mission + mode` 定义 | 跨 Pi Session 存在，可反复激活 |
 | Action/job | Codex Actor 接受的一次具体委派或续接 | 有明确开始与终态 |
@@ -24,13 +25,13 @@ Codex 不属于某个 Pi 对话。它在 Project 中承担一个有界、可续�
 
 ```text
 Project
-├── Leader Actor
-│   └── 当前 attached Leader Session
-├── Analysis Session 1..N (read-only, no Leader mailbox)
-└── Codex Actor: mission + mode
-    ├── stable Codex thread
-    ├── Action/job 1 -> completed
-    └── Action/job 2 -> running
+├── Research Branch A / workspace A
+│   ├── Leader Actor -> attached Leader Session
+│   ├── Analysis Session 1..N
+│   └── Subagent Actors / Actions / mailbox / evidence / state
+└── Research Branch B / workspace B
+    ├── independent Leader Actor -> attached Leader Session
+    └── independent Actors / Actions / mailbox / evidence / state
 ```
 
 “跨 Session 续接”不是把 Session A 的完整对话交给 Session B，也不是让 Session B 拥有 Session A。它表示 Session B 成为 Leader Session、attach 到同一个 Leader Actor 后，可以依据 Project Runtime 状态继续管理原 Codex Actor 和 thread。Analysis Session 只读取同一 ProjectView，不发生这次 attachment 转移。
@@ -180,6 +181,8 @@ Host capability 不走上述自由文本咨询路径。Codex 调用 `research_pi
 
 普通第二个 TUI 启动时不会静默抢走仍 attached 的 Leader。`/runtime`、`/runtime health|recommend|view`、`/actors` 和 `/inbox` 都是只读观察；一条真正的研究输入会在旧 Leader 没有 active agent run 时转移 attachment。若旧 Session 正在生成，输入会保留在编辑器并提示等待；只有 `/runtime takeover <reason>` 会显式越过该保护。claim 与 activation start 在同一个 ledger lock 中竞争，因此不会同时产生两个合法 owner。attachment epoch 变化后，旧 Session 在下一模型边界 abort；旧 shutdown 不能 detach 新 epoch，旧 settled run 不能消费消息，改变 Codex 状态的操作也必须持有当前 attachment lease。open message 会重投给新 owner。
 
+Session 的角色与 Project Leader attachment 是两层状态：已有 Leader／clean Session 可能未持有当前项目的 attachment，此时使用 `/runtime takeover <reason>`，而不是 `/runtime promote`。Dock 的 `Leader elsewhere` 表示另一个 Session 持有归属，`Leader detached` 表示无人绑定。Project ID 优先取 Git common directory 的身份；Git 不可用时回退到 workspace 路径。因此，修复从别的机器复制来的 worktree `.git` 指针后，Project ID 可能从独立目录的身份变成共享主仓库的身份。Session 角色不会自动变成 Analysis，但后续工具可能读取另一份项目账本。诊断时核对报错中的 Project ID；接管不会自动合并旧账本中的历史、Actors 或实验记录。
+
 这里没有把 A 的完整 transcript 注入 B。最近一次结构化 research compact 会提交带 Project revision 的 state；B 在模型调用前得到确定性的限长 ProjectView，优先合并 active transition、freshness、state provenance、project evidence 索引、Git 摘要、未结 Action 和 mailbox ID。它不包含完整旧 transcript，重要证据仍须通过引用或 memory read 精确读取。
 
 方向切换不等待 compact。`record_research_transition` 立即使旧 state 变为 stale，并说明旧路线是 archived、superseded 还是 parallel；下一次 compact 才综合形成新 state。superseded/archived 时不会机械搬运旧假设，旧证据仍可检索；parallel 路线的存活状态会跨后续主路线切换保留，并可用精确 `fromTrackRef` 从任一 live route 继续。Evidence、Action、message、Project State 与 Codex job 都携带 track provenance；延迟返回的实验可显式保留旧 `trackRef`。ProjectView 根据 compacted state 自己的 track 判断它是否 retired，而不是只看最后一次 transition。Project revision 使用 compare-and-append：压缩或换轨基于旧 revision 时不会覆盖当前状态。ProjectView 观察 ledger semantic event count，但只在下一条真正的用户输入到来时捕获一份新的请求级 Delta；跨 Session 新增 Action/mailbox 不会单独唤醒 Leader 或改写正在运行请求的 Delta。
@@ -195,12 +198,12 @@ Host capability 不走上述自由文本咨询路径。Codex 调用 `research_pi
 新 Codex job 使用三层检查：
 
 ```text
-projectKey + research-leader Actor    逻辑所有权，可跨 Pi Session
+projectKey + branchId + research-leader Actor  分支内逻辑所有权，可跨 Pi Session
 Leader session + attachment epoch     当前控制权；状态写入期间持有短 lease
 exact workspaceKey/root               文件与副作用边界，不可跨 worktree
 ```
 
-错误 Project、错误 Leader Actor 或另一 workspace 都会被拒绝。旧版本创建、没有 `leaderActorId` 的 job 不会自动迁移，仍只能由原 Pi Session/branch 管理。
+错误 Project、Research Branch、Leader Actor 或另一 workspace 都会被拒绝。旧版本创建、没有 `leaderActorId` 的 job 不会自动迁移，仍只能由原 Pi Session/branch 管理。
 
 ## 6. 常用命令
 
@@ -216,6 +219,7 @@ exact workspaceKey/root               文件与副作用边界，不可跨 workt
 /subagents missions
 /watch [job后缀|mission|@codex:<Actor短码>]
 /runtime
+/runtime branches
 /runtime health
 /runtime recommend
 /runtime view
@@ -233,7 +237,7 @@ Runtime mailbox 会保存消息正文，因此不要在这些命令中输入 API
 
 ## 7. 本地验证
 
-`tests/` 与测试夹具仅保存在本地，不提交到仓库，也不随 npm 包发布；过时测试应直接删除。下面列出验证要点，便于功能变更时选择相关检查。
+确定性的 `tests/*.test.mjs` 回归测试随源码提交，可运行 `npm test`；测试夹具在临时目录中创建并清理。真实模型、网络和硬件验收默认不运行，现场产物仍保存在本地；测试与夹具不随 npm 包发布。下面列出验证要点，便于功能变更时选择相关检查。
 
 ### Layer 1：无模型 Runtime 测试
 
@@ -517,3 +521,87 @@ Relevant /actors and /inbox all output:
 ```
 
 不要附上 `.env`、凭据、完整敏感 prompt 或整个 Runtime ledger；截取与路由状态有关的最小片段即可。
+
+## 独立研究分支：第一阶段
+
+新 workspace 首次初始化时建立持久的 `projectKey + branchId + workspaceKey` 绑定。同一 Git common directory 的不同 worktree 属于同一 Project，但默认创建不同研究分支。身份建立后优先读取持久绑定，Git branch 改名或 `.git` 修复不会重新选择 Runtime。绑定不会因浏览、Git 改名或元数据修复而切换。Checkpoint、fork、研究回溯和归档见下节；目录重定位与研究状态自动合并尚未提供。
+
+每分支使用 `runtime/projects/<projectKey>/branches/<branchId>/events.jsonl`，日志、版本、Leader attachment、派发锁、消息、证据和研究状态各自独立。`projectDir` 保留项目目录含义，`scopeDir` 是实际控制和锁的范围。后台 Codex request/job 保存分支与项目身份；恢复和消息回执使用原归属，不从当前 Git 状态重新猜测。
+
+普通用户输入不会抢占另一个 Session 的 Leader，包括其空闲时；显式 `/runtime takeover <reason>` 或 Analysis Session 的 `/runtime promote <reason>` 才转移控制权。Session 保存分支 provenance，带着其他分支历史恢复时拒绝写入并提示新开 Session。项目总览与跨分支检索均不转移 attachment。
+
+已有 workspace 若在旧 Project ledger 中有历史，继续使用 legacy Runtime，不自动拆分、迁移或接管运行任务。无法确定归属的旧事件也保持原状。现阶段在新的 worktree 上开始独立研究；旧 workspace 的离线迁移另行实施。
+
+```sh
+pi branch status --workspace /path/to/worktree
+pi branch init experiment-a --workspace /path/to/fresh-worktree
+pi branch list --workspace /path/to/project
+```
+
+`init` 可在启动前指定名称；重复同名初始化幂等，不能借此改绑已有 workspace。`status` 和 `list` 只读，支持 `--json`。TUI 中 `/runtime branches` 按需列出本项目的研究分支。
+
+独立分支的 `record_experiment` 以分支 Runtime 事件为唯一权威记录，Session entry 是展示副本；不再写工作目录下的第二份实验 ledger，也不自动导入 worktree 复制来的旧 ledger 或历史 compact。legacy 记录协议保持兼容。
+
+Memory 使用独立的可重建 `memory/memory-v4.sqlite`，避免与仍运行的旧版索引互相重建。Session 记录中的分支身份与 Runtime 记录一起进入索引；默认在 SQL 检索候选阶段限定当前分支。`scope=current_project` 显式读取同项目其他分支，`all_projects` 显式扩大到所有项目；精确读取跨分支结果时携带返回的 `projectKey` 与 `branchId`。Pi Session 自身的对话树分叉与 Research Branch 是不同概念。
+
+本地验收使用临时 Git repository、linked worktrees 和独立 state：双 Leader 并行、独立 revision/evidence/mailbox、跨分支任务拒绝、Session 恢复拒绝、元数据修复、并发初始化、旧日志保留、Memory SQL 隔离，以及真实 `record_experiment` 入口的幂等重试。不使用模型、网络或 GPU。
+
+## 研究历史、成果采纳与生命周期
+
+独立 Research Branch 的 `research_checkpoint` 现在同时记录研究状态的事件游标、证据边界、代码快照与 Session/entry 上下文引用。Checkpoint 只保存游标和父节点，查看时重放截至该游标的研究投影；不重复保存整段对话或大文件。Git snapshot 保存已跟踪文件，包括尚未提交的改动，且不改变当前 branch、index、working tree；未跟踪文件只报告，不自动纳入。捕获期间发现代码变化或存在活动 writer 时拒绝保存。
+
+```sh
+pi branch checkpoint baseline --reason "before a contrasting intervention"
+pi branch history
+pi branch inspect <checkpoint-id>
+pi branch fork alternative --at <checkpoint-id> --to /path/to/new-worktree
+pi branch fork followup --from <branch-name-or-id> --at <checkpoint-id> --to /path/to/new-worktree
+```
+
+Fork 创建新的 Git worktree 和 `pi/<name>-<suffix>` Git branch，代码来自所选 checkpoint 的冻结 commit。新研究分支仅物化一次冻结的结构化状态和证据元数据，并保留来源；原始日志、transcript、checkpoint 二进制和其他产物按引用共享。父分支后来的事件不会进入子分支；Leader attachment、Actor、Action、消息队列与运行租约均不继承。子分支有自己的初始 checkpoint，其 parent 指向来源 checkpoint，从而形成可遍历的历史 DAG。若 Runtime 发布失败，已创建的 worktree 保留供检查，不自动删除。
+
+```sh
+pi branch rewind <checkpoint-id> --reason "revisit the earlier hypothesis"
+```
+
+Rewind 追加事件、递增 research generation，恢复研究投影，不删除原历史。它保留真实 Job 终态、外部运行事实和当前代码；恢复历史代码优先使用 fork。回溯要求任务、外部运行、activation 均已收束，Leader 已关闭或 detached。旧 Session generation 不能再次取得执行上下文，需新开 Session。Memory 的默认 SQL 范围同时限定 branch 与 generation；旧会话、后来的讨论与 Job 结果仍可显式按历史查询，但不会自动进入恢复后的当前记忆。索引升级到独立的 `memory/memory-v5.sqlite`，不会重建仍运行的 v4 数据库。
+
+```sh
+pi branch import <source-branch> <evidence-id> --reason "why this result applies here"
+pi branch import <source-branch> <evidence-id> --at <checkpoint-id> --reason "adopt the frozen result"
+```
+
+当前 Leader 也可调用 `import_research_evidence`。导入仅接受同项目其他分支的具体 evidence，保留 source branch、evidence/event ID、内容哈希、执行代码身份和原有局限；可增加采纳理由与当前解释。导入幂等，只让 evidence 成为当前分支待综合的输入，不覆盖 Project State、自动承认结论或复制 artifacts。Analysis 只能使用只读 `research_branch_history`，不能调用采纳工具。研究状态自动 merge 暂不提供，代码合并继续使用 Git。
+
+```sh
+pi branch archive <branch-name-or-id>
+pi branch restore <branch-name-or-id>
+pi branch list
+pi branch doctor
+pi branch prune             # preview
+pi branch prune --apply     # repair confirmed stale indexes/locks/cache rows
+```
+
+Archive 要求不存在 attached Leader、活动/未知结果 Action、activation 或未收束外部运行。它追加归档事件，将 JSONL 压缩为同目录中不可变的 gzip，并以带 SHA-256 的只读小型 ledger pointer 原子替换原文件；文件权限也会阻止仍缓存旧版 append 实现的进程继续写入。所有 Runtime 写入口在同一 ledger lock 内检查归档状态，因此缓存旧 Runtime 的调用也不能绕过。历史、inspect、fork 与 evidence import 继续可读；restore 校验并展开日志后追加恢复事件。永久删除未提供，以免破坏其他分支引用的 checkpoint 与 evidence。
+
+`doctor` 只读报告失效目录、损坏/缺失绑定、缺失 catalog、损坏 ledger 和死进程遗留锁。新绑定额外保存目录的 device/inode；相同路径被另一目录替换时不会静默复用旧分支身份。`prune` 默认只预览，`--apply` 在对应锁内复查，跳过重现的目录、活进程锁与未收束所有权；只移除失效 workspace binding 和确认死亡的 Runtime 锁，不删除 worktree、Git refs 或研究日志。已丢失 catalog 的有效历史先恢复派生 catalog，仍保留在项目分支列表中；损坏元数据保留人工检查。清理仅针对当前 Project，不运行 `git worktree prune`，也不删除 Git 自身的锁。
+
+SQLite 是共享、可重建的索引，并非每个分支一份数据库。`prune --apply` 只删除 v5 索引中底层文件确实已消失的 source/FTS 行，保留共享数据库和仍有原始记录的归档分支记忆。不会按一个废弃分支的名称删除数据库，也不删除可能仍被旧进程使用的旧版索引。
+
+CLI 支持 `--json` 与 `--workspace <path>`。Checkpoint/import 的 CLI 路径代表显式用户操作，要求无活动或未收束工作；工具路径则在事务内验证当前 Leader attachment。Legacy workspace 与正在运行的旧项目不自动迁移。上述命令应先在隔离 fixture 验证；本轮自动验收不启动真实模型、GPU 或现有 Native Host。
+
+## Legacy 项目的定向交接
+
+存量项目可以把旧共享研究历史整体承接给一个 workspace，并让另一 workspace 从空白研究状态开始。先正常停止该 state root 中两个 workspace 的 Native Host，确认 Leader attachment、activation、Action 和外部运行均已收束；迁移本身不取消任务或假定掉线就是终态。
+
+```sh
+pi branch migrate --workspace /path/to/retained-worktree \
+  --keep continuous_training \
+  --fresh-workspace /path/to/main --fresh-name main \
+  --session <retained-session-id>
+# 确认预览后，同一命令增加 --apply
+```
+
+该操作保留不可变旧日志和会话备份，以 receipt 记录源日志 SHA-256；旧 ledger 变为只读。新 worktree 分支承接旧研究状态、全部审计历史和证据，建立交接代码 checkpoint。已关闭的过程型 subagent Actor 退休，结果仍保留；不复活旧进程或转移活动租约。main 建立空白分支，原 main 会话记录保留在磁盘但不自动纳入新上下文。
+
+只为显式指定、已停止的原 Leader Session 追加新归属及上下文刷新记录，原 transcript 和 Session ID 保留。其他历史/Analysis Session 不在迁移时改写，其白名单和来源路径保存在迁移事件中，Memory 使用该明确映射；它们在新版本首次重开时才追加新分支归属。活动旧 Analysis 窗口不被迁移器停止。中途失败保留原始备份及准备 receipt，可用相同计划重试；已完成的同一计划重复执行返回 unchanged，不停止新分支的工作。

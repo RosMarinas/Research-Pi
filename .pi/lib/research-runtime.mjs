@@ -1,12 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import { appendFile, mkdir, open, readFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveCodexWorkspaceIdentity } from "./codex-jobs.mjs";
+import { resolveCodexWorkspaceBoundary, resolveCodexWorkspaceIdentity } from "./codex-jobs.mjs";
 import { createRuntimeLedgerCache, freezeRuntimeValue } from "./runtime-ledger-cache.mjs";
+import { readResearchLedgerText } from "./research-ledger-storage.mjs";
 import { withOwnerFileLock } from "./owner-file-lock.mjs";
 import { applyResearchStatePatch } from "./research-compact.mjs";
 import { researchPiStateRoot } from "./runtime-paths.mjs";
+import { createResearchBranchBinding, readResearchBranchBinding, researchBranchContext } from "./research-branches.mjs";
+export { listResearchBranches } from "./research-branches.mjs";
 import { runtimeDirectedMessageCard, subagentModelCard } from "./subagent-message.mjs";
 
 const LIB_DIR = dirname(fileURLToPath(import.meta.url));
@@ -46,6 +49,9 @@ const PROJECT_REVISION_EVENT_TYPES = new Set([
 	"project.state.amended",
 	"research.transition.recorded",
 	"evidence.recorded",
+	"evidence.imported",
+	"branch.forked",
+	"branch.rewound",
 ]);
 
 function now() {
@@ -78,8 +84,14 @@ export function analysisSessionActorId(sessionId) {
 	return `analysis:${shortHash(String(sessionId ?? "unknown"), 24)}`;
 }
 
-async function withRuntimeLedgerLock(runtime, operation) {
-	return await withOwnerFileLock(`${runtime.ledgerPath}.lock`, operation, {
+async function withRuntimeLedgerLock(runtime, operation, options = {}) {
+	return await withOwnerFileLock(`${runtime.ledgerPath}.lock`, async () => {
+		if (runtime.legacySealed) throw new Error("This legacy Runtime was migrated and is read-only; reopen the workspace on its research branch");
+		if (runtime.branchId && !options.allowArchived && (await readRuntimeSnapshot(runtime)).lifecycle === "archived") {
+			throw new Error("This research branch is archived and read-only. Use pi branch restore before writing.");
+		}
+		return await operation();
+	}, {
 		attempts: LEDGER_LOCK_ATTEMPTS,
 		waitMs: LEDGER_LOCK_WAIT_MS,
 		staleMs: LEDGER_LOCK_STALE_MS,
@@ -161,15 +173,54 @@ export function runtimeActorTarget(actor) {
 }
 
 export async function resolveResearchRuntime(cwd, options = {}) {
-	const identity = await resolveCodexWorkspaceIdentity(cwd);
+	const boundary = await resolveCodexWorkspaceBoundary(cwd);
 	const runtimeRoot = resolve(options.runtimeRoot ?? process.env.RESEARCH_PI_RUNTIME_DIR ?? DEFAULT_RESEARCH_RUNTIME_ROOT);
-	const projectDir = join(runtimeRoot, identity.projectKey);
-	return {
-		...identity,
-		runtimeRoot,
-		projectDir,
-		ledgerPath: join(projectDir, "events.jsonl"),
-	};
+	if (options.scope && !options.scope.branchId) {
+		const projectKey = options.scope.projectKey ?? (await resolveCodexWorkspaceIdentity(cwd)).projectKey;
+		const context = researchBranchContext({ ...boundary, projectKey }, runtimeRoot);
+		return { ...context, legacySealed: Boolean(await readLegacyMigration(context)) };
+	}
+	const binding = await readResearchBranchBinding(boundary, runtimeRoot);
+	if (options.scope && (binding?.branchId !== options.scope.branchId || binding?.projectKey !== options.scope.projectKey)) {
+		throw new Error("Stored job belongs to a different research branch binding");
+	}
+	const identity = binding ? { ...boundary, projectKey: binding.projectKey } : await resolveCodexWorkspaceIdentity(cwd);
+	const context = researchBranchContext(identity, runtimeRoot, binding);
+	return { ...context, legacySealed: !binding && Boolean(await readLegacyMigration(context)) };
+}
+
+async function readLegacyMigration(runtime) {
+	try { return JSON.parse(await readFile(join(runtime.projectDir, "legacy-migration.json"), "utf8")); }
+	catch (error) { if (error.code === "ENOENT") return null; throw error; }
+}
+
+// Persisted jobs must never rediscover their owner from current Git metadata.
+export function runtimeScopeOptions(job) {
+	return { runtimeRoot: job.runtimeRoot ?? undefined,
+		scope: { projectKey: job.projectKey, branchId: job.branchId ?? null } };
+}
+
+function legacyWorkspaceHasHistory(events, runtime) {
+	const roots = event => [event.data?.workspaceKey, event.data?.metadata?.workspaceKey,
+		event.data?.workspaceRoot, event.data?.source?.workspaceRoot];
+	return events.some(event => roots(event).some(value => value === runtime.workspaceKey || value === runtime.workspaceRoot))
+		|| (events.length > 0 && !events.some(event => roots(event).some(Boolean)));
+}
+
+export async function createRuntimeResearchBranch(cwd, options = {}) {
+	const runtime = await resolveResearchRuntime(cwd, options);
+	if (runtime.branchId) {
+		if (options.name && options.name !== runtime.branchName) throw new Error(`Workspace is already bound to ${runtime.branchName}`);
+		return runtime;
+	}
+	const events = await readRuntimeEvents(runtime);
+	// Never reassign an existing workspace's historical jobs or Sessions. Legacy
+	// migration is a separate, explicit operation after work has settled.
+	if (legacyWorkspaceHasHistory(events, runtime)) {
+		throw new Error("This workspace has legacy Runtime history; leave its sessions and jobs attached until an explicit offline migration. Initialize a fresh worktree to start an independent branch.");
+	}
+	const binding = await createResearchBranchBinding(runtime, runtime.runtimeRoot, { name: options.name ?? basename(runtime.workspaceRoot) });
+	return researchBranchContext(runtime, runtime.runtimeRoot, binding);
 }
 
 function prepareRuntimeEvent(runtime, eventType, data = {}, options = {}) {
@@ -180,6 +231,7 @@ function prepareRuntimeEvent(runtime, eventType, data = {}, options = {}) {
 		type: eventType,
 		at: options.at ?? now(),
 		projectKey: runtime.projectKey,
+		...(runtime.branchId ? { branchId: runtime.branchId } : {}),
 		data,
 	};
 	validateMessageId(event.id);
@@ -192,7 +244,7 @@ async function writeRuntimeEvent(runtime, event) {
 
 export async function appendRuntimeEvent(runtime, eventType, data = {}, options = {}) {
 	const event = prepareRuntimeEvent(runtime, eventType, data, options);
-	await mkdir(runtime.projectDir, { recursive: true, mode: 0o700 });
+	await mkdir(runtime.scopeDir ?? runtime.projectDir, { recursive: true, mode: 0o700 });
 	return await withRuntimeLedgerLock(runtime, async () => {
 		await repairRuntimeLedgerTail(runtime);
 		if (options.id) {
@@ -204,8 +256,13 @@ export async function appendRuntimeEvent(runtime, eventType, data = {}, options 
 	});
 }
 
+function nextRuntimeRevision(revision, event) {
+	if (!PROJECT_REVISION_EVENT_TYPES.has(event.type)) return revision;
+	return event.type === "branch.forked" ? Math.max(revision, event.data?.research?.revision ?? 0) + 1 : revision + 1;
+}
+
 export function runtimeRevisionFromEvents(events) {
-	return events.reduce((revision, event) => revision + (PROJECT_REVISION_EVENT_TYPES.has(event.type) ? 1 : 0), 0);
+	return events.reduce(nextRuntimeRevision, 0);
 }
 
 function runtimeActorAttachmentFromEvents(events, actorId) {
@@ -226,7 +283,7 @@ function runtimeActorAttachmentFromEvents(events, actorId) {
 export async function appendRuntimeEventAtRevision(runtime, eventType, data, expectedRevision, options = {}) {
 	if (!Number.isInteger(expectedRevision) || expectedRevision < 0) throw new Error("A non-negative expected Project revision is required");
 	const event = prepareRuntimeEvent(runtime, eventType, data, options);
-	await mkdir(runtime.projectDir, { recursive: true, mode: 0o700 });
+	await mkdir(runtime.scopeDir ?? runtime.projectDir, { recursive: true, mode: 0o700 });
 	return await withRuntimeLedgerLock(runtime, async () => {
 		await repairRuntimeLedgerTail(runtime);
 		const events = await readRuntimeEvents(runtime);
@@ -247,7 +304,7 @@ export async function appendRuntimeEventAtRevision(runtime, eventType, data, exp
 		return {
 			status: "appended",
 			event,
-			revision: revision + (PROJECT_REVISION_EVENT_TYPES.has(eventType) ? 1 : 0),
+			revision: nextRuntimeRevision(revision, event),
 		};
 	});
 }
@@ -260,13 +317,8 @@ export async function readRuntimeEvents(runtime) {
 }
 
 async function loadRuntimeEvents(runtime) {
-	let text;
-	try {
-		text = await readFile(runtime.ledgerPath, "utf8");
-	} catch (error) {
-		if (error?.code === "ENOENT") return [];
-		throw error;
-	}
+	const storage = await readResearchLedgerText(runtime, { metadata: true });
+	const text = storage.text;
 	const events = [];
 	const seen = new Set();
 	const lines = text.split(/\r?\n/);
@@ -279,10 +331,11 @@ async function loadRuntimeEvents(runtime) {
 			if (index === lines.length - 1 && !text.endsWith("\n")) break;
 			throw new Error(`Research Runtime ledger contains invalid JSON at line ${index + 1}`);
 		}
-		if (event.projectKey !== runtime.projectKey || seen.has(event.id)) continue;
+		if (event.projectKey !== runtime.projectKey || (event.branchId ?? null) !== (runtime.branchId ?? null) || seen.has(event.id)) continue;
 		seen.add(event.id);
 		events.push(event);
 	}
+	if (storage.archivePath) Object.defineProperty(events, "archivePath", { value: storage.archivePath });
 	return events;
 }
 
@@ -291,12 +344,12 @@ export async function readRuntimeSnapshot(runtime) {
 	const events = await readRuntimeEvents(runtime);
 	let views = runtimeSnapshots.get(events);
 	if (!views) { views = new Map(); runtimeSnapshots.set(events, views); }
-	const key = JSON.stringify([runtime.workspaceKey, runtime.workspaceRoot]);
+	const key = JSON.stringify([runtime.workspaceKey, runtime.workspaceRoot, runtime.branchId ?? null]);
 	if (!views.has(key)) views.set(key, freezeRuntimeValue(projectRuntimeEvents(runtime, events)));
 	return views.get(key);
 }
 
-function projectRuntimeEvents(runtime, events) {
+export function projectRuntimeEvents(runtime, events) {
 	const actors = new Map();
 	const attachments = new Map();
 	const messages = new Map();
@@ -310,11 +363,34 @@ function projectRuntimeEvents(runtime, events) {
 	const rejectedStates = [];
 	let projectState = null;
 	let projectBrief = null;
-	let revision = 0;
+	let revision = 0, generation = 0, lifecycle = "active", headCheckpoint = null, forkedFrom = null, legacyMigration = null;
+	const checkpoints = [];
 	for (const event of events) {
 		const data = event.data ?? {};
-		if (PROJECT_REVISION_EVENT_TYPES.has(event.type)) revision += 1;
+		revision = nextRuntimeRevision(revision, event);
 		switch (event.type) {
+			case "branch.legacy.migrated": legacyMigration = data; break;
+			case "branch.archived": lifecycle = "archived"; break;
+			case "branch.restored": lifecycle = "active"; break;
+			case "branch.checkpoint":
+				checkpoints.push({ ...data, eventId: event.id, at: event.at });
+				headCheckpoint = { branchId: runtime.branchId, checkpointId: data.id };
+				break;
+			case "branch.forked":
+			case "branch.rewound": {
+				const research = data.research;
+				projectState = research.projectState;
+				projectBrief = research.projectBrief;
+				evidence.clear();
+				for (const item of research.evidence) evidence.set(item.id, event.type === "branch.forked" ? {
+					...item, inheritedFrom: { ...data.checkpoint, evidenceId: item.id, eventId: item.eventId ?? null }, eventId: event.id,
+				} : item);
+				transitions.splice(0, transitions.length, ...research.transitions);
+				headCheckpoint = data.checkpoint;
+				if (event.type === "branch.forked") forkedFrom = data.checkpoint;
+				else generation += 1;
+				break;
+			}
 			case "actor.registered": {
 				const current = actors.get(data.id) ?? {};
 				actors.set(data.id, { ...current, ...data, createdAt: current.createdAt ?? data.createdAt ?? event.at, updatedAt: event.at });
@@ -396,9 +472,10 @@ function projectRuntimeEvents(runtime, events) {
 			case "research.transition.recorded":
 				transitions.push({ ...data, recordedAt: event.at, revision });
 				break;
+			case "evidence.imported":
 			case "evidence.recorded": {
 				const current = evidence.get(data.id) ?? {};
-				evidence.set(data.id, { ...current, ...data, recordedAt: event.at, revision });
+				evidence.set(data.id, { ...current, ...data, recordedAt: event.at, revision, eventId: event.id });
 				break;
 			}
 			case "work.handoff.recorded":
@@ -442,6 +519,9 @@ function projectRuntimeEvents(runtime, events) {
 	const activationList = [...activations.values()];
 	return {
 		projectKey: runtime.projectKey,
+		branchId: runtime.branchId ?? null,
+		branchName: runtime.branchName ?? null,
+		lifecycle, generation, checkpoints, headCheckpoint, forkedFrom, legacyMigration,
 		workspaceKey: runtime.workspaceKey,
 		workspaceRoot: runtime.workspaceRoot,
 		actors: [...actors.values()],
@@ -585,7 +665,7 @@ export async function attachRuntimeActor(runtime, actorId, session) {
 export async function withRuntimeActorAttachment(runtime, actorId, expected, operation) {
 	validateActorId(actorId);
 	const sessionId = String(expected.sessionId);
-	await mkdir(runtime.projectDir, { recursive: true, mode: 0o700 });
+	await mkdir(runtime.scopeDir ?? runtime.projectDir, { recursive: true, mode: 0o700 });
 	return await withRuntimeLedgerLock(runtime, async () => {
 		await repairRuntimeLedgerTail(runtime);
 		const snapshot = await readRuntimeSnapshot(runtime);
@@ -611,7 +691,7 @@ export async function claimRuntimeActorAttachment(runtime, actorId, session, opt
 		epoch: validateMessageId(session.epoch ?? createEventId("attachment")),
 		reason: boundedRuntimeText(session.reason, 400) || null,
 	};
-	await mkdir(runtime.projectDir, { recursive: true, mode: 0o700 });
+	await mkdir(runtime.scopeDir ?? runtime.projectDir, { recursive: true, mode: 0o700 });
 	return await withRuntimeLedgerLock(runtime, async () => {
 		await repairRuntimeLedgerTail(runtime);
 		const snapshot = await readRuntimeSnapshot(runtime);
@@ -630,6 +710,7 @@ export async function claimRuntimeActorAttachment(runtime, actorId, session, opt
 			&& (!current?.epoch || item.attachmentEpoch === current.epoch),
 		) ?? null;
 		if (activation && !options.force) return { status: "busy", attachment: current ?? null, activation };
+		if (current && !options.force) return { status: "occupied", attachment: current, activation: null };
 		const event = prepareRuntimeEvent(runtime, "actor.attached", data, { id: `actor-attachment:${data.epoch}` });
 		await writeRuntimeEvent(runtime, event);
 		return { status: "attached", attachment: data, activation: null, event };
@@ -639,7 +720,7 @@ export async function claimRuntimeActorAttachment(runtime, actorId, session, opt
 export async function detachRuntimeActor(runtime, actorId, sessionId, attachmentEpoch = null) {
 	validateActorId(actorId);
 	const normalizedSessionId = String(sessionId);
-	await mkdir(runtime.projectDir, { recursive: true, mode: 0o700 });
+	await mkdir(runtime.scopeDir ?? runtime.projectDir, { recursive: true, mode: 0o700 });
 	return await withRuntimeLedgerLock(runtime, async () => {
 		await repairRuntimeLedgerTail(runtime);
 		const current = runtimeActorAttachment(await readRuntimeSnapshot(runtime), actorId);
@@ -673,7 +754,11 @@ export async function isRuntimeActorAttached(runtime, actorId, sessionId) {
 }
 
 export async function initializeResearchRuntime(cwd, session, options = {}) {
-	const runtime = await resolveResearchRuntime(cwd, options);
+	let runtime = await resolveResearchRuntime(cwd, options);
+	if (!runtime.branchId && !options.scope) {
+		const legacyEvents = await readRuntimeEvents(runtime);
+		if (!legacyWorkspaceHasHistory(legacyEvents, runtime)) runtime = await createRuntimeResearchBranch(cwd, options);
+	}
 	await ensureRuntimeActor(runtime, { id: USER_ACTOR_ID, kind: "user", label: "User" });
 	await ensureRuntimeActor(runtime, {
 		id: RESEARCH_LEADER_ACTOR_ID,
@@ -681,14 +766,14 @@ export async function initializeResearchRuntime(cwd, session, options = {}) {
 		label: "Leader Session",
 		provider: "pi",
 	});
-	if (options.attach !== false) await attachRuntimeActor(runtime, RESEARCH_LEADER_ACTOR_ID, session);
+	if (options.attach !== false) await claimRuntimeActorAttachment(runtime, RESEARCH_LEADER_ACTOR_ID, session, { onlyIfUnattached: true });
 	return runtime;
 }
 
 export async function startRuntimeActorActivation(runtime, actorId, input) {
 	validateActorId(actorId);
 	const id = validateMessageId(input.id ?? createEventId("activation"));
-	await mkdir(runtime.projectDir, { recursive: true, mode: 0o700 });
+	await mkdir(runtime.scopeDir ?? runtime.projectDir, { recursive: true, mode: 0o700 });
 	return await withRuntimeLedgerLock(runtime, async () => {
 		await repairRuntimeLedgerTail(runtime);
 		const snapshot = await readRuntimeSnapshot(runtime);
@@ -745,7 +830,26 @@ function conciseRuntimeField(value, max) {
 	return text && text.length <= max ? text : null;
 }
 
-export async function recordRuntimeEvidence(runtime, record) {
+export async function recordRuntimeEvidence(runtime, record, options = {}) {
+	if (runtime.branchId) {
+		if (!record?.id || !record.contentFingerprint) throw new Error("Branch evidence requires an id and content fingerprint");
+		return await withRuntimeActorAttachment(runtime, RESEARCH_LEADER_ACTOR_ID, {
+			sessionId: options.sessionId ?? record.source?.sessionId ?? record.sessionId,
+		}, async ({ snapshot }) => {
+			const existing = snapshot.evidence.find(item => item.id === record.id);
+			if (existing) {
+				if (existing.contentFingerprint && existing.contentFingerprint !== record.contentFingerprint) throw new Error(`Experiment idempotency conflict: ${record.id}`);
+				return { duplicate: true, data: existing };
+			}
+			const track = resolveRuntimeResearchTrack(snapshot, record.trackRef);
+			const event = prepareRuntimeEvent(runtime, "evidence.recorded", {
+				...record, projectKey: runtime.projectKey, branchId: runtime.branchId,
+				projectRevision: snapshot.revision, trackRef: track.trackRef, trackLabel: record.trackLabel ?? track.trackLabel,
+			}, { id: `evidence:${record.id}` });
+			await writeRuntimeEvent(runtime, event);
+			return event;
+		});
+	}
 	if (!record?.id) throw new Error("Project evidence id is required");
 	const snapshot = await readRuntimeSnapshot(runtime);
 	const resolvedTrack = resolveRuntimeResearchTrack(snapshot, record.trackRef);
@@ -893,7 +997,7 @@ export async function amendRuntimeProjectState(runtime, input) {
 	if (!authorityRefs.length) throw new Error("Project State amendment requires at least one authority reference");
 	const id = validateMessageId(input.id ?? createEventId("state-amendment"));
 
-	await mkdir(runtime.projectDir, { recursive: true, mode: 0o700 });
+	await mkdir(runtime.scopeDir ?? runtime.projectDir, { recursive: true, mode: 0o700 });
 	return await withRuntimeActorAttachment(runtime, RESEARCH_LEADER_ACTOR_ID, {
 		sessionId,
 		attachmentEpoch: input.attachmentEpoch,
@@ -972,6 +1076,7 @@ export async function createRuntimeMessage(runtime, input) {
 	const snapshot = await readRuntimeSnapshot(runtime);
 	if (runtimeActorRetired(snapshot.actors.find((actor) => actor.id === to))) throw new Error("Actor is retired; start a new Actor");
 	const message = {
+		generation: snapshot.generation,
 		id,
 		type,
 		from,
@@ -1001,7 +1106,7 @@ export async function settleRuntimeMessage(runtime, messageId, status, details =
 // Clear the Leader inbox, not history or worker requests. Reuse existing
 // superseded events so older readers also honor dismissal; append once.
 export async function clearRuntimeMailbox(runtime, details) {
-	await mkdir(runtime.projectDir, { recursive: true, mode: 0o700 });
+	await mkdir(runtime.scopeDir ?? runtime.projectDir, { recursive: true, mode: 0o700 });
 	return await withRuntimeLedgerLock(runtime, async () => {
 		await repairRuntimeLedgerTail(runtime);
 		const snapshot = await readRuntimeSnapshot(runtime);
@@ -1024,7 +1129,7 @@ export async function consumeRuntimeMessagesForAttachment(runtime, messageIds, d
 	const ids = [...new Set(messageIds.map((messageId) => validateMessageId(messageId)))];
 	validateActorId(details.actorId);
 	const sessionId = String(details.sessionId);
-	await mkdir(runtime.projectDir, { recursive: true, mode: 0o700 });
+	await mkdir(runtime.scopeDir ?? runtime.projectDir, { recursive: true, mode: 0o700 });
 	return await withRuntimeLedgerLock(runtime, async () => {
 		await repairRuntimeLedgerTail(runtime);
 		const snapshot = await readRuntimeSnapshot(runtime);
@@ -1187,7 +1292,7 @@ export async function upsertRuntimeAction(runtime, action) {
 		status: action.status ?? "queued",
 		label: action.label ? boundedRuntimeText(action.label, 240) : null,
 		externalId: action.externalId ?? null,
-		metadata: action.metadata ?? {},
+		metadata: { ...action.metadata, generation: snapshot.actions.find(item => item.id === action.id)?.metadata?.generation ?? snapshot.generation },
 		projectRevision: Number.isInteger(action.projectRevision) ? action.projectRevision : snapshot.revision,
 		trackRef: action.trackRef ?? track.ref,
 		trackLabel: action.trackLabel ?? track.label,
@@ -1224,6 +1329,10 @@ export function runtimeMessageText(message, actors = []) {
 }
 
 export async function registerSubagentRuntimeJob(runtime, job) {
+	if ((job.branchId ?? null) !== (runtime.branchId ?? null)
+		|| (job.projectKey && job.projectKey !== runtime.projectKey)) {
+		throw new Error("Subagent job belongs to another research branch");
+	}
 	const snapshot = await readRuntimeSnapshot(runtime);
 	const currentTrack = runtimeResearchTrack(snapshot);
 	const trackRef = job.researchTrackRef ?? currentTrack.ref;
@@ -1245,6 +1354,7 @@ export async function registerSubagentRuntimeJob(runtime, job) {
 			backend,
 			cwd: job.cwd ?? null,
 			workspaceKey: job.workspaceKey ?? null,
+			branchId: job.branchId ?? null,
 			activityPath: job.activityPath ?? null,
 			nativeTerminal: job.nativeTerminal ?? null,
 			mission: job.mission ?? null,
@@ -1271,6 +1381,7 @@ export async function registerSubagentRuntimeJob(runtime, job) {
 			backend,
 			cwd: job.cwd ?? null,
 			workspaceKey: job.workspaceKey ?? null,
+			branchId: job.branchId ?? null,
 			activityPath: job.activityPath ?? null,
 			nativeTerminal: job.nativeTerminal ?? null,
 			turn: job.turn ?? null,
@@ -1348,4 +1459,34 @@ export async function recordCodexRuntimeEvent(runtime, job) {
 		role: job.role ?? job.mode,
 		thinking: job.thinking ?? job.reasoningEffort,
 	});
+}
+
+export async function withResearchBranchMutation(runtime, options, operation) {
+	if (!runtime.branchId) throw new Error("This operation requires an independent research branch; legacy Runtime is unchanged");
+	await mkdir(runtime.scopeDir, { recursive: true, mode: 0o700 });
+	return await withRuntimeLedgerLock(runtime, async () => {
+		if ((await readRuntimeSnapshot(runtime)).lifecycle !== "archived") await repairRuntimeLedgerTail(runtime);
+		const events = await readRuntimeEvents(runtime);
+		const snapshot = await readRuntimeSnapshot(runtime);
+		if (options.sessionId) {
+			const attachment = runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID, options.sessionId);
+			if (!attachment || (options.attachmentEpoch && options.attachmentEpoch !== attachment.epoch)) throw new RuntimeAttachmentChangedError(RESEARCH_LEADER_ACTOR_ID);
+		} else if (options.authority !== "user") throw new Error("Explicit user authority or the current Leader attachment is required");
+		if (options.expectedRevision !== undefined && options.expectedRevision !== snapshot.revision) throw new Error("Research branch revision changed; refresh before applying the operation");
+		if (options.quiescent || !options.sessionId) assertResearchBranchQuiescent(snapshot, { detached: options.detached });
+		return await operation({ snapshot, events, append: async (type, data, id) => {
+			const event = prepareRuntimeEvent(runtime, type, data, { id });
+			await writeRuntimeEvent(runtime, event);
+			return event;
+		} });
+	}, options);
+}
+
+export function assertResearchBranchQuiescent(snapshot, { detached = false } = {}) {
+	const live = new Set(["queued", "starting", "running", "input_required", "cancelling", "outcome_unknown"]);
+	if (snapshot.activeActivations.length || snapshot.actions.some(action => live.has(action.status)
+		|| (action.metadata?.externalRuns ?? []).some(run => !["completed", "failed", "cancelled"].includes(run.status)))) {
+		throw new Error("Research branch has active or unresolved work; settle it before this operation");
+	}
+	if (detached && snapshot.attachments.length) throw new Error("Research branch still has attached Sessions; close or detach them first");
 }
