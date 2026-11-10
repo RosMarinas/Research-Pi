@@ -36,6 +36,7 @@ import {
 	RESEARCH_LEADER_ACTOR_ID,
 	RUNTIME_MESSAGE_KIND,
 	assertRuntimeActorAttachment,
+	acknowledgeDirectSubagentTerminalResult,
 	codexActorId,
 	consumeRuntimeMessagesForAttachment,
 	readRuntimeSnapshot,
@@ -599,14 +600,7 @@ export async function acknowledgeDirectCodexTerminalResult({
 	sessionId: string;
 	attachmentEpoch: string;
 }) {
-	if (!TERMINAL_JOB_STATUSES.has(job.status)) return null;
-	const message = await recordCodexRuntimeEvent(runtime, job);
-	if (!message) return null;
-	return (await consumeRuntimeMessagesForAttachment(runtime, [message.id], {
-		sessionId,
-		actorId: RESEARCH_LEADER_ACTOR_ID,
-		attachmentEpoch,
-	}))[0];
+	return await acknowledgeDirectSubagentTerminalResult({ runtime, job: { ...job, backend: "codex" }, sessionId, attachmentEpoch });
 }
 
 export default function codexDelegateExtension(pi: ExtensionAPI) {
@@ -1371,6 +1365,10 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 						commandReceipt = receipt.detail;
 					} else {
 						throw new Error(`${params.action} is specific to the Codex backend; ${backend} supports start, status, result, resume, steer, and cancel`);
+					}
+					if (owner.attachmentEpoch) {
+						await acknowledgeDirectSubagentTerminalResult({ runtime: owner.runtime, job,
+							sessionId: owner.leaderSessionId, attachmentEpoch: owner.attachmentEpoch });
 					}
 					return {
 						content: [{

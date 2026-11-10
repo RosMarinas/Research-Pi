@@ -1,6 +1,6 @@
 import { redactSensitiveText } from "./sensitive-text.mjs";
 
-export const SUBAGENT_WORKSPACE_POLICY = "Use the Leader-assigned branch, workspace, directory layout and write scope. Do not create, switch, merge or delete branches or worktrees. Ordinary files within scope need no approval. Preserve others' work and active runs. Commit only assigned changes. Remove only paths this task clearly supersedes or disposable files it created; preserve meaningful evidence.";
+export const SUBAGENT_WORKSPACE_POLICY = "Use the Leader-assigned branch, workspace, directory layout and write scope. Do not create, switch, merge or delete branches or worktrees. Ordinary files within scope need no approval. Preserve others' work and active runs. Commit only assigned changes. Remove only paths this task clearly supersedes or disposable files it created; preserve meaningful evidence. Report a concise final result once; do not also send the same result as a progress message. Routine progress uses notify, and ask is reserved for a blocking question or decision. Do not acknowledge acknowledgements or send a message merely to confirm receipt.";
 
 export const SUBAGENT_RESULT_SECTIONS = [
 	"summary",
@@ -101,6 +101,7 @@ function resultCard(job, messageId) {
 		lines.push(`Available detail: ${sections.join(", ")}.`);
 		lines.push(`To read one detail section, call subagent with action=result, jobId=${line(job.id)}, and resultSection=<section>.`);
 	}
+	lines.push("No acknowledgement is required. Use this result for the current task; contact the sender only for a decision, correction, or further work.");
 	return lines.join("\n");
 }
 
@@ -282,6 +283,9 @@ export function runtimeDirectedMessageCard(message, actors = []) {
 		metadata.requestId ? `Request: ${line(metadata.requestId)}.` : undefined,
 		metadata.kind ? `Purpose: ${line(metadata.kind)}.` : undefined,
 		metadata.kind === "research_discussion" ? `Audience: ${line(metadata.audience) || "leader"}. Reply to ${line(message.from)} through the subagent mailbox; the sender may still be working.` : undefined,
+		message?.type === "ask"
+			? "Reply to the sender only if a decision or answer is needed. This participant message is not a structured subagent approval request."
+			: "No acknowledgement or status lookup is required. Act only on information relevant to the current task.",
 		message?.payloadRef ? `Payload: ${line(message.payloadRef)}.` : undefined,
 		"Content:",
 		block(message?.body),
@@ -289,15 +293,21 @@ export function runtimeDirectedMessageCard(message, actors = []) {
 }
 
 export function legacyRuntimeMessageCard(message) {
-	const jobId = line(message?.metadata?.jobId) || "unknown";
+	const jobId = line(message?.metadata?.jobId);
 	const messageId = line(message?.id) || "unknown";
-	if (message?.type === "ask") {
+	// Participant messages have always been valid without backend request IDs.
+	// Only actual backend lifecycle records need the legacy retrieval fallback.
+	// In particular, never replace an ordinary ask's body with jobId=unknown.
+	if (!jobId || jobId === "unknown") return runtimeDirectedMessageCard(message);
+	const requestId = line(message?.metadata?.requestId);
+	if (message?.type === "ask" && requestId) {
 		return [
 			"RUNTIME REQUEST",
 			`Message: ${messageId}.`,
 			`Job: ${jobId}.`,
-			`Request: ${line(message?.metadata?.requestId ?? message?.relatesTo) || "unknown"}.`,
+			`Request: ${requestId}.`,
 			"This legacy request has no structured model card.",
+			`Content: ${block(message?.body)}`,
 			`Required action: Call subagent with action=status and jobId=${jobId}. Read the current request before you respond.`,
 		].join("\n");
 	}
@@ -307,17 +317,20 @@ export function legacyRuntimeMessageCard(message) {
 			`Message: ${messageId}.`,
 			`Job: ${jobId}.`,
 			"State: outcome_unknown.",
+			`Content: ${block(message?.body)}`,
 			"Required action: Inspect external state. Then reconcile this job with evidence.",
 			"Do not start overlapping work before reconciliation.",
 		].join("\n");
 	}
-	if (message?.type === "result") {
+	if (message?.type === "result" && message?.metadata?.status) {
 		return [
 			"RUNTIME RESULT",
 			`Message: ${messageId}.`,
 			`Job: ${jobId}.`,
 			`State: ${line(message?.metadata?.status) || "terminal"}.`,
+			`Content: ${block(message?.body)}`,
 			`Required action: Call subagent with action=result and jobId=${jobId} to read the structured result.`,
+			"No acknowledgement is required.",
 		].join("\n");
 	}
 	return runtimeDirectedMessageCard(message);

@@ -100,6 +100,12 @@ queued -> delivered -> consumed
 
 投递采用 at-least-once 的恢复思路：如果进程在模型看到消息后、`agent_settled` 前崩溃，消息可能在恢复时再出现一次；不会为了追求 exactly-once 而增加高频事务写入。
 
+普通 participant `ask` 不等于 backend 的结构化 approval request。只有同时带真实 `jobId` 和 `requestId` 的旧请求才进入兼容查询路径，正文始终保留；缺少这些 ID 时，直接按发送者消息展示，不能生成 `jobId=unknown` 的工具指令。
+
+子代理 `message_leader` 默认使用 `notify`，进度不会单独唤醒 Leader；只有阻塞问题或需要决策时才显式 `type=ask`。最终结果自动回传一次，不再通过进度工具重复发送。Leader 无需逐条确认结果或通知；只有必要的答复、纠正或后续工作才发送消息。已完成 Actor 收到 `reply`/`notify` 后的完成状态只更新历史，不再生成一轮回传确认；活动任务收到普通通知仍保留原任务的最终回报责任，`steer`/`resume` 继续要求结果。
+
+Leader 通过同步工具结果、`status` 或 `result` 已读到某个 Pi／Antigravity／Codex 终态时，将该精确 turn 的 Runtime 结果记为 consumed，避免再投递。结构化阻塞请求不会因只读查询而被消费；接管后的旧 Leader 也无权消费新 attachment 的消息。已进入 Session 的模型历史保持稳定，旧错误工具调用不会被后台删除。
+
 状态折叠是单调的：`consumed`/`superseded` 不会被迟到的 `delivered` 回退；Action 的 `completed`/`failed`/`cancelled` 也不会重新变成 running。`outcome_unknown` 只能通过显式 reconcile 进入一个终态。
 
 ### 3.4 副作用恢复边界

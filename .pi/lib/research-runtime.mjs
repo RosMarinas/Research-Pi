@@ -1461,6 +1461,17 @@ export async function recordCodexRuntimeEvent(runtime, job) {
 	});
 }
 
+// A synchronous tool result is already a model delivery. Mark that exact turn
+// consumed for the current attachment so the mailbox does not repeat it later.
+export async function acknowledgeDirectSubagentTerminalResult({ runtime, job, sessionId, attachmentEpoch }) {
+	if (!["completed", "failed", "cancelled", "outcome_unknown"].includes(job.status)) return null;
+	const message = await recordSubagentRuntimeEvent(runtime, job);
+	if (!message) return null;
+	return (await consumeRuntimeMessagesForAttachment(runtime, [message.id], {
+		sessionId, actorId: RESEARCH_LEADER_ACTOR_ID, attachmentEpoch,
+	}))[0];
+}
+
 export async function withResearchBranchMutation(runtime, options, operation) {
 	if (!runtime.branchId) throw new Error("This operation requires an independent research branch; legacy Runtime is unchanged");
 	await mkdir(runtime.scopeDir, { recursive: true, mode: 0o700 });
