@@ -336,6 +336,7 @@ async function loadRuntimeEvents(runtime) {
 		events.push(event);
 	}
 	if (storage.archivePath) Object.defineProperty(events, "archivePath", { value: storage.archivePath });
+	Object.defineProperty(events, "cacheBytes", { value: Buffer.byteLength(text) * 2 });
 	return events;
 }
 
@@ -1356,6 +1357,7 @@ export async function registerSubagentRuntimeJob(runtime, job) {
 			workspaceKey: job.workspaceKey ?? null,
 			branchId: job.branchId ?? null,
 			activityPath: job.activityPath ?? null,
+			residency: job.residency ?? null,
 			nativeTerminal: job.nativeTerminal ?? null,
 			mission: job.mission ?? null,
 			missionKey: job.missionKey ?? null,
@@ -1383,6 +1385,7 @@ export async function registerSubagentRuntimeJob(runtime, job) {
 			workspaceKey: job.workspaceKey ?? null,
 			branchId: job.branchId ?? null,
 			activityPath: job.activityPath ?? null,
+			residency: job.residency ?? null,
 			nativeTerminal: job.nativeTerminal ?? null,
 			turn: job.turn ?? null,
 			role,

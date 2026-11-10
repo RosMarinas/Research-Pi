@@ -418,6 +418,30 @@ The packaged resources include Inter, a renamed Source Han Sans CN derivative, J
 
 When delegating HTML creation, provide the skill path and the required resources within the worker's existing filesystem permissions. Leader skill discovery does not automatically inject the full instructions into every worker.
 
+### Host memory and idle subagents
+
+New Native Hosts capture these optional environment overrides at startup. Updating source files does not activate them in an already running Host. Deploy at a suitable checkpoint; do not restart a busy Host merely to reclaim memory.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `RESEARCH_PI_SUBAGENT_IDLE_MS` | `900000` | Hibernate eligible Pi child processes after 15 minutes idle; `0` disables automatic hibernation. |
+| `RESEARCH_PI_WARM_SUBAGENTS` | `4` | Target four eligible settled Pi children in the warm pool; overflow becomes eligible after a one-minute grace period. Active, observed and protected children can exceed this target. |
+| `RESEARCH_PI_PROVIDER_IDLE_MS` | `60000` | Release an idle, unobserved Session's ACP connection through the installed provider's `closeSession` API; `0` disables this. |
+| `RESEARCH_PI_EVENT_CACHE_BYTES` | `262144` | Serialized-byte budget for each job's recent owner-event ring. Full tool output stays in its Session/journal. |
+| `RESEARCH_PI_LEDGER_CACHE_BYTES` | `16777216` | Aggregate estimated-byte budget for each process's Runtime ledger cache, alongside its existing entry limit. |
+| `RESEARCH_PI_SESSION_CACHE_BYTES` | `8388608` | Byte budget for lazily loaded historical Session bodies. Active model context remains materialized. |
+| `RESEARCH_PI_HISTORY_WINDOW` | `200` | Recent entries shown in Native TUI history; `0` shows all history. |
+
+Hibernation preserves the Actor, job identity, Pi Session ID, original transcript and latest full result. It changes process residency (`warm`/`cold`), not the recorded task outcome. A later explicit task, mission continuation or participant message restores the saved Pi Session. It does not replay the original task or start a model merely to load history. A cold Actor's journal remains readable in `/watch`; send a message or resume its job to restore the live conversation.
+
+Only settled Pi children are eligible. Running, cancelling, input-required or approval-blocked jobs, queued participant messages and registered unsettled external work are excluded. The child rechecks idle state, compaction, dialogs and connected observers before preparation and again before committing to exit. The owner validates the saved Session and persists its result between those checks. A newly attached observer or new task can refuse hibernation. Direct Antigravity CLI jobs are not automatically hibernated because that backend does not currently offer the same verified Session restore path; ACP used as a Pi provider is covered.
+
+ACP release is feature-detected against the installed provider and closes only the current Pi Session's connection. It retains saved ACP conversation/account records, and a new model run waits for any in-flight release. Providers without that session-close API continue normally. Closing/hibernating a child also executes its provider shutdown path, which releases remaining child-owned bindings.
+
+Current-version Session history uses an on-disk body index and a bounded cache while Core retains ownership of compaction, context edits, branching and append-only writes. Older formats and unterminated files use Core's normal loader. Historical bodies are loaded for explicit inspection/export; model-facing messages remain ordinary cloneable objects. The optimization targets the pinned Core API and is covered by projection, export, clone and native-resume regression tests. Re-run those checks when upgrading Core.
+
+`/memory` inspects the current Host's RSS, JavaScript heap and cache policy without forcing collection. `/history-window <count>` changes the display window; `/history-window all` loads the full display. Neither changes the model context or removes research records. Memory limits bound retained cache payloads, not the entire JavaScript heap or active task concurrency. Disk retention is a separate policy.
+
 ### Research branch identity and history
 
 Use a separate Session ID for Analysis while a Leader Session is running. Reopening the same Session ID as Analysis can still replace its role policy and detach its Leader; branch isolation does not yet prevent this within-branch Session collision.

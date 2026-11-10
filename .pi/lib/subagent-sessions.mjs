@@ -2,12 +2,15 @@ import { runtimePerformance } from "./runtime-performance.mjs";
 import { RESEARCH_PRINCIPLES, researchRolePrompt } from "./research-prompts.mjs";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { mkdir, readFile, writeFile, rename, realpath } from "node:fs/promises";
+import { join, resolve, relative, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sanitizeBoundaryEnvironment } from "./project-boundary.mjs";
 import { redactSensitiveText } from "./sensitive-text.mjs";
 import { subagentModelCard, SUBAGENT_WORKSPACE_POLICY } from "./subagent-message.mjs";
+import { runtimeMemoryPolicy, retainEvent } from "./runtime-memory-policy.mjs";
+import { idleSubagentCandidates } from "./subagent-idle.mjs";
+import { readSessionIdentity } from "./lazy-session-history.mjs";
 
 const FINAL_STATUSES = new Set(["completed", "failed", "cancelled", "input_required"]);
 const BACKENDS = new Set(["pi", "antigravity"]);
@@ -47,7 +50,9 @@ function publicJob(job) {
 		thinking: job.thinking,
 		reasoningEffort: job.thinking,
 		status: job.status,
-		reusable: job.closed !== true,
+		reusable: !job.retired && (job.residency === "cold" || job.closed !== true),
+		residency: job.residency ?? (job.closed ? "closed" : "warm"),
+		resultPath: job.resultPath ?? null,
 		progress: job.progress,
 		pendingRequest: job.pendingRequest,
 		performance: job.performance,
@@ -100,6 +105,10 @@ export function buildPiRunnerArgs(input) {
 		"--name", `Research Pi ${input.role} ${input.id.slice(-8)}`,
 		"--append-system-prompt", buildWorkerPrompt(input),
 	];
+	if (input.resumeSessionFile) {
+		const index = args.indexOf("--session-id");
+		args.splice(index, 2, "--session", input.resumeSessionFile);
+	}
 	if (input.boundaryExtension) args.push("--extension", input.boundaryExtension);
 	args.push("--extension", fileURLToPath(new URL("../extensions/research-mode.ts", import.meta.url)));
 	if (input.model && input.model !== "inherit") args.push("--model", input.model);
@@ -135,9 +144,53 @@ export function createSubagentSessionManager(options = {}) {
 	const boundaryExtension = options.boundaryExtension
 		?? (process.env.RESEARCH_PI_HARNESS_ROOT ? join(process.env.RESEARCH_PI_HARNESS_ROOT, ".pi", "extensions", "project-boundary.ts") : null);
 	const onUpdate = options.onUpdate ?? (async () => {});
+	const policy = { ...runtimeMemoryPolicy(), ...options.memoryPolicy };
+	const clock = options.clock ?? Date.now;
 	const jobs = new Map();
 	const actorJobs = new Map();
-	let disposed = false, performanceTimer;
+	let disposed = false, performanceTimer, idleTimer, sweeping = false;
+	const saveResult = async job => {
+		if (["cold", "closed", "retired"].includes(job.residency) && job.resultPath) return;
+		const path = join(stateRoot, "subagents", job.id, "result.json");
+		await mkdir(join(stateRoot, "subagents", job.id), { recursive: true, mode: 0o700 });
+		const temporary = `${path}.${randomUUID()}.tmp`;
+		await writeFile(temporary, JSON.stringify({ result: job.result, task: job.task, systemPrompt: job.systemPrompt }), { mode: 0o600 });
+		await rename(temporary, path);
+		job.resultPath = path;
+	};
+	const trimClosed = job => {
+		job.events = []; job.stderr = ""; job.performance = undefined;
+		job.lastResponse = ""; job.lastModelError = undefined; job.child = null;
+		job.task = null; job.systemPrompt = null;
+		if (job.result) job.result = { summary: compact(job.result.summary, 1200), outcome: job.result.outcome, goal_satisfied: job.result.goal_satisfied };
+	};
+	const finishHibernate = (job, accepted = false) => {
+		clearTimeout(job.hibernateTimer); job.hibernateTimer = undefined;
+		const request = job.hibernateRequest;
+		job.hibernateRequest = null;
+		request?.resolve(accepted);
+	};
+	const sweepIdle = async () => {
+		if (disposed || sweeping) return [];
+		sweeping = true;
+		const requested = [];
+		try {
+			for (const job of idleSubagentCandidates([...jobs.values()], policy, clock())) {
+				if (options.canHibernate && !await options.canHibernate(publicJob(job))) continue;
+				// Recheck after an asynchronous Runtime guard; a new turn may have started.
+				if (!idleSubagentCandidates([job], { ...policy, warmLimit: 0 }, clock()).length) continue;
+				const id = randomUUID();
+				let resolveSleep;
+				const promise = new Promise(resolve => { resolveSleep = resolve; });
+				job.hibernateRequest = { id, turn: job.turn, promise, resolve: resolveSleep };
+				job.hibernateTimer = setTimeout(() => finishHibernate(job), 10_000); job.hibernateTimer.unref();
+				writeRecord(job.child, { type: "hibernate", id, sessionId: job.sessionId });
+				requested.push(job.id);
+			}
+			return requested;
+		} finally { sweeping = false; }
+	};
+	if (policy.idleMs) { idleTimer = setInterval(() => void sweepIdle().catch(() => undefined), Math.min(policy.idleMs, 30_000)); idleTimer.unref(); }
 	const pollPerformance = () => {
 		for (const job of jobs.values()) if (job.backend === "pi" && job.nativeTerminal && !job.closed && job.child?.stdin?.writable) {
 			writeRecord(job.child, { type: "performance", enabled: runtimePerformance.enabled });
@@ -153,8 +206,7 @@ export function createSubagentSessionManager(options = {}) {
 
 	const emit = async (job, event) => {
 		if (event) {
-			job.events.push({ at: now(), ...event });
-			if (job.events.length > MAX_EVENTS) job.events.splice(0, job.events.length - MAX_EVENTS);
+			retainEvent(job.events, { at: now(), ...event }, policy.eventBytes, MAX_EVENTS);
 		}
 		await onUpdate(publicJob(job), event ?? null);
 	};
@@ -164,6 +216,7 @@ export function createSubagentSessionManager(options = {}) {
 		job.approvals.clear(); job.pendingRequest = null; job.nativeBlocked = false;
 		job.status = status;
 		job.finishedAt = now();
+		job.idleSince = clock();
 		job.result = result;
 		job.error = error ? compact(error, 4000) : null;
 		job.progress = status === "completed" ? "turn completed" : status === "input_required" ? "waiting for input" : job.error ?? status;
@@ -178,6 +231,7 @@ export function createSubagentSessionManager(options = {}) {
 	};
 
 	const beginTurn = async (job, body, source = "research-leader", messageId = null, reportToLeader = source !== "user") => {
+		job.idleSince = null;
 		job.reportToLeader = reportToLeader;
 		job.turn += 1;
 		job.actionId = `action:${job.id}:turn-${job.turn}`;
@@ -185,6 +239,7 @@ export function createSubagentSessionManager(options = {}) {
 		job.startedAt ??= now();
 		job.finishedAt = null;
 		job.result = null;
+		job.resultPath = null;
 		job.error = null;
 		job.cancelling = false;
 		job.lastResponse = ""; job.lastStopReason = null;
@@ -197,13 +252,14 @@ export function createSubagentSessionManager(options = {}) {
 		}
 	};
 
-	const startPi = async (job, task) => {
+	const startPi = async (job, task, turnOptions = {}) => {
 		await mkdir(sessionDir, { recursive: true, mode: 0o700 });
-		job.sessionId = randomUUID();
-		const args = buildPiRunnerArgs({ ...job, sessionDir, boundaryExtension });
+		job.sessionId ??= randomUUID();
+		job.closed = false; job.residency = "warm";
+		const args = buildPiRunnerArgs({ ...job, sessionDir, boundaryExtension, resumeSessionFile: job.resumeSessionFile });
 		const child = spawnProcess(process.execPath, [options.piRunner ?? fileURLToPath(new URL("./subagent-native-process.mjs", import.meta.url)), ...args], {
 			cwd: job.cwd,
-			env: { ...process.env,
+			env: { ...(options.environment ?? process.env),
 				RESEARCH_PI_SUBAGENT: JSON.stringify({ id: job.id, actorId: job.actorId, mission: job.mission, role: job.role, stateRoot }),
 				RESEARCH_PI_FULL_ACCESS: job.fullAccess ? "1" : "0",
 				RESEARCH_PI_INITIAL_SESSION_MODE: job.role === "advisor" ? "analysis" : "project",
@@ -225,22 +281,61 @@ export function createSubagentSessionManager(options = {}) {
 		});
 		child.on("error", (error) => { job.closed = true; void enqueue(job, () => settle(job, "failed", null, error.message)); });
 		child.on("close", (code, signal) => {
+			if (job.child !== child) return;
 			job.closed = true;
 			void enqueue(job, async () => {
 				if (buffer.trim()) await handlePiRecord(job, buffer);
+				if (job.hibernateRequest?.accepted && !job.retired) {
+					job.residency = "cold";
+					trimClosed(job);
+					await emit(job, { type: "residency", summary: "Session saved; process hibernated" });
+					finishHibernate(job, true);
+					return;
+				}
+				finishHibernate(job);
 				if (!FINAL_STATUSES.has(job.status)) {
 					const detail = job.stderr ? `: ${redactSensitiveText(job.stderr)}` : "";
 					await settle(job, job.cancelling ? "cancelled" : "failed", null, `Pi runner exited (${code ?? "?"}${signal ? `, ${signal}` : ""})${detail}`);
 				}
+				await saveResult(job); job.residency = "closed"; trimClosed(job);
+				await emit(job, { type: "residency", summary: "Backend process closed" });
 			});
 		});
-		await beginTurn(job, task);
+		await beginTurn(job, task, turnOptions.source ?? "research-leader", turnOptions.messageId ?? null, turnOptions.reportToLeader ?? true);
 		writeRecord(child, { id: "initial-state", type: "get_state" });
 	};
 
 	const handlePiRecord = async (job, line) => {
 		let record;
 		try { record = JSON.parse(line); } catch { return; }
+		if (record.type === "hibernate_response") {
+			const request = job.hibernateRequest;
+			if (!request || request.id !== record.id || request.turn !== job.turn) return;
+			if (!record.accepted) { finishHibernate(job); job.idleSince = clock(); return; }
+			try {
+				const path = record.sessionFile && await realpath(record.sessionFile);
+				const header = path && readSessionIdentity(path);
+				const inside = path && relative(await realpath(sessionDir), path);
+				if (!header || header.id !== job.sessionId || await realpath(header.cwd) !== await realpath(job.cwd) || !inside || inside.startsWith("..") || isAbsolute(inside)) {
+					throw new Error("Hibernation did not preserve this job's Session identity");
+				}
+				await saveResult(job);
+				job.resumeSessionFile = path;
+				if (options.canHibernate && !await options.canHibernate(publicJob(job))) { finishHibernate(job); job.idleSince = clock(); return; }
+				if (job.hibernateRequest === request && request.turn === job.turn) writeRecord(job.child, { type: "hibernate_commit", id: request.id, sessionId: job.sessionId });
+			} catch (error) {
+				finishHibernate(job); job.idleSince = clock();
+				await emit(job, { type: "memory_warning", summary: `Hibernation skipped: ${compact(redactSensitiveText(error.message), 300)}` });
+			}
+			return;
+		}
+		if (record.type === "hibernate_committed") {
+			const request = job.hibernateRequest;
+			if (!request || request.id !== record.id) return;
+			if (!record.accepted || request.turn !== job.turn) { finishHibernate(job); job.idleSince = clock(); return; }
+			request.accepted = true;
+			return;
+		}
 		if (record.type === "performance_sample") { job.performance = record.sample; return; }
 		if (record.type === "native_status") {
 			if (record.state === "blocked" && job.status === "running") {
@@ -256,6 +351,7 @@ export function createSubagentSessionManager(options = {}) {
 			job.nativeTerminal = record.nativeTerminal;
 			await emit(job, { type: "progress", summary: "Native conversation ready" });
 		} else if (record.type === "agent_start" && FINAL_STATUSES.has(job.status)) {
+			finishHibernate(job);
 			job.reportToLeader = false;
 			job.turn += 1; job.actionId = `action:${job.id}:turn-${job.turn}`;
 			job.status = "running"; job.result = null; job.finishedAt = null; job.error = null; job.lastResponse = ""; job.lastStopReason = null; job.cancelling = false;
@@ -354,10 +450,13 @@ export function createSubagentSessionManager(options = {}) {
 		});
 		child.on("error", (error) => { job.closed = true; void enqueue(job, () => settle(job, "failed", null, error.message)); });
 		child.on("close", (code, signal) => {
+			if (job.child !== child) return;
 			job.closed = true;
 			void enqueue(job, async () => {
 				if (buffer.trim()) await handleAntigravityRecord(job, buffer);
 				if (!FINAL_STATUSES.has(job.status)) await settle(job, job.cancelling ? "cancelled" : "failed", null, `Antigravity runner exited (${code ?? "?"}${signal ? `, ${signal}` : ""})`);
+				await saveResult(job); job.residency = "closed"; trimClosed(job);
+				await emit(job, { type: "residency", summary: "Backend process closed" });
 			});
 		});
 		await beginTurn(job, `${buildWorkerPrompt(job)}\n\nTask: ${task}`);
@@ -458,15 +557,33 @@ export function createSubagentSessionManager(options = {}) {
 		return id ? get(id) : null;
 	};
 
-	const send = async (actorId, message, { jobId } = {}) => {
+	const send = async (actorId, message, { jobId, onReady } = {}) => {
 		const id = jobId ?? actorJobs.get(actorId);
 		const job = id ? jobs.get(id) : null;
 		if (!job) return { status: "queued", detail: `No live ${actorId} session is attached` };
 		if (job.actorId !== actorId) throw new Error("The job does not belong to this Actor");
-		if (job.closed) return { status: "queued", detail: "The backend process has closed; start a new subagent" };
-		if (job.status === "cancelling") return { status: "queued", detail: "Waiting for cancellation to settle" };
 		const body = String(message?.body ?? message ?? "").trim();
 		if (!body) throw new Error("Subagent message body is required");
+		if (job.hibernateRequest) await job.hibernateRequest.promise;
+		if (job.waking) await job.waking;
+		// Bind the caller only after the old process's final callback released
+		// its context. This hook is synchronous and precedes any restored prompt.
+		onReady?.();
+		if (job.residency === "cold" && !job.retired) {
+			job.waking = (async () => {
+				const header = readSessionIdentity(job.resumeSessionFile);
+				if (header?.id !== job.sessionId || await realpath(header.cwd) !== await realpath(job.cwd)) throw new Error("Saved Session identity changed before wake");
+				const saved = JSON.parse(await readFile(job.resultPath, "utf8"));
+				job.systemPrompt = saved.systemPrompt;
+				job.task = saved.task;
+				await startPi(job, body, { source: message.from ?? "user", messageId: message.id,
+					reportToLeader: message.from !== "user" && !["notify", "reply"].includes(message.type) });
+			})();
+			try { await job.waking; } finally { job.waking = null; }
+			return { status: "delivered", detail: `restored saved Pi Session ${job.sessionId}` };
+		}
+		if (job.closed) return { status: "queued", detail: "The backend process has closed; start a new subagent" };
+		if (job.status === "cancelling") return { status: "queued", detail: "Waiting for cancellation to settle" };
 		// A reply or informational note can be read in the native conversation,
 		// but its completion must not generate a new result back to the Leader.
 		// Explicit steering/resume still requests a result. An active mission
@@ -494,12 +611,12 @@ export function createSubagentSessionManager(options = {}) {
 
 	const resume = async (id, input) => {
 		const job = jobs.get(id);
-		if (!job || job.closed) throw new Error("The backend process is no longer available; start a new subagent");
+		if (!job || (job.closed && job.residency !== "cold") || job.retired) throw new Error("The backend process is no longer available; start a new subagent");
 		if ((input.model && input.model !== job.model) || (input.thinking && input.thinking !== job.thinking)) {
 			throw new Error("A live Pi/Antigravity session keeps its model settings; use reuse=never to choose another model or thinking level");
 		}
 		job.researchTrackRef = input.researchTrackRef ?? job.researchTrackRef;
-		await send(job.actorId, { body: input.followUp, from: "research-leader" }, { jobId: id });
+		await send(job.actorId, { body: input.followUp, from: "research-leader" }, { jobId: id, onReady: input.onReady });
 		return publicJob(job);
 	};
 
@@ -537,7 +654,7 @@ export function createSubagentSessionManager(options = {}) {
 	};
 
 	const dispose = async () => {
-		disposed = true; clearInterval(performanceTimer); unsubscribePerformance();
+		disposed = true; clearInterval(performanceTimer); clearInterval(idleTimer); unsubscribePerformance();
 		for (const job of jobs.values()) {
 			for (const request of job.approvals.values()) request.abort();
 			job.approvals.clear();
@@ -547,7 +664,9 @@ export function createSubagentSessionManager(options = {}) {
 				await settle(job, "cancelled", null, "Research Pi session closed");
 			}
 			job.child?.stdin?.end();
+			finishHibernate(job);
 		}
+		jobs.clear(); actorJobs.clear();
 	};
 
 	return {
@@ -556,9 +675,20 @@ export function createSubagentSessionManager(options = {}) {
 			const job = jobs.get(id);
 			if (!job) return; // A prior host already closed this process.
 			if (!["completed", "failed", "cancelled"].includes(job.status)) throw new Error("Finish or cancel the subagent before retirement");
+			await saveResult(job);
+			job.retired = true; job.residency = "retired";
 			job.closed = true;
 			job.child?.stdin?.end();
 			job.child?.kill("SIGTERM");
+			trimClosed(job); finishHibernate(job);
+		},
+		sweepIdle,
+		readResult: async id => {
+			const job = jobs.get(id);
+			if (!job) throw new Error(`Unknown subagent job: ${id}`);
+			if (!job.resultPath) return publicJob(job);
+			const saved = JSON.parse(await readFile(job.resultPath, "utf8"));
+			return { ...publicJob(job), result: saved.result, task: saved.task };
 		},
 		get,
 		getByActor,

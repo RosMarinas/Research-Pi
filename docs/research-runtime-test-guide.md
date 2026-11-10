@@ -1,8 +1,16 @@
 # Research Runtime：subagent 状态与恢复测试指南
 
-更新：2026-10-02，适用于 Pi Core 1.0.0 与统一 subagent 层。
+## 内存回收回归测试
 
-所有 backend 共用 `subagent`、`/actors`、`/subagents`、`/watch` 和 Runtime 消息入口，界面展示 backend、role、model、thinking。下面的持久任务、跨 Session 恢复、写入范围与副作用协议主要描述 Codex backend；Pi／Antigravity runner 目前只在所属 Pi 进程内保持 live Session，退出后不自动恢复。离线测试验证协议与状态机，文末的真实项目测试需要另行执行，不能从离线通过推断已经实测。
+`node --test tests/runtime-memory.test.mjs` 使用临时项目和离线 provider 验证真实 Native 子进程的两阶段休眠、同一 Session 恢复与原始对话保留。测试还覆盖观察者拒绝回收、新任务与异步检查竞争、保存校验失败、外部 run/授权保护、ACP 关闭与新模型调用之间的等待、父进程引用释放，以及历史投影/导出/clone/分支和缓存字节上限。
+
+其中的保留堆对比只在测试自己启动的独立 Node 进程中使用 GC。32 MiB 合成历史在已 compact 的上下文中，新增保留堆约从 32.3 MiB 降至 1 MiB；这不是整机 RSS 或在线释放量的保证。单次 RSS 可能仍受分配器保留页影响。线上收益需要未来部署后另行测量。
+
+这些测试不连接现有 Host、真实模型服务或 GPU，不向现有子代理发送回收/重启命令。当前版本只对新的 Host 生效，配置与边界见 [Host memory and idle subagents](configuration.md#host-memory-and-idle-subagents)。
+
+更新：2026-11-10，内存回收回归按 Pi Core 1.4.0 验证；真实服务场景仍以各章节标明的验证边界为准。
+
+所有 backend 共用 `subagent`、`/actors`、`/subagents`、`/watch` 和 Runtime 消息入口，界面展示 backend、role、model、thinking。下面的持久任务、跨 Session 恢复、写入范围与副作用协议主要描述 Codex backend；Pi runner 可在所属 Leader Host 存活期间休眠并恢复同一 Session；Host 退出后仍不自动重建其 runner 注册表。直接 Antigravity runner 仍只在所属进程存活期间可继续。离线测试验证协议与状态机，文末的真实项目测试需要另行执行，不能从离线通过推断已经实测。
 
 ## 1. 先把几个对象分开
 
