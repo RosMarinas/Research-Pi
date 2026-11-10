@@ -5,7 +5,7 @@ export function researchPiExtensions(root, { search = false, anchor = false, tra
 	const extensions = [
 		"openai-codex-terra", "project-boundary", "runtime-performance", "tool-activity", "research-config", "research-mode",
 		"record-experiment", "research-transition", "amend-project-state",
-		"research-checkpoint", "research-memory", "research-compaction",
+		"research-checkpoint", "research-branches", "research-memory", "research-compaction",
 		"research-runtime", "research-side", "subagent-runners", "subagent-watch", "codex-delegate", "cache-audit", "token-speed",
 	];
 	if (search) extensions.push("deepseek-web-search");

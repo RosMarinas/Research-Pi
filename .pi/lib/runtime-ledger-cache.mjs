@@ -8,10 +8,11 @@ export function freezeRuntimeValue(value) {
 	return Object.freeze(value);
 }
 
-async function ledgerVersion(path) {
+async function ledgerVersion(path, archivePath) {
 	try {
 		const s = await stat(path, { bigint: true });
-		return `${s.dev}:${s.ino}:${s.size}:${s.mtimeNs}:${s.ctimeNs}`;
+		const current = `${s.dev}:${s.ino}:${s.size}:${s.mtimeNs}:${s.ctimeNs}`;
+		return archivePath ? `${current}:${await ledgerVersion(archivePath)}` : current;
 	} catch (error) {
 		if (error.code === "ENOENT") return "missing";
 		throw error;
@@ -24,7 +25,7 @@ async function ledgerVersion(path) {
 export function createRuntimeLedgerCache(load, { version = ledgerVersion, limit = 8 } = {}) {
 	const entries = new Map();
 	return async (runtime) => {
-		const key = JSON.stringify([resolve(runtime.ledgerPath), runtime.projectKey]);
+		const key = JSON.stringify([resolve(runtime.ledgerPath), runtime.projectKey, runtime.branchId ?? null]);
 		let entry = entries.get(key);
 		if (!entry) {
 			entry = {};
@@ -36,7 +37,7 @@ export function createRuntimeLedgerCache(load, { version = ledgerVersion, limit 
 		}
 		for (;;) {
 			while (entry.pending) await entry.pending;
-			const before = await version(runtime.ledgerPath);
+			const before = await version(runtime.ledgerPath, entry.archivePath);
 			// A different reader may have started loading during the stat call.
 			if (entry.pending) continue;
 			if (entry.version === before) return entry.value;
@@ -44,7 +45,8 @@ export function createRuntimeLedgerCache(load, { version = ledgerVersion, limit 
 			entry.value = undefined;
 			const pending = (async () => {
 				const value = freezeRuntimeValue(await load(runtime));
-				if (await version(runtime.ledgerPath) === before) {
+				entry.archivePath = value?.archivePath;
+				if (await version(runtime.ledgerPath, entry.archivePath) === before) {
 					entry.value = value;
 					entry.version = before;
 				}

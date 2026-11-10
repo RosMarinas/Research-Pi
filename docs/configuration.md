@@ -21,6 +21,27 @@ pi config show
 
 API keys, passwords, private keys and other credentials do not belong in `config.json`; credential-like field names are rejected. Safety boundaries and recovery invariants are code policy rather than convenience toggles.
 
+## Launch permissions
+
+`pi` and `pi restart` enable full access by default for the Leader and newly started execution subagents. Analysis and advisors retain their read-only role. This launch policy is separate from `config.json`.
+
+To use the project sandbox for a launch:
+
+```sh
+pi --no-full-access
+pi restart --no-full-access
+```
+
+The shell environment variable `RESEARCH_PI_FULL_ACCESS=0` also selects the sandbox; `--full-access` overrides it. When both access flags occur, the last one wins. Flags are consumed by the launcher and are not forwarded to Pi Core.
+
+Reattaching to an existing resident Host retains that Host's launch permissions. Run `pi restart` after updating or changing access policy; use `/boundary` in the Session to verify effective access (`🔓 full access` in the TUI for a full-access Leader). Existing running subagents retain their own launch permissions.
+
+## Optional remote-workspace skill
+
+The default skill paths include `~/.codex/skills/remote-workspace`. It provides optional source synchronization and remote workspace mapping; direct SSH, SCP, rsync and existing project scripts remain valid ways to work remotely. A remote task alone does not require bootstrapping its runtime or moving an existing project into a mapped workspace. Each method uses the current task authorization and execution permissions.
+
+Reload the skill list with `/reload` or start a new Host after installing or editing a skill. Use `pi restart` when applying launcher permission changes at the same time.
+
 ## API keys: one file for all three providers
 
 For DeepSeek, OpenCode Go, and Z.AI, use the same sequence:
@@ -117,7 +138,7 @@ Research Pi bundles and explicitly loads `pi-token-speed` 0.11.0 by default. The
 
 In the terminal UI, TPS and TTFT occupy a separate performance row below the editor. Narrow terminals wrap the measurements instead of clipping TTFT. This row does not share the native extension-status line with task descriptions. Runtime status omits the project ID, and worker status shows counts, waiting/cancelling state, heartbeat and the latest failure or incomplete outcome. Job IDs, task names, models and activity details remain in the Runtime Dock and `/watch`. Local tool status keeps the tool name, count, duration and failure state; the tool card retains its arguments and result.
 
-Research Pi explicitly loads `builtin:codemode` and `builtin:tool-search` because Pi 1.0's `--no-extensions` disables built-ins too. Codemode is enabled by default; the `on` mode retains direct tool calls as well. MCP and llama.cpp remain opt-in (`-e builtin:mcp` or `-e builtin:llama.cpp`). Analysis Sessions keep their read-only tool allowlist and do not expose codemode's model operations.
+Research Pi explicitly loads `builtin:codemode` and `builtin:tool-search`. The Leader and Pi child runners keep installed extensions enabled, including provider packages such as `pi-antigravity-acp-provider`; neither adds `--no-extensions` by default. Codemode is enabled by default; the `on` mode retains direct tool calls as well. MCP and llama.cpp remain opt-in (`-e builtin:mcp` or `-e builtin:llama.cpp`). Analysis Sessions keep their read-only tool allowlist and do not expose codemode's model operations.
 
 ## Subagent runners
 
@@ -144,7 +165,7 @@ The defaults deliberately make Codex advisor/executor the main design, implement
 
 `systems-optimizer` (Systems Optimizer) is a peer role for experiment performance, with independent backend/model/thinking/speed settings. It uses executor permissions, write ownership, external-run tools and the same Codex executor concurrency pool; it does not gain new host or resource authority. Existing v3 configs acquire its bundled defaults on load without changing executor settings. Its packaged optimization skill is included in the role prompt for Codex (including resume), Pi and Antigravity, so a bounded worker need not read the harness installation. The skill starts with available resources and whole-system analysis and encourages searching primary sources; Codex native Web Search remains enabled. Other backends use their available search capabilities.
 
-The Pi runner launches Pi Core in a separate RPC Session. It reuses the same Pi provider catalog and authentication directory as the Leader, while retaining an independent model, thinking level, conversation, and Runtime Actor. It loads the project boundary; any approval dialog that cannot be represented in the isolated RPC channel is declined and reported rather than hanging or silently widening authority. The Antigravity runner uses its documented [bidirectional streaming JSON protocol](https://antigravity.google/docs/cli/headless/) and keeps the same process for follow-up messages; launch `agy` interactively once for [first-time authentication](https://antigravity.google/docs/cli/install/). Because headless mode cannot display permission prompts, non-advisor Antigravity Actions auto-approve tools inside the CLI's explicit `--sandbox`; advisor remains plan mode without that override. Neither runner creates a handoff file; task context and later steering travel through their live message stream and the Runtime mailbox.
+The Pi runner launches Pi Core in a separate RPC Session. It reuses the same Pi provider catalog and authentication directory as the Leader, while retaining an independent model, thinking level, conversation, and Runtime Actor. Installed provider extensions remain enabled, and the runner explicitly loads the project boundary and research identity. Startup failures include the redacted stderr cause rather than only an exit code. Any approval dialog that cannot be represented in the isolated RPC channel is declined and reported rather than hanging or silently widening authority. The Antigravity runner uses its documented [bidirectional streaming JSON protocol](https://antigravity.google/docs/cli/headless/) and keeps the same process for follow-up messages; launch `agy` interactively once for [first-time authentication](https://antigravity.google/docs/cli/install/). Because headless mode cannot display permission prompts, non-advisor Antigravity Actions auto-approve tools inside the CLI's explicit `--sandbox`; advisor remains plan mode without that override. Neither runner creates a handoff file; task context and later steering travel through their live message stream and the Runtime mailbox.
 
 ### Unified model settings
 
@@ -396,3 +417,27 @@ Retired Actors cannot receive new messages, resume or be selected for mission re
 The packaged resources include Inter, a renamed Source Han Sans CN derivative, JetBrains Mono, and KaTeX with their licenses. Ordinary builds require only Node. The packer embeds only Chinese font shards used by the source document; maintaining or regenerating those shards is separate from authoring. The result is a standalone HTML file, opened in a browser; there is no additional viewer service or automatic feedback transport.
 
 When delegating HTML creation, provide the skill path and the required resources within the worker's existing filesystem permissions. Leader skill discovery does not automatically inject the full instructions into every worker.
+
+### Research branch identity and history
+
+Use a separate Session ID for Analysis while a Leader Session is running. Reopening the same Session ID as Analysis can still replace its role policy and detach its Leader; branch isolation does not yet prevent this within-branch Session collision.
+
+A new workspace receives an immutable research branch binding on Runtime initialization. Linked worktrees share a Project while keeping separate Leaders, state, evidence, mailboxes and task ownership. Use `pi branch init <name> --workspace <path>` before startup to choose a name; `pi branch status`, `pi branch list` and TUI `/runtime branches` inspect existing bindings without taking over a Leader. CLI commands support `--json`.
+
+Bindings live under `runtime/projects/workspaces/<workspaceKey>.json`; branch ledgers live under `runtime/projects/<projectKey>/branches/<branchId>/events.jsonl`. `RESEARCH_PI_RUNTIME_DIR` overrides the `runtime/projects` root. Branch IDs persist independently of Git branch names and repaired Git metadata. Existing workspaces with legacy Runtime history keep their original ledger and running jobs; live migration and branch switching are not part of this phase.
+
+Memory defaults to the current research branch. Explicit `current_project` or `all_projects` scopes broaden retrieval without changing ownership. The generation-aware derived index is `memory/memory-v5.sqlite`, separate from indexes used by older running versions. See [the Runtime guide](research-runtime-test-guide.md#独立研究分支第一阶段) for compatibility and local acceptance checks.
+
+### Checkpoints, forks, archive and maintenance
+
+`pi branch checkpoint <label>` freezes a research event boundary and tracked code. `history` and `inspect <checkpoint>` read it; `fork <name> --at <checkpoint> --to <new-worktree>` creates an independent research branch and Git worktree without inheriting live tasks or Leader leases. `rewind <checkpoint>` restores only research state after work is settled and Sessions are detached; code and actual execution outcomes stay intact.
+
+`pi branch import <source-branch> <evidence-id> --reason <reason>` explicitly adopts evidence with provenance, without replacing current claims. The Leader tool is `import_research_evidence`; `research_branch_history` is read-only and available to Analysis Sessions.
+
+`archive [branch]` compresses an inactive branch's history and makes every Runtime write entry read-only. `restore [branch]` expands it; archived evidence and checkpoints remain readable and usable by forks. `doctor` diagnoses stale bindings and locks. `prune` previews repairs; `prune --apply` rechecks and repairs only confirmed stale indexes and dead-owner Runtime locks, retaining research history and Git worktrees. It also prunes shared Memory cache rows whose original backing files disappeared, never the shared SQLite database itself.
+
+Generation-aware Memory now uses `memory/memory-v5.sqlite`, separate from v4 indexes used by older processes. Default retrieval is limited to the current branch generation; explicit project/history retrieval preserves access to older material. Permanent history deletion, automatic research-state merging, workspace relocation and live legacy migration remain outside these commands.
+
+### Offline legacy handoff
+
+`pi branch migrate --keep <name> --fresh-workspace <path> --fresh-name <name> --session <id>` previews adoption of legacy research history by the current workspace and a clean start for its sibling. Add `--apply` only after the relevant Native Hosts have stopped and all Runtime work and ownership have settled. The migration records immutable backups and a source checksum, preserves the retained Session ID, seals the old ledger, and gives each workspace its own branch. Other historical/Analysis transcripts are admitted lazily rather than rewritten while open. See the Runtime guide for recovery and provenance details.

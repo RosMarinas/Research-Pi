@@ -9,19 +9,19 @@ export function subagentConversationExtension(pi, options) {
  let runtime, client, timer, lastStatus;
  const seen = new Map();
  const identity = `Subagent · ${options.mission ?? options.role} · User → this agent`;
- const send = async (body, from, type = "ask") => createRuntimeMessage(runtime, {
+ const send = async (body, from, type = "notify") => createRuntimeMessage(runtime, {
   from, to: RESEARCH_LEADER_ACTOR_ID, type, body,
-  metadata: { workspaceKey: runtime.workspaceKey, sourceActorId: options.actorId },
+  metadata: { workspaceKey: runtime.workspaceKey, sourceActorId: options.actorId, jobId: options.id },
  });
  pi.registerCommand("leader", { description: "Return to Leader, or /leader <message> to ask it", handler: async (body, ctx) => {
   if (!body.trim()) return options.navigate("leader");
-  const receipt = await send(body, USER_ACTOR_ID);
+  const receipt = await send(body, USER_ACTOR_ID, "ask");
   ctx.ui.notify(`User → Leader queued (${receipt.id})`, "info");
  }});
  pi.registerCommand("agents", { description: "Search and switch conversations", handler: async () => options.navigate("agents") });
- pi.registerTool({ name: "message_leader", label: "Message Leader", description: "Send an explicit message to the Leader. During a user discussion, use only if the user asks you to contact the Leader; do not automatically relay discussion or progress. A reply arrives as a subsequent directed message.",
+ pi.registerTool({ name: "message_leader", label: "Message Leader", description: "Send decision-relevant information to the Leader. Defaults to notify: progress does not wake the Leader and needs no acknowledgement. Use ask only for a blocking question or decision. Your final result is reported automatically; do not also send it here. During a user discussion, use only if the user asks you to contact the Leader. A necessary reply arrives as a subsequent directed message.",
   parameters: Type.Object({ message: Type.String(), type: Type.Optional(Type.Union([Type.Literal("ask"), Type.Literal("notify")])) }),
-  async execute(_id, args) { const receipt = await send(args.message, options.actorId, args.type ?? "ask"); return { content: [{ type: "text", text: `Queued to Leader: ${receipt.id}` }], details: { messageId: receipt.id } }; }
+  async execute(_id, args) { const receipt = await send(args.message, options.actorId, args.type ?? "notify"); return { content: [{ type: "text", text: `Queued to Leader: ${receipt.id}` }], details: { messageId: receipt.id } }; }
  });
  pi.on("before_agent_start", async event => {
   if (options.isUserDiscussion?.()) return { systemPrompt: event.systemPrompt + "\nThis turn is a direct discussion with the User. Answer the User here. Do not automatically notify, ask, or report to the Leader unless the User explicitly requests it. The User can also use /leader <message> to contact the Leader." };

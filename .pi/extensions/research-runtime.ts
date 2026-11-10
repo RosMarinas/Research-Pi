@@ -58,6 +58,8 @@ import {
 	detachRuntimeActor,
 	ensureRuntimeActor,
 	initializeResearchRuntime,
+	listResearchBranches,
+	resolveResearchRuntime,
 	isRuntimeActorAttached,
 	pendingRuntimeMessages,
 	readRuntimeSnapshot,
@@ -95,9 +97,9 @@ type ProjectViewReceipt = {
 };
 
 class RuntimeLeaderBusyError extends Error {
-	readonly activation: RuntimeActivation;
-	constructor(activation: RuntimeActivation) {
-		super(`The Leader Session is active in Session ${String(activation.sessionId).slice(-8)}. Wait for it to settle or use /runtime takeover <reason>.`);
+	readonly activation: RuntimeActivation | null;
+	constructor(activation: RuntimeActivation | null, sessionId?: string) {
+		super(`This research branch is owned by Leader Session ${String(activation?.sessionId ?? sessionId).slice(-8)}. Use /runtime takeover <reason> explicitly to change its Leader.`);
 		this.name = "RuntimeLeaderBusyError";
 		this.activation = activation;
 	}
@@ -121,6 +123,7 @@ const ANALYSIS_SAFE_TOOLS = new Set([
 	"ls",
 	"research_memory_search",
 	"research_memory_read",
+	"research_branch_history",
 	"web_search",
 	"host_capability",
 	"analysis_send_to_leader",
@@ -134,6 +137,7 @@ const PROJECT_VIEW_MUTATING_TOOLS = new Set([
 	"record_research_transition",
 	"amend_project_state",
 	"research_checkpoint",
+	"import_research_evidence",
 ]);
 const PROJECT_VIEW_READ_ONLY_SUBAGENT_ACTIONS = new Set(["status", "result", "missions", "messages"]);
 
@@ -178,6 +182,7 @@ export async function reconcileStaleCodexMailbox(
 		try {
 			job = await readJob(jobId, {
 				expectedProjectKey: runtime.projectKey,
+				expectedResearchBranchId: runtime.branchId,
 				expectedLeaderActorId: RESEARCH_LEADER_ACTOR_ID,
 			});
 		} catch {
@@ -466,6 +471,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	let runtime: RuntimeContext | undefined;
 	let runtimeInputCwd: string | undefined;
 	let localSessionId: string | undefined;
+	let localResearchGeneration = 0;
 	let localAttachmentEpoch: string | undefined;
 	let activeActivationId: string | undefined;
 	const supersededMessageIds = new Set<string>();
@@ -526,14 +532,38 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 	): Promise<RuntimeContext> => {
 		const sessionId = ctx.sessionManager.getSessionId();
 		if (runtime && runtimeInputCwd === ctx.cwd && localSessionId === sessionId) {
+			if ((await readRuntimeSnapshot(runtime)).generation !== localResearchGeneration) throw new Error("This branch was rewound. Open a new Session to avoid resuming superseded research context.");
 			if (!options.claim || await isRuntimeActorAttached(runtime, RESEARCH_LEADER_ACTOR_ID, sessionId)) return runtime;
 		} else {
+			const resolved = await resolveResearchRuntime(ctx.cwd);
+			const entries = ctx.sessionManager.getBranch();
+			const resolvedSnapshot = await readRuntimeSnapshot(resolved);
+			const historical = entries.some((entry: any) => entry.type === "message" || entry.type === "compaction");
+			let binding = entries.findLast((entry: any) => entry.type === "custom" && entry.customType === "research-runtime-branch")?.data;
+			if (!binding?.branchId && resolvedSnapshot.legacyMigration?.sessionIds?.includes(sessionId)) {
+				binding = { projectKey: resolved.projectKey, branchId: resolved.branchId, workspaceKey: resolved.workspaceKey,
+					generation: resolvedSnapshot.generation, migrationId: resolvedSnapshot.legacyMigration.migrationId };
+				pi.appendEntry("research-runtime-branch", binding);
+			}
+			if (binding && (binding.generation ?? 0) !== resolvedSnapshot.generation) throw new Error("This branch was rewound. Open a new Session for its restored research state.");
+			if (binding && (binding.projectKey !== resolved.projectKey || (binding.branchId ?? null) !== resolved.branchId
+				|| (binding.workspaceKey && binding.workspaceKey !== resolved.workspaceKey))) {
+				throw new Error("This Session belongs to another research branch. Open a new Session in this workspace; historical Sessions cannot silently switch ownership.");
+			}
+			if (!binding && resolved.branchId && historical) {
+				throw new Error("This historical Session has no research branch binding. Start a new Session to work on this branch.");
+			}
 			runtime = await initializeResearchRuntime(ctx.cwd, {
 				sessionId,
 				branchAnchorId: ctx.sessionManager.getLeafId(),
-			}, { attach: false });
+			}, { attach: false, ...(binding ? { scope: { projectKey: binding.projectKey, branchId: binding.branchId ?? null } }
+				: historical ? { scope: { projectKey: resolved.projectKey, branchId: null } } : {}) });
+			if (!binding) pi.appendEntry("research-runtime-branch", {
+				projectKey: runtime.projectKey, branchId: runtime.branchId, workspaceKey: runtime.workspaceKey, generation: resolvedSnapshot.generation,
+			});
 			runtimeInputCwd = ctx.cwd;
 			localSessionId = sessionId;
+			localResearchGeneration = resolvedSnapshot.generation;
 			const snapshot = await readRuntimeSnapshot(runtime);
 			const existingAttachment = runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID);
 			if (existingAttachment?.sessionId === sessionId) localAttachmentEpoch = existingAttachment.epoch ?? undefined;
@@ -544,6 +574,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 				branchAnchorId: ctx.sessionManager.getLeafId(),
 				reason: options.reason ?? (options.force ? "explicit takeover" : "user activity"),
 			}, { force: options.force === true, onlyIfUnattached: options.onlyIfUnattached === true });
+			if (claim.status === "occupied" && !options.onlyIfUnattached) throw new RuntimeLeaderBusyError(null, claim.attachment?.sessionId);
 			if (claim.status === "busy" && !options.onlyIfUnattached) throw new RuntimeLeaderBusyError(claim.activation);
 			if (claim.attachment?.sessionId === sessionId) localAttachmentEpoch = claim.attachment.epoch ?? undefined;
 		}
@@ -1484,8 +1515,14 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			try {
 				const [mode = "board", ...rest] = args.trim().split(/\s+/).filter(Boolean);
-				if (!["board", "health", "recommend", "view", "rotate", "takeover", "analysis", "context", "promote", "new", "inherit"].includes(mode)) {
-					throw new Error("Usage: /runtime [board|health|recommend|view|analysis [reason]|context <on|off>|promote <reason>|rotate [reason]|takeover <reason>|new <clean|analysis> [reason]|inherit [reason]]");
+				if (!["branches", "board", "health", "recommend", "view", "rotate", "takeover", "analysis", "context", "promote", "new", "inherit"].includes(mode)) {
+					throw new Error("Usage: /runtime [branches|board|health|recommend|view|analysis [reason]|context <on|off>|promote <reason>|rotate [reason]|takeover <reason>|new <clean|analysis> [reason]|inherit [reason]]");
+				}
+				if (mode === "branches") {
+					const activeRuntime = await getRuntime(ctx);
+					const branches = await listResearchBranches(activeRuntime);
+					ctx.ui.notify(branches.length ? branches.map(branch => `${branch.branchId === activeRuntime.branchId ? "* " : "  "}${branch.name} · ${branch.branchId} · ${branch.workspaceRoot}`).join("\n") : "This project uses the legacy shared Runtime; no independent research branches are registered.", "info");
+					return;
 				}
 				if (mode === "board") {
 					await showRuntimeBoard(ctx);
@@ -1558,7 +1595,7 @@ export default function researchRuntimeExtension(pi: ExtensionAPI) {
 					return;
 				}
 				if (mode === "promote") {
-					if (!isAnalysisSession()) throw new Error("Only an Analysis Session needs promotion; this Session is already a Leader or clean Session.");
+					if (!isAnalysisSession()) throw new Error("This is already a Leader or clean Session. To reclaim the Project Leader attachment, use /runtime takeover <reason>; /runtime promote is only for Analysis Sessions.");
 					const reason = rest.join(" ").trim();
 					if (!reason) throw new Error("Usage: /runtime promote <reason>");
 					const activeRuntime = await getRuntime(ctx, { claim: true, force: true, reason });

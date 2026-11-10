@@ -6,6 +6,7 @@ import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sanitizeBoundaryEnvironment } from "./project-boundary.mjs";
+import { redactSensitiveText } from "./sensitive-text.mjs";
 import { subagentModelCard, SUBAGENT_WORKSPACE_POLICY } from "./subagent-message.mjs";
 
 const FINAL_STATUSES = new Set(["completed", "failed", "cancelled", "input_required"]);
@@ -53,6 +54,7 @@ function publicJob(job) {
 		cwd: job.cwd,
 		workspaceKey: job.workspaceKey,
 		projectKey: job.projectKey,
+		branchId: job.branchId ?? null,
 		researchTrackRef: job.researchTrackRef,
 		activityPath: job.activityPath,
 		nativeTerminal: job.closed ? null : job.nativeTerminal,
@@ -85,9 +87,10 @@ function writeRecord(child, value) {
 }
 
 export function buildPiRunnerArgs(input) {
+	// Installed providers are extensions too. Keep them enabled, as on the
+	// Leader, so models such as antigravity-acp/* exist in the child catalog.
 	const args = [
 		"--mode", "rpc",
-		"--no-extensions",
 		"--no-skills",
 		"--no-prompt-templates",
 		"--no-themes",
@@ -174,8 +177,8 @@ export function createSubagentSessionManager(options = {}) {
 		return job.records;
 	};
 
-	const beginTurn = async (job, body, source = "research-leader", messageId = null) => {
-		job.reportToLeader = source !== "user";
+	const beginTurn = async (job, body, source = "research-leader", messageId = null, reportToLeader = source !== "user") => {
+		job.reportToLeader = reportToLeader;
 		job.turn += 1;
 		job.actionId = `action:${job.id}:turn-${job.turn}`;
 		job.status = "running";
@@ -225,7 +228,10 @@ export function createSubagentSessionManager(options = {}) {
 			job.closed = true;
 			void enqueue(job, async () => {
 				if (buffer.trim()) await handlePiRecord(job, buffer);
-				if (!FINAL_STATUSES.has(job.status)) await settle(job, job.cancelling ? "cancelled" : "failed", null, `Pi runner exited (${code ?? "?"}${signal ? `, ${signal}` : ""})`);
+				if (!FINAL_STATUSES.has(job.status)) {
+					const detail = job.stderr ? `: ${redactSensitiveText(job.stderr)}` : "";
+					await settle(job, job.cancelling ? "cancelled" : "failed", null, `Pi runner exited (${code ?? "?"}${signal ? `, ${signal}` : ""})${detail}`);
+				}
 			});
 		});
 		await beginTurn(job, task);
@@ -409,6 +415,7 @@ export function createSubagentSessionManager(options = {}) {
 			cwd: resolve(input.cwd),
 			workspaceKey: input.workspaceKey ?? null,
 			projectKey: input.projectKey ?? null,
+			branchId: input.branchId ?? null,
 			researchTrackRef: input.researchTrackRef ?? "project:initial",
 			activityPath: input.activityPath ?? null,
 			systemPrompt: input.systemPrompt,
@@ -460,23 +467,28 @@ export function createSubagentSessionManager(options = {}) {
 		if (job.status === "cancelling") return { status: "queued", detail: "Waiting for cancellation to settle" };
 		const body = String(message?.body ?? message ?? "").trim();
 		if (!body) throw new Error("Subagent message body is required");
+		// A reply or informational note can be read in the native conversation,
+		// but its completion must not generate a new result back to the Leader.
+		// Explicit steering/resume still requests a result. An active mission
+		// keeps its existing reporting obligation when a passive note arrives.
+		const reportToLeader = message.from !== "user" && !["notify", "reply"].includes(message.type);
 		if (job.backend === "pi") {
 			if (job.status === "running" || job.status === "starting" || job.nativeBlocked) {
 				// Pi steering enters the current agent loop at its next safe boundary,
 				// matching Runtime's direct-message semantics without creating a
 				// second queued turn whose lifecycle would be ambiguous here.
-				if (message.from && message.from !== "user") job.reportToLeader = true;
+				if (message.from && reportToLeader) job.reportToLeader = true;
 				writeRecord(job.child, { type: "steer", message: body, source: message.from ?? "user" });
 				await emit(job, { type: "message", source: message.from ?? "user", messageId: message.id, text: body, summary: compact(body, 300) });
 				return { status: "delivered", detail: `delivered to active Pi Actor ${actorId}` };
 			}
-			await beginTurn(job, body, message.from ?? "user", message.id);
+			await beginTurn(job, body, message.from ?? "user", message.id, reportToLeader);
 			return { status: "delivered", detail: `resumed Pi Actor ${actorId}` };
 		}
 		if (job.status === "running" || job.status === "starting") {
 			return { status: "queued", detail: `waiting in Runtime for Antigravity Actor ${actorId}; the next turn starts after the current result` };
 		}
-		await beginTurn(job, body, message.from ?? "user", message.id);
+		await beginTurn(job, body, message.from ?? "user", message.id, reportToLeader);
 		return { status: "delivered", detail: `resumed Antigravity Actor ${actorId}` };
 	};
 

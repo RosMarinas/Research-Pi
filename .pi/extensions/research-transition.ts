@@ -46,7 +46,11 @@ export default function researchTransitionExtension(pi: ExtensionAPI) {
 			const sessionId = ctx.sessionManager.getSessionId();
 			const snapshot = await readRuntimeSnapshot(runtime);
 			const attachment = runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID, sessionId);
-			if (!attachment?.epoch) throw new Error("This is no longer the Leader Session; explicitly promote or take over before changing the research route.");
+			if (!attachment?.epoch) {
+				const current = runtimeActorAttachment(snapshot, RESEARCH_LEADER_ACTOR_ID);
+				const owner = current ? `attached to Session ${current.sessionId}` : "currently detached";
+				throw new Error(`Project ${runtime.projectKey} is ${owner}; this Session does not hold its Leader attachment. Use /runtime takeover <reason> from a Leader/clean Session, or /runtime promote <reason> from an Analysis Session, before changing the research route.`);
+			}
 			const git = await getGitSnapshot(ctx.cwd);
 			const transition = await recordResearchTransition(runtime, {
 				id,

@@ -220,7 +220,7 @@ export class RuntimeDockComponent {
 			? th.fg("warning", "clean context")
 			: this.model.leader.isCurrentSessionAttached
 				? th.fg("success", "Leader here")
-				: th.fg("warning", "Leader elsewhere");
+				: th.fg("warning", this.model.leader.sessionId ? "Leader elsewhere" : "Leader detached");
 		const route = inline(this.model.research.activeTrack || this.model.research.question || this.model.project.git.branch || "project context", 72);
 		const headline = `${th.fg("customMessageLabel", th.bold("◈ RESEARCH"))}  ${th.fg("accent", th.bold(this.model.project.name))} · ${route}`;
 		const counters = [

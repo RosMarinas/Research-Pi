@@ -123,8 +123,10 @@ export function buildRuntimeBoardModel({ runtime, snapshot, view, health, sessio
 		generatedAt: new Date().toISOString(),
 		project: {
 			key: runtime.projectKey,
+			branchId: runtime.branchId ?? null,
+			branchName: runtime.branchName ?? null,
 			shortKey: shortId(runtime.projectKey, 8),
-			name: basename(runtime.workspaceRoot) || runtime.workspaceRoot,
+			name: runtime.branchName ?? (basename(runtime.workspaceRoot) || runtime.workspaceRoot),
 			root: runtime.workspaceRoot,
 			revision: view.projectRevision,
 			stateRevision: view.stateRevision,

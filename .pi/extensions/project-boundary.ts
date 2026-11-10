@@ -34,15 +34,16 @@ import {
 	LINUX_SANDBOX_INSTALL_HINT,
 	prepareBoundaryRuntime,
 	projectTemporaryEnvironment,
+	projectSandboxSpawn,
 	SYSTEM_TMPDIR,
 	readGitIdentity,
 	researchPiFullAccessEnabled,
 	resolveBoundaryPath,
 	resolveSandboxDependencies,
-	runCodexSandboxPreflight,
 	sanitizeBoundaryEnvironment,
 } from "../lib/project-boundary.mjs";
 import { runtimeSessionInheritancePolicy } from "../lib/research-runtime.mjs";
+import { formatBoundaryDoctor, runBoundaryDoctorProcess } from "../lib/boundary-doctor.mjs";
 import { resolveSystemRuntimePolicy } from "../lib/security-policy.mjs";
 import { mapProviderSystemPrompt } from "../lib/provider-system-prompt.mjs";
 
@@ -204,9 +205,12 @@ function createProjectBashOperations(
 
 			const commandId = `research-pi-${randomUUID()}`;
 			const shell = process.platform === "darwin" ? "/bin/zsh" : getShellConfig().shell;
-			const wrapped = await SandboxManager.wrapWithSandboxArgv(command, shell, undefined, signal, cwd, {
+			const generated = await SandboxManager.wrapWithSandboxArgv(command, shell, undefined, signal, cwd, {
 				commandId,
 				commandText: command,
+			});
+			const wrapped = projectSandboxSpawn(generated, runtime, {
+				networkSockets: [SandboxManager.getLinuxHttpSocketPath(), SandboxManager.getLinuxSocksSocketPath()],
 			});
 			const childEnv = sanitizeBoundaryEnvironment({ ...env, ...wrapped.env });
 			Object.assign(childEnv, systemRuntime.environment);
@@ -521,15 +525,15 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 		label: launchFullAccess ? "bash (full access for Leader)" : "bash (project boundary)",
 		promptSnippet: launchFullAccess
 			? "Execute host commands with explicit full access in the Leader Session; Analysis remains project-read-only"
-			: "Execute shell commands inside the current project boundary with role-scoped write and network authority",
+			: "Execute shell commands inside the current project boundary with role-scoped write authority and public network access",
 		promptGuidelines: launchFullAccess
 			? [
 					"This Leader Session has explicit host-user filesystem, command, network, and Unix-socket access. Keep operations within the user's task, protect credentials, and verify exact destructive targets.",
-					"Analysis Sessions still use an OS-enforced read-only project profile with no local shell network; full access does not widen the Analysis role.",
+					"Analysis Sessions use an OS-enforced read-only project profile with public network access; full access does not widen their filesystem or execution role.",
 				]
 			: [
 					"Leader shell may read/write the current project, including Git metadata. Analysis shell uses an OS-enforced read-only project profile with only project-local runtime temp writable. Neither role can access other user directories or write system temp paths.",
-					"Leader project shell has public network access. Analysis local shell has no network; use web_search for public evidence and host_capability for approved SSH inspection. Command syntax is not a policy boundary.",
+					"Leader and Analysis project shells have public network access. Use host_capability for SSH inspection that needs host credentials. Command syntax is not a policy boundary.",
 					"Unix sockets and host credential files remain outside the project sandbox. If a justified operation needs them, use host_capability command or a project-trusted SSH target instead of asking the user to copy a terminal command.",
 				],
 		async execute(id, params, signal, onUpdate, ctx) {
@@ -687,53 +691,10 @@ export default function projectBoundaryExtension(pi: ExtensionAPI) {
 			const words = parseCommandWords(args ?? "");
 			const action = words.shift();
 			if (action === "doctor") {
-				if (!runtime || !systemRuntime) {
-					ctx.ui.notify(`Boundary unavailable: ${initializationError ?? "not initialized"}`, "error");
-					return;
-				}
 				ctx.ui.setWorkingMessage("Validating Pi and Codex permission boundaries...");
 				try {
-					let piOutput = "";
-					const piProbe = await createProjectBashOperations(runtime, gitIdentity, systemRuntime).exec(
-						"set -e\ngit --version >/dev/null\ngit status --porcelain=v1 --untracked-files=no >/dev/null\nif command -v python3 >/dev/null 2>&1; then python3 --version >/dev/null; fi\nprintf 'research-pi-shell-preflight=ok\\n'",
-						runtime.root,
-						{
-							onData: (chunk) => {
-								piOutput = `${piOutput}${chunk.toString()}`.slice(-8000);
-							},
-							timeout: 20,
-							env: process.env,
-						},
-					);
-					if (piProbe.exitCode !== 0) throw new Error(`Pi shell preflight exited ${piProbe.exitCode}: ${piOutput}`);
-					const [advisorProbe, executorProbe] = await Promise.all([
-						runCodexSandboxPreflight({
-							codexBin: process.env.PI_CODEX_BIN ?? "codex",
-							mode: "advisor",
-							cwd: runtime.root,
-							gitIdentity,
-							runtimePolicy: systemRuntime,
-						}),
-						runCodexSandboxPreflight({
-							codexBin: process.env.PI_CODEX_BIN ?? "codex",
-							mode: "executor",
-							cwd: runtime.root,
-							runtimeTmp: runtime.runtimeTmp,
-							gitIdentity,
-							runtimePolicy: systemRuntime,
-							fullAccess: leaderHasFullAccess(ctx),
-						}),
-					]);
-					ctx.ui.notify(
-						[
-							"Research Pi boundary doctor passed.",
-							leaderHasFullAccess(ctx) ? "Pi shell: explicit full host access active." : "Pi shell: project/Git/runtime OK.",
-							`Codex advisor: ${advisorProbe.codexVersion || "version unknown"} · ${advisorProbe.codexBin} · project/Git/runtime OK.`,
-							`Codex executor: ${executorProbe.codexVersion || "version unknown"} · ${executorProbe.codexBin} · ${leaderHasFullAccess(ctx) ? "full host access/runtime OK" : "project/Git/runtime OK"}.`,
-							...systemRuntime.diagnostics,
-						].join("\n"),
-						"info",
-					);
+					const result = await runBoundaryDoctorProcess({ cwd: ctx.cwd, environment: process.env });
+					ctx.ui.notify(formatBoundaryDoctor(result), result.ok ? "info" : "error");
 				} catch (error) {
 					ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 				} finally {

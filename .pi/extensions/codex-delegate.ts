@@ -1,3 +1,4 @@
+import { subagentBelongsToWorkspace } from "../lib/runtime-subagents.mjs";
 import { getMarkdownTheme, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -35,6 +36,7 @@ import {
 	RESEARCH_LEADER_ACTOR_ID,
 	RUNTIME_MESSAGE_KIND,
 	assertRuntimeActorAttachment,
+	acknowledgeDirectSubagentTerminalResult,
 	codexActorId,
 	consumeRuntimeMessagesForAttachment,
 	readRuntimeSnapshot,
@@ -397,6 +399,7 @@ const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled", "outc
 
 type CodexRecoveryScope = {
 	projectKey: string;
+	branchId?: string | null;
 	leaderActorId: string;
 	leaderSessionId: string;
 	branchEntryIds: Set<string>;
@@ -404,7 +407,7 @@ type CodexRecoveryScope = {
 
 export function codexJobVisibleForRecovery(job: CodexJobView, scope: CodexRecoveryScope): boolean {
 	if (job.leaderActorId) {
-		return job.projectKey === scope.projectKey && job.leaderActorId === scope.leaderActorId;
+		return job.projectKey === scope.projectKey && (job.branchId ?? null) === (scope.branchId ?? null) && job.leaderActorId === scope.leaderActorId;
 	}
 	return job.leaderSessionId === scope.leaderSessionId
 		&& Boolean(job.leaderBranchAnchorId && scope.branchEntryIds.has(job.leaderBranchAnchorId));
@@ -450,6 +453,7 @@ async function leaderScope(ctx: ExtensionContext, options: { requireAttached?: b
 	return {
 		runtime,
 		projectKey: runtime.projectKey,
+		branchId: runtime.branchId,
 		projectRevision: snapshot.revision,
 		researchTrackRef: track.ref,
 		researchTrackLabel: track.label,
@@ -477,13 +481,14 @@ function projectJobManagementScope(ctx: ExtensionContext, scope: Awaited<ReturnT
 	return {
 		expectedCwd: ctx.cwd,
 		expectedProjectKey: scope.projectKey,
+		expectedResearchBranchId: scope.branchId,
 		expectedLeaderActorId: scope.leaderActorId,
 	};
 }
 
 async function jobManagementScope(ctx: ExtensionContext, jobId: string) {
 	const scope = await leaderScope(ctx);
-	const job = await readCodexJob(jobId, { expectedCwd: ctx.cwd });
+	const job = await readCodexJob(jobId, { expectedCwd: ctx.cwd, expectedResearchBranchId: scope.branchId, reconcile: false });
 	if (job.leaderActorId) return projectJobManagementScope(ctx, scope);
 	return {
 		expectedCwd: ctx.cwd,
@@ -495,7 +500,7 @@ async function jobManagementScope(ctx: ExtensionContext, jobId: string) {
 async function listOwnedCodexJobs(ctx: ExtensionContext) {
 	const scope = await leaderScope(ctx);
 	const [projectJobs, legacyJobs] = await Promise.all([
-		listCodexJobs({ cwd: ctx.cwd, projectKey: scope.projectKey, leaderActorId: scope.leaderActorId }),
+		listCodexJobs({ cwd: ctx.cwd, projectKey: scope.projectKey, branchId: scope.branchId, leaderActorId: scope.leaderActorId }),
 		listCodexJobs({ cwd: ctx.cwd, leaderSessionId: scope.leaderSessionId, branchEntryIds: scope.branchEntryIds, legacyOnly: true }),
 	]);
 	return [...new Map([...projectJobs, ...legacyJobs].map((job) => [job.id, job])).values()];
@@ -504,7 +509,7 @@ async function listOwnedCodexJobs(ctx: ExtensionContext) {
 async function listRestorableCodexJobs(ctx: ExtensionContext) {
 	const scope = await leaderScope(ctx);
 	const [projectJobs, legacyJobs] = await Promise.all([
-		listCodexJobs({ cwd: ctx.cwd, projectKey: scope.projectKey, leaderActorId: scope.leaderActorId }),
+		listCodexJobs({ cwd: ctx.cwd, projectKey: scope.projectKey, branchId: scope.branchId, leaderActorId: scope.leaderActorId }),
 		// Startup recovery indexes all legacy jobs owned by this Pi Session once.
 		// Branch visibility is applied after reading so tree navigation can switch
 		// legacy live monitors from memory without another directory scan.
@@ -519,7 +524,7 @@ async function listRestorableCodexJobs(ctx: ExtensionContext) {
 async function listOwnedCodexMissions(ctx: ExtensionContext) {
 	const scope = await leaderScope(ctx);
 	const [projectMissions, legacyMissions] = await Promise.all([
-		listCodexMissions({ cwd: ctx.cwd, projectKey: scope.projectKey, leaderActorId: scope.leaderActorId }),
+		listCodexMissions({ cwd: ctx.cwd, projectKey: scope.projectKey, branchId: scope.branchId, leaderActorId: scope.leaderActorId }),
 		listCodexMissions({ cwd: ctx.cwd, leaderSessionId: scope.leaderSessionId, branchEntryIds: scope.branchEntryIds, legacyOnly: true }),
 	]);
 	return [...projectMissions, ...legacyMissions];
@@ -595,14 +600,7 @@ export async function acknowledgeDirectCodexTerminalResult({
 	sessionId: string;
 	attachmentEpoch: string;
 }) {
-	if (!TERMINAL_JOB_STATUSES.has(job.status)) return null;
-	const message = await recordCodexRuntimeEvent(runtime, job);
-	if (!message) return null;
-	return (await consumeRuntimeMessagesForAttachment(runtime, [message.id], {
-		sessionId,
-		actorId: RESEARCH_LEADER_ACTOR_ID,
-		attachmentEpoch,
-	}))[0];
+	return await acknowledgeDirectSubagentTerminalResult({ runtime, job: { ...job, backend: "codex" }, sessionId, attachmentEpoch });
 }
 
 export default function codexDelegateExtension(pi: ExtensionAPI) {
@@ -1012,7 +1010,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 	registerSubagentRuntimeAdapter("codex", {
 		list: async ({ ctx }) => {
 			const owner = await leaderScope(ctx);
-			return await listCodexJobs({ cwd: ctx.cwd, projectKey: owner.projectKey, leaderActorId: owner.leaderActorId });
+			return await listCodexJobs({ cwd: ctx.cwd, projectKey: owner.projectKey, branchId: owner.branchId, leaderActorId: owner.leaderActorId });
 		},
 		status: async ({ jobId, ctx }) => publicJobView(await readCodexJob(jobId, await jobManagementScope(ctx, jobId))),
 		start: async (input) => {
@@ -1033,6 +1031,7 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 			const jobs = await listCodexJobs({
 				cwd: ctx.cwd,
 				projectKey: owner.projectKey,
+				branchId: owner.branchId,
 				leaderActorId: owner.leaderActorId,
 				actorId: actor.id,
 			});
@@ -1337,6 +1336,9 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 				if (backend !== "codex") {
 					const adapter = getSubagentRuntimeAdapter(backend);
 					if (!adapter) throw new Error(`${backend} subagent adapter is not loaded`);
+						if (params.jobId && !subagentBelongsToWorkspace(await adapter.status({ jobId: params.jobId }), owner.runtime)) {
+							throw new Error("This subagent belongs to another research branch or workspace");
+						}
 					if (params.action === "start" || params.action === "resume") {
 						const dispatched = await dispatchTask();
 						job = dispatched.job;
@@ -1363,6 +1365,10 @@ export default function codexDelegateExtension(pi: ExtensionAPI) {
 						commandReceipt = receipt.detail;
 					} else {
 						throw new Error(`${params.action} is specific to the Codex backend; ${backend} supports start, status, result, resume, steer, and cancel`);
+					}
+					if (owner.attachmentEpoch) {
+						await acknowledgeDirectSubagentTerminalResult({ runtime: owner.runtime, job,
+							sessionId: owner.leaderSessionId, attachmentEpoch: owner.attachmentEpoch });
 					}
 					return {
 						content: [{
