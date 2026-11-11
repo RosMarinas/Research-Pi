@@ -10,7 +10,9 @@ function normalizeBackend(backend) {
 }
 
 export function registerSubagentRuntimeAdapter(backend, adapter) {
-	subagentAdapters.set(normalizeBackend(backend), adapter);
+	const key = normalizeBackend(backend);
+	subagentAdapters.set(key, adapter);
+	return () => { if (subagentAdapters.get(key) === adapter) subagentAdapters.delete(key); };
 }
 
 export function getSubagentRuntimeAdapter(backend) {

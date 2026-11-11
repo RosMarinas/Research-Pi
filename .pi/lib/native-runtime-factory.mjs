@@ -9,10 +9,13 @@ import { validateThemeJson } from "../../node_modules/@earendil-works/pi-coding-
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/trust-manager.js";
 import { processFileArguments } from "../../node_modules/@earendil-works/pi-coding-agent/dist/cli/file-processor.js";
 import { buildInitialMessage } from "../../node_modules/@earendil-works/pi-coding-agent/dist/cli/initial-message.js";
+import { openLazySession, discoverSessionHeaders } from "./lazy-session-history.mjs";
+import { runtimeMemoryExtension } from "./runtime-memory.mjs";
 
 export async function createResearchSessionRuntime({ args, cwd, agentDir, sessionDir, extensionFactories = [], model, settingsManager }) {
 	setThemeJsonValidator(validateThemeJson);
 	const parsed = parseArgs(args);
+	const memoryControl = { observed: () => memoryControl.presentationObserved ?? true };
 	sessionDir = parsed.sessionDir ?? sessionDir;
 	const parseErrors = parsed.diagnostics.filter((x) => x.type === "error"); if (parseErrors.length) throw new Error(parseErrors.map((x) => x.message).join("\n"));
 	const factory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
@@ -22,7 +25,7 @@ export async function createResearchSessionRuntime({ args, cwd, agentDir, sessio
 			resourceLoaderOptions: { noExtensions: parsed.noExtensions, noSkills: parsed.noSkills, noThemes: parsed.noThemes, noPromptTemplates: parsed.noPromptTemplates, additionalPromptTemplatePaths: parsed.promptTemplates, noContextFiles: parsed.noContextFiles,
 				additionalExtensionPaths: parsed.extensions, additionalSkillPaths: parsed.skills, additionalThemePaths: parsed.themes,
 				appendSystemPrompt: parsed.appendSystemPrompt, systemPrompt: parsed.systemPrompt,
-				extensionFactories: [...builtInExtensions, ...extensionFactories] } });
+				extensionFactories: [...builtInExtensions, pi => runtimeMemoryExtension(pi, memoryControl), ...extensionFactories] } });
 		const errors = [...services.diagnostics.filter((x) => x.type === "error"), ...services.resourceLoader.getExtensions().errors];
 		if (errors.length) throw new Error(errors.map((x) => x.message ?? `${x.path}: ${x.error}`).join("\n"));
 		const resolved = resolveCliModel({ cliProvider: parsed.provider, cliModel: parsed.model, cliThinking: parsed.thinking, modelRuntime: services.modelRuntime });
@@ -37,24 +40,30 @@ export async function createResearchSessionRuntime({ args, cwd, agentDir, sessio
 		return { ...created, services, diagnostics: services.diagnostics };
 	};
 	let sessionManager;
-	const sessions = await SessionManager.list(cwd, sessionDir);
-	const resolveSession = (value) => {
+	// Discovery needs IDs/headers, not every historical message and search text.
+	let sessions;
+	const listSessions = async () => sessions ??= sessionDir ? discoverSessionHeaders(sessionDir, cwd) : await SessionManager.list(cwd, sessionDir);
+	const resolveSession = async (value) => {
 		const path = resolve(cwd, value);
 		if (existsSync(path)) return path;
-		const matches = sessions.filter((s) => s.id.startsWith(value));
+		const matches = (await listSessions()).filter((s) => s.id.startsWith(value));
 		if (matches.length !== 1) throw new Error(matches.length ? "Ambiguous session ID" : "No workspace session matches " + value);
 		return matches[0].path;
 	};
 	if (parsed.noSession) sessionManager = SessionManager.inMemory(cwd, { id: parsed.sessionId });
-	else if (parsed.fork) sessionManager = SessionManager.forkFrom(resolveSession(parsed.fork), cwd, sessionDir, { id: parsed.sessionId });
+	else if (parsed.fork) sessionManager = SessionManager.forkFrom(await resolveSession(parsed.fork), cwd, sessionDir, { id: parsed.sessionId });
 	else if (parsed.session) {
-		sessionManager = SessionManager.open(resolveSession(parsed.session), sessionDir);
+		sessionManager = openLazySession(SessionManager, await resolveSession(parsed.session), sessionDir);
 		if (resolve(sessionManager.getCwd()) !== resolve(cwd)) throw new Error("This Session belongs to another workspace; use --fork to copy it into the current workspace");
 	}
-	else if (parsed.continue) sessionManager = SessionManager.continueRecent(cwd, sessionDir);
-	else if (parsed.sessionId) { const existing = sessions.find((s) => s.id === parsed.sessionId); if (existing) sessionManager = SessionManager.open(existing.path, sessionDir, cwd); }
+	else if (parsed.continue) {
+		const recent = sessionDir ? (await listSessions()).sort((a, b) => b.mtime - a.mtime)[0] : null;
+		sessionManager = recent ? openLazySession(SessionManager, recent.path, sessionDir, cwd) : sessionDir ? undefined : SessionManager.continueRecent(cwd, sessionDir);
+	}
+	else if (parsed.sessionId) { const existing = (await listSessions()).find((s) => s.id === parsed.sessionId); if (existing) sessionManager = openLazySession(SessionManager, existing.path, sessionDir, cwd); }
 	sessionManager ??= SessionManager.create(cwd, sessionDir, { id: parsed.sessionId });
 	const runtime = await createAgentSessionRuntime(factory, { cwd, agentDir, sessionManager });
+	runtime.memoryControl = memoryControl;
 	if (parsed.name) runtime.session.setSessionName(parsed.name);
 	const files = await processFileArguments(parsed.fileArgs ?? []);
 	runtime.startupInput = buildInitialMessage({ parsed, fileText: files.text, fileImages: files.images });

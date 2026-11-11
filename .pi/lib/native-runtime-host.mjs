@@ -4,15 +4,22 @@ import { existsSync } from 'node:fs';
 import { InteractiveMode } from '../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js';
 import { NativeTerminal } from './native-terminal.mjs';
 import { createDesktopTerminal } from './web-terminal.mjs';
+import { installPresentationWindow } from './runtime-memory.mjs';
 
 export async function createNativeRuntimeHost({ runtime, terminalSocket, instance, tuiMode = runtime.startupTuiMode ?? "fullscreen", configureMode = () => {}, suspendUnobserved = false, onShutdown = async()=>{} }) {
-  let desktop, closing = false, inputSocket, observed = !suspendUnobserved;
+  let desktop, closing = false, inputSocket, observerCount = 0, observed = !suspendUnobserved;
   const terminal = new NativeTerminal({output: event => desktop?.broadcast(event)});
   const mode = new InteractiveMode(runtime, { terminal, tuiMode,
     startupDiagnostics: runtime.diagnostics, initialThemeSetting: runtime.services.settingsManager.getTheme(),
     initialMessage: runtime.startupInput?.initialMessage, initialImages: runtime.startupInput?.initialImages,
     initialMessages: runtime.startupMessages,
   });
+  if (runtime.memoryControl) {
+    runtime.memoryControl.presentationObserved = false;
+    runtime.memoryControl.presentation = installPresentationWindow(mode);
+    runtime.memoryControl.blocked = () => mode.extensionDialogs.length > 0 || !runtime.session.isIdle || runtime.session.isCompacting
+      || mode.pendingUserInputs.length > 0 || mode.compactionQueuedMessages.length > 0 || Boolean(mode.bashComponent) || mode.pendingBashComponents.length > 0 || mode.pendingTools.size > 0;
+  }
   const setProgress = terminal.setProgress.bind(terminal);
   terminal.setProgress = active => setProgress(active && observed);
   const requestRender = mode.ui.requestRender.bind(mode.ui);
@@ -21,6 +28,8 @@ export async function createNativeRuntimeHost({ runtime, terminalSocket, instanc
     runtimePerformance.count('renderRequests'); requestRender(...args);
   };
   const setObserved = count => {
+    observerCount = count;
+    if (runtime.memoryControl) runtime.memoryControl.presentationObserved = count > 0;
     const next = !suspendUnobserved || count > 0;
     if (next === observed) return;
     observed = next;
@@ -67,5 +76,8 @@ export async function createNativeRuntimeHost({ runtime, terminalSocket, instanc
     await runtime.dispose(); await desktop.close(); terminal.dispose();
     await unlink(terminalSocket).catch(e=>{if(e.code!=='ENOENT')throw e});await onShutdown();
   }
-  return {runtime,mode,terminal,state,close,run,get observed(){return observed}};
+  return {runtime,mode,terminal,state,close,run,get observed(){return observed},get observers(){return observerCount},
+    canHibernate: () => !closing && observerCount === 0 && runtime.session.isIdle && !runtime.session.isCompacting
+      && mode.extensionDialogs.length === 0 && mode.pendingUserInputs.length === 0 && mode.compactionQueuedMessages.length === 0
+      && !mode.bashComponent && mode.pendingBashComponents.length === 0 && mode.pendingTools.size === 0};
 }

@@ -101,6 +101,7 @@ function resultCard(job, messageId) {
 		lines.push(`Available detail: ${sections.join(", ")}.`);
 		lines.push(`To read one detail section, call subagent with action=result, jobId=${line(job.id)}, and resultSection=<section>.`);
 	}
+	if (job?.resultPath && !sections.length) lines.push(`Full result is saved. Call subagent with action=result and jobId=${line(job.id)} for the original result.`);
 	lines.push("No acknowledgement is required. Use this result for the current task; contact the sender only for a decision, correction, or further work.");
 	return lines.join("\n");
 }

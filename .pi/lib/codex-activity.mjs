@@ -1,4 +1,5 @@
 import { open } from "node:fs/promises";
+import { StringDecoder } from "node:string_decoder";
 
 const MAX_COMMAND_LENGTH = 600;
 const MAX_OUTPUT_TAIL = 2000;
@@ -338,36 +339,57 @@ export class CodexActivityCursor {
 		this.carry = "";
 		this.events = [];
 		this.maxEvents = options.maxEvents ?? DEFAULT_MAX_EVENTS;
+		this.chunkBytes = options.chunkBytes ?? 64 * 1024;
+		this.pollBytes = options.pollBytes ?? 1024 * 1024;
+		this.initialBytes = options.initialBytes ?? 4 * 1024 * 1024;
+		this.lineBytes = options.lineBytes ?? 1024 * 1024;
+		this.decoder = new StringDecoder("utf8");
+		this.initialized = false;
+		this.skippingLine = false;
 	}
 
 	async poll() {
+		if (this.pending) return this.pending;
+		this.pending = this.readAvailable();
+		try { return await this.pending; } finally { this.pending = undefined; }
+	}
+
+	async readAvailable() {
 		let handle;
 		try {
 			handle = await open(this.path, "r");
 			const stat = await handle.stat();
-			if (stat.size < this.offset) {
-				this.offset = 0;
-				this.carry = "";
-				this.events = [];
+			const identity = `${stat.dev}:${stat.ino}`;
+			if ((this.identity && this.identity !== identity) || stat.size < this.offset) {
+				this.offset = 0; this.carry = ""; this.events = []; this.initialized = false;
+				this.decoder = new StringDecoder("utf8"); this.skippingLine = false;
 			}
-			const remaining = stat.size - this.offset;
-			if (remaining <= 0) return this.events;
-			const buffer = Buffer.allocUnsafe(remaining);
-			const { bytesRead } = await handle.read(buffer, 0, remaining, this.offset);
-			this.offset += bytesRead;
-			const text = this.carry + buffer.subarray(0, bytesRead).toString("utf8");
-			const lines = text.split(/\r?\n/);
-			this.carry = lines.pop() ?? "";
-			for (const line of lines) {
-				if (!line.trim()) continue;
-				try {
-					const event = normalizeCodexActivityRecord(JSON.parse(line));
-					if (event && event.category !== "protocol") this.events.push(event);
-				} catch {
-					// A damaged audit line should not make the live supervisor unusable.
+			this.identity = identity;
+			if (!this.initialized) {
+				this.offset = Math.max(0, stat.size - this.initialBytes);
+				this.skippingLine = this.offset > 0;
+				this.initialized = true;
+			}
+			let remaining = Math.min(stat.size - this.offset, this.pollBytes);
+			const buffer = Buffer.allocUnsafe(Math.min(this.chunkBytes, Math.max(0, remaining)));
+			while (remaining > 0) {
+				const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, remaining), this.offset);
+				if (!bytesRead) break;
+				this.offset += bytesRead; remaining -= bytesRead;
+				const text = this.carry + this.decoder.write(buffer.subarray(0, bytesRead));
+				const lines = text.split(/\r?\n/);
+				this.carry = lines.pop() ?? "";
+				for (const line of lines) {
+					if (this.skippingLine) { this.skippingLine = false; continue; }
+					if (!line.trim() || Buffer.byteLength(line) > this.lineBytes) continue;
+					try {
+						const event = normalizeCodexActivityRecord(JSON.parse(line));
+						if (event && event.category !== "protocol") this.events.push(event);
+					} catch { /* Damaged audit lines must not break supervision. */ }
 				}
+				if (this.skippingLine || Buffer.byteLength(this.carry) > this.lineBytes) { this.carry = ""; this.skippingLine = true; }
+				if (this.events.length > this.maxEvents) this.events.splice(0, this.events.length - this.maxEvents);
 			}
-			if (this.events.length > this.maxEvents) this.events.splice(0, this.events.length - this.maxEvents);
 			return this.events;
 		} catch (error) {
 			if (error?.code === "ENOENT") return this.events;

@@ -38,7 +38,7 @@ registerHostCapabilityRequestAdapter({ request: (pendingRequest, { signal } = {}
   output({ type: "extension_ui_request", id, method: "host_capability", pendingRequest: { ...pendingRequest, id } });
  });
 } });
-let host, runtime, directory, unsubscribe, closing = false, turnSource = null;
+let host, runtime, directory, unsubscribe, closing = false, turnSource = null, preparedSleep;
 const controls = createInterface({ input: process.stdin });
 const queued = [];
 controls.on("line", line => { if (runtime && host) void dispatch(line); else queued.push(line); });
@@ -48,6 +48,7 @@ async function close() {
  for (const request of approvals.values()) request.finish(undefined, new Error("Owning Leader disconnected"));
  unsubscribe?.(); ownerEvents.flush(); await host?.close();
  if (directory) await rm(directory, { recursive: true, force: true });
+ await new Promise(resolve => process.stdout.write("", () => resolve()));
  process.exit(0);
 }
 async function dispatch(line) {
@@ -59,11 +60,24 @@ async function dispatch(line) {
   switch (command.type) {
    case "extension_ui_response": approvals.get(command.id)?.finish(command.decision, command.error ? new Error(command.error) : undefined); return;
    case "performance": runtimePerformance.setEnabled(command.enabled); output({ type: "performance_sample", sample: runtimePerformance.snapshot() }); return;
-   case "prompt": turnSource = command.source ?? "research-leader"; await session.prompt(command.message, { source: "rpc" }); break;
-   case "steer": if (command.source && command.source !== "user") turnSource = command.source; await session.steer(command.message, undefined, { source: "rpc" }); break;
+   case "prompt": preparedSleep = null; turnSource = command.source ?? "research-leader"; await session.prompt(command.message, { source: "rpc" }); break;
+   case "steer": preparedSleep = null; if (command.source && command.source !== "user") turnSource = command.source; await session.steer(command.message, undefined, { source: "rpc" }); break;
    case "follow_up": await session.followUp(command.message, undefined, { source: "rpc" }); break;
    case "abort": for (const request of approvals.values()) request.abort(); await session.abort(); break;
    case "get_state": data = { model: session.model, thinkingLevel: session.thinkingLevel }; break;
+   case "hibernate": {
+    const accepted = host.canHibernate() && approvals.size === 0 && command.sessionId === session.sessionId && Boolean(session.sessionFile);
+    preparedSleep = accepted ? command.id : null;
+    output({ type: "hibernate_response", id: command.id, accepted, sessionFile: accepted ? session.sessionFile : null });
+    return;
+   }
+   case "hibernate_commit": {
+    const accepted = preparedSleep === command.id && host.canHibernate() && approvals.size === 0 && command.sessionId === session.sessionId;
+    preparedSleep = null;
+    output({ type: "hibernate_committed", id: command.id, accepted });
+    if (accepted) await close();
+    return;
+   }
    case "set_model": {
     const model = session.modelRuntime.getAvailableSnapshot().find(m => m.provider === command.provider && m.id === command.modelId);
     if (!model) throw new Error("Model not found");
