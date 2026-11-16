@@ -118,7 +118,7 @@ export async function openSubagentTerminal(options, dependencies = {}) {
 	const launch = subagentWatchCommand(options);
 	const context = dependencies.context ?? captureTerminalContext(dependencies);
 	const exec = dependencies.exec ?? runFile;
-	return await launchTerminal({ executable: process.execPath, args: launch.args, cwd: options.cwd, title: "Pi subagent" }, {
+	return await launchTerminal({ executable: process.execPath, args: launch.args, cwd: options.cwd, title: "Pi subagent", watch: options, requestId: dependencies.requestId }, {
 		context, exec,
 		openIde: async () => await openVsCodeTerminal(options, {
 			environment: context.environment, platform: context.platform,

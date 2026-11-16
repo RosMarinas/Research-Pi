@@ -25,6 +25,12 @@ assert.ok(!files.includes(".pi/config.json"), "The user-local Research Pi config
 assert.ok(!files.some((path) => path.startsWith(".pi/agent/")), "Generated Pi agent state would enter the npm package");
 assert.ok(!files.some((path) => path.startsWith(".pi/web/")), "Private resident Web access records would enter the npm package");
 for (const required of [
+	"integrations/ghostty-ssh/bridge.py",
+	"integrations/ghostty-ssh/install.sh",
+	"integrations/ghostty-ssh/install.py",
+	"integrations/ghostty-ssh/shell-integration.sh",
+	"integrations/ghostty-ssh/README.md",
+	".pi/lib/ghostty-ssh-bridge.mjs",
 	"README.md",
 	"web/index.html",
 	"web/app.js",

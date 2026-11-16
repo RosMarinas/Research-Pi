@@ -308,3 +308,7 @@ Open the private pairing link printed in the terminal from a phone on the existi
 Keep using your usual pi launcher. For a source checkout, run-pi.sh preserves authentication and sessions in that checkout's .pi directory; add --resume to select an existing conversation. Direct node bin/pi.mjs defaults to separate user-level storage, which can appear as missing login and session history.
 
 The gateway requires authentication and exact same-origin requests. Tailscale access uses the currently signed-in identity without replacing existing Serve endpoints. An already running Pi process needs a planned restart into Web mode. See [mobile access and security](docs/mobile-web.md).
+
+### Mac Ghostty over SSH
+
+Install the optional [Ghostty SSH integration](integrations/ghostty-ssh/README.md) on the Mac, then keep using ordinary `ssh` commands. `/watch` opens a native right split beside the requesting pane, reconnects to the same host and attaches the selected subagent. `/watch --here` stays in the current pane. Run `sh integrations/ghostty-ssh/install.sh` on the Mac; repeat installation and uninstall are supported.

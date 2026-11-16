@@ -3,6 +3,7 @@ import { AssistantMessageComponent, UserMessageComponent, CustomEditor, ToolExec
 import { join, resolve } from "node:path";
 import { createSubagentWatchClient, openSubagentTerminal, subagentWatchLabel, subagentWatchTranscript } from "./subagent-watch.mjs";
 import { HARNESS_ROOT } from "./codex-jobs.mjs";
+import { captureTerminalContext } from "./terminal-launcher.mjs";
 import { resolveResearchPiPaths } from "./runtime-paths.mjs";
 import { attachNativeTerminal } from "./native-terminal-client.mjs";
 import { selectModel } from "./model-picker.mjs";
@@ -192,9 +193,9 @@ export async function attachSubagentInUi(ctx, record) {
  });
 }
 
-export async function openTerminalFromLeader(ctx, options) {
+export async function openTerminalFromLeader(ctx, options, capturedAction) {
  return await ctx.ui.custom((tui, _theme, _keys, done) => {
-  const requestAction = tui.terminal.captureActionClient?.() ?? tui.terminal.requestAction?.bind(tui.terminal);
+  const requestAction = capturedAction ?? tui.terminal.captureActionClient?.() ?? tui.terminal.requestAction?.bind(tui.terminal);
   setImmediate(async () => {
    try { done(requestAction
     ? await requestAction("open-subagent-terminal", options)
@@ -207,16 +208,27 @@ export async function openTerminalFromLeader(ctx, options) {
 
 export async function openSubagentWatch(ctx, selector = "") {
  try {
+  const here = /(?:^|\s)--here(?:\s|$)/.test(selector);
+  selector = selector.replace(/(?:^|\s)--here(?=\s|$)/g, " ").trim();
   const paths = resolveResearchPiPaths({ harnessRoot: HARNESS_ROOT });
   const client = await createSubagentWatchClient({ cwd: ctx.cwd, stateRoot: paths.stateRoot });
   if (!(await client.list()).length) { ctx.ui.notify("No subagent is registered in this workspace.", "info"); return; }
   selector ||= await chooseSubagentConversation(ctx, client);
   if (!selector) return;
-  const mode = await ctx.ui.select("Subagent terminal", ["Switch in this terminal", "Open a new terminal"]);
+  const capabilities = here ? {} : await ctx.ui.custom((tui, _theme, _keys, done) => {
+   const requestAction = tui.terminal.captureActionClient?.() ?? tui.terminal.requestAction?.bind(tui.terminal);
+   setImmediate(async () => {
+    try { done({ ...(requestAction ? await requestAction("terminal-capabilities", {}) : { provider: captureTerminalContext().provider }), requestAction }); }
+    catch { done({}); } // Older physical clients keep the existing chooser.
+   });
+   return { render: () => [], invalidate() {} };
+  });
+  const mode = here ? "Switch in this terminal" : capabilities.provider === "ghostty-ssh" ? "Open a new terminal"
+   : await ctx.ui.select("Subagent terminal", ["Switch in this terminal", "Open a new terminal"]);
   if (!mode) return;
   if (mode === "Open a new terminal") {
    const { actor } = await client.read(selector);
-   const result = await openTerminalFromLeader(ctx, { launcher: join(HARNESS_ROOT, "bin", "pi.mjs"), cwd: ctx.cwd, stateRoot: paths.stateRoot, actorId: actor.id });
+   const result = await openTerminalFromLeader(ctx, { launcher: join(HARNESS_ROOT, "bin", "pi.mjs"), cwd: ctx.cwd, stateRoot: paths.stateRoot, actorId: actor.id }, capabilities.requestAction);
    ctx.ui.notify(result.opened ? `Subagent terminal opened${result.appName ? ` in ${result.appName}` : ""}.`
     : `${result.error ?? "Could not open a terminal automatically."}${result.command ? `\nRun this in another terminal in the same application, or choose “Switch in this terminal”:\n${result.command}` : ""}`, result.opened ? "info" : "warning");
    return;
