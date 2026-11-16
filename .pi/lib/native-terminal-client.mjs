@@ -12,8 +12,14 @@ export async function attachNativeTerminal(record, { terminal, onAction } = {}) 
  const input=data=>{if(acting)return;if(data==='\x1d')return detach();send({type:'capabilities',kitty:physical.kittyProtocolActive});send({type:'input',data})};
  const start=()=>{physical.start(input,resize);started=true;resize();physical.write('\x1b]10;?\x07\x1b]11;?\x07')};
  const action=async event=>{
-  if(event.action==='open-subagent-terminal') {
-   try { const {openSubagentTerminal}=await import('./subagent-watch.mjs'); send({type:'action_result',id:event.id,result:onAction ? await onAction(event) : await openSubagentTerminal(event.params,{context:terminalContext})}); send({type:'attach'}); }
+  if(event.action==='open-subagent-terminal' || event.action==='terminal-capabilities') {
+   try {
+    let result;
+    if(onAction) result=await onAction(event);
+    else if(event.action==='terminal-capabilities') result={provider:terminalContext.provider};
+    else { const {openSubagentTerminal}=await import('./subagent-watch.mjs'); result=await openSubagentTerminal(event.params,{context:terminalContext,requestId:event.id}); }
+    send({type:'action_result',id:event.id,result}); send({type:'attach'});
+   }
    catch(error){send({type:'action_result',id:event.id,error:error.message})}
    return;
   }

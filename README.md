@@ -381,3 +381,7 @@ npm run check:package
 ## 原生 TUI / Runtime 分离候选方案
 
 独立 Host 保留完整 Pi InteractiveMode，桌面终端与 Web Gateway 可以分离退出。当前需显式启用 `pi --resident-runtime --web`，默认启动行为保持不变。[边界、使用与验收](docs/native-ui-runtime-boundary.md)。
+
+### Mac Ghostty 远程分屏
+
+使用 Mac Ghostty 通过普通 `ssh` 连接 Linux 时，可安装 [Ghostty SSH 集成](integrations/ghostty-ssh/README.md)。`/watch` 会在发起请求的面板右侧原生分屏，自动 SSH 并打开对应子代理；`/watch --here` 保留当前面板切换。安装入口为 `sh integrations/ghostty-ssh/install.sh`，在 Mac 上执行，支持重复安装与卸载。

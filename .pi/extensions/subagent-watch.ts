@@ -3,7 +3,7 @@ import { openSubagentWatch } from "../lib/subagent-watch-ui.mjs";
 
 export default function subagentWatchExtension(pi: ExtensionAPI) {
 	pi.registerCommand("watch", {
-		description: "Open a subagent conversation in this terminal or a new terminal; message it directly",
+		description: "Open a subagent conversation; Mac SSH opens a right split, --here switches in place",
 		handler: async (args, ctx) => await openSubagentWatch(ctx, args.trim()),
 	});
 }

@@ -4,7 +4,7 @@ New Pi subagents run the same `AgentSessionRuntime` and `InteractiveMode` as the
 
 ## Use
 
-- `/watch` on the Leader: search conversations by name, role or model. Choose the same terminal or a new terminal.
+- `/watch` on the Leader: search conversations by name, role or model. Choose the same terminal or a new terminal. With the Mac SSH integration, open a native Ghostty right split automatically; `/watch --here` stays in this terminal.
 - `/agents` inside a native subagent: search and switch conversations. Leader is a fixed entry.
 - `/leader` or `Ctrl+]`: return/detach. The subagent continues, retaining its editor draft and transcript position. A standalone watch terminal exits back to its shell.
 - User-started discussion turns stay in the subagent conversation: completion, failure, cancellation and input requests do not automatically enqueue Leader messages. A User steering a still-running Leader task does not remove that original task’s completion notification. An explicit new Leader instruction restores reporting.
@@ -58,6 +58,7 @@ Terminal selection and application launching are separate steps in `terminal-lau
 | Requesting environment | New-terminal mechanism |
 | --- | --- |
 | Ghostty on macOS | Native right split in the requesting pane, matched by the physical client's TTY; verified with Ghostty 1.4 |
+| Mac Ghostty → SSH → Linux | [Mac SSH integration](../integrations/ghostty-ssh/README.md): private reverse socket, native right split, automatic SSH and exact watch target |
 | Ghostty on Linux | `ghostty +new-window` in the running application |
 | VS Code, Antigravity and compatible IDEs | Window-local Research Pi Terminal bridge |
 | iTerm2 | Native window creation with a command |
@@ -70,4 +71,4 @@ The IDE bridge registers terminal PIDs so existing IDE terminals can discover it
 
 On macOS Ghostty, the watch view opens beside the requesting pane, matching the default `Command+D` layout. Pi calls the native split API and locates the source by TTY, so a change of window focus cannot move the split elsewhere. If the source pane cannot be identified, Pi reports the problem instead of splitting an arbitrary front window. This requires a Ghostty scripting dictionary exposing terminal TTYs, as in Ghostty 1.4; no keyboard event is generated.
 
-An SSH shell needs an IDE bridge in the remote extension host or a tmux session to open another terminal on the same remote host. Pi otherwise supplies a manual command. Same-terminal switching needs no application automation. To load new client launch code, detach with `Ctrl+]` and run `pi` again in the intended terminal; the resident Host and its agents continue. The Host-side action binding loads at the next normal Host restart.
+For Mac Ghostty over SSH, install the [Mac integration](../integrations/ghostty-ssh/README.md) once and keep using normal `ssh` commands. The SSH client captures its own bridge endpoint, so the Host forwards watch requests back to the exact requesting Mac pane. Other SSH clients need an IDE bridge or tmux for automatic opening; otherwise Pi supplies a manual command. Same-terminal switching needs no application automation. To load new client launch code, detach with `Ctrl+]` and run `pi` again in the intended terminal; the resident Host and its agents continue. The Host-side action binding loads at the next normal Host restart.

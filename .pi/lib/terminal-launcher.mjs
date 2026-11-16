@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
+import { openGhosttySshWatch } from './ghostty-ssh-bridge.mjs';
 
 const runFile = promisify(execFile);
 const quote = value => `'${String(value).replaceAll("'", `'"'"'`)}'`;
@@ -28,6 +29,10 @@ const terminalScript = 'on run argv\ntell application "Terminal"\ndo script (ite
 // Selection is independent of OS defaults. Each adapter must open the selected
 // application or report failure; a failed adapter never selects another one.
 const adapters = [
+ { id: 'ghostty-ssh', name: 'Ghostty on your Mac', programs: [], async open(request, client) {
+  if (!request.watch) throw new Error('The SSH bridge only accepts subagent watch requests');
+  return await openGhosttySshWatch(request.watch, { environment: client.environment, requestId: request.requestId });
+ } },
  { id: 'tmux', name: 'tmux', programs: ['tmux'], async open(request, client) {
   const socket = client.environment.TMUX?.match(/^(.*),\d+,\d+$/)?.[1];
   const pane = client.environment.TMUX_PANE;
@@ -83,7 +88,8 @@ export function captureTerminalContext({ environment = process.env, platform = p
  const env = Object.freeze({ ...environment });
  const program = String(env.TERM_PROGRAM ?? '').trim();
  let adapter, error;
- if (env.TMUX) adapter = byId.get('tmux');
+ if (env.RESEARCH_PI_GHOSTTY_SOCKET || env.RESEARCH_PI_GHOSTTY_TOKEN) adapter = byId.get('ghostty-ssh');
+ else if (env.TMUX) adapter = byId.get('tmux');
  else if (program) {
   adapter = byProgram.get(program.toLowerCase());
   if (!adapter) error = `Opening a new terminal in ${program} is not supported`;
@@ -98,7 +104,7 @@ export function captureTerminalContext({ environment = process.env, platform = p
   if (candidates.length === 1) adapter = byId.get(candidates[0]);
   else error = candidates.length ? 'The terminal environment identifies multiple applications; TERM_PROGRAM is needed to choose the current one' : 'The current terminal application could not be identified';
  }
- if (adapter && (env.SSH_CONNECTION || env.SSH_TTY) && !['vscode', 'tmux'].includes(adapter.id)) {
+ if (adapter && (env.SSH_CONNECTION || env.SSH_TTY) && !['vscode', 'tmux', 'ghostty-ssh'].includes(adapter.id)) {
   error = 'This is a remote SSH terminal. Open another terminal on the same remote host or use tmux to open a remote window';
  }
  return Object.freeze({ provider: adapter?.id, appName: adapter?.name ?? program, platform, processId: process.pid, environment: env, error });
