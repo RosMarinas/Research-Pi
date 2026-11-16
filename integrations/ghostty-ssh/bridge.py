@@ -302,7 +302,9 @@ def main():
             app = subprocess.check_output(['/usr/bin/mdfind', 'kMDItemCFBundleIdentifier == "com.mitchellh.ghostty"'], text=True).splitlines()
         if not app:
             raise RuntimeError('Ghostty.app was not found')
-        dictionary = subprocess.check_output(['/usr/bin/sdef', app[0]], text=True)
+        # The installed bundle is the API source of truth. /usr/bin/sdef
+        # requires full Xcode even though the same definition ships with Ghostty.
+        dictionary = (Path(app[0]) / 'Contents/Resources/Ghostty.sdef').read_text(encoding='utf-8')
         if 'name="tty"' not in dictionary or 'name="split"' not in dictionary:
             raise RuntimeError('Upgrade Ghostty: its AppleScript dictionary needs terminal tty and split support')
         version = subprocess.check_output(['/usr/bin/osascript', '-e', 'tell application "Ghostty" to get version'], text=True)

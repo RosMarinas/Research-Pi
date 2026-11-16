@@ -8,6 +8,8 @@ This uses Ghostty's native AppleScript API and a private Unix socket forwarded t
 
 You need Python 3, OpenSSH and Ghostty with AppleScript **terminal `tty` and `split` support** (the installer checks the installed dictionary; the existing Research Pi local adapter targets Ghostty 1.4). If Python is missing, install it with `brew install python`.
 
+The dictionary check reads Ghostty's bundled definition directly; full Xcode is not required.
+
 From a checkout of this branch on your Mac:
 
 ```sh

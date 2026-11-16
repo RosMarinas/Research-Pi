@@ -126,6 +126,24 @@ assert rc.read_text() == original and not target.exists()
 `, [root]);
 });
 
+test('Mac doctor reads the bundled dictionary without requiring Xcode sdef', async () => {
+ await python(String.raw`
+from unittest.mock import patch
+def dictionary(path, **kwargs):
+    assert str(path) == '/Applications/Ghostty.app/Contents/Resources/Ghostty.sdef'
+    return '<property name="tty"/><command name="split"/>'
+def command(argv, **kwargs):
+    assert argv == ['/usr/bin/osascript', '-e', 'tell application "Ghostty" to get version']
+    return '1.4.0\n'
+with patch.object(sys, 'platform', 'darwin'), patch.object(sys, 'argv', ['bridge.py', 'doctor']), \
+     patch.object(b.Path, 'exists', return_value=True), \
+     patch.object(b.Path, 'read_text', autospec=True, side_effect=dictionary), \
+     patch.object(b.subprocess, 'check_output', side_effect=command), \
+     patch.object(sys.stdin, 'isatty', return_value=False):
+    assert b.main() == 0
+`);
+});
+
 test('bootstrap exports the bridge without sshd AcceptEnv and cleans its own remote socket', async t => {
  const root = await fixture(t);
  await python(String.raw`
